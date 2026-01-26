@@ -78,7 +78,7 @@ use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices, MIN_CHANNEL_CONFIRM
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str,
+    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_route, hex_str,
     hex_str_to_compressed_pubkey, hex_str_to_vec, UnlockedAppState, UserOnionMessageContents,
 };
 use crate::{
@@ -86,7 +86,6 @@ use crate::{
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
 use crate::{
-    disk::{self, CHANNEL_PEER_DATA},
     error::APIError,
     ldk::{PaymentInfo, FEE_RATE, UTXO_SIZE_SAT},
     utils::{
@@ -1259,9 +1258,11 @@ pub(crate) async fn address(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AddressResponse>, APIError> {
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = Arc::clone(guard.as_ref().unwrap());
 
-    let address = unlocked_state.rgb_get_address()?;
+    let address = tokio::task::spawn_blocking(move || unlocked_state.rgb_get_address())
+        .await
+        .unwrap()?;
 
     Ok(Json(AddressResponse { address }))
 }
@@ -1271,12 +1272,19 @@ pub(crate) async fn asset_balance(
     WithRejection(Json(payload), _): WithRejection<Json<AssetBalanceRequest>, APIError>,
 ) -> Result<Json<AssetBalanceResponse>, APIError> {
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = Arc::clone(guard.as_ref().unwrap());
 
     let contract_id = ContractId::from_str(&payload.asset_id)
         .map_err(|_| APIError::InvalidAssetID(payload.asset_id))?;
 
-    let balance = unlocked_state.rgb_get_asset_balance(contract_id)?;
+    let unlocked_state_clone = Arc::clone(&unlocked_state);
+    let contract_id_clone = contract_id;
+    let balance = tokio::task::spawn_blocking(move || {
+        unlocked_state_clone.rgb_get_asset_balance(contract_id_clone)
+    })
+    .await
+    .unwrap()
+    .map_err(|e| APIError::FailedBroadcast(format!("Asset balance retrieval failed: {e}")))?;
 
     let mut offchain_outbound = 0;
     let mut offchain_inbound = 0;
@@ -1341,7 +1349,8 @@ pub(crate) async fn backup(
         let _guard = state.check_locked().await?;
 
         let _mnemonic =
-            check_password_validity(&payload.password, &state.static_state.storage_dir_path)?;
+            check_password_validity(&payload.password, &state.static_state.database_manager)
+                .await?;
 
         do_backup(
             &state.static_state.storage_dir_path,
@@ -1388,13 +1397,15 @@ pub(crate) async fn change_password(
         check_password_strength(payload.new_password.clone())?;
 
         let mnemonic =
-            check_password_validity(&payload.old_password, &state.static_state.storage_dir_path)?;
+            check_password_validity(&payload.old_password, &state.static_state.database_manager)
+                .await?;
 
         encrypt_and_save_mnemonic(
             payload.new_password,
             mnemonic.to_string(),
-            &get_mnemonic_path(&state.static_state.storage_dir_path),
-        )?;
+            &state.static_state.database_manager,
+        )
+        .await?;
 
         Ok(Json(EmptyResponse {}))
     })
@@ -1509,11 +1520,11 @@ pub(crate) async fn connect_peer(
         if let Some(peer_addr) = peer_addr {
             connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
                 .await?;
-            disk::persist_channel_peer(
-                &state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA),
-                &peer_pubkey,
-                &peer_addr,
-            )?;
+            state
+                .static_state
+                .database_manager
+                .save_channel_peer(&peer_pubkey, &peer_addr)
+                .await?;
         } else {
             return Err(APIError::InvalidPeerInfo(s!(
                 "incorrectly formatted peer info. Should be formatted as: `pubkey@host:port`"
@@ -1531,15 +1542,19 @@ pub(crate) async fn create_utxos(
 ) -> Result<Json<EmptyResponse>, APIError> {
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
-
-        unlocked_state.rgb_create_utxos(
-            payload.up_to,
-            payload.num.unwrap_or(UTXO_NUM),
-            payload.size.unwrap_or(UTXO_SIZE_SAT),
-            payload.fee_rate,
-            payload.skip_sync,
-        )?;
+        let unlocked_state = Arc::clone(guard.as_ref().unwrap());
+        tokio::task::spawn_blocking(move || {
+            unlocked_state.rgb_create_utxos(
+                payload.up_to,
+                payload.num.unwrap_or(UTXO_NUM),
+                payload.size.unwrap_or(UTXO_SIZE_SAT),
+                payload.fee_rate,
+                payload.skip_sync,
+            )
+        })
+        .await
+        .unwrap()
+        .map_err(|e| APIError::FailedBroadcast(format!("UTXO creation failed: {e}")))?;
         tracing::debug!("UTXO creation complete");
 
         Ok(Json(EmptyResponse {}))
@@ -1614,10 +1629,11 @@ pub(crate) async fn disconnect_peer(
             }
         }
 
-        disk::delete_channel_peer(
-            &state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA),
-            payload.peer_pubkey,
-        )?;
+        state
+            .static_state
+            .database_manager
+            .delete_channel_peer(&peer_pubkey)
+            .await?;
 
         //check the pubkey matches a valid connected peer
         if unlocked_state
@@ -1724,14 +1740,18 @@ pub(crate) async fn init(
 
         check_password_strength(payload.password.clone())?;
 
-        let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
-        check_already_initialized(&mnemonic_path)?;
+        check_already_initialized(&state.static_state.database_manager).await?;
 
         let keys = generate_keys(state.static_state.network);
 
         let mnemonic = keys.mnemonic;
 
-        encrypt_and_save_mnemonic(payload.password, mnemonic.clone(), &mnemonic_path)?;
+        encrypt_and_save_mnemonic(
+            payload.password,
+            mnemonic.clone(),
+            &state.static_state.database_manager,
+        )
+        .await?;
 
         Ok(Json(InitResponse { mnemonic }))
     })
@@ -1805,18 +1825,23 @@ pub(crate) async fn issue_asset_nia(
 ) -> Result<Json<IssueAssetNIAResponse>, APIError> {
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = Arc::clone(guard.as_ref().unwrap());
 
         if *unlocked_state.rgb_send_lock.lock().unwrap() {
             return Err(APIError::OpenChannelInProgress);
         }
 
-        let asset = unlocked_state.rgb_issue_asset_nia(
-            payload.ticker,
-            payload.name,
-            payload.precision,
-            payload.amounts,
-        )?;
+        let asset = tokio::task::spawn_blocking(move || {
+            unlocked_state.rgb_issue_asset_nia(
+                payload.ticker,
+                payload.name,
+                payload.precision,
+                payload.amounts,
+            )
+        })
+        .await
+        .unwrap()
+        .map_err(|e| APIError::FailedBroadcast(format!("Asset issuance failed: {e}")))?;
 
         Ok(Json(IssueAssetNIAResponse {
             asset: asset.into(),
@@ -2049,76 +2074,83 @@ pub(crate) async fn list_channels(
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let mut channels = vec![];
-    for chan_info in unlocked_state.channel_manager.list_channels() {
-        let status = match chan_info.channel_shutdown_state.unwrap() {
-            ChannelShutdownState::NotShuttingDown => {
-                if chan_info.is_channel_ready {
-                    ChannelStatus::Opened
-                } else {
-                    ChannelStatus::Opening
+    let unlocked_state_copy = Arc::clone(unlocked_state);
+    let ldk_data_dir = state.static_state.ldk_data_dir.clone();
+    let channels = tokio::task::spawn_blocking(move || {
+        let mut channels = vec![];
+        for chan_info in unlocked_state_copy.channel_manager.list_channels() {
+            let status = match chan_info.channel_shutdown_state.unwrap() {
+                ChannelShutdownState::NotShuttingDown => {
+                    if chan_info.is_channel_ready {
+                        ChannelStatus::Opened
+                    } else {
+                        ChannelStatus::Opening
+                    }
+                }
+                _ => ChannelStatus::Closing,
+            };
+            let mut channel = Channel {
+                channel_id: chan_info.channel_id.0.as_hex().to_string(),
+                peer_pubkey: hex_str(&chan_info.counterparty.node_id.serialize()),
+                status,
+                ready: chan_info.is_channel_ready,
+                capacity_sat: chan_info.channel_value_satoshis,
+                outbound_balance_msat: chan_info.outbound_capacity_msat,
+                inbound_balance_msat: chan_info.inbound_capacity_msat,
+                next_outbound_htlc_limit_msat: chan_info.next_outbound_htlc_limit_msat,
+                next_outbound_htlc_minimum_msat: chan_info.next_outbound_htlc_minimum_msat,
+                is_usable: chan_info.is_usable,
+                public: chan_info.is_announced,
+                ..Default::default()
+            };
+
+            if let Some(funding_txo) = chan_info.funding_txo {
+                channel.funding_txid = Some(funding_txo.txid.to_string());
+                if let Ok(chan_monitor) = unlocked_state_copy
+                    .chain_monitor
+                    .get_monitor(chan_info.channel_id)
+                {
+                    channel.local_balance_sat = chan_monitor
+                        .get_claimable_balances()
+                        .iter()
+                        .map(|b| b.claimable_amount_satoshis())
+                        .sum::<u64>();
                 }
             }
-            _ => ChannelStatus::Closing,
-        };
-        let mut channel = Channel {
-            channel_id: chan_info.channel_id.0.as_hex().to_string(),
-            peer_pubkey: hex_str(&chan_info.counterparty.node_id.serialize()),
-            status,
-            ready: chan_info.is_channel_ready,
-            capacity_sat: chan_info.channel_value_satoshis,
-            outbound_balance_msat: chan_info.outbound_capacity_msat,
-            inbound_balance_msat: chan_info.inbound_capacity_msat,
-            next_outbound_htlc_limit_msat: chan_info.next_outbound_htlc_limit_msat,
-            next_outbound_htlc_minimum_msat: chan_info.next_outbound_htlc_minimum_msat,
-            is_usable: chan_info.is_usable,
-            public: chan_info.is_announced,
-            ..Default::default()
-        };
 
-        if let Some(funding_txo) = chan_info.funding_txo {
-            channel.funding_txid = Some(funding_txo.txid.to_string());
-            if let Ok(chan_monitor) = unlocked_state
-                .chain_monitor
-                .get_monitor(chan_info.channel_id)
+            if let Some(node_info) = unlocked_state_copy
+                .network_graph
+                .read_only()
+                .nodes()
+                .get(&NodeId::from_pubkey(&chan_info.counterparty.node_id))
             {
-                channel.local_balance_sat = chan_monitor
-                    .get_claimable_balances()
-                    .iter()
-                    .map(|b| b.claimable_amount_satoshis())
-                    .sum::<u64>();
+                if let Some(announcement) = &node_info.announcement_info {
+                    channel.peer_alias = Some(announcement.alias().to_string());
+                }
             }
-        }
 
-        if let Some(node_info) = unlocked_state
-            .network_graph
-            .read_only()
-            .nodes()
-            .get(&NodeId::from_pubkey(&chan_info.counterparty.node_id))
-        {
-            if let Some(announcement) = &node_info.announcement_info {
-                channel.peer_alias = Some(announcement.alias().to_string());
+            if let Some(id) = chan_info.short_channel_id {
+                channel.short_channel_id = Some(id);
             }
+
+            let info_file_path = get_rgb_channel_info_path(
+                &chan_info.channel_id.0.as_hex().to_string(),
+                &ldk_data_dir,
+                false,
+            );
+            if info_file_path.exists() {
+                let rgb_info = parse_rgb_channel_info(&info_file_path);
+                channel.asset_id = Some(rgb_info.contract_id.to_string());
+                channel.asset_local_amount = Some(rgb_info.local_rgb_amount);
+                channel.asset_remote_amount = Some(rgb_info.remote_rgb_amount);
+            };
+
+            channels.push(channel);
         }
-
-        if let Some(id) = chan_info.short_channel_id {
-            channel.short_channel_id = Some(id);
-        }
-
-        let info_file_path = get_rgb_channel_info_path(
-            &chan_info.channel_id.0.as_hex().to_string(),
-            &state.static_state.ldk_data_dir,
-            false,
-        );
-        if info_file_path.exists() {
-            let rgb_info = parse_rgb_channel_info(&info_file_path);
-            channel.asset_id = Some(rgb_info.contract_id.to_string());
-            channel.asset_local_amount = Some(rgb_info.local_rgb_amount);
-            channel.asset_remote_amount = Some(rgb_info.remote_rgb_amount);
-        };
-
-        channels.push(channel);
-    }
+        channels
+    })
+    .await
+    .unwrap();
 
     Ok(Json(ListChannelsResponse { channels }))
 }
@@ -3027,7 +3059,6 @@ pub(crate) async fn open_channel(
         let (peer_pubkey, mut peer_addr) =
             parse_peer_info(payload.peer_pubkey_and_opt_addr.to_string())?;
 
-        let peer_data_path = state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA);
         if peer_addr.is_none() {
             if let Some(peer) = unlocked_state.peer_manager.peer_by_node_id(&peer_pubkey) {
                 if let Some(socket_address) = peer.socket_address {
@@ -3039,7 +3070,11 @@ pub(crate) async fn open_channel(
             }
         }
         if peer_addr.is_none() {
-            let peer_info = disk::read_channel_peer_data(&peer_data_path)?;
+            let peer_info = state
+                .static_state
+                .database_manager
+                .load_channel_peers()
+                .await?;
             for (pubkey, addr) in peer_info.into_iter() {
                 if pubkey == peer_pubkey {
                     peer_addr = Some(addr);
@@ -3050,7 +3085,11 @@ pub(crate) async fn open_channel(
         if let Some(peer_addr) = peer_addr {
             connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
                 .await?;
-            disk::persist_channel_peer(&peer_data_path, &peer_pubkey, &peer_addr)?;
+            state
+                .static_state
+                .database_manager
+                .save_channel_peer(&peer_pubkey, &peer_addr)
+                .await?;
         } else {
             return Err(APIError::InvalidPeerInfo(s!(
                 "cannot find the address for the provided pubkey"
@@ -3082,7 +3121,13 @@ pub(crate) async fn open_channel(
         };
 
         let consignment_endpoint = if let Some((contract_id, asset_amount)) = &colored_info {
-            let balance = unlocked_state.rgb_get_asset_balance(*contract_id)?;
+            let unlocked_state_clone = Arc::clone(unlocked_state);
+            let contract_id_clone = *contract_id;
+            let balance = tokio::task::spawn_blocking(move || {
+                unlocked_state_clone.rgb_get_asset_balance(contract_id_clone)
+            })
+            .await
+            .unwrap()?;
             let spendable_rgb_amount = balance.spendable;
 
             if *asset_amount > spendable_rgb_amount {
@@ -3100,9 +3145,14 @@ pub(crate) async fn open_channel(
             let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
             let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network);
             let asset_id = contract_id.to_string();
-            let schema = unlocked_state
-                .rgb_get_asset_metadata(*contract_id)?
-                .asset_schema;
+            let unlocked_state_clone = Arc::clone(unlocked_state);
+            let contract_id_clone = *contract_id;
+            let schema = tokio::task::spawn_blocking(move || {
+                unlocked_state_clone.rgb_get_asset_metadata(contract_id_clone)
+            })
+            .await
+            .unwrap()?
+            .asset_schema;
             let assignment = match schema {
                 RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa => {
                     Assignment::Fungible(*asset_amount)
@@ -3283,8 +3333,7 @@ pub(crate) async fn restore(
     no_cancel(async move {
         let _unlocked_state = state.check_locked().await?;
 
-        let mnemonic_path = get_mnemonic_path(&state.static_state.storage_dir_path);
-        check_already_initialized(&mnemonic_path)?;
+        check_already_initialized(&state.static_state.database_manager).await?;
 
         restore_backup(
             Path::new(&payload.backup_path),
@@ -3293,7 +3342,8 @@ pub(crate) async fn restore(
         )?;
 
         let _mnemonic =
-            check_password_validity(&payload.password, &state.static_state.storage_dir_path)?;
+            check_password_validity(&payload.password, &state.static_state.database_manager)
+                .await?;
 
         Ok(Json(EmptyResponse {}))
     })
@@ -3310,7 +3360,7 @@ pub(crate) async fn revoke_token(
 
     let token_to_revoke = Biscuit::from_base64(&payload.token, root_pubkey)
         .map_err(|_| APIError::InvalidBiscuitToken)?;
-    state.revoke_token(&token_to_revoke)?;
+    state.revoke_token(&token_to_revoke).await?;
 
     Ok(Json(EmptyResponse {}))
 }
@@ -3751,16 +3801,16 @@ pub(crate) async fn unlock(
             }
         }
 
-        let mnemonic = match check_password_validity(
-            &payload.password,
-            &state.static_state.storage_dir_path,
-        ) {
-            Ok(mnemonic) => mnemonic,
-            Err(e) => {
-                state.update_changing_state(false);
-                return Err(e);
-            }
-        };
+        let mnemonic =
+            match check_password_validity(&payload.password, &state.static_state.database_manager)
+                .await
+            {
+                Ok(mnemonic) => mnemonic,
+                Err(e) => {
+                    state.update_changing_state(false);
+                    return Err(e);
+                }
+            };
 
         tracing::debug!("Starting LDK...");
         let (new_ldk_background_services, new_unlocked_app_state) =

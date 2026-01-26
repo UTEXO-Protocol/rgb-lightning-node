@@ -1811,6 +1811,7 @@ mod invoice;
 mod issue;
 mod lock_unlock_changepassword;
 mod multi_hop;
+mod rgb_config_persistence;
 mod multi_open_close;
 mod open_after_double_send;
 mod openchannel_fail;

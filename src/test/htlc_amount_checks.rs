@@ -3,7 +3,7 @@ use super::*;
 const TEST_DIR_BASE: &str = "tmp/htlc_amount_checks/";
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn htlc_amount_checks_3nodes() {
     initialize();
@@ -83,7 +83,7 @@ async fn htlc_amount_checks_3nodes() {
 }
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn htlc_amount_checks_2nodes() {
     initialize();

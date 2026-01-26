@@ -72,8 +72,8 @@ pub enum APIError {
     #[error("Failed to issue asset: {0}")]
     FailedIssuingAsset(String),
 
-    #[error("Unable to create keys seed file {0}: {1}")]
-    FailedKeysCreation(String, String),
+    #[error("Database error: {0}")]
+    DatabaseError(String),
 
     #[error("Failed to open channel: {0}")]
     FailedOpenChannel(String),
@@ -400,10 +400,10 @@ impl IntoResponse for APIError {
                 json_rejection.body_text(),
                 self.name(),
             ),
-            APIError::FailedClosingChannel(_)
+            APIError::DatabaseError(_)
+            | APIError::FailedClosingChannel(_)
             | APIError::FailedInvoiceCreation(_)
             | APIError::FailedIssuingAsset(_)
-            | APIError::FailedKeysCreation(_, _)
             | APIError::FailedOpenChannel(_)
             | APIError::FailedPayment(_)
             | APIError::FailedPeerDisconnection(_)
@@ -529,11 +529,11 @@ pub enum AppError {
     #[error("The provided authentication args are invalid")]
     InvalidAuthenticationArgs,
 
-    #[error("The revoked tokens file contains an invalid entry")]
-    InvalidRevokedTokensFile,
-
     #[error("The provided root public key is invalid")]
     InvalidRootKey,
+
+    #[error("API error: {0}")]
+    Api(#[from] APIError),
 
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),

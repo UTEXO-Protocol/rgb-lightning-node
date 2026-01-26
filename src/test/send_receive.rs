@@ -5,7 +5,7 @@ use super::*;
 const TEST_DIR_BASE: &str = "tmp/send_receive/";
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn send_receive() {
     initialize();

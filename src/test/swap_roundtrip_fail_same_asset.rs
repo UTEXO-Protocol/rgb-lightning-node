@@ -3,7 +3,7 @@ use super::*;
 const TEST_DIR_BASE: &str = "tmp/swap_roundtrip_fail_same_asset/";
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 #[should_panic(expected = "cannot swap the same asset")]
 async fn swap_roundtrip_fail_same_asset() {

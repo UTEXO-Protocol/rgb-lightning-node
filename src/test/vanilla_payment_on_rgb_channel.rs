@@ -3,7 +3,7 @@ use super::*;
 const TEST_DIR_BASE: &str = "tmp/vanilla_payment_on_rgb_channel/";
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn vanilla_payment_on_rgb_channel() {
     initialize();

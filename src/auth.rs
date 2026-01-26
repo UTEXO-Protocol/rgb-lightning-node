@@ -6,21 +6,12 @@ use axum::{
     response::Response,
 };
 use biscuit_auth::{macros::authorizer, Biscuit, PublicKey};
-use std::{
-    collections::HashSet,
-    fs,
-    io::{BufRead, BufReader, Write as IoWrite},
-    path::PathBuf,
-    sync::Arc,
-};
-use tempfile::NamedTempFile;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     error::{APIError, AppError},
     utils::{hex_str, hex_str_to_vec, AppState},
 };
-
-const REVOKED_TOKENS_FILE: &str = "revoked_tokens.txt";
 
 const READ_ONLY_OPS: [&str; 23] = [
     "/assetbalance",
@@ -187,57 +178,25 @@ fn is_token_expired(token: &Biscuit) -> bool {
 }
 
 impl AppState {
-    pub(crate) fn revoke_token(&self, token_to_revoke: &Biscuit) -> Result<(), APIError> {
+    /// Revokes a token by storing its revocation identifiers in the database.
+    /// Also updates the in-memory cache.
+    pub(crate) async fn revoke_token(&self, token_to_revoke: &Biscuit) -> Result<(), APIError> {
         let revocation_ids = token_to_revoke.revocation_identifiers();
+        let database_manager = &self.static_state.database_manager;
 
-        let file_body = {
+        // Store each revocation ID in the database and in-memory cache
+        {
             let mut revoked = self.revoked_tokens.lock().unwrap();
-            for id in revocation_ids {
-                revoked.insert(id);
+            for id in &revocation_ids {
+                revoked.insert(id.clone());
             }
+        } // drop lock before async operations
 
-            let mut updated_list = String::new();
-            for token_id in revoked.iter() {
-                updated_list.push_str(&hex_str(token_id));
-                updated_list.push('\n');
-            }
-            updated_list
-        }; // drop lock
-
-        let path = self.get_revoked_tokens_path();
-
-        // write to a temp file
-        let dir = path.parent().expect("parent defined");
-        let mut tmp = NamedTempFile::new_in(dir).map_err(|e| {
-            tracing::error!(
-                "Failed to create temporary file in {}: {}",
-                dir.display(),
-                e
-            );
-            APIError::IO(e)
-        })?;
-        tmp.as_file_mut()
-            .write_all(file_body.as_bytes())
-            .and_then(|_| tmp.as_file_mut().flush())
-            .and_then(|_| tmp.as_file().sync_all())
-            .map_err(|e| {
-                tracing::error!(
-                    "Failed to write/flush/sync temporary revoked-tokens file: {}",
-                    e
-                );
-                APIError::IO(e)
-            })?;
-
-        // atomically replace the destination file with the synced temp file
-        tmp.persist(&path).map_err(|persist_err| {
-            let e = persist_err.error;
-            tracing::error!(
-                "Failed to persist temporary file to {}: {}",
-                path.display(),
-                e
-            );
-            APIError::IO(e)
-        })?;
+        // Persist to database
+        for id in revocation_ids {
+            let hex_id = hex_str(&id);
+            database_manager.save_revoked_token(&hex_id).await?;
+        }
 
         Ok(())
     }
@@ -246,66 +205,5 @@ impl AppState {
         let revocation_ids: HashSet<_> = token.revocation_identifiers().into_iter().collect();
         let revoked = self.revoked_tokens.lock().unwrap();
         !revocation_ids.is_disjoint(&*revoked)
-    }
-
-    fn get_revoked_tokens_path(&self) -> PathBuf {
-        self.static_state.storage_dir_path.join(REVOKED_TOKENS_FILE)
-    }
-
-    pub(crate) fn load_revoked_tokens(&self) -> Result<HashSet<Vec<u8>>, AppError> {
-        let path = self.get_revoked_tokens_path();
-
-        let file = match fs::File::open(&path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!(
-                    "No revoked tokens file found at {}, starting with empty set",
-                    path.display()
-                );
-                return Ok(HashSet::new());
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to open revoked tokens file {}: {}",
-                    path.display(),
-                    e
-                );
-                return Err(AppError::IO(e));
-            }
-        };
-
-        let mut revoked: HashSet<Vec<u8>> = HashSet::new();
-        let reader = BufReader::new(file);
-        for (lineno, line_res) in reader.lines().enumerate() {
-            let line = line_res.map_err(|e| {
-                tracing::error!(
-                    "I/O error while reading {} at line {}: {}",
-                    path.display(),
-                    lineno + 1,
-                    e
-                );
-                AppError::IO(e)
-            })?;
-            let s = line.trim();
-            if s.is_empty() || s.starts_with('#') {
-                continue;
-            }
-            match hex_str_to_vec(s) {
-                Some(token_id) => {
-                    revoked.insert(token_id);
-                }
-                None => {
-                    tracing::error!(
-                        "Invalid hex string in revoked tokens at {}:{} -> {:?}",
-                        path.display(),
-                        lineno + 1,
-                        s
-                    );
-                    return Err(AppError::InvalidRevokedTokensFile);
-                }
-            }
-        }
-        tracing::info!("Loaded {} revoked tokens", revoked.len());
-        Ok(revoked)
     }
 }

@@ -3,7 +3,7 @@ use super::*;
 const TEST_DIR_BASE: &str = "tmp/openchannel_optional_addr/";
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn openchannel_optional_addr_forward() {
     initialize();
@@ -84,7 +84,7 @@ async fn openchannel_optional_addr_forward() {
 }
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn openchannel_optional_addr_reverse() {
     initialize();

@@ -3,7 +3,7 @@ use super::*;
 const TEST_DIR_BASE: &str = "tmp/close_coop_vanilla/";
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn with_anchors() {
     initialize();
@@ -78,7 +78,7 @@ async fn with_anchors() {
 }
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn without_anchors() {
     initialize();

@@ -4,7 +4,7 @@ use regex::RegexSet;
 const TEST_DIR_BASE: &str = "tmp/backup_and_restore/";
 
 #[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[traced_test]
 async fn backup_and_restore() {
     initialize();

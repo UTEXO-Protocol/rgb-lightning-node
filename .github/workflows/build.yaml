@@ -2,9 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["master", "main"]
   pull_request:
-    branches: [ "master" ]
+    branches: ["master", "main"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,8 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [ nightly, stable, 1.85.0 ]
-        name: [ linux, windows, macos ]
+        toolchain: [nightly, stable, 1.85.0]
+        name: [linux, windows, macos]
         include:
           - name: linux
             os: ubuntu-latest
