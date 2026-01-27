@@ -14,16 +14,13 @@ use lightning::{
     util::ser::{Writeable, Writer},
 };
 use lightning_persister::fs_store::FilesystemStore;
-use magic_crypt::{new_magic_crypt, MagicCryptTrait};
-use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
+use rgb_lib::{BitcoinNetwork, ContractId};
 use std::{
     collections::HashSet,
     fmt::Write,
-    fs,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::Path,
     path::PathBuf,
-    str::FromStr,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime},
 };
@@ -63,6 +60,7 @@ pub(crate) struct AppState {
     pub(crate) changing_state: Mutex<bool>,
     pub(crate) root_public_key: Option<biscuit_auth::PublicKey>,
     pub(crate) revoked_tokens: Arc<Mutex<HashSet<Vec<u8>>>>,
+    pub(crate) db: crate::db::Database,
 }
 
 impl AppState {
@@ -156,13 +154,6 @@ impl Writeable for UserOnionMessageContents {
     }
 }
 
-pub(crate) fn check_already_initialized(mnemonic_path: &Path) -> Result<(), APIError> {
-    if mnemonic_path.exists() {
-        return Err(APIError::AlreadyInitialized);
-    }
-    Ok(())
-}
-
 pub(crate) fn check_password_strength(password: String) -> Result<(), APIError> {
     if password.len() < PASSWORD_MIN_LENGTH as usize {
         return Err(APIError::InvalidPassword(format!(
@@ -170,22 +161,6 @@ pub(crate) fn check_password_strength(password: String) -> Result<(), APIError> 
         )));
     }
     Ok(())
-}
-
-pub(crate) fn check_password_validity(
-    password: &str,
-    storage_dir_path: &Path,
-) -> Result<Mnemonic, APIError> {
-    let mnemonic_path = get_mnemonic_path(storage_dir_path);
-    if let Ok(encrypted_mnemonic) = fs::read_to_string(mnemonic_path) {
-        let mcrypt = new_magic_crypt!(password, 256);
-        let mnemonic_str = mcrypt
-            .decrypt_base64_to_string(encrypted_mnemonic)
-            .map_err(|_| APIError::WrongPassword)?;
-        Ok(Mnemonic::from_str(&mnemonic_str).expect("valid mnemonic"))
-    } else {
-        Err(APIError::NotInitialized)
-    }
 }
 
 pub(crate) fn check_channel_id(channel_id_str: &str) -> Result<ChannelId, APIError> {
@@ -204,29 +179,6 @@ pub(crate) fn check_port_is_available(port: u16) -> Result<(), AppError> {
         return Err(AppError::UnavailablePort(port));
     }
     Ok(())
-}
-
-pub(crate) fn get_mnemonic_path(storage_dir_path: &Path) -> PathBuf {
-    storage_dir_path.join("mnemonic")
-}
-
-pub(crate) fn encrypt_and_save_mnemonic(
-    password: String,
-    mnemonic: String,
-    mnemonic_path: &Path,
-) -> Result<(), APIError> {
-    let mcrypt = new_magic_crypt!(password, 256);
-    let encrypted_mnemonic = mcrypt.encrypt_str_to_base64(mnemonic);
-    match fs::write(mnemonic_path, encrypted_mnemonic) {
-        Ok(()) => {
-            tracing::info!("Created a new wallet");
-            Ok(())
-        }
-        Err(e) => Err(APIError::FailedKeysCreation(
-            mnemonic_path.to_string_lossy().to_string(),
-            e.to_string(),
-        )),
-    }
 }
 
 pub(crate) async fn connect_peer_if_necessary(
@@ -352,6 +304,10 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
 
     let cancel_token = CancellationToken::new();
 
+    // Initialize database (synchronous - no async runtime conflicts)
+    let db = crate::db::init_db(&args.storage_dir_path)
+        .map_err(|e| AppError::Generic(e.to_string()))?;
+
     let static_state = Arc::new(StaticState {
         ldk_peer_listening_port: args.ldk_peer_listening_port,
         network: args.network,
@@ -369,6 +325,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         changing_state: Mutex::new(false),
         root_public_key: args.root_public_key,
         revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
+        db,
     });
 
     // Load revoked tokens from file if authentication is enabled

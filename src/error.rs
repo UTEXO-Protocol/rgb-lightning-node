@@ -72,9 +72,6 @@ pub enum APIError {
     #[error("Failed to issue asset: {0}")]
     FailedIssuingAsset(String),
 
-    #[error("Unable to create keys seed file {0}: {1}")]
-    FailedKeysCreation(String, String),
-
     #[error("Failed to open channel: {0}")]
     FailedOpenChannel(String),
 
@@ -403,7 +400,6 @@ impl IntoResponse for APIError {
             APIError::FailedClosingChannel(_)
             | APIError::FailedInvoiceCreation(_)
             | APIError::FailedIssuingAsset(_)
-            | APIError::FailedKeysCreation(_, _)
             | APIError::FailedOpenChannel(_)
             | APIError::FailedPayment(_)
             | APIError::FailedPeerDisconnection(_)
@@ -526,6 +522,9 @@ impl IntoResponse for APIError {
 /// The error variants returned by the app
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("{0}")]
+    Generic(String),
+
     #[error("The provided authentication args are invalid")]
     InvalidAuthenticationArgs,
 
