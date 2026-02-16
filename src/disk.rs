@@ -4,7 +4,7 @@ use chrono::Utc;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::util::hash_tables::new_hash_map;
 use lightning::util::logger::{Logger, Record};
-use lightning::util::ser::{Readable, ReadableArgs, Writer};
+use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use crate::error::APIError;
 use crate::ldk::{
-    ChannelIdsMap, ClaimablePaymentStorage, InboundPaymentInfoStorage, InvoiceMetadataStorage,
-    NetworkGraph, OutboundPaymentInfoStorage, OutputSpenderTxes, SwapMap,
+    ChannelIdsMap, ClaimablePaymentStorage, HtlcTrackerStorage, InboundPaymentInfoStorage,
+    InvoiceMetadataStorage, NetworkGraph, OutboundPaymentInfoStorage, OutputSpenderTxes, SwapMap,
+    HTLC_TRACKER_FNAME,
 };
 use crate::utils::{parse_peer_info, LOGS_DIR};
 
@@ -199,6 +200,53 @@ pub(crate) fn read_claimable_htlcs(path: &Path) -> ClaimablePaymentStorage {
     }
     ClaimablePaymentStorage {
         payments: new_hash_map(),
+    }
+}
+
+pub(crate) fn read_htlc_tracker(ldk_data_dir: &Path) -> HtlcTrackerStorage {
+    let path = ldk_data_dir.join(HTLC_TRACKER_FNAME);
+    if let Ok(file) = File::open(&path) {
+        match HtlcTrackerStorage::read(&mut BufReader::new(file)) {
+            Ok(info) => return info,
+            Err(e) => tracing::warn!("Failed to decode HTLC tracker {}: {e}", path.display()),
+        }
+    }
+    HtlcTrackerStorage::default()
+}
+
+pub(crate) fn write_htlc_tracker(ldk_data_dir: &Path, storage: &HtlcTrackerStorage) {
+    if let Err(e) = fs::create_dir_all(ldk_data_dir) {
+        tracing::warn!(
+            "Could not create LDK data dir {}: {e}",
+            ldk_data_dir.display()
+        );
+        return;
+    }
+    let path = ldk_data_dir.join(HTLC_TRACKER_FNAME);
+    let tmp_path = path.with_extension("json.tmp");
+    match File::create(&tmp_path) {
+        Ok(mut file) => {
+            if let Err(e) = storage.write(&mut file) {
+                tracing::warn!("Failed to write HTLC tracker {}: {e}", tmp_path.display());
+                return;
+            }
+            if let Err(e) = file.sync_all() {
+                tracing::warn!("Failed to sync HTLC tracker {}: {e}", tmp_path.display());
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to create HTLC tracker {}: {e}", tmp_path.display());
+            return;
+        }
+    }
+    if let Err(_e) = fs::rename(&tmp_path, &path) {
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+        if let Err(e) = fs::rename(&tmp_path, &path) {
+            tracing::warn!("Failed to replace HTLC tracker {}: {e}", path.display());
+        }
     }
 }
 
