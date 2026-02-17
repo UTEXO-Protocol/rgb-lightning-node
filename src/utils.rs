@@ -1,4 +1,6 @@
 use amplify::s;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
 use bitcoin::io;
 use bitcoin::secp256k1::PublicKey;
 use futures::Future;
@@ -11,13 +13,23 @@ use lightning::routing::router::{
 use lightning::{
     onion_message::packet::OnionMessageContents,
     sign::KeysManager,
+    types::payment::{PaymentHash, PaymentPreimage},
     util::ser::{Writeable, Writer},
 };
 use lightning_persister::fs_store::FilesystemStore;
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
-use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
+use rgb_lib::{
+    bdk_wallet::keys::bip39::Mnemonic,
+    bitcoin::{
+        bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
+        secp256k1::Secp256k1 as Secp256k1_30,
+        Network,
+    },
+    wallet::Outpoint as RgbOutpoint,
+    Assignment as RgbLibAssignment, BitcoinNetwork, ContractId,
+};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write,
     fs,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
@@ -30,17 +42,23 @@ use std::{
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
+use crate::bitcoind::ScannedUtxo;
+use crate::ldk::HtlcUtxoKind;
+#[cfg(test)]
+use crate::ldk::RgbOutputSpender;
 use crate::ldk::{ChannelIdsMap, Router};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
+use crate::routes::Assignment;
 use crate::routes::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::{
     args::UserArgs,
+    bitcoind::BitcoindClient,
     disk::FilesystemLogger,
     error::{APIError, AppError},
     ldk::{
-        BumpTxEventHandler, ChainMonitor, ChannelManager, InboundPaymentInfoStorage,
-        LdkBackgroundServices, NetworkGraph, OnionMessenger, OutboundPaymentInfoStorage,
-        OutputSweeper, PeerManager, SwapMap,
+        BumpTxEventHandler, ChainMonitor, ChannelManager, ClaimablePaymentStorage,
+        InboundPaymentInfoStorage, InvoiceMetadataStorage, LdkBackgroundServices, NetworkGraph,
+        OnionMessenger, OutboundPaymentInfoStorage, OutputSweeper, PeerManager, SwapMap,
     },
 };
 
@@ -95,6 +113,8 @@ pub(crate) struct StaticState {
 pub(crate) struct UnlockedAppState {
     pub(crate) channel_manager: Arc<ChannelManager>,
     pub(crate) inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
+    pub(crate) invoice_metadata: Arc<Mutex<InvoiceMetadataStorage>>,
+    pub(crate) claimable_htlcs: Arc<Mutex<ClaimablePaymentStorage>>,
     pub(crate) keys_manager: Arc<KeysManager>,
     pub(crate) network_graph: Arc<NetworkGraph>,
     pub(crate) chain_monitor: Arc<ChainMonitor>,
@@ -108,14 +128,26 @@ pub(crate) struct UnlockedAppState {
     pub(crate) rgb_wallet_wrapper: Arc<RgbLibWalletWrapper>,
     pub(crate) router: Arc<Router>,
     pub(crate) output_sweeper: Arc<OutputSweeper>,
+    #[cfg(test)]
+    pub(crate) htlc_output_spender: Arc<RgbOutputSpender>,
+    pub(crate) bitcoind_client: Arc<BitcoindClient>,
     pub(crate) rgb_send_lock: Arc<Mutex<bool>>,
     pub(crate) channel_ids_map: Arc<Mutex<ChannelIdsMap>>,
     pub(crate) proxy_endpoint: String,
+    pub(crate) lp_htlc_xpub: Xpub,
 }
 
 impl UnlockedAppState {
     pub(crate) fn get_inbound_payments(&self) -> MutexGuard<'_, InboundPaymentInfoStorage> {
         self.inbound_payments.lock().unwrap()
+    }
+
+    pub(crate) fn get_invoice_metadata(&self) -> MutexGuard<'_, InvoiceMetadataStorage> {
+        self.invoice_metadata.lock().unwrap()
+    }
+
+    pub(crate) fn get_claimable_htlcs(&self) -> MutexGuard<'_, ClaimablePaymentStorage> {
+        self.claimable_htlcs.lock().unwrap()
     }
 
     pub(crate) fn get_outbound_payments(&self) -> MutexGuard<'_, OutboundPaymentInfoStorage> {
@@ -188,6 +220,86 @@ pub(crate) fn check_password_validity(
     }
 }
 
+pub(crate) struct HtlcUtxoClassification {
+    pub(crate) utxo_kind: HtlcUtxoKind,
+    pub(crate) assignment: Option<Assignment>,
+}
+
+pub(crate) fn classify_htlc_utxos_by_asset(
+    rgb_wallet_wrapper: &RgbLibWalletWrapper,
+    utxos: &[ScannedUtxo],
+    asset_id: Option<&str>,
+) -> Result<HashMap<(String, u32), HtlcUtxoClassification>, APIError> {
+    if asset_id.is_none() {
+        return Ok(utxos
+            .iter()
+            .map(|u| {
+                (
+                    (u.txid.to_string(), u.vout),
+                    HtlcUtxoClassification {
+                        utxo_kind: HtlcUtxoKind::Vanilla,
+                        assignment: None,
+                    },
+                )
+            })
+            .collect());
+    }
+
+    let contract_id = ContractId::from_str(asset_id.unwrap())
+        .map_err(|e| APIError::InvalidAssetID(e.to_string()))?;
+    let outpoints: Vec<RgbOutpoint> = utxos
+        .iter()
+        .map(|u| RgbOutpoint {
+            txid: u.txid.to_string(),
+            vout: u.vout,
+        })
+        .collect();
+    let assignments_map = rgb_wallet_wrapper
+        .contract_assignments_for_outpoints(contract_id, outpoints)
+        .map_err(APIError::from)?;
+    let mut colored_map: HashMap<(String, u32), Option<Assignment>> = HashMap::new();
+    for (outpoint, assignments) in assignments_map {
+        if assignments.is_empty() {
+            continue;
+        }
+        if assignments.len() > 1 {
+            return Err(APIError::InvalidHtlcParams(format!(
+                "Multiple RGB assignments for HTLC outpoint {}:{}",
+                outpoint.txid, outpoint.vout
+            )));
+        }
+        let assignment = assignments
+            .into_iter()
+            .next()
+            .map(|a: RgbLibAssignment| a.into());
+        colored_map.insert((outpoint.txid, outpoint.vout), assignment);
+    }
+
+    Ok(utxos
+        .iter()
+        .map(|u| {
+            let key = (u.txid.to_string(), u.vout);
+            if let Some(value) = colored_map.get(&key).cloned() {
+                (
+                    key,
+                    HtlcUtxoClassification {
+                        utxo_kind: HtlcUtxoKind::Colored,
+                        assignment: value,
+                    },
+                )
+            } else {
+                (
+                    key,
+                    HtlcUtxoClassification {
+                        utxo_kind: HtlcUtxoKind::Vanilla,
+                        assignment: None,
+                    },
+                )
+            }
+        })
+        .collect())
+}
+
 pub(crate) fn check_channel_id(channel_id_str: &str) -> Result<ChannelId, APIError> {
     if let Some(channel_id_bytes) = hex_str_to_vec(channel_id_str) {
         if channel_id_bytes.len() != 32 {
@@ -204,6 +316,46 @@ pub(crate) fn check_port_is_available(port: u16) -> Result<(), AppError> {
         return Err(AppError::UnavailablePort(port));
     }
     Ok(())
+}
+
+pub(crate) fn derive_lp_htlc_xpub(
+    base_xpub: &Xpub,
+    payment_hash: &PaymentHash,
+) -> Result<Xpub, APIError> {
+    let (child1, child2) = htlc_child_numbers_from_payment_hash(payment_hash);
+    let path = DerivationPath::from(vec![child1, child2]);
+    let secp = Secp256k1_30::new();
+    base_xpub
+        .derive_pub(&secp, &path)
+        .map_err(|_| APIError::InvalidHtlcParams("Failed to derive LP HTLC pubkey".into()))
+}
+
+pub(crate) fn derive_lp_htlc_xprv_from_path(
+    base_xprv: &Xpriv,
+    path_str: &str,
+    network: Network,
+) -> Result<Xpriv, APIError> {
+    let full_path: DerivationPath = path_str
+        .parse()
+        .map_err(|_| APIError::InvalidHtlcParams("Invalid LP HTLC key path".into()))?;
+    let base = htlc_base_path(network);
+    let full_parts = full_path.as_ref();
+    let base_parts = base.as_ref();
+    if full_parts.len() < base_parts.len() || full_parts[..base_parts.len()] != *base_parts {
+        return Err(APIError::InvalidHtlcParams(
+            "LP HTLC key path does not match base path".into(),
+        ));
+    }
+    let tail: Vec<ChildNumber> = full_parts[base_parts.len()..].to_vec();
+    if tail.is_empty() {
+        return Err(APIError::InvalidHtlcParams(
+            "LP HTLC key path missing child indices".into(),
+        ));
+    }
+    let secp = Secp256k1_30::new();
+    base_xprv
+        .derive_priv(&secp, &DerivationPath::from(tail))
+        .map_err(|_| APIError::InvalidHtlcParams("Failed to derive LP HTLC key".into()))
 }
 
 pub(crate) fn get_mnemonic_path(storage_dir_path: &Path) -> PathBuf {
@@ -302,6 +454,40 @@ pub(crate) fn hex_str_to_vec(hex: &str) -> Option<Vec<u8>> {
     }
 
     Some(out)
+}
+
+pub(crate) fn htlc_base_path(network: Network) -> DerivationPath {
+    let coin = match network {
+        Network::Bitcoin => 0,
+        _ => 1,
+    };
+    format!("m/86'/{coin}'/0'/0")
+        .parse()
+        .expect("valid BIP86 base path")
+}
+
+pub(crate) fn htlc_child_numbers_from_payment_hash(
+    payment_hash: &PaymentHash,
+) -> (ChildNumber, ChildNumber) {
+    let bytes = payment_hash.0;
+    let idx1 = u32::from_be_bytes(bytes[0..4].try_into().expect("slice length")) & 0x7fff_ffff;
+    let idx2 = u32::from_be_bytes(bytes[4..8].try_into().expect("slice length")) & 0x7fff_ffff;
+    (
+        ChildNumber::Normal { index: idx1 },
+        ChildNumber::Normal { index: idx2 },
+    )
+}
+
+pub(crate) fn htlc_full_path_from_payment_hash(
+    network: Network,
+    payment_hash: &PaymentHash,
+) -> DerivationPath {
+    let base = htlc_base_path(network);
+    let (child1, child2) = htlc_child_numbers_from_payment_hash(payment_hash);
+    let mut parts = base.as_ref().to_vec();
+    parts.push(child1);
+    parts.push(child2);
+    DerivationPath::from(parts)
 }
 
 pub(crate) async fn no_cancel<Fut>(fut: Fut) -> Fut::Output
@@ -444,4 +630,42 @@ pub(crate) fn get_route(
     );
 
     route.ok()
+}
+
+pub(crate) fn validate_and_parse_payment_hash(
+    payment_hash_str: &str,
+) -> Result<PaymentHash, APIError> {
+    if payment_hash_str.is_empty() {
+        return Err(APIError::InvalidPaymentHash("missing payment_hash".into()));
+    }
+    let hash_vec = hex_str_to_vec(payment_hash_str)
+        .ok_or_else(|| APIError::InvalidPaymentHash(payment_hash_str.to_string()))?;
+    if hash_vec.len() != 32 {
+        return Err(APIError::InvalidPaymentHash(payment_hash_str.to_string()));
+    }
+    let hash_bytes: [u8; 32] = hash_vec
+        .try_into()
+        .map_err(|_| APIError::InvalidPaymentHash(payment_hash_str.to_string()))?;
+    Ok(PaymentHash(hash_bytes))
+}
+
+pub(crate) fn validate_and_parse_payment_preimage(
+    payment_preimage_str: &str,
+    payment_hash: &PaymentHash,
+) -> Result<PaymentPreimage, APIError> {
+    let preimage_vec =
+        hex_str_to_vec(payment_preimage_str).ok_or_else(|| APIError::InvalidPaymentPreimage)?;
+    if preimage_vec.len() != 32 {
+        return Err(APIError::InvalidPaymentPreimage);
+    }
+    let preimage = PaymentPreimage(
+        preimage_vec
+            .try_into()
+            .map_err(|_| APIError::InvalidPaymentPreimage)?,
+    );
+    let computed_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
+    if computed_hash != *payment_hash {
+        return Err(APIError::InvalidPaymentPreimage);
+    }
+    Ok(preimage)
 }

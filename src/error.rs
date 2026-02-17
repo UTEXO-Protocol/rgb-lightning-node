@@ -141,6 +141,9 @@ pub enum APIError {
     #[error("Invalid fee rate: {0}")]
     InvalidFeeRate(String),
 
+    #[error("Invalid HTLC params: {0}")]
+    InvalidHtlcParams(String),
+
     #[error("Invalid indexer: {0}")]
     InvalidIndexer(String),
 
@@ -161,6 +164,9 @@ pub enum APIError {
 
     #[error("Invalid payment hash: {0}")]
     InvalidPaymentHash(String),
+
+    #[error("Payment hash already used")]
+    PaymentHashAlreadyUsed,
 
     #[error("Invalid payment secret")]
     InvalidPaymentSecret,
@@ -210,6 +216,24 @@ pub enum APIError {
     #[error("Invalid transport endpoints: {0}")]
     InvalidTransportEndpoints(String),
 
+    #[error("Invoice is expired")]
+    InvoiceExpired,
+
+    #[error("HTLC claim deadline exceeded")]
+    ClaimDeadlineExceeded,
+
+    #[error("Invoice is not marked as HODL")]
+    InvoiceNotHodl,
+
+    #[error("No claimable HTLC found for this invoice")]
+    InvoiceNotClaimable,
+
+    #[error("Invoice settlement is in progress")]
+    InvoiceSettlingInProgress,
+
+    #[error("Invoice is already settled")]
+    InvoiceAlreadySettled,
+
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
 
@@ -233,6 +257,9 @@ pub enum APIError {
 
     #[error("Unable to find payment preimage, be sure you've provided the correct swap info")]
     MissingSwapPaymentPreimage,
+
+    #[error("Invalid payment preimage")]
+    InvalidPaymentPreimage,
 
     #[error("Network error: {0}")]
     Network(String),
@@ -342,7 +369,6 @@ impl From<RgbLibError> for APIError {
             }
             RgbLibError::InvalidAddress { details } => APIError::InvalidAddress(details),
             RgbLibError::InvalidAmountZero => APIError::InvalidAmount(s!("0")),
-            RgbLibError::InvalidAssetID { asset_id } => APIError::InvalidAssetID(asset_id),
             RgbLibError::InvalidAssignment => APIError::InvalidAssignment,
             RgbLibError::InvalidAttachments { details } => APIError::InvalidAttachments(details),
             RgbLibError::InvalidDetails { details } => APIError::InvalidDetails(details),
@@ -430,6 +456,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidDetails(_)
             | APIError::InvalidEstimationBlocks
             | APIError::InvalidFeeRate(_)
+            | APIError::InvalidHtlcParams(_)
             | APIError::InvalidInvoice(_)
             | APIError::InvalidMediaDigest
             | APIError::InvalidName(_)
@@ -437,13 +464,16 @@ impl IntoResponse for APIError {
             | APIError::InvalidOnionData(_)
             | APIError::InvalidPassword(_)
             | APIError::InvalidPaymentHash(_)
+            | APIError::PaymentHashAlreadyUsed
             | APIError::InvalidPaymentSecret
+            | APIError::InvalidPaymentPreimage
             | APIError::InvalidPeerInfo(_)
             | APIError::InvalidPrecision(_)
             | APIError::InvalidPubkey
             | APIError::InvalidRecipientData(_)
             | APIError::InvalidRecipientID
             | APIError::InvalidRecipientNetwork
+            | APIError::InvoiceExpired
             | APIError::InvalidSwap(_)
             | APIError::InvalidSwapString(_, _)
             | APIError::InvalidTicker(_)
@@ -454,6 +484,7 @@ impl IntoResponse for APIError {
             | APIError::MediaFileNotProvided
             | APIError::MissingSwapPaymentPreimage
             | APIError::OutputBelowDustLimit
+            | APIError::ClaimDeadlineExceeded
             | APIError::UnsupportedBackupVersion { .. } => {
                 (StatusCode::BAD_REQUEST, self.to_string(), self.name())
             }
@@ -497,6 +528,13 @@ impl IntoResponse for APIError {
             | APIError::UnlockedNode
             | APIError::UnsupportedLayer1(_)
             | APIError::UnsupportedTransportType => {
+                (StatusCode::FORBIDDEN, self.to_string(), self.name())
+            }
+            APIError::InvoiceNotClaimable => (StatusCode::NOT_FOUND, self.to_string(), self.name()),
+            APIError::InvoiceAlreadySettled => {
+                (StatusCode::CONFLICT, self.to_string(), self.name())
+            }
+            APIError::InvoiceNotHodl | APIError::InvoiceSettlingInProgress => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
             }
             APIError::Network(_) | APIError::NoValidTransportEndpoint => (
