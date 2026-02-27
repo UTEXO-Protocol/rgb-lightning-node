@@ -1,6 +1,5 @@
 use amplify::s;
 use axum::{
-    extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -162,6 +161,9 @@ pub enum APIError {
     #[error("Invalid payment hash: {0}")]
     InvalidPaymentHash(String),
 
+    #[error("Invalid payment preimage")]
+    InvalidPaymentPreimage,
+
     #[error("Invalid payment secret")]
     InvalidPaymentSecret,
 
@@ -192,6 +194,9 @@ pub enum APIError {
     #[error("The provided recipient ID is for a different network than the wallet's one")]
     InvalidRecipientNetwork,
 
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+
     #[error("Invalid swap: {0}")]
     InvalidSwap(String),
 
@@ -210,11 +215,26 @@ pub enum APIError {
     #[error("Invalid transport endpoints: {0}")]
     InvalidTransportEndpoints(String),
 
+    #[error("HTLC claim deadline exceeded")]
+    ClaimDeadlineExceeded,
+
+    #[error("Invoice is already settled")]
+    InvoiceAlreadySettled,
+
+    #[error("Invoice is expired")]
+    InvoiceExpired,
+
+    #[error("No claimable HTLC found for this invoice")]
+    InvoiceNotClaimable,
+
+    #[error("Invoice is not marked as HODL")]
+    InvoiceNotHodl,
+
+    #[error("Invoice settlement is in progress")]
+    InvoiceSettlingInProgress,
+
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
-
-    #[error(transparent)]
-    JsonExtractorRejection(#[from] JsonRejection),
 
     #[error("Node is locked (hint: call unlock)")]
     LockedNode,
@@ -257,6 +277,9 @@ pub enum APIError {
 
     #[error("Output below the dust limit")]
     OutputBelowDustLimit,
+
+    #[error("Payment hash already used")]
+    PaymentHashAlreadyUsed,
 
     #[error("Payment not found: {0}")]
     PaymentNotFound(String),
@@ -311,6 +334,18 @@ impl APIError {
             .next()
             .unwrap()
             .to_string()
+    }
+}
+
+impl From<axum::extract::rejection::JsonRejection> for APIError {
+    fn from(err: axum::extract::rejection::JsonRejection) -> Self {
+        APIError::InvalidRequest(err.to_string())
+    }
+}
+
+impl From<axum::extract::multipart::MultipartRejection> for APIError {
+    fn from(err: axum::extract::multipart::MultipartRejection) -> Self {
+        APIError::InvalidRequest(err.to_string())
     }
 }
 
@@ -395,11 +430,6 @@ impl From<RgbLibError> for APIError {
 impl IntoResponse for APIError {
     fn into_response(self) -> Response {
         let (status, error, name) = match self {
-            APIError::JsonExtractorRejection(ref json_rejection) => (
-                json_rejection.status(),
-                json_rejection.body_text(),
-                self.name(),
-            ),
             APIError::FailedClosingChannel(_)
             | APIError::FailedInvoiceCreation(_)
             | APIError::FailedIssuingAsset(_)
@@ -437,6 +467,8 @@ impl IntoResponse for APIError {
             | APIError::InvalidOnionData(_)
             | APIError::InvalidPassword(_)
             | APIError::InvalidPaymentHash(_)
+            | APIError::PaymentHashAlreadyUsed
+            | APIError::InvalidPaymentPreimage
             | APIError::InvalidPaymentSecret
             | APIError::InvalidPeerInfo(_)
             | APIError::InvalidPrecision(_)
@@ -444,16 +476,19 @@ impl IntoResponse for APIError {
             | APIError::InvalidRecipientData(_)
             | APIError::InvalidRecipientID
             | APIError::InvalidRecipientNetwork
+            | APIError::InvalidRequest(_)
             | APIError::InvalidSwap(_)
             | APIError::InvalidSwapString(_, _)
             | APIError::InvalidTicker(_)
             | APIError::InvalidTlvType(_)
             | APIError::InvalidTransportEndpoint(_)
             | APIError::InvalidTransportEndpoints(_)
+            | APIError::InvoiceExpired
             | APIError::MediaFileEmpty
             | APIError::MediaFileNotProvided
             | APIError::MissingSwapPaymentPreimage
             | APIError::OutputBelowDustLimit
+            | APIError::ClaimDeadlineExceeded
             | APIError::UnsupportedBackupVersion { .. } => {
                 (StatusCode::BAD_REQUEST, self.to_string(), self.name())
             }
@@ -478,6 +513,8 @@ impl IntoResponse for APIError {
             | APIError::InvalidIndexer(_)
             | APIError::InvalidProxyEndpoint
             | APIError::InvalidProxyProtocol(_)
+            | APIError::InvoiceNotHodl
+            | APIError::InvoiceSettlingInProgress
             | APIError::LockedNode
             | APIError::MaxFeeExceeded(_)
             | APIError::MinFeeNotMet(_)
@@ -499,6 +536,10 @@ impl IntoResponse for APIError {
             | APIError::UnsupportedTransportType => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
             }
+            APIError::InvoiceAlreadySettled => {
+                (StatusCode::CONFLICT, self.to_string(), self.name())
+            }
+            APIError::InvoiceNotClaimable => (StatusCode::NOT_FOUND, self.to_string(), self.name()),
             APIError::Network(_) | APIError::NoValidTransportEndpoint => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.to_string(),
@@ -540,4 +581,36 @@ pub enum AppError {
 
     #[error("Port {0} is unavailable")]
     UnavailablePort(u16),
+}
+
+/// The error variants returned by the authentication checks
+#[derive(Debug)]
+pub enum AuthError {
+    Unauthorized,
+    Forbidden,
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        match self {
+            AuthError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                Json(APIErrorResponse {
+                    code: StatusCode::UNAUTHORIZED.as_u16(),
+                    error: s!("Missing or invalid credentials"),
+                    name: s!("Unauthorized"),
+                }),
+            )
+                .into_response(),
+            AuthError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                Json(APIErrorResponse {
+                    code: StatusCode::FORBIDDEN.as_u16(),
+                    error: s!("You don't have access to this resource"),
+                    name: s!("Forbidden"),
+                }),
+            )
+                .into_response(),
+        }
+    }
 }

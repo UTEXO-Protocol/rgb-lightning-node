@@ -21,6 +21,7 @@ async fn invoice() {
         expiry_sec: 900,
         asset_id: Some(asset_id.clone()),
         asset_amount: Some(1),
+        payment_hash: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node1_addr}/lninvoice"))
@@ -36,6 +37,7 @@ async fn invoice() {
         expiry_sec: 900,
         asset_id: Some(asset_id.clone()),
         asset_amount: Some(1),
+        payment_hash: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node1_addr}/lninvoice"))
@@ -51,6 +53,7 @@ async fn invoice() {
         expiry_sec: 900,
         asset_id: None,
         asset_amount: None,
+        payment_hash: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node1_addr}/lninvoice"))
@@ -99,6 +102,7 @@ async fn zero_amount_invoice() {
         expiry_sec: 900,
         asset_id: None,
         asset_amount: None,
+        payment_hash: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node2_addr}/lninvoice"))
@@ -140,4 +144,22 @@ async fn zero_amount_invoice() {
 
     // Wait for payment to complete
     wait_for_ln_payment(node1_addr, &decoded.payment_hash, HTLCStatus::Succeeded).await;
+    wait_for_ln_payment(node2_addr, &decoded.payment_hash, HTLCStatus::Succeeded).await;
+
+    // Verify that both sender and receiver payments record the actual amount
+    let payment_sender = get_payment(node1_addr, &decoded.payment_hash).await;
+    assert_eq!(
+        payment_sender.amt_msat,
+        Some(payment_amount),
+        "Sender payment should have the amount that was sent"
+    );
+    assert_eq!(payment_sender.status, HTLCStatus::Succeeded);
+
+    let payment_receiver = get_payment(node2_addr, &decoded.payment_hash).await;
+    assert_eq!(
+        payment_receiver.amt_msat,
+        Some(payment_amount),
+        "Receiver payment should have the amount that was received, not zero"
+    );
+    assert_eq!(payment_receiver.status, HTLCStatus::Succeeded);
 }
