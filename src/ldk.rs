@@ -98,7 +98,8 @@ use crate::disk::{
 };
 use crate::error::APIError;
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional, RgbLibWalletWrapper};
-use crate::routes::{HTLCStatus, SwapStatus, UnlockRequest, DUST_LIMIT_MSAT};
+use crate::routes::{UnlockRequest, DUST_LIMIT_MSAT};
+use crate::sdk::{HtlcStatus as HTLCStatus, SwapStatus};
 use crate::swap::SwapData;
 use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, do_connect_peer, get_current_timestamp,

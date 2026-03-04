@@ -1,0 +1,171 @@
+name: UniFFI Artifacts
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  kotlin-jvm:
+    name: Kotlin JVM (Linux host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.1
+
+      - name: Build host cdylib
+        run: cargo build --release --features uniffi --lib
+
+      - name: Generate Kotlin bindings
+        run: |
+          cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml -- \
+            generate bindings/rgb_lightning_node.udl \
+            --language kotlin \
+            --config uniffi.toml \
+            -o bindings/kotlin
+
+      - name: Package Kotlin JVM bundle
+        run: |
+          mkdir -p artifacts/kotlin-jvm
+          cp -r bindings/kotlin artifacts/kotlin-jvm/
+          cp target/release/librgb_lightning_node.so artifacts/kotlin-jvm/
+
+      - name: Upload Kotlin JVM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-jvm-host
+          path: artifacts/kotlin-jvm/**
+
+  kotlin-android:
+    name: Kotlin Android (JNI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.1
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Add Android targets
+        run: |
+          rustup target add aarch64-linux-android
+          rustup target add armv7-linux-androideabi
+          rustup target add x86_64-linux-android
+
+      - name: Install Android native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build make clang pkg-config build-essential
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 3.5.4 --locked
+
+      - name: Generate Kotlin Android bindings
+        run: |
+          cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml -- \
+            generate bindings/rgb_lightning_node.udl \
+            --language kotlin \
+            --config uniffi-android.toml \
+            -o bindings/kotlin-android
+
+      - name: Build Android JNI libs
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          rm -rf bindings/kotlin-android/jniLibs
+          cargo ndk -t arm64-v8a -o bindings/kotlin-android/jniLibs build --release --features uniffi --lib
+          cargo ndk -t armeabi-v7a -o bindings/kotlin-android/jniLibs build --release --features uniffi --lib
+          cargo ndk -t x86_64 -o bindings/kotlin-android/jniLibs build --release --features uniffi --lib
+
+      - name: Upload Kotlin Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-android-jni
+          path: bindings/kotlin-android/**
+
+  swift:
+    name: Swift iOS XCFramework
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.1
+
+      - name: Add Apple targets
+        run: |
+          rustup target add aarch64-apple-ios
+          rustup target add aarch64-apple-ios-sim
+          rustup target add x86_64-apple-ios
+
+      - name: Build static libraries for Apple targets
+        run: |
+          cargo build --release --features uniffi --lib --target aarch64-apple-ios
+          cargo build --release --features uniffi --lib --target aarch64-apple-ios-sim
+          cargo build --release --features uniffi --lib --target x86_64-apple-ios
+
+      - name: Generate Swift bindings
+        run: |
+          cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml -- \
+            generate bindings/rgb_lightning_node.udl \
+            --language swift \
+            --config uniffi.toml \
+            -o bindings/swift
+
+      - name: Package XCFramework
+        run: |
+          mkdir -p bindings/swift/headers
+          cp bindings/swift/RGBLightningNodeFFI.h bindings/swift/headers/
+          cp bindings/swift/RGBLightningNodeFFI.modulemap bindings/swift/headers/module.modulemap
+
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/librgb_lightning_node.a -headers bindings/swift/headers \
+            -library target/aarch64-apple-ios-sim/release/librgb_lightning_node.a -headers bindings/swift/headers \
+            -library target/x86_64-apple-ios/release/librgb_lightning_node.a -headers bindings/swift/headers \
+            -output bindings/swift/RGBLightningNode.xcframework
+
+      - name: Upload Swift artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-xcframework
+          path: |
+            bindings/swift/RGBLightningNode.xcframework/**
+            bindings/swift/RGBLightningNode.swift
+            bindings/swift/RGBLightningNodeFFI.h
+            bindings/swift/RGBLightningNodeFFI.modulemap

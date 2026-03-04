@@ -43,6 +43,134 @@ The docker image can be built with:
 docker build -t rgb-lightning-node .
 ```
 
+## UniFFI Bindings
+
+REST is **not** part of the SDK surface. REST endpoints remain a compatibility
+wrapper for existing integrations and tests. The SDK surface is exposed through
+the Rust library + UniFFI bindings.
+
+Current lifecycle/threading model:
+- UniFFI API is single-node-per-process (global state slot).
+- State is registered by daemon startup and cleared on daemon shutdown.
+- Use `uniffiIsInitialized()` from generated bindings to check readiness before SDK calls.
+- Calls made before registration return `NotInitialized`.
+
+Build with UniFFI enabled:
+```sh
+cargo check --features uniffi
+```
+
+Generate all bindings:
+```sh
+./scripts/uniffi_bindgen_generate.sh
+```
+
+Generate per language:
+```sh
+./scripts/uniffi_bindgen_generate_kotlin.sh
+./scripts/uniffi_bindgen_generate_kotlin_android.sh
+./scripts/uniffi_bindgen_generate_python.sh
+./scripts/uniffi_bindgen_generate_swift.sh
+```
+
+Quick SDK smoke tests:
+```sh
+cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1
+```
+
+Kotlin/JVM + Rust UniFFI smoke test (local toolchain):
+```sh
+./scripts/kotlin_uniffi_smoke.sh
+```
+
+Kotlin/JVM + Rust UniFFI smoke test (Docker):
+```sh
+./scripts/docker_kotlin_uniffi_smoke.sh
+```
+
+Kotlin/JVM manual UniFFI checks (error mapping + custom type validation):
+```sh
+./scripts/kotlin_manual_test.sh
+```
+
+Faster rerun when artifacts are already built:
+```sh
+SKIP_BUILD=1 SKIP_BINDINGS=1 ./scripts/kotlin_manual_test.sh
+```
+
+Kotlin/Android manual artifact checks (requires `ANDROID_NDK_HOME` + `cargo-ndk`):
+```sh
+./scripts/kotlin_android_manual_test.sh
+```
+
+Kotlin/Android manual artifact checks in Docker:
+```sh
+./scripts/docker_kotlin_android_manual_test.sh
+```
+
+Swift manual checks on macOS (host smoke + iOS XCFramework packaging):
+```sh
+./scripts/swift_manual_test.sh
+```
+
+If you hit CMake generator/cache conflicts, force a clean Android target dir:
+```sh
+CLEAN_ANDROID_TARGET=1 ./scripts/kotlin_android_manual_test.sh
+# or in docker:
+docker run --rm -v "$PWD:/work" -w /work rln-kotlin-android-uniffi:local \
+  bash -lc "source /usr/local/cargo/env && CLEAN_ANDROID_TARGET=1 ./scripts/kotlin_android_manual_test.sh"
+```
+
+If needed, override target dir explicitly to guarantee no old CMake cache is reused:
+```sh
+CARGO_TARGET_DIR="$PWD/target/android-uniffi-make-fresh" ./scripts/docker_kotlin_android_manual_test.sh
+```
+
+Local Android NDK setup (Ubuntu, CLI):
+```sh
+# 1) Install Java + Rust helper
+sudo apt-get update
+sudo apt-get install -y openjdk-17-jdk unzip cmake clang pkg-config build-essential ninja-build
+cargo install cargo-ndk --version 3.5.4 --locked
+cargo install bindgen-cli --version 0.71.1 --locked
+
+# 2) Install Android cmdline-tools (pick your own SDK root if needed)
+export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
+mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+cd /tmp
+wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
+unzip -q cmdline-tools.zip
+mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+mv cmdline-tools/* "$ANDROID_SDK_ROOT/cmdline-tools/latest/"
+
+# 3) Install NDK + build tools used by local checks/CI
+"$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
+"$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+  "ndk;26.3.11579264" "platform-tools" "build-tools;34.0.0"
+
+# 4) Export env vars for this shell
+export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.3.11579264"
+export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+```
+
+Then run:
+```sh
+./scripts/kotlin_android_manual_test.sh
+```
+
+Parity tests used in CI:
+```sh
+cargo test zero_amount_invoice -- --test-threads=1
+cargo test send_receive -- --test-threads=1
+```
+
+CI artifact packaging workflow:
+- `.github/workflows/uniffi-artifacts.yaml`
+- Artifacts produced:
+  - Swift: `RGBLightningNode.xcframework`
+  - Kotlin Android: `jniLibs` + generated Kotlin sources
+  - Python: generated module + host shared library bundle
+
 ## Run
 
 In order to operate, the node will need:
@@ -368,6 +496,37 @@ Tests can be executed with:
 ```sh
 cargo test
 ```
+
+## Maintenance
+
+`rgb-lightning-node` is a fork and we keep feature parity with upstream.
+UniFFI support adds a required manual sync checklist when upstream changes:
+
+1. Sync upstream changes into this fork.
+2. Re-check SDK/REST parity for changed endpoints in `src/routes.rs` and `src/sdk/mod.rs`.
+3. Update `bindings/rgb_lightning_node.udl` for any public API shape changes.
+4. Add/update converters in `src/ffi/types.rs` for new structured identifiers.
+5. Regenerate bindings:
+   - `./scripts/uniffi_bindgen_generate.sh`
+6. Re-run required tests:
+   - `cargo test -- --test-threads=1`
+   - `cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1`
+   - `cargo test zero_amount_invoice -- --test-threads=1`
+   - `cargo test send_receive -- --test-threads=1`
+
+## Release checklist
+
+1. Run Rust checks:
+   - `cargo check`
+   - `cargo check --features uniffi`
+2. Run core tests:
+   - `cargo test -- --test-threads=1`
+   - `cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1`
+3. Regenerate bindings and verify changed output:
+   - `./scripts/uniffi_bindgen_generate.sh`
+4. Ensure CI workflows pass:
+   - `.github/workflows/test.yaml`
+   - `.github/workflows/uniffi-artifacts.yaml`
 
 ## Projects using RLN
 

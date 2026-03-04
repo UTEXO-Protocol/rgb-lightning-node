@@ -1,18 +1,3 @@
-mod args;
-mod auth;
-mod backup;
-mod bitcoind;
-mod disk;
-mod error;
-mod ldk;
-mod rgb;
-mod routes;
-mod swap;
-mod utils;
-
-#[cfg(test)]
-mod test;
-
 use anyhow::Result;
 use axum::{
     extract::DefaultBodyLimit,
@@ -54,9 +39,8 @@ use crate::routes::{
 };
 use crate::utils::{start_daemon, AppState, LOGS_DIR};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = args::parse_startup_args()?;
+pub async fn run_daemon() -> Result<()> {
+    let args = crate::args::parse_startup_args()?;
 
     // stdout logger
     let stdout_log = tracing_subscriber::fmt::layer().fmt_fields(TypedFields::default());
@@ -94,6 +78,8 @@ async fn main() -> Result<()> {
 
 pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppError> {
     let app_state = start_daemon(&args).await?;
+    #[cfg(feature = "uniffi")]
+    crate::set_uniffi_app_state(app_state.clone());
 
     let router = Router::new()
         .route(
@@ -199,7 +185,7 @@ impl AppState {
 }
 
 /// Tokio signal handler that will wait for a user to press CTRL+C.
-async fn shutdown_signal(app_state: Arc<AppState>) {
+pub(crate) async fn shutdown_signal(app_state: Arc<AppState>) {
     let cancel_token = app_state.cancel_token.clone();
 
     let ctrl_c = async {
@@ -238,6 +224,8 @@ async fn shutdown_signal(app_state: Arc<AppState>) {
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     stop_ldk(app_state.clone()).await;
+    #[cfg(feature = "uniffi")]
+    crate::clear_uniffi_app_state();
 }
 
 // workaround for https://github.com/tokio-rs/tracing/issues/1372

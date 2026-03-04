@@ -1,0 +1,144 @@
+namespace rgb_lightning_node {
+    string uniffi_healthcheck();
+    boolean uniffi_is_initialized();
+    [Throws=RlnError]
+    NodeInfoV1 sdk_node_info();
+    [Throws=RlnError]
+    ChannelId sdk_get_channel_id(ChannelId temporary_channel_id);
+    [Throws=RlnError]
+    PaymentV1 sdk_get_payment(PaymentHash payment_hash);
+    [Throws=RlnError]
+    SwapV1 sdk_get_swap(PaymentHash payment_hash, boolean taker);
+    [Throws=RlnError]
+    LnInvoiceResponseV1 sdk_ln_invoice(LnInvoiceRequestV1 request);
+    [Throws=RlnError]
+    SendRgbResponseV1 sdk_send_rgb(SendRgbRequestV1 request);
+};
+
+[Error]
+enum RlnError {
+    "NotInitialized",
+    "InvalidRequest",
+    "Internal",
+};
+
+dictionary NodeInfoV1 {
+    PublicKey pubkey;
+    u64 num_channels;
+    u64 num_peers;
+    u64 network_nodes;
+    u64 network_channels;
+};
+
+dictionary PaymentV1 {
+    u64? amt_msat;
+    u64? asset_amount;
+    ContractId? asset_id;
+    PaymentHash payment_hash;
+    boolean inbound;
+    HtlcStatusV1 status;
+    u64 created_at;
+    u64 updated_at;
+    PublicKey payee_pubkey;
+};
+
+enum HtlcStatusV1 {
+    "Pending",
+    "Succeeded",
+    "Failed",
+};
+
+dictionary SwapV1 {
+    u64 qty_from;
+    u64 qty_to;
+    ContractId? from_asset;
+    ContractId? to_asset;
+    PaymentHash payment_hash;
+    SwapStatusV1 status;
+    u64 requested_at;
+    u64? initiated_at;
+    u64 expires_at;
+    u64? completed_at;
+};
+
+enum SwapStatusV1 {
+    "Waiting",
+    "Pending",
+    "Succeeded",
+    "Expired",
+    "Failed",
+};
+
+dictionary LnInvoiceRequestV1 {
+    u64? amt_msat;
+    u32 expiry_sec;
+    ContractId? asset_id;
+    u64? asset_amount;
+};
+
+dictionary LnInvoiceResponseV1 {
+    Bolt11Invoice invoice;
+};
+
+dictionary SendRgbRequestV1 {
+    boolean donation;
+    u64 fee_rate;
+    u8 min_confirmations;
+    boolean skip_sync;
+    sequence<AssetRecipientsV1> recipient_groups;
+};
+
+dictionary SendRgbResponseV1 {
+    Txid txid;
+    i32 batch_transfer_idx;
+};
+
+dictionary AssetRecipientsV1 {
+    ContractId asset_id;
+    sequence<RgbRecipientV1> recipients;
+};
+
+dictionary RgbRecipientV1 {
+    RecipientId recipient_id;
+    WitnessDataV1? witness_data;
+    AssignmentKindV1 assignment_kind;
+    u64? assignment_amount;
+    sequence<TransportEndpoint> transport_endpoints;
+};
+
+dictionary WitnessDataV1 {
+    u64 amount_sat;
+    u64? blinding;
+};
+
+enum AssignmentKindV1 {
+    "Fungible",
+    "NonFungible",
+    "InflationRight",
+    "ReplaceRight",
+    "Any",
+};
+
+[Custom]
+typedef string PublicKey;
+
+[Custom]
+typedef string Txid;
+
+[Custom]
+typedef string ContractId;
+
+[Custom]
+typedef string ChannelId;
+
+[Custom]
+typedef string PaymentHash;
+
+[Custom]
+typedef string RecipientId;
+
+[Custom]
+typedef string Bolt11Invoice;
+
+[Custom]
+typedef string TransportEndpoint;
