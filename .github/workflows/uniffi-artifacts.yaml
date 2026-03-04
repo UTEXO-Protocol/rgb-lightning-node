@@ -30,12 +30,7 @@ jobs:
         run: cargo build --release --features uniffi --lib
 
       - name: Generate Kotlin bindings
-        run: |
-          cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml -- \
-            generate bindings/rgb_lightning_node.udl \
-            --language kotlin \
-            --config uniffi.toml \
-            -o bindings/kotlin
+        run: ./scripts/ci/uniffi_generate_kotlin.sh
 
       - name: Package Kotlin JVM bundle
         run: |
@@ -91,21 +86,12 @@ jobs:
         run: cargo install cargo-ndk --version 3.5.4 --locked
 
       - name: Generate Kotlin Android bindings
-        run: |
-          cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml -- \
-            generate bindings/rgb_lightning_node.udl \
-            --language kotlin \
-            --config uniffi-android.toml \
-            -o bindings/kotlin-android
+        run: ./scripts/ci/uniffi_generate_kotlin_android.sh
 
       - name: Build Android JNI libs
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          rm -rf bindings/kotlin-android/jniLibs
-          cargo ndk -t arm64-v8a -o bindings/kotlin-android/jniLibs build --release --features uniffi --lib
-          cargo ndk -t armeabi-v7a -o bindings/kotlin-android/jniLibs build --release --features uniffi --lib
-          cargo ndk -t x86_64 -o bindings/kotlin-android/jniLibs build --release --features uniffi --lib
+        run: ./scripts/ci/build_android_jni.sh
 
       - name: Upload Kotlin Android artifact
         uses: actions/upload-artifact@v4
@@ -141,24 +127,10 @@ jobs:
           cargo build --release --features uniffi --lib --target x86_64-apple-ios
 
       - name: Generate Swift bindings
-        run: |
-          cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml -- \
-            generate bindings/rgb_lightning_node.udl \
-            --language swift \
-            --config uniffi.toml \
-            -o bindings/swift
+        run: ./scripts/ci/uniffi_generate_swift.sh
 
       - name: Package XCFramework
-        run: |
-          mkdir -p bindings/swift/headers
-          cp bindings/swift/RGBLightningNodeFFI.h bindings/swift/headers/
-          cp bindings/swift/RGBLightningNodeFFI.modulemap bindings/swift/headers/module.modulemap
-
-          xcodebuild -create-xcframework \
-            -library target/aarch64-apple-ios/release/librgb_lightning_node.a -headers bindings/swift/headers \
-            -library target/aarch64-apple-ios-sim/release/librgb_lightning_node.a -headers bindings/swift/headers \
-            -library target/x86_64-apple-ios/release/librgb_lightning_node.a -headers bindings/swift/headers \
-            -output bindings/swift/RGBLightningNode.xcframework
+        run: ./scripts/ci/package_swift_xcframework.sh
 
       - name: Upload Swift artifact
         uses: actions/upload-artifact@v4

@@ -62,15 +62,15 @@ cargo check --features uniffi
 
 Generate all bindings:
 ```sh
-./scripts/uniffi_bindgen_generate.sh
+./scripts/ci/uniffi_generate_all.sh
 ```
 
 Generate per language:
 ```sh
-./scripts/uniffi_bindgen_generate_kotlin.sh
-./scripts/uniffi_bindgen_generate_kotlin_android.sh
-./scripts/uniffi_bindgen_generate_python.sh
-./scripts/uniffi_bindgen_generate_swift.sh
+./scripts/ci/uniffi_generate_kotlin.sh
+./scripts/ci/uniffi_generate_kotlin_android.sh
+./scripts/ci/uniffi_generate_python.sh
+./scripts/ci/uniffi_generate_swift.sh
 ```
 
 Quick SDK smoke tests:
@@ -78,52 +78,16 @@ Quick SDK smoke tests:
 cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1
 ```
 
-Kotlin/JVM + Rust UniFFI smoke test (local toolchain):
+Kotlin/JVM artifact build (Linux host):
 ```sh
-./scripts/kotlin_uniffi_smoke.sh
+cargo build --release --features uniffi --lib
+./scripts/ci/uniffi_generate_kotlin.sh
 ```
 
-Kotlin/JVM + Rust UniFFI smoke test (Docker):
+Kotlin/Android artifact build (requires `ANDROID_NDK_HOME` + `cargo-ndk`):
 ```sh
-./scripts/docker_kotlin_uniffi_smoke.sh
-```
-
-Kotlin/JVM manual UniFFI checks (error mapping + custom type validation):
-```sh
-./scripts/kotlin_manual_test.sh
-```
-
-Faster rerun when artifacts are already built:
-```sh
-SKIP_BUILD=1 SKIP_BINDINGS=1 ./scripts/kotlin_manual_test.sh
-```
-
-Kotlin/Android manual artifact checks (requires `ANDROID_NDK_HOME` + `cargo-ndk`):
-```sh
-./scripts/kotlin_android_manual_test.sh
-```
-
-Kotlin/Android manual artifact checks in Docker:
-```sh
-./scripts/docker_kotlin_android_manual_test.sh
-```
-
-Swift manual checks on macOS (host smoke + iOS XCFramework packaging):
-```sh
-./scripts/swift_manual_test.sh
-```
-
-If you hit CMake generator/cache conflicts, force a clean Android target dir:
-```sh
-CLEAN_ANDROID_TARGET=1 ./scripts/kotlin_android_manual_test.sh
-# or in docker:
-docker run --rm -v "$PWD:/work" -w /work rln-kotlin-android-uniffi:local \
-  bash -lc "source /usr/local/cargo/env && CLEAN_ANDROID_TARGET=1 ./scripts/kotlin_android_manual_test.sh"
-```
-
-If needed, override target dir explicitly to guarantee no old CMake cache is reused:
-```sh
-CARGO_TARGET_DIR="$PWD/target/android-uniffi-make-fresh" ./scripts/docker_kotlin_android_manual_test.sh
+./scripts/ci/uniffi_generate_kotlin_android.sh
+./scripts/ci/build_android_jni.sh
 ```
 
 Local Android NDK setup (Ubuntu, CLI):
@@ -153,9 +117,20 @@ export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.3.11579264"
 export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
 ```
 
-Then run:
+Then build Android artifacts:
 ```sh
-./scripts/kotlin_android_manual_test.sh
+./scripts/ci/uniffi_generate_kotlin_android.sh
+./scripts/ci/build_android_jni.sh
+```
+
+Swift artifact build (macOS):
+```sh
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+cargo build --release --features uniffi --lib --target aarch64-apple-ios
+cargo build --release --features uniffi --lib --target aarch64-apple-ios-sim
+cargo build --release --features uniffi --lib --target x86_64-apple-ios
+./scripts/ci/uniffi_generate_swift.sh
+./scripts/ci/package_swift_xcframework.sh
 ```
 
 Parity tests used in CI:
@@ -168,8 +143,8 @@ CI artifact packaging workflow:
 - `.github/workflows/uniffi-artifacts.yaml`
 - Artifacts produced:
   - Swift: `RGBLightningNode.xcframework`
+  - Kotlin JVM host bundle: generated Kotlin sources + Linux `librgb_lightning_node.so`
   - Kotlin Android: `jniLibs` + generated Kotlin sources
-  - Python: generated module + host shared library bundle
 
 ## Run
 
@@ -507,7 +482,7 @@ UniFFI support adds a required manual sync checklist when upstream changes:
 3. Update `bindings/rgb_lightning_node.udl` for any public API shape changes.
 4. Add/update converters in `src/ffi/types.rs` for new structured identifiers.
 5. Regenerate bindings:
-   - `./scripts/uniffi_bindgen_generate.sh`
+   - `./scripts/ci/uniffi_generate_all.sh`
 6. Re-run required tests:
    - `cargo test -- --test-threads=1`
    - `cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1`
@@ -523,7 +498,7 @@ UniFFI support adds a required manual sync checklist when upstream changes:
    - `cargo test -- --test-threads=1`
    - `cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1`
 3. Regenerate bindings and verify changed output:
-   - `./scripts/uniffi_bindgen_generate.sh`
+   - `./scripts/ci/uniffi_generate_all.sh`
 4. Ensure CI workflows pass:
    - `.github/workflows/test.yaml`
    - `.github/workflows/uniffi-artifacts.yaml`
