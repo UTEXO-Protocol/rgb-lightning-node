@@ -1,4 +1,4 @@
-mod state;
+pub(crate) mod state;
 mod types;
 
 use std::str::FromStr;

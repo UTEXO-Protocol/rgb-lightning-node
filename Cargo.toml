@@ -10,6 +10,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [features]
 default = []
+test-utils = []
 
 [dependencies]
 amplify = { version = "=4.8.1", default-features = false }
@@ -84,3 +85,23 @@ level = "allow"
 [profile.reldebug]
 inherits = "release"
 debug = 1
+
+[[test]]
+name = "lib_core_uniffi_state"
+path = "tests/lib_core/uniffi_state.rs"
+required-features = ["uniffi", "test-utils"]
+
+[[test]]
+name = "lib_core_type_converters"
+path = "tests/lib_core/type_converters.rs"
+required-features = ["uniffi", "test-utils"]
+
+[[test]]
+name = "lib_core_error_mapping"
+path = "tests/lib_core/error_mapping.rs"
+required-features = ["uniffi", "test-utils"]
+
+[[test]]
+name = "lib_core_node_handle_invariants"
+path = "tests/lib_core/node_handle_invariants.rs"
+required-features = ["uniffi", "test-utils"]

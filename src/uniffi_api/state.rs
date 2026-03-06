@@ -79,7 +79,7 @@ where
     }
 }
 
-pub(super) fn map_api_error(err: APIError) -> RlnError {
+pub(crate) fn map_api_error(err: APIError) -> RlnError {
     match err {
         APIError::LockedNode | APIError::NotInitialized => RlnError::NotInitialized,
         APIError::InvalidAddress(_)

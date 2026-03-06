@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "uniffi", allow(clippy::empty_line_after_doc_comments))]
+
 mod args;
 mod auth;
 mod backup;
@@ -15,6 +17,8 @@ mod swap;
 #[cfg(feature = "uniffi")]
 mod uniffi_api;
 mod utils;
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 
 #[cfg(test)]
 mod test;

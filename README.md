@@ -78,6 +78,23 @@ Quick SDK smoke tests:
 cargo test --features uniffi --lib uniffi_smoke_tests:: -- --test-threads=1
 ```
 
+Library-only test suite (no daemon/API routing):
+```sh
+cargo test --features "uniffi,test-utils" \
+  --test lib_core_uniffi_state \
+  --test lib_core_type_converters \
+  --test lib_core_error_mapping \
+  --test lib_core_node_handle_invariants
+```
+
+Strict lint after library-core changes:
+```sh
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+PR CI gate for these tests:
+- `.github/workflows/uniffi-artifacts.yaml` job: `library-core-tests`
+
 Kotlin/JVM artifact build (Linux host):
 ```sh
 cargo build --release --features uniffi --lib
