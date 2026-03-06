@@ -4,8 +4,12 @@ mod types;
 use std::str::FromStr;
 
 use crate::sdk;
+use crate::{NodeConfig, NodeHandle};
 
-use state::{block_on_sdk, get_uniffi_app_state, is_uniffi_app_state_initialized};
+use state::{
+    block_on_app, block_on_sdk, clear_uniffi_node_handle, get_uniffi_app_state,
+    is_uniffi_app_state_initialized, set_uniffi_node_handle,
+};
 pub(crate) use state::{clear_uniffi_app_state, set_uniffi_app_state};
 pub use types::*;
 
@@ -15,6 +19,42 @@ pub fn uniffi_healthcheck() -> String {
 
 pub fn uniffi_is_initialized() -> bool {
     is_uniffi_app_state_initialized()
+}
+
+pub fn sdk_initialize(request: SdkInitRequestV1) -> Result<(), RlnError> {
+    let network = match request.network.to_lowercase().as_str() {
+        "mainnet" => rgb_lib::BitcoinNetwork::Mainnet,
+        "testnet" => rgb_lib::BitcoinNetwork::Testnet,
+        "testnet4" => rgb_lib::BitcoinNetwork::Testnet4,
+        "signet" => rgb_lib::BitcoinNetwork::Signet,
+        "regtest" => rgb_lib::BitcoinNetwork::Regtest,
+        _ => return Err(RlnError::InvalidRequest),
+    };
+
+    let config = NodeConfig {
+        storage_dir_path: std::path::PathBuf::from(request.storage_dir_path),
+        daemon_listening_port: request.daemon_listening_port,
+        ldk_peer_listening_port: request.ldk_peer_listening_port,
+        network,
+        max_media_upload_size_mb: request.max_media_upload_size_mb,
+        root_public_key: None,
+    };
+
+    let handle = block_on_app(NodeHandle::new(config))?;
+
+    set_uniffi_node_handle(handle);
+    Ok(())
+}
+
+pub fn sdk_shutdown() {
+    if let Ok(state) = get_uniffi_app_state() {
+        let _ = block_on_sdk(async move {
+            let handle = NodeHandle::from_app_state(state);
+            handle.shutdown().await;
+            Ok::<(), crate::error::APIError>(())
+        });
+    }
+    clear_uniffi_node_handle();
 }
 
 pub fn sdk_node_info() -> Result<NodeInfoV1, RlnError> {

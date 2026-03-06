@@ -2,6 +2,9 @@ namespace rgb_lightning_node {
     string uniffi_healthcheck();
     boolean uniffi_is_initialized();
     [Throws=RlnError]
+    void sdk_initialize(SdkInitRequestV1 request);
+    void sdk_shutdown();
+    [Throws=RlnError]
     NodeInfoV1 sdk_node_info();
     [Throws=RlnError]
     ChannelId sdk_get_channel_id(ChannelId temporary_channel_id);
@@ -78,6 +81,14 @@ dictionary LnInvoiceRequestV1 {
 
 dictionary LnInvoiceResponseV1 {
     Bolt11Invoice invoice;
+};
+
+dictionary SdkInitRequestV1 {
+    string storage_dir_path;
+    u16 daemon_listening_port;
+    u16 ldk_peer_listening_port;
+    string network;
+    u16 max_media_upload_size_mb;
 };
 
 dictionary SendRgbRequestV1 {

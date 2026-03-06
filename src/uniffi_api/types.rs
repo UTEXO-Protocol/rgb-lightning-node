@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use crate::utils::AppState;
+use crate::NodeHandle;
 
 pub type PublicKey = bitcoin::secp256k1::PublicKey;
 pub type Txid = bitcoin::Txid;
@@ -80,6 +78,14 @@ pub struct LnInvoiceResponseV1 {
     pub invoice: Bolt11Invoice,
 }
 
+pub struct SdkInitRequestV1 {
+    pub storage_dir_path: String,
+    pub daemon_listening_port: u16,
+    pub ldk_peer_listening_port: u16,
+    pub network: String,
+    pub max_media_upload_size_mb: u16,
+}
+
 pub struct SendRgbRequestV1 {
     pub donation: bool,
     pub fee_rate: u64,
@@ -119,8 +125,8 @@ pub enum AssignmentKindV1 {
     Any,
 }
 
-pub(super) fn uniffi_state_slot() -> &'static std::sync::Mutex<Option<Arc<AppState>>> {
-    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<Arc<AppState>>>> =
+pub(super) fn uniffi_state_slot() -> &'static std::sync::Mutex<Option<NodeHandle>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<NodeHandle>>> =
         std::sync::OnceLock::new();
     SLOT.get_or_init(|| std::sync::Mutex::new(None))
 }

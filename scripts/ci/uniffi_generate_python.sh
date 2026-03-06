@@ -4,10 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+OUT_DIR="target/uniffi/python"
+mkdir -p "$OUT_DIR"
+
 cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml -- \
   generate bindings/rgb_lightning_node.udl \
   --language python \
   --config uniffi.toml \
-  -o bindings/python
+  -o "$OUT_DIR"
 
-echo "Generated Python bindings in bindings/python"
+echo "Generated Python bindings in $OUT_DIR"

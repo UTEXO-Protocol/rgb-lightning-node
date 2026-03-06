@@ -51,8 +51,8 @@ pub(crate) async fn list_transfers(
                 rgb_lib::TransferStatus::Settled => TransferStatus::Settled,
                 rgb_lib::TransferStatus::Failed => TransferStatus::Failed,
             },
-            requested_assignment: transfer.requested_assignment.map(|a| a.into()),
-            assignments: transfer.assignments.into_iter().map(|a| a.into()).collect(),
+            requested_assignment: transfer.requested_assignment,
+            assignments: transfer.assignments,
             kind: match transfer.kind {
                 rgb_lib::TransferKind::Issuance => TransferKind::Issuance,
                 rgb_lib::TransferKind::ReceiveBlind => TransferKind::ReceiveBlind,
@@ -101,7 +101,7 @@ pub(crate) async fn list_unspents(
                 .iter()
                 .map(|a| RgbAllocationData {
                     asset_id: a.asset_id.clone(),
-                    assignment: a.assignment.clone().into(),
+                    assignment: a.assignment.clone(),
                     settled: a.settled,
                 })
                 .collect(),

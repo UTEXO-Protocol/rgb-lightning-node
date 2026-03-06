@@ -1,17 +1,27 @@
 use std::sync::Arc;
 
+use crate::error::AppError;
 use crate::error::APIError;
 use crate::utils::AppState;
+use crate::NodeHandle;
 
 use super::types::{uniffi_state_slot, RlnError};
 
 pub(crate) fn set_uniffi_app_state(state: Arc<AppState>) {
-    // UniFFI currently uses a single global node state per process.
+    set_uniffi_node_handle(NodeHandle::from_app_state(state));
+}
+
+pub(crate) fn set_uniffi_node_handle(handle: NodeHandle) {
+    // UniFFI currently uses a single global node handle per process.
     let mut slot = uniffi_state_slot().lock().unwrap();
-    *slot = Some(state);
+    *slot = Some(handle);
 }
 
 pub(crate) fn clear_uniffi_app_state() {
+    clear_uniffi_node_handle();
+}
+
+pub(crate) fn clear_uniffi_node_handle() {
     // Clear global state on daemon shutdown to avoid stale handles.
     let mut slot = uniffi_state_slot().lock().unwrap();
     *slot = None;
@@ -27,6 +37,7 @@ pub(super) fn get_uniffi_app_state() -> Result<Arc<AppState>, RlnError> {
         .lock()
         .unwrap()
         .clone()
+        .map(|h| h.app_state())
         .ok_or(RlnError::NotInitialized)
 }
 
@@ -47,6 +58,24 @@ where
                 .expect("failed to build uniffi runtime")
         });
         rt.block_on(fut).map_err(map_api_error)
+    }
+}
+
+pub(super) fn block_on_app<F, T>(fut: F) -> Result<T, RlnError>
+where
+    F: std::future::Future<Output = Result<T, AppError>>,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(fut)).map_err(map_app_error)
+    } else {
+        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        let rt = RT.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build uniffi runtime")
+        });
+        rt.block_on(fut).map_err(map_app_error)
     }
 }
 
@@ -71,6 +100,13 @@ pub(super) fn map_api_error(err: APIError) -> RlnError {
         | APIError::UnknownLNInvoice
         | APIError::UnknownTemporaryChannelId
         | APIError::IncompleteRGBInfo => RlnError::InvalidRequest,
+        _ => RlnError::Internal,
+    }
+}
+
+pub(super) fn map_app_error(err: AppError) -> RlnError {
+    match err {
+        AppError::UnavailablePort(_) | AppError::InvalidAuthenticationArgs => RlnError::InvalidRequest,
         _ => RlnError::Internal,
     }
 }

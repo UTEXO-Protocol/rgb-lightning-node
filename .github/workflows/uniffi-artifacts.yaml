@@ -35,7 +35,7 @@ jobs:
       - name: Package Kotlin JVM bundle
         run: |
           mkdir -p artifacts/kotlin-jvm
-          cp -r bindings/kotlin artifacts/kotlin-jvm/
+          cp -r target/uniffi/kotlin artifacts/kotlin-jvm/
           cp target/release/librgb_lightning_node.so artifacts/kotlin-jvm/
 
       - name: Upload Kotlin JVM artifact
@@ -97,7 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kotlin-android-jni
-          path: bindings/kotlin-android/**
+          path: target/uniffi/kotlin-android/**
 
   swift:
     name: Swift iOS XCFramework
@@ -137,7 +137,7 @@ jobs:
         with:
           name: swift-xcframework
           path: |
-            bindings/swift/RGBLightningNode.xcframework/**
-            bindings/swift/RGBLightningNode.swift
-            bindings/swift/RGBLightningNodeFFI.h
-            bindings/swift/RGBLightningNodeFFI.modulemap
+            target/uniffi/swift/RGBLightningNode.xcframework/**
+            target/uniffi/swift/RGBLightningNode.swift
+            target/uniffi/swift/RGBLightningNodeFFI.h
+            target/uniffi/swift/RGBLightningNodeFFI.modulemap

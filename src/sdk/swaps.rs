@@ -6,7 +6,7 @@ fn map_swap(
     taker: bool,
     state: &crate::utils::UnlockedAppState,
 ) -> SwapViewData {
-    let mut status: SwapStatus = swap_data.status.clone().into();
+    let mut status: SwapStatus = swap_data.status;
     if status == SwapStatus::Waiting && get_current_timestamp() > swap_data.swap_info.expiry {
         status = SwapStatus::Expired;
     } else if status == SwapStatus::Pending
@@ -14,12 +14,12 @@ fn map_swap(
     {
         status = SwapStatus::Failed;
     }
-    let current_status: SwapStatus = swap_data.status.clone().into();
+    let current_status: SwapStatus = swap_data.status;
     if status != current_status {
         if taker {
-            state.update_taker_swap_status(payment_hash, status.clone().into());
+            state.update_taker_swap_status(payment_hash, status);
         } else {
-            state.update_maker_swap_status(payment_hash, status.clone().into());
+            state.update_maker_swap_status(payment_hash, status);
         }
     }
 

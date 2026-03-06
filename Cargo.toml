@@ -8,10 +8,6 @@ rust-version = "1.85.0"
 name = "rgb_lightning_node"
 crate-type = ["lib", "staticlib", "cdylib"]
 
-[[bin]]
-name = "rgb-lightning-node"
-path = "src/bin/rgb-lightning-node.rs"
-
 [features]
 default = []
 
