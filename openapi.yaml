@@ -115,6 +115,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/BtcBalanceResponse'
+  /cancelhodlinvoice:
+    post:
+      tags:
+        - Invoices
+      summary: Cancel a HODL invoice
+      description: Cancel a held HTLC for a HODL invoice. Rejects cancellation if a settlement is already in progress.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelHodlInvoiceRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmptyResponse'
   /changepassword:
     post:
       tags:
@@ -169,6 +187,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EmptyResponse'
+  /claimhodlinvoice:
+    post:
+      tags:
+        - Invoices
+      summary: Claim a HODL invoice
+      description: Claim a held HTLC for a HODL invoice
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimHodlInvoiceRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimHodlInvoiceResponse'
   /closechannel:
     post:
       tags:
@@ -386,6 +422,63 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetSwapResponse'
+  /htlcclaim:
+    post:
+      tags:
+        - RGB
+      summary: Request HTLC claim
+      description: Validate the HTLC preimage and update the HTLC tracker entry to start claim processing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HtlcClaimRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmptyResponse'
+  /htlcscan:
+    post:
+      tags:
+        - RGB
+      summary: Scan HTLC funding
+      description: Scan the chain for HTLC funding UTXOs and update the tracker entry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HtlcScanRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmptyResponse'
+  /htlctracker:
+    post:
+      tags:
+        - RGB
+      summary: Get HTLC tracker entry
+      description: Get an HTLC tracker entry by payment hash.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HtlcTrackerRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HtlcTrackerResponse'
   /init:
     post:
       tags:
@@ -638,7 +731,7 @@ paths:
       tags:
         - Invoices
       summary: Get a LN invoice
-      description: Get a LN invoice to receive a payment
+      description: Get a LN invoice to receive a payment. Provide `payment_hash` to create a HODL invoice.
       requestBody:
         content:
           application/json:
@@ -822,6 +915,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RgbInvoiceResponse'
+  /rgbinvoicehtlc:
+    post:
+      tags:
+        - RGB
+      summary: Get an RGB invoice bound to HTLC
+      description: Get an RGB invoice that binds to an HTLC P2TR scriptPubKey for submarine swaps. This is an escrow operation where RGB assets are temporarily locked in an HTLC address that is not owned by the rgb-lib wallet. The assets will be claimed into the wallet later via `/htlcclaim` when the HTLC is spent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RgbInvoiceHtlcRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RgbInvoiceHtlcResponse'
   /sendbtc:
     post:
       tags:
@@ -1247,6 +1359,14 @@ components:
           $ref: '#/components/schemas/BtcBalance'
         colored:
           $ref: '#/components/schemas/BtcBalance'
+    CancelHodlInvoiceRequest:
+      type: object
+      required:
+        - payment_hash
+      properties:
+        payment_hash:
+          type: string
+          example: 3febfae1e68b190c15461f4c2a3290f9af1dae63fd7d620d2bd61601869026cd
     ChangePasswordRequest:
       type: object
       properties:
@@ -1332,9 +1452,27 @@ components:
     CheckProxyEndpointRequest:
       type: object
       properties:
-        proxy_url:
+        proxy_endpoint:
           type: string
           example: rpc://127.0.0.1:3000/json-rpc
+    ClaimHodlInvoiceRequest:
+      type: object
+      required:
+        - payment_hash
+        - payment_preimage
+      properties:
+        payment_hash:
+          type: string
+          example: b4cb2da889477082a2e47f37a07e646e60ef6f97ffa7a4d88c823efd673da94b
+        payment_preimage:
+          type: string
+          example: eade701c7b23b8799465f4284ad84710fc16a776fbc6483001291149122695a8
+    ClaimHodlInvoiceResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          example: true
     CloseChannelRequest:
       type: object
       properties:
@@ -1539,7 +1677,9 @@ components:
       type: string
       enum:
         - Pending
+        - Claimable
         - Succeeded
+        - Cancelled
         - Failed
     IndexerProtocol:
       type: string
@@ -1566,6 +1706,7 @@ components:
       enum:
         - Pending
         - Succeeded
+        - Cancelled
         - Failed
         - Expired
     InvoiceStatusRequest:
@@ -1789,6 +1930,10 @@ components:
         asset_amount:
           type: integer
           example: 42
+        payment_hash:
+          type: string
+          description: Optional. When provided, the invoice is created as HODL.
+          example: 3febfae1e68b190c15461f4c2a3290f9af1dae63fd7d620d2bd61601869026cd
     LNInvoiceResponse:
       type: object
       properties:
@@ -1982,6 +2127,10 @@ components:
         payee_pubkey:
           type: string
           example: 03b79a4bc1ec365524b4fab9a39eb133753646babb5a1da5c4bc94c53110b7795d
+        preimage:
+          type: string
+          nullable: true
+          example: eade701c7b23b8799465f4284ad84710fc16a776fbc6483001291149122695a8
     Peer:
       type: object
       properties:
@@ -2080,6 +2229,42 @@ components:
         witness:
           type: boolean
           example: false
+    RgbInvoiceHtlcRequest:
+      type: object
+      required:
+        - min_confirmations
+        - payment_hash
+        - user_pubkey
+        - csv
+      properties:
+        asset_id:
+          type: string
+          description: Optional RGB asset ID (contract ID)
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+        assignment:
+          $ref: '#/components/schemas/Assignment'
+        duration_seconds:
+          type: integer
+          description: Optional invoice expiration in seconds
+          example: 86400
+        min_confirmations:
+          type: integer
+          description: Minimum confirmations required for HTLC funding UTXOs when scanning/claiming
+          minimum: 0
+          maximum: 255
+          example: 1
+        payment_hash:
+          type: string
+          description: 32-byte hex payment hash (H)
+          example: "9f1c3a2db36b63c6a6a71e70a37fd7f95453a32f2c9c6938b8a3e2c9e0ed6f65"
+        user_pubkey:
+          type: string
+          description: Compressed pubkey hex (refund key)
+          example: "02c1b3a2e4b0f3c2f2c0b1762a7b0b6a9c4ed9b6f7b5f2d0a1e2b3c4d5e6f7a8b9"
+        csv:
+          type: integer
+          description: Relative CSV timelock in blocks; added to current chain height to derive the absolute CLTV refund height
+          example: 144
     RgbInvoiceResponse:
       type: object
       properties:
@@ -2095,6 +2280,147 @@ components:
         batch_transfer_idx:
           type: integer
           example: 1
+    RgbInvoiceHtlcResponse:
+      type: object
+      properties:
+        recipient_id:
+          type: string
+          example: bcrt:utxob:cbgHUJ4e-7QyKY4U-Jsj5AZw-oI0gxZh-7fxQY2_-tFFUAZN-4CgpX
+        invoice:
+          type: string
+          example: rgb:~/~/~/bcrt:utxob:cbgHUJ4e-7QyKY4U-Jsj5AZw-oI0gxZh-7fxQY2_-tFFUAZN-4CgpX?expiry=1695811760&endpoints=rpc://127.0.0.1:3000/json-rpc
+        expiration_timestamp:
+          type: integer
+          example: 1695811760
+        batch_transfer_idx:
+          type: integer
+          example: 0
+        htlc_p2tr_script_pubkey:
+          type: string
+          description: HTLC P2TR scriptPubKey in hex format
+          example: "51200f0c8db753acbd17343a39c2f3f4e35e4be6da749f9e35137ab220e7b238a667"
+    HtlcClaimRequest:
+      type: object
+      required:
+        - payment_hash
+        - preimage
+      properties:
+        payment_hash:
+          type: string
+          description: 32-byte hex payment hash
+          example: "9f1c3a2db36b63c6a6a71e70a37fd7f95453a32f2c9c6938b8a3e2c9e0ed6f65"
+        preimage:
+          type: string
+          description: 32-byte hex preimage
+          example: "6f1c3a2db36b63c6a6a71e70a37fd7f95453a32f2c9c6938b8a3e2c9e0ed6f65"
+    HtlcScanRequest:
+      type: object
+      required:
+        - payment_hash
+      properties:
+        payment_hash:
+          type: string
+          description: 32-byte hex payment hash
+          example: "9f1c3a2db36b63c6a6a71e70a37fd7f95453a32f2c9c6938b8a3e2c9e0ed6f65"
+    HtlcTrackerRequest:
+      type: object
+      required:
+        - payment_hash
+      properties:
+        payment_hash:
+          type: string
+          description: 32-byte hex payment hash
+          example: "9f1c3a2db36b63c6a6a71e70a37fd7f95453a32f2c9c6938b8a3e2c9e0ed6f65"
+    HtlcFundingDescriptorInfo:
+      type: object
+      properties:
+        txid:
+          type: string
+          example: 7c2c95b9c2aa0a7d140495b664de7973b76561de833f0dd84def3efa08941664
+        vout:
+          type: integer
+          example: 0
+        value_sat:
+          type: integer
+          example: 100000
+        utxo_kind:
+          type: string
+          enum:
+            - Vanilla
+            - Colored
+        asset_id:
+          type: string
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+        assignment:
+          $ref: '#/components/schemas/Assignment'
+    HtlcTrackerEntryInfo:
+      type: object
+      properties:
+        payment_hash:
+          type: string
+          example: 9f1c3a2db36b63c6a6a71e70a37fd7f95453a32f2c9c6938b8a3e2c9e0ed6f65
+        preimage:
+          type: string
+          example: 6f1c3a2db36b63c6a6a71e70a37fd7f95453a32f2c9c6938b8a3e2c9e0ed6f65
+        lp_pubkey_xonly:
+          type: string
+          example: 9b47a2dfc7d7b4a4a2c20f154fc2b8b56c5e2d47a90d0d2a6a0d37a9d9b690e1
+        user_pubkey_xonly:
+          type: string
+          example: 2f5b4d1d0f6e5a1c0b8f9c1c2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d
+        lp_key_path:
+          type: string
+          example: m/86h/1h/0h/0/0
+        htlc_script_pubkey:
+          type: string
+          example: 51200f0c8db753acbd17343a39c2f3f4e35e4be6da749f9e35137ab220e7b238a667
+        recipient_id:
+          type: string
+          example: bcrt:utxob:cbgHUJ4e-7QyKY4U-Jsj5AZw-oI0gxZh-7fxQY2_-tFFUAZN-4CgpX
+        rgb_invoice:
+          type: string
+          example: rgb:~/~/~/bcrt:utxob:cbgHUJ4e-7QyKY4U-Jsj5AZw-oI0gxZh-7fxQY2_-tFFUAZN-4CgpX?expiry=1695811760&endpoints=rpc://127.0.0.1:3000/json-rpc
+        claim_tapscript_hex:
+          type: string
+          example: 20a1077fbf5d2c0a1d7b2ec7c93e3f7a1d61f0a9f7bfa8ef4a78cfa9f01f0d4cac
+        refund_tapscript_hex:
+          type: string
+          example: 20b1077fbf5d2c0a1d7b2ec7c93e3f7a1d61f0a9f7bfa8ef4a78cfa9f01f0d4cad
+        tapleaf_version:
+          type: integer
+          example: 192
+        control_block_hex:
+          type: string
+          example: c0ffee00
+        t_lock:
+          type: integer
+          example: 144
+        min_confirmations:
+          type: integer
+          example: 1
+        funding:
+          type: array
+          items:
+            $ref: '#/components/schemas/HtlcFundingDescriptorInfo'
+        status:
+          type: string
+          example: FundingDetected
+        asset_id:
+          type: string
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+        assignment:
+          $ref: '#/components/schemas/Assignment'
+        btc_destination_script_hex:
+          type: string
+          example: 51200f0c8db753acbd17343a39c2f3f4e35e4be6da749f9e35137ab220e7b238a667
+        rgb_destination_script_hex:
+          type: string
+          example: 51200f0c8db753acbd17343a39c2f3f4e35e4be6da749f9e35137ab220e7b238a667
+    HtlcTrackerResponse:
+      type: object
+      properties:
+        entry:
+          $ref: '#/components/schemas/HtlcTrackerEntryInfo'
     SendBtcRequest:
       type: object
       properties:
