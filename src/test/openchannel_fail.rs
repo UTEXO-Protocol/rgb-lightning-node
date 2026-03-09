@@ -454,6 +454,9 @@ async fn open_fail() {
     )
     .await;
 
+    wait_for_channels(node1_addr, 1).await;
+    wait_for_channels(node2_addr, 1).await;
+
     let channels_1 = list_channels(node1_addr).await;
     let channels_2 = list_channels(node2_addr).await;
     assert_eq!(channels_1.len(), 1);

@@ -7,6 +7,11 @@ rust-version = "1.85.0"
 [[bin]]
 name = "rgb-lightning-node"
 
+[features]
+default = ["electrum", "esplora"]
+electrum = ["rgb-lib/electrum"]
+esplora = ["rgb-lib/esplora"]
+
 [dependencies]
 amplify = { version = "=4.8.1", default-features = false }
 anyhow = "1.0.93"
@@ -26,20 +31,18 @@ futures = "0.3"
 hex = { package = "hex-conservative", version = "0.3.0", default-features = false }
 lightning = { version = "0.2.0", path = "./rust-lightning/lightning", features = ["dnssec"] }
 lightning-background-processor = { version = "0.2.0", path = "./rust-lightning/lightning-background-processor" }
-lightning-block-sync = { version = "0.2.0", features = ["rpc-client", "tokio"] }
+lightning-block-sync = { version = "0.2.0", path = "./rust-lightning/lightning-block-sync", features = ["rpc-client", "tokio"] }
 lightning-dns-resolver = { version = "0.3.0", path = "./rust-lightning/lightning-dns-resolver" }
 lightning-invoice = { version = "0.34.0", features = ["std"], path = "./rust-lightning/lightning-invoice" }
 lightning-macros = { version = "0.2.0" }
-lightning-net-tokio = { version = "0.2.0" }
+lightning-net-tokio = { version = "0.2.0", path = "./rust-lightning/lightning-net-tokio" }
 lightning-persister = { version = "0.2.0", path = "./rust-lightning/lightning-persister", features = ["tokio"] }
 lightning-rapid-gossip-sync = { version = "0.2.0", path = "./rust-lightning/lightning-rapid-gossip-sync" }
 magic-crypt = "4.0.1"
 rand = "0.8.5"
 regex = { version = "1.11", default-features = false }
-rgb-lib = { version = "0.3.0-beta.4", features = [
-    "electrum",
-    "esplora",
-] }
+rgb-lib = { version = "0.3.0-beta.4", default-features = false }
+rgb-invoicing = "0.11.1-rc.7"
 scrypt = "0.11.0"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -69,9 +72,20 @@ tracing-test = "0.2.5"
 [patch.crates-io]
 lightning = { path = "./rust-lightning/lightning" }
 lightning-background-processor = { path = "./rust-lightning/lightning-background-processor"}
+rgb-lib = { git = "https://github.com/txalkan/rgb-lib", branch = "pr-submarine-swap" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", branch = "master" }
+rgb-consensus = { git = "https://github.com/rgb-protocol/rgb-consensus", branch = "master" }
+rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "b9d4482" }
+rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "b9d4482" }
 
 [lints.rust.unexpected_cfgs]
 level = "allow"
+check-cfg = [
+  "cfg(c_bindings)",
+  "cfg(fuzzing)",
+  "cfg(ldk_bench)",
+  "cfg(taproot)",
+]
 
 [profile.reldebug]
 inherits = "release"

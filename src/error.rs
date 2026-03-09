@@ -47,6 +47,9 @@ pub enum APIError {
     #[error("Cannot call other APIs while node is changing state")]
     ChangingState,
 
+    #[error("HTLC claim deadline exceeded")]
+    ClaimDeadlineExceeded,
+
     #[error("Another payment for this invoice is already in status {0}")]
     DuplicatePayment(String),
 
@@ -140,6 +143,9 @@ pub enum APIError {
     #[error("Invalid fee rate: {0}")]
     InvalidFeeRate(String),
 
+    #[error("Invalid HTLC params: {0}")]
+    InvalidHtlcParams(String),
+
     #[error("Invalid indexer: {0}")]
     InvalidIndexer(String),
 
@@ -217,9 +223,6 @@ pub enum APIError {
 
     #[error("Invalid transport endpoints: {0}")]
     InvalidTransportEndpoints(String),
-
-    #[error("HTLC claim deadline exceeded")]
-    ClaimDeadlineExceeded,
 
     #[error("Invoice is already settled")]
     InvoiceAlreadySettled,
@@ -380,7 +383,6 @@ impl From<RgbLibError> for APIError {
             }
             RgbLibError::InvalidAddress { details } => APIError::InvalidAddress(details),
             RgbLibError::InvalidAmountZero => APIError::InvalidAmount(s!("0")),
-            RgbLibError::InvalidAssetID { asset_id } => APIError::InvalidAssetID(asset_id),
             RgbLibError::InvalidAssignment => APIError::InvalidAssignment,
             RgbLibError::InvalidAttachments { details } => APIError::InvalidAttachments(details),
             RgbLibError::InvalidDetails { details } => APIError::InvalidDetails(details),
@@ -448,6 +450,7 @@ impl IntoResponse for APIError {
                 self.name(),
             ),
             APIError::AnchorsRequired
+            | APIError::ClaimDeadlineExceeded
             | APIError::ExpiredSwapOffer
             | APIError::IncompleteRGBInfo
             | APIError::InvalidAddress(_)
@@ -463,6 +466,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidDetails(_)
             | APIError::InvalidEstimationBlocks
             | APIError::InvalidFeeRate(_)
+            | APIError::InvalidHtlcParams(_)
             | APIError::InvalidInvoice(_)
             | APIError::InvalidMediaDigest
             | APIError::InvalidMnemonic(_)
@@ -492,7 +496,6 @@ impl IntoResponse for APIError {
             | APIError::MediaFileNotProvided
             | APIError::MissingSwapPaymentPreimage
             | APIError::OutputBelowDustLimit
-            | APIError::ClaimDeadlineExceeded
             | APIError::UnsupportedBackupVersion { .. } => {
                 (StatusCode::BAD_REQUEST, self.to_string(), self.name())
             }
