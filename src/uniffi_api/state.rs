@@ -7,14 +7,24 @@ use crate::NodeHandle;
 
 use super::types::{uniffi_state_slot, RlnError};
 
+fn lock_uniffi_state_slot(
+) -> Result<std::sync::MutexGuard<'static, Option<NodeHandle>>, RlnError> {
+    uniffi_state_slot().lock().map_err(|_| {
+        tracing::error!("UniFFI global state mutex is poisoned");
+        RlnError::Internal
+    })
+}
+
 pub(crate) fn set_uniffi_app_state(state: Arc<AppState>) {
     set_uniffi_node_handle(NodeHandle::from_app_state(state));
 }
 
 pub(crate) fn set_uniffi_node_handle(handle: NodeHandle) {
     // UniFFI currently uses a single global node handle per process.
-    let mut slot = uniffi_state_slot().lock().unwrap();
-    *slot = Some(handle);
+    match lock_uniffi_state_slot() {
+        Ok(mut slot) => *slot = Some(handle),
+        Err(_) => tracing::error!("Failed to register UniFFI node handle"),
+    }
 }
 
 pub(crate) fn clear_uniffi_app_state() {
@@ -23,19 +33,22 @@ pub(crate) fn clear_uniffi_app_state() {
 
 pub(crate) fn clear_uniffi_node_handle() {
     // Clear global state on daemon shutdown to avoid stale handles.
-    let mut slot = uniffi_state_slot().lock().unwrap();
-    *slot = None;
+    match lock_uniffi_state_slot() {
+        Ok(mut slot) => *slot = None,
+        Err(_) => tracing::error!("Failed to clear UniFFI node handle"),
+    }
 }
 
 pub(super) fn is_uniffi_app_state_initialized() -> bool {
     // Lightweight readiness probe used by SDK clients before making calls.
-    uniffi_state_slot().lock().unwrap().is_some()
+    match lock_uniffi_state_slot() {
+        Ok(slot) => slot.is_some(),
+        Err(_) => false,
+    }
 }
 
 pub(super) fn get_uniffi_app_state() -> Result<Arc<AppState>, RlnError> {
-    uniffi_state_slot()
-        .lock()
-        .unwrap()
+    lock_uniffi_state_slot()?
         .clone()
         .map(|h| h.app_state())
         .ok_or(RlnError::NotInitialized)

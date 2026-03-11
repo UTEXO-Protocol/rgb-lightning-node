@@ -50,10 +50,10 @@ wrapper for existing integrations and tests. The SDK surface is exposed through
 the Rust library + UniFFI bindings.
 
 Current lifecycle/threading model:
-- UniFFI API is single-node-per-process (global state slot).
-- State is registered by daemon startup and cleared on daemon shutdown.
-- Use `uniffiIsInitialized()` from generated bindings to check readiness before SDK calls.
-- Calls made before registration return `NotInitialized`.
+- UniFFI SDK is instance-based via `SdkNodeV1` object handles.
+- Create a node with `SdkNodeV1.create(SdkInitRequestV1)`, then call methods on that instance.
+- Multiple SDK node instances are supported per process.
+- Legacy global `sdk_*` wrappers remain in Rust for compatibility but are no longer part of generated UniFFI bindings.
 
 Build with UniFFI enabled:
 ```sh

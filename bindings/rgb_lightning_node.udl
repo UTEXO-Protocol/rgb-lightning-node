@@ -1,21 +1,23 @@
 namespace rgb_lightning_node {
     string uniffi_healthcheck();
-    boolean uniffi_is_initialized();
+};
+
+interface SdkNodeV1 {
+    [Throws=RlnError, Name=create]
+    constructor(SdkInitRequestV1 request);
+    void shutdown();
     [Throws=RlnError]
-    void sdk_initialize(SdkInitRequestV1 request);
-    void sdk_shutdown();
+    NodeInfoV1 node_info();
     [Throws=RlnError]
-    NodeInfoV1 sdk_node_info();
+    ChannelId get_channel_id(ChannelId temporary_channel_id);
     [Throws=RlnError]
-    ChannelId sdk_get_channel_id(ChannelId temporary_channel_id);
+    PaymentV1 get_payment(PaymentHash payment_hash);
     [Throws=RlnError]
-    PaymentV1 sdk_get_payment(PaymentHash payment_hash);
+    SwapV1 get_swap(PaymentHash payment_hash, boolean taker);
     [Throws=RlnError]
-    SwapV1 sdk_get_swap(PaymentHash payment_hash, boolean taker);
+    LnInvoiceResponseV1 ln_invoice(LnInvoiceRequestV1 request);
     [Throws=RlnError]
-    LnInvoiceResponseV1 sdk_ln_invoice(LnInvoiceRequestV1 request);
-    [Throws=RlnError]
-    SendRgbResponseV1 sdk_send_rgb(SendRgbRequestV1 request);
+    SendRgbResponseV1 send_rgb(SendRgbRequestV1 request);
 };
 
 [Error]

@@ -92,6 +92,28 @@ mod uniffi_smoke_tests {
     }
 
     #[test]
+    fn uniffi_instance_entrypoints_work_without_global_registration() {
+        clear_uniffi_app_state();
+        assert!(!uniffi_is_initialized());
+
+        let node = SdkNodeV1 { handle: crate::NodeHandle::from_app_state(mock_locked_state()) };
+        let node_info = node.node_info();
+        assert!(matches!(node_info, Err(RlnError::NotInitialized)));
+
+        let send_rgb = node.send_rgb(SendRgbRequestV1 {
+            donation: false,
+            fee_rate: 1,
+            min_confirmations: 1,
+            skip_sync: true,
+            recipient_groups: vec![],
+        });
+        assert!(matches!(send_rgb, Err(RlnError::InvalidRequest)));
+
+        // Keep global slot untouched for compatibility wrappers.
+        assert!(!uniffi_is_initialized());
+    }
+
+    #[test]
     fn uniffi_custom_types_roundtrip_and_reject_invalid_values() {
         let public_key = bitcoin::secp256k1::PublicKey::from_str(
             "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",

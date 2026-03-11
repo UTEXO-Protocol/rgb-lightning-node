@@ -10,6 +10,10 @@ pub type Bolt11Invoice = lightning_invoice::Bolt11Invoice;
 pub struct RecipientId(pub String);
 pub struct TransportEndpoint(pub String);
 
+pub struct SdkNodeV1 {
+    pub(crate) handle: NodeHandle,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RlnError {
     #[error("node is not initialized")]
