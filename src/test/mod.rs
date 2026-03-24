@@ -22,7 +22,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing_test::traced_test;
 
 use crate::core_types::{HTLCStatus, SwapStatus, FEE_RATE, HTLC_MIN_MSAT};
-use crate::disk::{read_inbound_payment_info, INBOUND_PAYMENTS_FNAME};
 use crate::error::{APIError, APIErrorResponse};
 use crate::ldk::InvoiceType;
 use crate::routes::{
@@ -49,8 +48,8 @@ use crate::routes::{
     Transaction, Transfer, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
-    hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LDK_DIR,
-    LOGS_DIR, PROXY_ENDPOINT_LOCAL,
+    hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LOGS_DIR,
+    PROXY_ENDPOINT_LOCAL,
 };
 
 use super::*;

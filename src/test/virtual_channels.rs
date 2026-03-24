@@ -4,6 +4,27 @@ const TEST_DIR_BASE: &str = "tmp/openchannel_virtual/";
 const VIRTUAL_TIMEOUT_BOUNDARY_CHUNK_SIZE: u16 = 144;
 const VIRTUAL_TIMEOUT_BOUNDARY_SYNC_TIMEOUT_SECS: f32 = 30.0;
 
+/// Assert that a virtual channel marker exists in KVStore (not on filesystem).
+fn assert_virtual_marker_in_kvstore(test_dir: &str, channel_id: &str) {
+    use crate::kv_store::SeaOrmKvStore;
+    use crate::utils::get_db_path;
+    use lightning::util::persist::KVStoreSync;
+    use sea_orm::{ConnectOptions, Database};
+    use std::sync::Arc;
+
+    let db_path = get_db_path(&std::path::PathBuf::from(test_dir));
+    let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
+    let db = crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
+        .expect("connect to test db");
+    let kv_store = SeaOrmKvStore::from_connection(Arc::new(db));
+    let marker_key = format!("virtual_channel_{channel_id}");
+    assert!(
+        kv_store.read("", "", &marker_key).is_ok(),
+        "virtual channel marker '{marker_key}' should exist in KVStore for {test_dir}"
+    );
+}
+
+
 async fn close_channel_response(
     node_address: SocketAddr,
     channel_id: &str,
@@ -463,11 +484,10 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
         Some(funded_rgb_amount)
     );
 
-    let expected_virtual_marker_path = PathBuf::from(format!(
-        "{test_storage_root}host_node/.ldk/virtual_channel_{}",
-        virtual_channel_after_timeout.channel_id
-    ));
-    assert!(expected_virtual_marker_path.exists());
+    assert_virtual_marker_in_kvstore(
+        &format!("{test_storage_root}host_node"),
+        &virtual_channel_after_timeout.channel_id,
+    );
 
     let btc_ln_invoice = ln_invoice(client_a_node_address, Some(3_000_000), None, None, 3600)
         .await
@@ -571,11 +591,10 @@ async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_an
         ChannelStatus::Opened
     ));
 
-    let expected_virtual_marker_path_b = PathBuf::from(format!(
-        "{test_storage_root}host_node/.ldk/virtual_channel_{}",
-        opened_virtual_channel_b.channel_id
-    ));
-    assert!(expected_virtual_marker_path_b.exists());
+    assert_virtual_marker_in_kvstore(
+        &format!("{test_storage_root}host_node"),
+        &opened_virtual_channel_b.channel_id,
+    );
 
     let client_a_to_b_btc_payment_msat = 4_000_000;
     let btc_ln_invoice_b = ln_invoice(

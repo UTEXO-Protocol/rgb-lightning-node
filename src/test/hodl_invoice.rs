@@ -1,7 +1,35 @@
 use super::*;
 
+use crate::kv_store::SeaOrmKvStore;
+use crate::ldk::{InboundPaymentInfoStorage, INBOUND_PAYMENTS_KEY};
+use crate::utils::get_db_path;
+use lightning::util::hash_tables::new_hash_map;
+use lightning::util::persist::KVStoreSync;
+use lightning::util::ser::Readable;
+use sea_orm::{ConnectOptions, Database};
+use std::sync::Arc;
+
 const TEST_DIR_BASE: &str = "tmp/hodl_invoice/";
 const RGB_PAYMENT_AMOUNT: u64 = 1;
+
+fn read_inbound_payments_from_kvstore(test_dir: &str) -> InboundPaymentInfoStorage {
+    let db_path = get_db_path(Path::new(test_dir));
+    let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
+    let mut opt = ConnectOptions::new(connection_string);
+    opt.max_connections(1);
+    let db = crate::runtime::block_on(Database::connect(opt)).expect("connect to test db");
+    let kv_store = SeaOrmKvStore::from_connection(Arc::new(db));
+    match kv_store.read("", "", INBOUND_PAYMENTS_KEY) {
+        Ok(bytes) => InboundPaymentInfoStorage::read(&mut &bytes[..]).unwrap_or_else(|_| {
+            InboundPaymentInfoStorage {
+                payments: new_hash_map(),
+            }
+        }),
+        Err(_) => InboundPaymentInfoStorage {
+            payments: new_hash_map(),
+        },
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ExpiryTrigger {
@@ -122,10 +150,7 @@ async fn run_expire_hodl_invoice_case(
             });
         }
         ExpiryTrigger::Blocks => {
-            let inbound_payments_path = Path::new(test_dir_node2)
-                .join(LDK_DIR)
-                .join(INBOUND_PAYMENTS_FNAME);
-            let storage = read_inbound_payment_info(&inbound_payments_path);
+            let storage = read_inbound_payments_from_kvstore(test_dir_node2);
             let hash = validate_and_parse_payment_hash(&payment_hash_hex).unwrap();
             let deadline_height = storage
                 .payments
@@ -340,10 +365,7 @@ async fn wait_for_claimable_state(
     expected: bool,
 ) -> Result<(), APIError> {
     let claimable_exists = || -> Result<bool, APIError> {
-        let inbound_payments_path = Path::new(node_test_dir)
-            .join(LDK_DIR)
-            .join(INBOUND_PAYMENTS_FNAME);
-        let storage = read_inbound_payment_info(&inbound_payments_path);
+        let storage = read_inbound_payments_from_kvstore(node_test_dir);
         let hash = validate_and_parse_payment_hash(payment_hash)?;
         Ok(matches!(
             storage.payments.get(&hash).map(|p| p.status),
@@ -564,6 +586,10 @@ async fn claim_hodl_invoice_btc_rgb() {
     .await;
 
     let _ = send_payment_with_status(node1_addr, invoice.clone(), HTLCStatus::Pending).await;
+    assert!(matches!(
+        invoice_status(node2_addr, &invoice).await,
+        InvoiceStatus::Pending | InvoiceStatus::Claimable
+    ));
     wait_for_claimable_state(&test_dir_node2, &payment_hash, true)
         .await
         .unwrap_or_else(|err| panic!("wait for claimable entry to appear: {err}"));
