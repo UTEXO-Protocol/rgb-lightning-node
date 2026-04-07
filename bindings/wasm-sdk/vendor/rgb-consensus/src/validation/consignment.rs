@@ -1,0 +1,160 @@
+// RGB Consensus Library: consensus layer for RGB smart contracts.
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+// Written in 2019-2024 by
+//     Dr Maxim Orlovsky <orlovsky@lnp-bp.org>
+//
+// Copyright (C) 2019-2024 LNP/BP Standards Association. All rights reserved.
+// Copyright (C) 2019-2024 Dr Maxim Orlovsky. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Common API for accessing RGB contract operation graph, including individual
+//! state transitions, genesis, outputs, assignments & single-use-seal data.
+
+use std::collections::BTreeSet;
+
+use aluvm::library::{Lib, LibId};
+use amplify::confinement::ConfinedOrdMap;
+use bitcoin::Txid;
+use strict_types::TypeSystem;
+
+use super::EAnchor;
+use crate::{
+    AssignmentType, AssignmentsRef, BundleId, ContractId, Genesis, GlobalState, GraphSeal,
+    Metadata, OpFullType, OpId, Operation, Schema, Transition, TransitionBundle, TypedAssigns,
+};
+
+pub const CONSIGNMENT_MAX_LIBS: usize = 1024;
+
+pub type Scripts = ConfinedOrdMap<LibId, Lib, 0, CONSIGNMENT_MAX_LIBS>;
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, From)]
+pub enum OpRef<'op> {
+    #[from]
+    Genesis(&'op Genesis),
+    #[from]
+    Transition(&'op Transition),
+}
+
+impl<'op> Operation for OpRef<'op> {
+    fn full_type(&self) -> OpFullType {
+        match self {
+            Self::Genesis(op) => op.full_type(),
+            Self::Transition(op) => op.full_type(),
+        }
+    }
+
+    fn id(&self) -> OpId {
+        match self {
+            Self::Genesis(op) => op.id(),
+            Self::Transition(op) => op.id(),
+        }
+    }
+
+    fn contract_id(&self) -> ContractId {
+        match self {
+            Self::Genesis(op) => op.contract_id(),
+            Self::Transition(op) => op.contract_id(),
+        }
+    }
+
+    fn nonce(&self) -> u64 {
+        match self {
+            Self::Genesis(op) => op.nonce(),
+            Self::Transition(op) => op.nonce(),
+        }
+    }
+
+    fn metadata(&self) -> &Metadata {
+        match self {
+            Self::Genesis(op) => op.metadata(),
+            Self::Transition(op) => op.metadata(),
+        }
+    }
+
+    fn globals(&self) -> &GlobalState {
+        match self {
+            Self::Genesis(op) => op.globals(),
+            Self::Transition(op) => op.globals(),
+        }
+    }
+
+    fn assignments(&self) -> AssignmentsRef<'op> {
+        match self {
+            Self::Genesis(op) => (&op.assignments).into(),
+            Self::Transition(op) => (&op.assignments).into(),
+        }
+    }
+
+    fn assignments_by_type(&self, t: AssignmentType) -> Option<TypedAssigns<GraphSeal>> {
+        match self {
+            Self::Genesis(op) => op.assignments_by_type(t),
+            Self::Transition(op) => op.assignments_by_type(t),
+        }
+    }
+}
+
+pub struct CheckedConsignment<'consignment, C: ConsignmentApi>(&'consignment C);
+
+impl<'consignment, C: ConsignmentApi> CheckedConsignment<'consignment, C> {
+    pub fn new(consignment: &'consignment C) -> Self { Self(consignment) }
+}
+
+impl<C: ConsignmentApi> ConsignmentApi for CheckedConsignment<'_, C> {
+    fn schema(&self) -> &Schema { self.0.schema() }
+
+    fn types(&self) -> &TypeSystem { self.0.types() }
+
+    fn scripts(&self) -> impl Iterator<Item = &Lib> { self.0.scripts() }
+
+    fn genesis(&self) -> &Genesis { self.0.genesis() }
+
+    fn bundles_info(&self) -> impl Iterator<Item = (&TransitionBundle, &EAnchor, Txid)> {
+        self.0.bundles_info()
+    }
+}
+
+/// Trait defining common data access API for all storage-related RGB structures
+///
+/// The API provided for the consignment should not verify the internal
+/// consistency, schema conformance or validation status of the RGB contract
+/// data within the storage or container. If the methods are called on an
+/// invalid or absent data, the API must always return [`None`] or empty
+/// collections/iterators.
+pub trait ConsignmentApi {
+    /// Returns reference to the schema object used by the consignment.
+    fn schema(&self) -> &Schema;
+
+    /// Returns reference to the type system.
+    fn types(&self) -> &TypeSystem;
+
+    /// Returns reference to a collection of AluVM libraries used for the
+    /// validation.
+    fn scripts(&self) -> impl Iterator<Item = &Lib>;
+
+    /// Contract genesis.
+    fn genesis(&self) -> &Genesis;
+
+    /// Returns iterator over all bundle information in the consignment
+    fn bundles_info(&self) -> impl Iterator<Item = (&TransitionBundle, &EAnchor, Txid)>;
+
+    /// Returns iterator over all bundle ids present in the consignment.
+    fn bundle_ids<'iter>(&self) -> impl Iterator<Item = BundleId> + 'iter {
+        self.bundles_info()
+            .map(|(b, _, _)| b.bundle_id())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+    }
+}

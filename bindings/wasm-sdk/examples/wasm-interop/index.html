@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RLN WASM Interop Example</title>
+    <style>
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        margin: 2rem;
+      }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+      }
+      input {
+        min-width: 340px;
+        padding: 0.4rem 0.6rem;
+      }
+      button {
+        padding: 0.4rem 0.8rem;
+      }
+      #out {
+        border: 1px solid #bbb;
+        padding: 0.8rem;
+      }
+      pre {
+        margin: 0.4rem 0;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>RLN WASM Interop Example</h1>
+    <p>
+      Runs a minimal browser flow for key generation/restore and API error
+      contract checks.
+    </p>
+
+    <div class="row">
+      <label for="proxyUrl">Proxy URL (optional)</label>
+      <input
+        id="proxyUrl"
+        type="text"
+        placeholder="https://your-rgb-proxy.example"
+      />
+    </div>
+
+    <div class="row">
+      <label for="peerAddr">Peer Addr (optional)</label>
+      <input id="peerAddr" type="text" placeholder="127.0.0.1:9735" />
+    </div>
+
+    <div class="row">
+      <label for="peerPubkey">Peer Pubkey (optional)</label>
+      <input
+        id="peerPubkey"
+        type="text"
+        placeholder="02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      />
+      <button id="run">Run Example</button>
+    </div>
+
+    <div id="out"></div>
+
+    <script type="module" src="./manual_js_wasm_interop.js"></script>
+  </body>
+</html>

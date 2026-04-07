@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RLN WASM Virtual Channels Flow</title>
+    <style>
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        margin: 2rem;
+      }
+      button {
+        padding: 0.4rem 0.8rem;
+      }
+      #out {
+        border: 1px solid #bbb;
+        padding: 0.8rem;
+        margin-top: 1rem;
+      }
+      pre {
+        margin: 0.4rem 0;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>RLN WASM Virtual Channel SDK Flow</h1>
+    <p>
+      Runs the same high-level sequence as the Python virtual-channel SDK example:
+      init/unlock, connect peers, open channel, keysend A->B, keysend B->A,
+      close channel.
+    </p>
+    <p>
+      Note: this is the wasm runtime flow, so settlement statuses are driven via
+      wasm status APIs/events instead of native LDK daemon callbacks.
+    </p>
+
+    <button id="run-flow">Run Flow</button>
+    <div id="out"></div>
+
+    <script type="module" src="./manual_js_virtual_channels_sdk_flow.js"></script>
+  </body>
+</html>

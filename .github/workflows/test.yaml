@@ -41,3 +41,33 @@ jobs:
           rustflags: ""
       - name: Run parity test by name
         run: cargo test ${{ matrix.test_name }} -- --test-threads=1
+
+  wasm-sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - name: wasm-sdk check
+        run: cargo check --manifest-path bindings/wasm-sdk/Cargo.toml
+      - name: wasm-sdk test (compile only)
+        run: cargo test --manifest-path bindings/wasm-sdk/Cargo.toml --no-run
+
+  wasm-sdk-wasm32:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - name: wasm-sdk wasm32 check
+        run: cargo check --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown

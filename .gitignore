@@ -30,3 +30,4 @@
 /bindings/python/rgb_lightning_node.py
 /artifacts
 /bindings/python/build
+/bindings/wasm-sdk/target

@@ -11,16 +11,15 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [features]
 default = []
 test-utils = []
+native-sdk-engine = []
+real-wasm-rgb = []
 
 [dependencies]
 amplify = { version = "=4.8.1", default-features = false }
 anyhow = "1.0.93"
-axum = { version = "0.7.7", features = ["multipart"] }
-axum-extra = "0.9.4"
 # axum-macros = "0.4.2"  # uncomment to use debug_handler
 baid58 = "0.4.4"
 base64 = "0.22.1"
-biscuit-auth = "6.0.0"
 bitcoin = "0.32"
 bitcoin-bech32 = "0.13"
 chacha20poly1305 = { version = "0.10.1", features = ["stream"] }
@@ -29,6 +28,27 @@ clap = "4.5.20"
 dirs = "5.0.1"
 futures = "0.3"
 hex = { package = "hex-conservative", version = "0.3.0", default-features = false }
+magic-crypt = "4.0.1"
+rand = "0.8.5"
+regex = { version = "1.11", default-features = false }
+scrypt = "0.11.0"
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.14.0"
+thiserror = "2.0"
+time = { version = "0.3.36", features = ["std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+typenum = "1.17.0"
+uuid = { version = "1.11.0", default-features = false, features = ["v4", "js"] }
+walkdir = "2.5.0"
+uniffi = { version = "0.28.3", features = ["build"], optional = true }
+zip = { version = "2.2.0", default-features = false, features = ["time", "zstd"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+axum = { version = "0.7.7", features = ["multipart"] }
+axum-extra = "0.9.4"
+biscuit-auth = "6.0.0"
 lightning = { version = "0.2.0", path = "./rust-lightning/lightning", features = ["dnssec"] }
 lightning-background-processor = { version = "0.2.0", path = "./rust-lightning/lightning-background-processor" }
 lightning-block-sync = { version = "0.2.0", features = ["rpc-client", "tokio"] }
@@ -38,39 +58,30 @@ lightning-macros = { version = "0.2.0" }
 lightning-net-tokio = { version = "0.2.0" }
 lightning-persister = { version = "0.2.0", path = "./rust-lightning/lightning-persister", features = ["tokio"] }
 lightning-rapid-gossip-sync = { version = "0.2.0", path = "./rust-lightning/lightning-rapid-gossip-sync" }
-magic-crypt = "4.0.1"
-rand = "0.8.5"
-regex = { version = "1.11", default-features = false }
-rgb-lib = { version = "0.3.0-beta.4", features = [
+rgb-lib = { version = "0.3.0-beta.4", default-features = false, features = [
     "electrum",
     "esplora",
 ] }
-scrypt = "0.11.0"
-serde = { version = "^1.0", features = ["derive"] }
-serde_json = "1.0"
-tempfile = "3.14.0"
-thiserror = "2.0"
-time = { version = "0.3.36", features = ["std"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "signal", "sync", "net", "time"] }
 tokio-util = { version = "0.7.12", features = ["codec"] }
 tower-http = { version = "0.6.1", features = ["cors", "limit", "trace"] }
-tracing = "0.1"
 tracing-appender = "0.2.3"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-typenum = "1.17.0"
-uuid = { version = "1.11.0", default-features = false, features = ["v4"] }
-walkdir = "2.5.0"
-uniffi = { version = "0.28.3", features = ["build"], optional = true }
-zip = { version = "2.2.0", default-features = false, features = ["time", "zstd"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.16", features = ["js"] }
+serde-wasm-bindgen = "0.6.5"
+wasm-bindgen = "0.2.100"
 
 [dev-dependencies]
 dircmp = "0.2.0"
-electrum-client = "0.20.0"
 lazy_static = { version = "1.5.0", default-features = false }
 once_cell = "1.20.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "native-tls", "stream"] }
 serial_test = "3.1.1"
 tracing-test = "0.2.5"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+electrum-client = "0.20.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "native-tls", "stream"] }
 
 [build-dependencies]
 uniffi = { version = "0.28.3", features = ["build"], optional = true }
@@ -85,6 +96,11 @@ level = "allow"
 [profile.reldebug]
 inherits = "release"
 debug = 1
+
+[[bin]]
+name = "rgb-lightning-node"
+path = "src/main.rs"
+bench = false
 
 [[test]]
 name = "lib_core"

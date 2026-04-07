@@ -1,0 +1,166 @@
+# SDK WASM Endpoint Matrix
+
+Baseline source: async SDK endpoints in `src/sdk/mod.rs` (51 entries).
+
+Status legend:
+- `runtime-backed`: backed by `rgb-lib-wasm` wallet/runtime behavior.
+- `scaffolded`: present in wasm SDK, but LN/LDK behavior is modeled/scaffolded.
+- `missing`: no direct wasm-sdk endpoint yet.
+
+Checklist tags used in Notes for scaffolded LN/payment/read endpoints:
+- `IV`: input validation parity
+- `ST`: state transition parity
+- `OS`: output shape parity
+- `EC`: error contract parity
+- `ET`: endpoint tests present (node/facade/node-handle)
+
+| Native SDK endpoint (`src/sdk/mod.rs`) | Wasm equivalent (`bindings/wasm-sdk`) | Status | Notes |
+|---|---|---|---|
+| `estimate_fee` | `getFeeEstimation` / `getFeeEstimationJson` | runtime-backed | Via wallet online object. |
+| `check_indexer_url` | `checkIndexerUrlValue` / `checkIndexerUrlJson` | runtime-backed | Deterministic wasm-side protocol validation (`esplora` only) with explicit HTTP/HTTPS host-format checks and stable electrum-unsupported contract. |
+| `check_proxy_endpoint` | `checkProxyUrl` | runtime-backed | URL/proxy format validation surface exists. |
+| `node_info` | `nodeInfoValue` / `nodeInfoJson` | runtime-backed | Runtime-backed node metadata from wasm node runtime manager with runtime-ready guard parity and stable shape across node/facade/node-handle surfaces. |
+| `network_info` | `networkInfoValue` / `networkInfoJson` | runtime-backed | Runtime-guarded wasm node network metadata (`network`, `height=0`) with stable shape across node/facade/node-handle surfaces. |
+| `address` | `getAddress` / `walletGetAddress` | runtime-backed | Wallet address fetch supported. |
+| `btc_balance` | `getBtcBalanceValue` / `getBtcBalanceJson` | runtime-backed | Wallet balance supported. |
+| `sign_message` | `signMessageValue` / `signMessageJson` | runtime-backed | Deterministic signing with node-scoped derived key (`proxy_url`-scoped), runtime-ready guard parity, trimmed-input parity, and stable hex-encoded recoverable signature shape. |
+| `get_channel_id` | `getChannelId` | runtime-backed | Runtime-manager-backed temporary->final channel id resolution with runtime-ready guard and stable not-found error contract (`unknown temporary_channel_id`). |
+| `list_channels` | `listChannelsValue` / `listChannelsJson` | runtime-backed | Runtime-backed channel read surface using runtime-manager authoritative state with deterministic output shape and runtime-ready guard parity. |
+| `list_peers` | `listPeersValue` / `listPeersJson` | runtime-backed | Runtime-backed peer read surface using runtime-manager authoritative state with deterministic output shape and runtime-ready guard parity. |
+| `asset_balance` | `getAssetBalanceValue` / `getAssetBalanceJson` | runtime-backed | Wallet-backed asset queries. |
+| `asset_metadata` | `getAssetMetadataValue` / `getAssetMetadataJson` | runtime-backed | Wallet-backed metadata queries. |
+| `get_asset_media` | `getAssetMediaValue` / `getAssetMediaJson` | runtime-backed | Media-digest lookup backed by wasm media store with native-like digest validation and stable `{bytes_hex}` response shape; media entries are browser-persistent (`localStorage`) with in-memory cache fallback. |
+| `list_assets` | `listAssetsValue` / `listAssetsJson` | runtime-backed | Wallet-backed listing. |
+| `send_rgb` | `sendBegin` + `sendEndValue/Json` | runtime-backed | Two-step PSBT flow. |
+| `send_rgb_from_groups` | `walletSendRgbFromGroupsValue` / `walletSendRgbFromGroupsJson` and wallet-handle `sendRgbFromGroupsValue` / `sendRgbFromGroupsJson` | runtime-backed | Adapter implemented on wallet surfaces via real `send_begin` orchestration; legacy SDK-only `sendRgbFromGroups*` remains scaffolded for compatibility. |
+| `init` | `initValue` / `initJson` | runtime-backed | Stateful wasm lifecycle initialization (`password+mnemonic` bootstrap) with stable validation/error contracts and runtime-session authority propagation (`initialized=true`, `authorized=false`). |
+| `unlock` | `unlock` | runtime-backed | Runtime-backed lifecycle unlock with request parsing, init precondition, password validation, and runtime-session authorization transition (`authorized=true`). |
+| `lock` | `lock` | runtime-backed | Runtime-backed lifecycle lock with init precondition and deterministic authorization transition (`authorized=false`) so runtime managers reject locked sessions until next unlock. |
+| `connect_peer` | `connectPeer` | runtime-backed | Runtime-backed websocket peer-connect path with secp256k1/`host:port` validation and runtime-event application through shared transport pipeline. On `ldk_bridge`, peer state is runtime-manager authoritative and reconnect aliases reactivate persisted peers (`started=true`), with JSON/text alias compatibility for event/id fields and separator-normalized kinds. |
+| `disconnect_peer` | `disconnectPeer` | runtime-backed | Runtime-backed disconnect path with secp256k1 validation and `peer_disconnected` transport transition application, including stale channel cleanup and runtime-manager-authoritative state transitions on `ldk_bridge`. |
+| `close_channel` | `closeChannel` | runtime-backed | Runtime-backed channel-close transition via `channel_closed` transport event path with runtime-manager-authoritative application on `ldk_bridge`, runtime-ready guard parity, and stable not-found contract. |
+| `create_utxos` | `createUtxosBegin` + `createUtxosEnd/Json` | runtime-backed | Two-step PSBT flow. |
+| `issue_asset_nia` | `walletIssueAssetNiaValue` / `walletIssueAssetNiaJson` and wallet-handle `issueAssetNiaValue` / `issueAssetNiaJson` | runtime-backed | Wired to `rgb-lib-wasm` `Wallet::issue_asset_nia`; legacy SDK-only `issueAssetNia*` remains scaffolded for compatibility. |
+| `issue_asset_cfa` | `walletIssueAssetCfaValue` / `walletIssueAssetCfaJson` and wallet-handle `issueAssetCfaValue` / `issueAssetCfaJson` | runtime-backed | Wired via `rgb-lib-wasm` `Wallet::issue_asset_ifa` compatibility mapping; legacy SDK-only `issueAssetCfa*` remains scaffolded for compatibility. |
+| `issue_asset_uda` | `walletIssueAssetUdaValue` / `walletIssueAssetUdaJson` and wallet-handle `issueAssetUdaValue` / `issueAssetUdaJson` | scaffolded | Explicit unsupported contract: `rgb-lib-wasm` currently has no UDA issuance primitive; legacy SDK-only `issueAssetUda*` remains scaffolded for compatibility. |
+| `keysend` | `keysendValue` / `keysendJson` | runtime-backed | Runtime-backed payment send path enforcing native min amount parity (`SDK_HTLC_MIN_MSAT`), destination pubkey validation, RGB payload validation (`asset_id` format + `asset_amount > 0`), and no-route failure transitions through runtime payment-status events. On `ldk_bridge`, delivery requires connected destination peer state (`peer.started=true`). |
+| `send_btc` | `sendBtcBegin` + `sendBtcEnd` | runtime-backed | Two-step PSBT flow. |
+| `post_asset_media` | `postAssetMediaValue` / `postAssetMediaJson` | runtime-backed | Media upload stores hex payload in wasm media store keyed by SHA-256 digest and returns stable `{digest}` response shape; writes persist to browser storage for cross-instance retrieval parity. |
+| `rgb_invoice` | `blindReceiveValue/Json` + `witnessReceiveValue/Json` | runtime-backed | Functional equivalent split by receive mode. |
+| `open_channel` | `openChannelValue` / `openChannelJson` | runtime-backed | Runtime-backed channel open path with native-like bounds/pair validation (`capacity_sat` min/max, RGB pair + min RGB-capacity constraints), `asset_id` format validation, and transport-driven usable/unusable transitions (including alias compatibility for channel events). On `ldk_bridge`, channel state is runtime-manager authoritative and requires connected peer state (`peer.started=true`). |
+| `send_payment` | `sendPaymentValue` / `sendPaymentJson` | runtime-backed | Runtime-backed invoice payment path with invoice parsing/amount contracts, RGB min-amount validation (`SDK_INVOICE_MIN_MSAT`), `asset_id` format checks, payment-secret return, and no-route failure via runtime payment-status transitions. On `ldk_bridge`, routability requires connected peers and connected known payee when present in runtime peer state. |
+| `fail_transfers` | `failTransfers` / `failTransfersJson` | runtime-backed | Wallet transfer state operation. |
+| `refresh_transfers` | `refreshValue` / `refreshJson` | runtime-backed | Wallet refresh operation. |
+| `maker_execute` | `makerExecuteValue` / `makerExecuteJson` | runtime-backed | Runtime-backed by wasm swap state manager (`bindings/wasm-sdk/src/swap_runtime.rs`), with `Waiting -> Pending` transitions, expiry checks, request-contract validation for JSON execute payloads (`payment_secret`, `taker_pubkey`), and payment-event-driven settlement updates (`pending/succeeded/failed/expired`). |
+| `maker_init` | `makerInitValue` / `makerInitJson` | runtime-backed | Runtime-backed by wasm swap state manager (`bindings/wasm-sdk/src/swap_runtime.rs`) with native-like pair validation, 64-hex asset-id checks, deterministic swapstring encoding, and browser-persistent runtime snapshots scoped by SDK identity seed (with legacy global-key read compatibility). |
+| `taker` | `taker` | runtime-backed | Runtime-backed by wasm swap state manager (`bindings/wasm-sdk/src/swap_runtime.rs`) with swapstring parsing and taker-book insertion. |
+| `send_onion_message` | `sendOnionMessage` | runtime-backed | Runtime-backed validation/runtime shim with native-like request checks (`node_ids`, `tlv_type >= 64`, hex payload, secp256k1 pubkeys) and deterministic success/error contracts. |
+| `sync` | `syncOnline` | runtime-backed | Requires explicit `Online` input in wasm. |
+| `decode_ln_invoice` | `decodeLnInvoiceValue` / `decodeLnInvoiceJson` | runtime-backed | Real BOLT11 parsing via `lightning-invoice`; explicit empty-input + invalid-invoice contracts. |
+| `decode_rgb_invoice` | `decodeRgbInvoiceValue` / `decodeRgbInvoiceJson` | runtime-backed | Uses `rgb-lib-wasm` invoice decode. |
+| `invoice_status` | `invoiceStatusValue` / `invoiceStatusJson` | runtime-backed | Runtime-backed payment-state read contract with explicit empty-input validation and runtime-manager-authoritative status lookup on `ldk_bridge`. Event ingestion supports status aliases from JSON/text payloads, including separator-normalized variants, event/hash field aliases, and status-field aliases (`status`/`state`/`payment_status`/`paymentStatus`). |
+| `create_ln_invoice` | `createLnInvoiceValue` / `createLnInvoiceJson` | runtime-backed | Runtime-backed invoice creation path builds signed BOLT11 invoices using node-scoped identity, registers pending inbound payment state, and enforces RGB min-amount checks (`SDK_INVOICE_MIN_MSAT`) plus `asset_id` format validation. |
+| `list_payments` | `listPaymentsValue` / `listPaymentsJson` | runtime-backed | Runtime-backed payment list read path with deterministic ordering (`created_at`, then `payment_hash`) and runtime-ready guard parity; runtime-manager authoritative on `ldk_bridge`. |
+| `get_payment` | `getPaymentValue` / `getPaymentJson` | runtime-backed | Runtime-backed payment lookup with trimmed-hash acceptance, explicit empty-hash/not-found contracts, and runtime-manager-authoritative resolution on `ldk_bridge`. |
+| `get_swap` | `getSwapValue` / `getSwapJson` | runtime-backed | Runtime-backed by wasm swap state manager (`bindings/wasm-sdk/src/swap_runtime.rs`) with native-like `{swap: ...}` envelope support, strict `payment_hash` format validation, and status values synchronized from payment-status runtime events. |
+| `list_swaps` | `listSwapsValue` / `listSwapsJson` | runtime-backed | Runtime-backed by wasm swap state manager (`bindings/wasm-sdk/src/swap_runtime.rs`) returning maker/taker swap collections with deterministic ordering, effective-expiry status mapping, and browser-persistent snapshot restore scoped by SDK identity seed. |
+| `list_transactions` | `listTransactionsValue` / `listTransactionsJson` | runtime-backed | Wallet-backed BTC tx list. |
+| `list_transfers` | `listTransfersValue` / `listTransfersJson` | runtime-backed | Wallet-backed RGB transfer list. |
+| `list_unspents` | `listUnspentsValue/Json` + `listUnspentsVanillaValue/Json` | runtime-backed | Wallet-backed unspent listing. |
+
+## Acceptance Gate Freeze (Step 1)
+
+This section locks target behavior per native endpoint and defines strict acceptance criteria through gate profiles.
+
+Target mode legend:
+- `runtime-backed`: endpoint should be fully runtime-backed in wasm.
+- `scaffold-to-runtime`: currently scaffolded, target is full runtime-backed parity.
+- `unsupported-by-design`: explicit long-term unsupported in wasm, with stable error contracts.
+
+Gate profile criteria:
+
+| Profile | IV | ST | OS | EC | ET | Meaning |
+|---|---|---|---|---|---|---|
+| `P_STATEFUL` | required | required | required | required | required | Stateful write/lifecycle/channel/payment methods. |
+| `P_STATEFUL_READ` | optional | required | required | required | required | Runtime-backed reads that reflect evolving state. |
+| `P_STATELESS` | required | n/a | required | required | required | Stateless parsing/validation/read adapters. |
+| `P_UNSUPPORTED` | n/a | n/a | optional | required | required | Explicit unsupported-by-design endpoints. |
+
+Endpoint target freeze:
+
+| Native endpoint | Target mode | Gate profile |
+|---|---|---|
+| `estimate_fee` | runtime-backed | `P_STATELESS` |
+| `check_indexer_url` | runtime-backed | `P_STATELESS` |
+| `check_proxy_endpoint` | runtime-backed | `P_STATELESS` |
+| `node_info` | runtime-backed | `P_STATEFUL_READ` |
+| `network_info` | runtime-backed | `P_STATEFUL_READ` |
+| `address` | runtime-backed | `P_STATELESS` |
+| `btc_balance` | runtime-backed | `P_STATEFUL_READ` |
+| `sign_message` | runtime-backed | `P_STATELESS` |
+| `get_channel_id` | runtime-backed | `P_STATEFUL_READ` |
+| `list_channels` | runtime-backed | `P_STATEFUL_READ` |
+| `list_peers` | runtime-backed | `P_STATEFUL_READ` |
+| `asset_balance` | runtime-backed | `P_STATEFUL_READ` |
+| `asset_metadata` | runtime-backed | `P_STATELESS` |
+| `get_asset_media` | runtime-backed | `P_STATELESS` |
+| `list_assets` | runtime-backed | `P_STATEFUL_READ` |
+| `send_rgb` | runtime-backed | `P_STATEFUL` |
+| `send_rgb_from_groups` | runtime-backed | `P_STATEFUL` |
+| `init` | runtime-backed | `P_STATEFUL` |
+| `unlock` | runtime-backed | `P_STATEFUL` |
+| `lock` | runtime-backed | `P_STATEFUL` |
+| `connect_peer` | runtime-backed | `P_STATEFUL` |
+| `disconnect_peer` | runtime-backed | `P_STATEFUL` |
+| `close_channel` | runtime-backed | `P_STATEFUL` |
+| `create_utxos` | runtime-backed | `P_STATEFUL` |
+| `issue_asset_nia` | runtime-backed | `P_STATEFUL` |
+| `issue_asset_cfa` | runtime-backed | `P_STATEFUL` |
+| `issue_asset_uda` | unsupported-by-design | `P_UNSUPPORTED` |
+| `keysend` | runtime-backed | `P_STATEFUL` |
+| `send_btc` | runtime-backed | `P_STATEFUL` |
+| `post_asset_media` | runtime-backed | `P_STATELESS` |
+| `rgb_invoice` | runtime-backed | `P_STATEFUL` |
+| `open_channel` | runtime-backed | `P_STATEFUL` |
+| `send_payment` | runtime-backed | `P_STATEFUL` |
+| `fail_transfers` | runtime-backed | `P_STATEFUL` |
+| `refresh_transfers` | runtime-backed | `P_STATEFUL` |
+| `maker_execute` | runtime-backed | `P_STATEFUL` |
+| `maker_init` | runtime-backed | `P_STATEFUL` |
+| `taker` | runtime-backed | `P_STATEFUL` |
+| `send_onion_message` | runtime-backed | `P_STATEFUL` |
+| `sync` | runtime-backed | `P_STATEFUL` |
+| `decode_ln_invoice` | runtime-backed | `P_STATELESS` |
+| `decode_rgb_invoice` | runtime-backed | `P_STATELESS` |
+| `invoice_status` | runtime-backed | `P_STATEFUL_READ` |
+| `create_ln_invoice` | runtime-backed | `P_STATEFUL` |
+| `list_payments` | runtime-backed | `P_STATEFUL_READ` |
+| `get_payment` | runtime-backed | `P_STATEFUL_READ` |
+| `get_swap` | runtime-backed | `P_STATEFUL_READ` |
+| `list_swaps` | runtime-backed | `P_STATEFUL_READ` |
+| `list_transactions` | runtime-backed | `P_STATEFUL_READ` |
+| `list_transfers` | runtime-backed | `P_STATEFUL_READ` |
+| `list_unspents` | runtime-backed | `P_STATEFUL_READ` |
+
+## Unsupported Contract Coverage (Step 3)
+
+The endpoints below are intentionally scaffolded/unsupported and now have explicit rationale + deterministic error-contract tests.
+
+| Endpoint group | Wasm endpoint surfaces | Unsupported rationale | Tested surfaces |
+|---|---|---|---|
+| UDA issuance | legacy sdk `issueAssetUdaValue/Json`; wallet surfaces `walletIssueAssetUdaValue/Json` / handle `issueAssetUdaValue/Json` | Legacy RLN issuance adapter unavailable in wasm; `rgb-lib-wasm` does not expose UDA issuance primitive. | sdk facade, sdk wallet-facade, wallet-handle |
+| Legacy grouped transfer endpoint | legacy sdk `sendRgbFromGroupsValue/Json` | Legacy grouped SDK adapter unavailable in wasm facade; runtime-backed grouped send is available on wallet surfaces (`walletSendRgbFromGroups*` / handle). | sdk facade, wallet-handle (runtime-backed path) |
+
+## Wasm-Only Node Runtime Helpers
+
+These APIs do not map 1:1 to native SDK endpoints but are used by the wasm runtime contract:
+
+| Wasm endpoint | Purpose | Current behavior |
+|---|---|---|
+| `ingestReadEventPayloadHex` (+ `Json`) | Manual payment-status event ingestion | Applies `payment_status` events (explicit status and alias mappings such as `PaymentSent`/`payment_succeeded`) and records runtime-event log entries; on `ldk_bridge`, payment status mutation is applied directly against runtime-manager storage. Disabled by default on `ldk_bridge`; requires debug mode (`debug-manual-events` feature or tests). |
+| `ingestRuntimeTransportEventPayloadHexValue` (+ `Json`) | Manual transport-event ingestion | Applies peer/channel transport events and records runtime-event log entries. Disabled by default on `ldk_bridge`; requires debug mode (`debug-manual-events` feature or tests). |
+| `installAutoPeerManagerHooks` | Hook-driven runtime event bridge | Auto hook now follows queue/drain semantics closer to LDK flow: `read_event` enqueues payloads and `process_events` drains/applies them; socket disconnect/error side effects are also queued and processed in the same drain pass. Peer-session error/disconnect branches force a final `process_events` call so queued control events are not stranded. On `ldk_bridge`, transport transitions mutate runtime-manager state directly. |
+| `listRuntimeEventsValue` (+ `Json`) | Runtime event introspection | Returns ordered runtime-event audit stream; log is persisted/restored per node runtime key through browser-backed state store. |
+| `failPendingPayments` | Force pending payment failures | Transitions `pending -> failed` via `payment_status` runtime events (no direct status mutation); on `ldk_bridge`, resulting statuses are applied directly in runtime-manager storage. Disabled by default on `ldk_bridge`; requires debug mode (`debug-manual-events` feature or tests). |
+| `newWithRuntimeBackend` | Explicit runtime backend selection for node construction | Supports `scaffold` and `ldk_bridge` backends with stable backend-status introspection (`ldkRuntimeStatus*`). |
+| `sdk.newNodeWithRuntimeBackend` / `sdk.createNodeHandleWithRuntimeBackend` | Explicit runtime backend selection from SDK facade surfaces | Exposes `scaffold` / `ldk_bridge` selection without dropping to raw node constructor. |

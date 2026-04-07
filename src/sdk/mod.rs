@@ -1,17 +1,19 @@
 // NOTE: This module mirrors core behavior from `src/routes.rs` for SDK consumers.
 // If route-level business logic changes, keep SDK equivalents in sync.
 
+mod runtime;
+
+use self::runtime::{ChannelPeerStore, LdkLifecycle, PeerConnectivity};
 use crate::core_types::{FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
 use crate::disk::{self, CHANNEL_PEER_DATA};
 use crate::error::APIError;
-use crate::ldk::{start_ldk, PaymentInfo, VirtualChannelSessionStatus};
+use crate::ldk::{PaymentInfo, VirtualChannelSessionStatus};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    connect_peer_if_necessary, encrypt_and_save_mnemonic, get_current_timestamp,
-    get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str, hex_str_to_vec,
-    parse_peer_info, AppState, UserOnionMessageContents,
+    encrypt_and_save_mnemonic, get_current_timestamp, get_max_local_rgb_amount, get_mnemonic_path,
+    get_route, hex_str, hex_str_to_vec, parse_peer_info, AppState, UserOnionMessageContents,
 };
 use amplify::{map, s};
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -58,7 +60,6 @@ use rgb_lib::wallet::{
 };
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, generate_keys, ContractId, RgbTransport};
 use std::collections::HashMap;
-use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -75,6 +76,7 @@ use rgb_lib::wallet::{
 };
 use rgb_lib::BitcoinNetwork as RgbBitcoinNetwork;
 use rgb_lib::{AssetSchema as RgbLibAssetSchema, Assignment as RgbLibAssignment};
+use serde::{Deserialize, Serialize};
 
 const SDK_HTLC_MIN_MSAT: u64 = 3_000_000;
 const SDK_OPENRGBCHANNEL_MIN_SAT: u64 = SDK_HTLC_MIN_MSAT / 1000 * 10 + 10;
@@ -339,6 +341,7 @@ pub(crate) struct InitData {
     pub(crate) mnemonic: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct UnlockRequest {
     pub(crate) password: String,
     pub(crate) bitcoind_rpc_username: String,
@@ -1438,6 +1441,8 @@ pub(crate) async fn init(
 }
 
 pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Result<(), APIError> {
+    let ldk_lifecycle = runtime::native_ldk_lifecycle();
+
     tracing::info!("Unlock started");
     match check_locked(&state).await {
         Ok(unlocked_state) => {
@@ -1472,14 +1477,16 @@ pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Resu
         announce_addresses: request.announce_addresses,
         announce_alias: request.announce_alias,
     };
-    let (new_ldk_background_services, new_unlocked_app_state) =
-        match start_ldk(state.clone(), mnemonic, unlock_request).await {
-            Ok((nlbs, nuap)) => (nlbs, nuap),
-            Err(e) => {
-                update_changing_state(&state, false);
-                return Err(e);
-            }
-        };
+    let (new_ldk_background_services, new_unlocked_app_state) = match ldk_lifecycle
+        .start_ldk(state.clone(), mnemonic, unlock_request)
+        .await
+    {
+        Ok((nlbs, nuap)) => (nlbs, nuap),
+        Err(e) => {
+            update_changing_state(&state, false);
+            return Err(e);
+        }
+    };
     tracing::debug!("LDK started");
 
     update_unlocked_app_state(&state, Some(new_unlocked_app_state)).await;
@@ -1489,19 +1496,50 @@ pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Resu
     Ok(())
 }
 
+pub(crate) async fn lock(state: Arc<AppState>) -> Result<(), APIError> {
+    let ldk_lifecycle = runtime::native_ldk_lifecycle();
+
+    tracing::info!("Lock started");
+    match check_unlocked(&state).await {
+        Ok(unlocked_state) => {
+            update_changing_state(&state, true);
+            drop(unlocked_state);
+        }
+        Err(e) => {
+            update_changing_state(&state, false);
+            return Err(e);
+        }
+    }
+
+    tracing::debug!("Stopping LDK...");
+    ldk_lifecycle.stop_ldk(state.clone()).await;
+    tracing::debug!("LDK stopped");
+
+    update_unlocked_app_state(&state, None).await;
+    update_ldk_background_services(&state, None);
+    update_changing_state(&state, false);
+
+    tracing::info!("Lock completed");
+    Ok(())
+}
+
 pub(crate) async fn connect_peer(
     state: Arc<AppState>,
     peer_pubkey_and_addr: String,
 ) -> Result<(), APIError> {
+    let peer_runtime = runtime::native_peer_connectivity();
+    let channel_peer_store = runtime::native_channel_peer_store();
+
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
     let (peer_pubkey, peer_addr) = parse_peer_info(peer_pubkey_and_addr.to_string())?;
 
     if let Some(peer_addr) = peer_addr {
-        connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
+        peer_runtime
+            .connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
             .await?;
-        disk::persist_channel_peer(
+        channel_peer_store.persist_channel_peer(
             &state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA),
             &peer_pubkey,
             &peer_addr,
@@ -1519,6 +1557,9 @@ pub(crate) async fn disconnect_peer(
     state: Arc<AppState>,
     request: DisconnectPeerRequestData,
 ) -> Result<(), APIError> {
+    let peer_runtime = runtime::native_peer_connectivity();
+    let channel_peer_store = runtime::native_channel_peer_store();
+
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
@@ -1533,24 +1574,18 @@ pub(crate) async fn disconnect_peer(
         }
     }
 
-    disk::delete_channel_peer(
+    channel_peer_store.delete_channel_peer(
         &state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA),
         request.peer_pubkey,
     )?;
 
-    if unlocked_state
-        .peer_manager
-        .peer_by_node_id(&peer_pubkey)
-        .is_none()
-    {
+    if !peer_runtime.has_peer(&peer_pubkey, &unlocked_state.peer_manager) {
         return Err(APIError::FailedPeerDisconnection(format!(
             "Could not find peer {peer_pubkey}"
         )));
     }
 
-    unlocked_state
-        .peer_manager
-        .disconnect_by_node_id(peer_pubkey);
+    peer_runtime.disconnect_peer(peer_pubkey, unlocked_state.peer_manager.clone());
     Ok(())
 }
 
@@ -2045,6 +2080,9 @@ pub(crate) async fn open_channel(
     state: Arc<AppState>,
     request: OpenChannelRequestData,
 ) -> Result<OpenChannelData, APIError> {
+    let peer_runtime = runtime::native_peer_connectivity();
+    let channel_peer_store = runtime::native_channel_peer_store();
+
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
@@ -2164,16 +2202,11 @@ pub(crate) async fn open_channel(
 
     let peer_data_path = state.static_state.ldk_data_dir.join(CHANNEL_PEER_DATA);
     if peer_addr.is_none() {
-        if let Some(peer) = unlocked_state.peer_manager.peer_by_node_id(&peer_pubkey) {
-            if let Some(socket_address) = peer.socket_address {
-                if let Ok(mut socket_addrs) = socket_address.to_socket_addrs() {
-                    peer_addr = socket_addrs.next();
-                }
-            }
-        }
+        peer_addr =
+            peer_runtime.resolve_connected_peer_addr(&peer_pubkey, &unlocked_state.peer_manager);
     }
     if peer_addr.is_none() {
-        let peer_info = disk::read_channel_peer_data(&peer_data_path)?;
+        let peer_info = channel_peer_store.read_channel_peer_data(&peer_data_path)?;
         for (pubkey, addr) in peer_info {
             if pubkey == peer_pubkey {
                 peer_addr = Some(addr);
@@ -2182,9 +2215,10 @@ pub(crate) async fn open_channel(
         }
     }
     if let Some(peer_addr) = peer_addr {
-        connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
+        peer_runtime
+            .connect_peer_if_necessary(peer_pubkey, peer_addr, unlocked_state.peer_manager.clone())
             .await?;
-        disk::persist_channel_peer(&peer_data_path, &peer_pubkey, &peer_addr)?;
+        channel_peer_store.persist_channel_peer(&peer_data_path, &peer_pubkey, &peer_addr)?;
     } else {
         return Err(APIError::InvalidPeerInfo(s!(
             "cannot find the address for the provided pubkey"
