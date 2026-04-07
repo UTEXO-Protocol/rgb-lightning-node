@@ -13,7 +13,7 @@ default = []
 debug-manual-events = []
 
 [dependencies]
-rgb-lib-wasm = { path = "../../../rgb-lib-wasm", package = "rgb-lib-wasm" }
+rgb-lib-wasm = { git = "https://github.com/UTEXO-Protocol/rgb-lib-wasm", rev = "2086c72cecb0a9ec5ba7eda17340b908dc54d0b3", package = "rgb-lib-wasm" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
@@ -36,8 +36,7 @@ debug = 1
 wasm-bindgen-test = "0.3"
 
 [patch.crates-io]
-rgb-strict-encoding = { path = "vendor/rgb-strict-encoding/rust" }
-rgb-strict-encoding-derive = { path = "vendor/rgb-strict-encoding/rust/derive" }
-rgb-consensus = { path = "vendor/rgb-consensus" }
-rgb-ops = { path = "vendor/rgb-ops" }
-rgb-invoicing = { path = "vendor/rgb-ops/invoice" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "062dccfb88196ba2a100e76fef6f3e5adc228a9c" }
+rgb-consensus = { git = "https://github.com/rgb-protocol/rgb-consensus", rev = "d0e157ae6a19edc08829cf4b52bbda2f10b4301e" }
+rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "b9d44825a95593429dfd6a2bd059d3d83749a063" }
+rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "b9d44825a95593429dfd6a2bd059d3d83749a063" }
