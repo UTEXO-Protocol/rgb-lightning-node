@@ -54,7 +54,6 @@ WASM checks are wired into CI in `.github/workflows/test.yaml`:
 
 - [ERROR_CONTRACT.md](ERROR_CONTRACT.md)
 - [SDK_WASM_ENDPOINT_MATRIX.md](SDK_WASM_ENDPOINT_MATRIX.md)
-- WIP planning/reference docs moved to `bindings/wasm-sdk/.local_wip/`
 
 ## Related
 
