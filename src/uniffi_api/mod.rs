@@ -5,7 +5,8 @@ use std::str::FromStr;
 
 use crate::sdk;
 use crate::{NodeConfig, NodeHandle};
-
+use bitcoin::hex::DisplayHex;
+use bitcoin::hex::FromHex;
 use state::{
     block_on_app, block_on_sdk, clear_uniffi_node_handle, get_uniffi_app_state,
     is_uniffi_app_state_initialized, set_uniffi_node_handle,
@@ -279,8 +280,6 @@ impl SdkNode {
     }
 
     pub fn closechannel(&self, request: SdkCloseChannelRequest) -> Result<(), RlnError> {
-        use bitcoin::hex::DisplayHex;
-
         let state = self.handle.app_state();
         block_on_sdk(sdk::close_channel(
             state,
@@ -591,9 +590,6 @@ impl SdkNode {
         &self,
         request: SdkOpenChannelRequest,
     ) -> Result<SdkOpenChannelResponse, RlnError> {
-        use bitcoin::hex::DisplayHex;
-        use bitcoin::hex::FromHex;
-
         let state = self.handle.app_state();
         let response = block_on_sdk(sdk::open_channel(
             state,
@@ -726,9 +722,6 @@ impl SdkNode {
     }
 
     pub fn get_channel_id(&self, temporary_channel_id: ChannelId) -> Result<ChannelId, RlnError> {
-        use bitcoin::hex::DisplayHex;
-        use bitcoin::hex::FromHex;
-
         let state = self.handle.app_state();
         let data = block_on_sdk(sdk::get_channel_id(
             state,
@@ -744,8 +737,6 @@ impl SdkNode {
     }
 
     pub fn get_payment(&self, payment_hash: PaymentHash) -> Result<Payment, RlnError> {
-        use bitcoin::hex::DisplayHex;
-
         let state = self.handle.app_state();
         let data = block_on_sdk(sdk::get_payment(state, payment_hash.0.as_hex().to_string()))?;
         map_payment_data(data)
@@ -758,8 +749,6 @@ impl SdkNode {
     }
 
     pub fn get_swap(&self, payment_hash: PaymentHash, taker: bool) -> Result<Swap, RlnError> {
-        use bitcoin::hex::DisplayHex;
-
         let state = self.handle.app_state();
         let data = block_on_sdk(sdk::get_swap(
             state,
@@ -786,8 +775,6 @@ impl SdkNode {
     }
 
     pub fn list_channels(&self) -> Result<Vec<Channel>, RlnError> {
-        use bitcoin::hex::FromHex;
-
         let state = self.handle.app_state();
         let channels = block_on_sdk(sdk::list_channels(state))?;
         channels
@@ -1238,8 +1225,6 @@ impl SdkNode {
     }
 
     pub fn ln_invoice(&self, request: LnInvoiceRequest) -> Result<LnInvoiceResponse, RlnError> {
-        use bitcoin::hex::DisplayHex;
-
         let state = self.handle.app_state();
         let asset_id = request.asset_id.map(|a| a.to_string());
         let payment_hash = request.payment_hash.map(|h| h.0.as_hex().to_string());
@@ -1256,8 +1241,6 @@ impl SdkNode {
     }
 
     pub fn cancelhodlinvoice(&self, request: CancelHodlInvoiceRequest) -> Result<(), RlnError> {
-        use bitcoin::hex::DisplayHex;
-
         let state = self.handle.app_state();
         block_on_sdk(sdk::cancel_hodl_invoice(
             state,
@@ -1272,8 +1255,6 @@ impl SdkNode {
         &self,
         request: ClaimHodlInvoiceRequest,
     ) -> Result<ClaimHodlInvoiceResponse, RlnError> {
-        use bitcoin::hex::DisplayHex;
-
         let state = self.handle.app_state();
         let response = block_on_sdk(sdk::claim_hodl_invoice(
             state,
