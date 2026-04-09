@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use bitcoin::secp256k1::PublicKey;
+use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter};
 
@@ -30,11 +31,9 @@ impl RlnDatabase {
     }
 
     pub fn add_revoked_token(&self, token_id_hex: &str) -> Result<(), APIError> {
-        let now = crate::utils::get_current_timestamp() as i64;
-
         let token = RevokedTokenActMod {
             token_id: ActiveValue::Set(token_id_hex.to_string()),
-            revoked_at: ActiveValue::Set(now),
+            revoked_at: ActiveValue::Set(Utc::now()),
         };
 
         block_on(
@@ -102,12 +101,10 @@ impl RlnDatabase {
         pubkey: &PublicKey,
         address: &SocketAddr,
     ) -> Result<(), APIError> {
-        let now = crate::utils::get_current_timestamp() as i64;
-
         let peer = ChannelPeerActMod {
             pubkey: ActiveValue::Set(pubkey.to_string()),
             address: ActiveValue::Set(address.to_string()),
-            created_at: ActiveValue::Set(now),
+            created_at: ActiveValue::Set(Utc::now()),
         };
 
         block_on(
@@ -141,7 +138,7 @@ impl RlnDatabase {
     }
 
     pub fn save_mnemonic(&self, encrypted_mnemonic: String) -> Result<(), APIError> {
-        let now = crate::utils::get_current_timestamp() as i64;
+        let now = Utc::now();
 
         let mnemonic = DbMnemonicActMod {
             id: ActiveValue::Set(1),
@@ -167,7 +164,7 @@ impl RlnDatabase {
     }
 
     pub fn set_config(&self, key: &str, value: &str) -> Result<(), APIError> {
-        let now = crate::utils::get_current_timestamp() as i64;
+        let now = Utc::now();
 
         let config = ConfigActMod {
             key: ActiveValue::Set(key.to_string()),

@@ -15,7 +15,7 @@ impl EntityName for Entity {
 pub struct Model {
     pub pubkey: String,
     pub address: String,
-    pub created_at: i64,
+    pub created_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
@@ -46,7 +46,7 @@ impl ColumnTrait for Column {
         match self {
             Self::Pubkey => ColumnType::String(StringLen::None).def(),
             Self::Address => ColumnType::String(StringLen::None).def(),
-            Self::CreatedAt => ColumnType::BigInteger.def(),
+            Self::CreatedAt => ColumnType::TimestampWithTimeZone.def(),
         }
     }
 }

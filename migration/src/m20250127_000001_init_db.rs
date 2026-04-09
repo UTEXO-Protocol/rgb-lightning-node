@@ -19,8 +19,8 @@ impl MigrationTrait for Migration {
                             .default(1),
                     )
                     .col(string(Mnemonic::EncryptedMnemonic))
-                    .col(big_unsigned(Mnemonic::CreatedAt))
-                    .col(big_unsigned(Mnemonic::UpdatedAt))
+                    .col(timestamp_with_time_zone(Mnemonic::CreatedAt))
+                    .col(timestamp_with_time_zone(Mnemonic::UpdatedAt))
                     .to_owned(),
             )
             .await?;
@@ -56,8 +56,8 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(Config::Value).string().not_null())
-                    .col(ColumnDef::new(Config::CreatedAt).big_integer().not_null())
-                    .col(ColumnDef::new(Config::UpdatedAt).big_integer().not_null())
+                    .col(timestamp_with_time_zone(Config::CreatedAt))
+                    .col(timestamp_with_time_zone(Config::UpdatedAt))
                     .to_owned(),
             )
             .await?;
@@ -73,11 +73,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(RevokedToken::RevokedAt)
-                            .big_integer()
-                            .not_null(),
-                    )
+                    .col(timestamp_with_time_zone(RevokedToken::RevokedAt))
                     .to_owned(),
             )
             .await?;
@@ -94,11 +90,7 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(ChannelPeer::Address).string().not_null())
-                    .col(
-                        ColumnDef::new(ChannelPeer::CreatedAt)
-                            .big_integer()
-                            .not_null(),
-                    )
+                    .col(timestamp_with_time_zone(ChannelPeer::CreatedAt))
                     .to_owned(),
             )
             .await

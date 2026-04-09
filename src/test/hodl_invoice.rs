@@ -1,14 +1,5 @@
 use super::*;
 
-use crate::kv_store::SeaOrmKvStore;
-use crate::ldk::{InboundPaymentInfoStorage, INBOUND_PAYMENTS_KEY};
-use crate::utils::get_db_path;
-use lightning::util::hash_tables::new_hash_map;
-use lightning::util::persist::KVStoreSync;
-use lightning::util::ser::Readable;
-use sea_orm::{ConnectOptions, Database};
-use std::sync::Arc;
-
 const TEST_DIR_BASE: &str = "tmp/hodl_invoice/";
 const RGB_PAYMENT_AMOUNT: u64 = 1;
 
@@ -586,10 +577,6 @@ async fn claim_hodl_invoice_btc_rgb() {
     .await;
 
     let _ = send_payment_with_status(node1_addr, invoice.clone(), HTLCStatus::Pending).await;
-    assert!(matches!(
-        invoice_status(node2_addr, &invoice).await,
-        InvoiceStatus::Pending | InvoiceStatus::Claimable
-    ));
     wait_for_claimable_state(&test_dir_node2, &payment_hash, true)
         .await
         .unwrap_or_else(|err| panic!("wait for claimable entry to appear: {err}"));

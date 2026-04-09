@@ -14,7 +14,7 @@ impl EntityName for Entity {
 #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel, Eq)]
 pub struct Model {
     pub token_id: String,
-    pub revoked_at: i64,
+    pub revoked_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
@@ -43,7 +43,7 @@ impl ColumnTrait for Column {
     fn def(&self) -> ColumnDef {
         match self {
             Self::TokenId => ColumnType::String(StringLen::None).def(),
-            Self::RevokedAt => ColumnType::BigInteger.def(),
+            Self::RevokedAt => ColumnType::TimestampWithTimeZone.def(),
         }
     }
 }

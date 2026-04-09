@@ -14,5 +14,6 @@ sea-orm-migration = { version = "1.1.19", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",
     "sqlx-sqlite",
+    "with-chrono",
 ] }
 tokio = { version = "1", features = ["rt", "macros"] }

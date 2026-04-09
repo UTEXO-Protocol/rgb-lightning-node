@@ -5,17 +5,21 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
+use lightning::util::hash_tables::new_hash_map;
+use lightning::util::persist::KVStoreSync;
+use lightning::util::ser::Readable;
 use lightning_invoice::Bolt11Invoice;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use reqwest::{Response, StatusCode};
 use rgb_lib::BitcoinNetwork;
+use sea_orm::{ConnectOptions, Database};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Once, RwLock};
+use std::sync::{Arc, Once, RwLock};
 use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -23,7 +27,8 @@ use tracing_test::traced_test;
 
 use crate::core_types::{HTLCStatus, SwapStatus, FEE_RATE, HTLC_MIN_MSAT};
 use crate::error::{APIError, APIErrorResponse};
-use crate::ldk::InvoiceType;
+use crate::kv_store::SeaOrmKvStore;
+use crate::ldk::{InboundPaymentInfoStorage, InvoiceType, INBOUND_PAYMENTS_KEY};
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetIFA, AssetNIA,
     AssetUDA, Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse,
@@ -48,8 +53,8 @@ use crate::routes::{
     Transaction, Transfer, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
-    hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LOGS_DIR,
-    PROXY_ENDPOINT_LOCAL,
+    get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST,
+    LOGS_DIR, PROXY_ENDPOINT_LOCAL,
 };
 
 use super::*;
