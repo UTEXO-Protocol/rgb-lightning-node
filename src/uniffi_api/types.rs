@@ -86,7 +86,7 @@ pub struct Payment {
     pub asset_amount: Option<u64>,
     pub asset_id: Option<ContractId>,
     pub payment_hash: PaymentHash,
-    pub inbound: bool,
+    pub payment_type: PaymentType,
     pub status: HtlcStatus,
     pub created_at: u64,
     pub updated_at: u64,
@@ -94,9 +94,18 @@ pub struct Payment {
     pub preimage: Option<String>,
 }
 
+pub enum PaymentType {
+    Outbound,
+    InboundAutoClaim,
+    InboundHodl,
+}
+
 pub enum HtlcStatus {
     Pending,
+    Claimable,
+    Claiming,
     Succeeded,
+    Cancelled,
     Failed,
 }
 
@@ -284,10 +293,27 @@ pub struct AssetCfa {
     pub media: Option<Media>,
 }
 
+pub struct AssetIfa {
+    pub asset_id: ContractId,
+    pub ticker: String,
+    pub name: String,
+    pub details: Option<String>,
+    pub precision: u8,
+    pub initial_supply: u64,
+    pub max_supply: u64,
+    pub known_circulating_supply: u64,
+    pub timestamp: i64,
+    pub added_at: i64,
+    pub balance: AssetBalanceInfo,
+    pub media: Option<Media>,
+    pub reject_list_url: Option<String>,
+}
+
 pub struct ListAssetsResponse {
     pub nia: Option<Vec<AssetNia>>,
     pub uda: Option<Vec<AssetUda>>,
     pub cfa: Option<Vec<AssetCfa>>,
+    pub ifa: Option<Vec<AssetIfa>>,
 }
 
 pub struct DecodeLnInvoiceResponse {
@@ -315,7 +341,10 @@ pub struct DecodeRgbInvoiceResponse {
 
 pub enum InvoiceStatus {
     Pending,
+    Claimable,
+    Claiming,
     Succeeded,
+    Cancelled,
     Failed,
     Expired,
 }
@@ -364,6 +393,31 @@ pub struct LnInvoiceRequest {
     pub expiry_sec: u32,
     pub asset_id: Option<ContractId>,
     pub asset_amount: Option<u64>,
+    pub payment_hash: Option<PaymentHash>,
+}
+
+pub struct CancelHodlInvoiceRequest {
+    pub payment_hash: PaymentHash,
+}
+
+pub struct ClaimHodlInvoiceRequest {
+    pub payment_hash: PaymentHash,
+    pub payment_preimage: String,
+}
+
+pub struct ClaimHodlInvoiceResponse {
+    pub changed: bool,
+}
+
+pub struct InflateRequest {
+    pub asset_id: ContractId,
+    pub inflation_amounts: Vec<u64>,
+    pub fee_rate: u64,
+    pub min_confirmations: u8,
+}
+
+pub struct InflateResponse {
+    pub txid: Txid,
 }
 
 pub struct SdkUnlockRequest {
@@ -456,6 +510,15 @@ pub struct SdkIssueAssetCfaRequest {
     pub details: Option<String>,
     pub precision: u8,
     pub file_digest: Option<String>,
+}
+
+pub struct SdkIssueAssetIfaRequest {
+    pub amounts: Vec<u64>,
+    pub inflation_amounts: Vec<u64>,
+    pub ticker: String,
+    pub name: String,
+    pub precision: u8,
+    pub reject_list_url: Option<String>,
 }
 
 pub struct SdkIssueAssetUdaRequest {

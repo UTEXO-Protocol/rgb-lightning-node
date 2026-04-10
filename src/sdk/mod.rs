@@ -4,14 +4,15 @@
 use crate::core_types::{FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
 use crate::disk::{self, CHANNEL_PEER_DATA};
 use crate::error::APIError;
-use crate::ldk::{start_ldk, PaymentInfo, VirtualChannelSessionStatus};
+use crate::ldk::{start_ldk, InvoiceType, PaymentInfo, VirtualChannelSessionStatus};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
     connect_peer_if_necessary, encrypt_and_save_mnemonic, get_current_timestamp,
     get_max_local_rgb_amount, get_mnemonic_path, get_route, hex_str, hex_str_to_vec,
-    parse_peer_info, AppState, UserOnionMessageContents,
+    parse_peer_info, validate_and_parse_payment_hash, validate_and_parse_payment_preimage,
+    AppState, UserOnionMessageContents,
 };
 use amplify::{map, s};
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -56,7 +57,7 @@ use rgb_lib::wallet::{
     Invoice as RgbLibInvoice, Recipient as RgbLibRecipient, RecipientInfo,
     WitnessData as RgbLibWitnessData,
 };
-use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, generate_keys, ContractId, RgbTransport};
+use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, keys::generate_keys, ContractId, RgbTransport};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -69,8 +70,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use rgb_lib::wallet::rust_only::IndexerProtocol as RgbLibIndexerProtocol;
 use rgb_lib::wallet::RecipientType as RgbLibRecipientType;
 use rgb_lib::wallet::{
-    AssetCFA as RgbLibAssetCFA, AssetNIA as RgbLibAssetNIA, AssetUDA as RgbLibAssetUDA,
-    EmbeddedMedia as RgbLibEmbeddedMedia, Media as RgbLibMedia,
+    AssetCFA as RgbLibAssetCFA, AssetIFA as RgbLibAssetIFA, AssetNIA as RgbLibAssetNIA,
+    AssetUDA as RgbLibAssetUDA, EmbeddedMedia as RgbLibEmbeddedMedia, Media as RgbLibMedia,
     ProofOfReserves as RgbLibProofOfReserves, Token as RgbLibToken, TokenLight as RgbLibTokenLight,
 };
 use rgb_lib::BitcoinNetwork as RgbBitcoinNetwork;
@@ -301,7 +302,6 @@ fn rgb_assignment_from_kind(
         (AssignmentKindData::Fungible, Some(v)) => Ok(RgbLibAssignment::Fungible(v)),
         (AssignmentKindData::InflationRight, Some(v)) => Ok(RgbLibAssignment::InflationRight(v)),
         (AssignmentKindData::NonFungible, None) => Ok(RgbLibAssignment::NonFungible),
-        (AssignmentKindData::ReplaceRight, None) => Ok(RgbLibAssignment::ReplaceRight),
         (AssignmentKindData::Any, None) => Ok(RgbLibAssignment::Any),
         _ => Err(APIError::InvalidAmount(
             "invalid RGB assignment payload".to_string(),
@@ -431,6 +431,15 @@ pub(crate) struct IssueAssetCfaRequestData {
     pub(crate) file_digest: Option<String>,
 }
 
+pub(crate) struct IssueAssetIFARequestData {
+    pub(crate) amounts: Vec<u64>,
+    pub(crate) inflation_amounts: Vec<u64>,
+    pub(crate) ticker: String,
+    pub(crate) name: String,
+    pub(crate) precision: u8,
+    pub(crate) reject_list_url: Option<String>,
+}
+
 pub(crate) struct IssueAssetUdaRequestData {
     pub(crate) ticker: String,
     pub(crate) name: String,
@@ -518,6 +527,7 @@ pub(crate) struct ListAssetsData {
     pub(crate) nia: Option<Vec<AssetNIA>>,
     pub(crate) uda: Option<Vec<AssetUDA>>,
     pub(crate) cfa: Option<Vec<AssetCFA>>,
+    pub(crate) ifa: Option<Vec<AssetIFA>>,
 }
 
 pub(crate) struct LnInvoiceData {
@@ -529,12 +539,36 @@ pub(crate) struct PaymentData {
     pub(crate) asset_amount: Option<u64>,
     pub(crate) asset_id: Option<String>,
     pub(crate) payment_hash: String,
-    pub(crate) inbound: bool,
+    pub(crate) payment_type: PaymentType,
     pub(crate) status: HtlcStatus,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
     pub(crate) payee_pubkey: String,
     pub(crate) preimage: Option<String>,
+}
+
+pub(crate) struct CancelHodlInvoiceRequestData {
+    pub(crate) payment_hash: String,
+}
+
+pub(crate) struct ClaimHodlInvoiceRequestData {
+    pub(crate) payment_hash: String,
+    pub(crate) payment_preimage: String,
+}
+
+pub(crate) struct ClaimHodlInvoiceResponseData {
+    pub(crate) changed: bool,
+}
+
+pub(crate) struct InflateRequestData {
+    pub(crate) asset_id: String,
+    pub(crate) inflation_amounts: Vec<u64>,
+    pub(crate) fee_rate: u64,
+    pub(crate) min_confirmations: u8,
+}
+
+pub(crate) struct InflateResponseData {
+    pub(crate) txid: String,
 }
 
 pub(crate) struct ChannelData {
@@ -640,9 +674,19 @@ pub(crate) enum ChannelStatus {
 pub(crate) type HtlcStatus = crate::core_types::HTLCStatus;
 
 #[derive(Clone, Copy, Debug)]
+pub(crate) enum PaymentType {
+    Outbound,
+    InboundAutoClaim,
+    InboundHodl,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum InvoiceStatus {
     Pending,
+    Claimable,
+    Claiming,
     Succeeded,
+    Cancelled,
     Failed,
     Expired,
 }
@@ -674,6 +718,7 @@ pub(crate) enum TransferKind {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum TransferStatus {
+    Initiated,
     WaitingCounterparty,
     WaitingConfirmations,
     Settled,
@@ -901,6 +946,48 @@ impl From<RgbLibAssetCFA> for AssetCFA {
     }
 }
 
+pub(crate) struct AssetIFA {
+    pub(crate) asset_id: String,
+    pub(crate) ticker: String,
+    pub(crate) name: String,
+    pub(crate) details: Option<String>,
+    pub(crate) precision: u8,
+    pub(crate) initial_supply: u64,
+    pub(crate) max_supply: u64,
+    pub(crate) known_circulating_supply: u64,
+    pub(crate) timestamp: i64,
+    pub(crate) added_at: i64,
+    pub(crate) balance: AssetBalance,
+    pub(crate) media: Option<Media>,
+    pub(crate) reject_list_url: Option<String>,
+}
+
+impl From<RgbLibAssetIFA> for AssetIFA {
+    fn from(value: RgbLibAssetIFA) -> Self {
+        Self {
+            asset_id: value.asset_id,
+            ticker: value.ticker,
+            name: value.name,
+            details: value.details,
+            precision: value.precision,
+            initial_supply: value.initial_supply,
+            max_supply: value.max_supply,
+            known_circulating_supply: value.known_circulating_supply,
+            timestamp: value.timestamp,
+            added_at: value.added_at,
+            balance: AssetBalance {
+                settled: value.balance.settled,
+                future: value.balance.future,
+                spendable: value.balance.spendable,
+                offchain_outbound: 0,
+                offchain_inbound: 0,
+            },
+            media: value.media.map(Into::into),
+            reject_list_url: value.reject_list_url,
+        }
+    }
+}
+
 /*
  * -------------------------------------------------------------------------
  * ROUTES-PARITY METHODS
@@ -977,7 +1064,7 @@ pub(crate) async fn node_info(state: Arc<AppState>) -> Result<NodeInfoData, APIE
     let network_nodes = graph_lock.nodes().len();
     let network_channels = graph_lock.channels().len();
 
-    let wallet_data = unlocked_state.rgb_get_wallet_data();
+    let wallet_data = unlocked_state.rgb_get_keys();
 
     Ok(NodeInfoData {
         pubkey: unlocked_state.channel_manager.get_our_node_id().to_string(),
@@ -1330,8 +1417,21 @@ pub(crate) async fn list_assets(
             })
             .collect()
     });
+    let ifa = rgb_assets.ifa.map(|assets| {
+        assets
+            .into_iter()
+            .map(|a| {
+                let mut asset: AssetIFA = a.into();
+                (
+                    asset.balance.offchain_outbound,
+                    asset.balance.offchain_inbound,
+                ) = *offchain_balances.get(&asset.asset_id).unwrap_or(&(0, 0));
+                asset
+            })
+            .collect()
+    });
 
-    Ok(ListAssetsData { nia, uda, cfa })
+    Ok(ListAssetsData { nia, uda, cfa, ifa })
 }
 
 pub(crate) async fn send_rgb(
@@ -1356,6 +1456,7 @@ pub(crate) async fn send_rgb(
             donation,
             fee_rate,
             min_confirmations,
+            None,
             skip_sync,
         )
     })
@@ -1813,6 +1914,29 @@ pub(crate) async fn issue_asset_cfa(
     Ok(asset.into())
 }
 
+pub(crate) async fn issue_asset_ifa(
+    state: Arc<AppState>,
+    request: IssueAssetIFARequestData,
+) -> Result<AssetIFA, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    if *unlocked_state.rgb_send_lock.lock().unwrap() {
+        return Err(APIError::OpenChannelInProgress);
+    }
+
+    let asset = unlocked_state.rgb_issue_asset_ifa(
+        request.ticker,
+        request.name,
+        request.precision,
+        request.amounts,
+        request.inflation_amounts,
+        request.reject_list_url,
+    )?;
+
+    Ok(asset.into())
+}
+
 pub(crate) async fn issue_asset_uda(
     state: Arc<AppState>,
     request: IssueAssetUdaRequestData,
@@ -1903,10 +2027,12 @@ pub(crate) async fn keysend(
             secret: None,
             status: HtlcStatus::Pending,
             amt_msat: Some(amt_msat),
+            claim_deadline_height: None,
             created_at,
             updated_at: created_at,
             payee_pubkey: dest_pubkey,
             expires_at: None,
+            invoice_type: None,
         },
     )?;
     if let Some((contract_id, rgb_amount)) = rgb_payment {
@@ -2015,11 +2141,14 @@ pub(crate) async fn rgb_invoice(
         None => RgbLibAssignment::Any,
     };
 
+    let expiration_timestamp = request
+        .duration_seconds
+        .map(|duration| get_current_timestamp() + u64::from(duration));
     let receive_data = if request.witness {
         unlocked_state.rgb_witness_receive(
             request.asset_id,
             assignment,
-            request.duration_seconds,
+            expiration_timestamp,
             vec![unlocked_state.proxy_endpoint.clone()],
             request.min_confirmations,
         )?
@@ -2027,7 +2156,7 @@ pub(crate) async fn rgb_invoice(
         unlocked_state.rgb_blind_receive(
             request.asset_id,
             assignment,
-            request.duration_seconds,
+            expiration_timestamp,
             vec![unlocked_state.proxy_endpoint.clone()],
             request.min_confirmations,
         )?
@@ -2036,7 +2165,7 @@ pub(crate) async fn rgb_invoice(
     Ok(RgbInvoiceData {
         recipient_id: receive_data.recipient_id,
         invoice: receive_data.invoice,
-        expiration_timestamp: receive_data.expiration_timestamp,
+        expiration_timestamp: receive_data.expiration_timestamp.map(|t| t as i64),
         batch_transfer_idx: receive_data.batch_transfer_idx,
     })
 }
@@ -2246,11 +2375,10 @@ pub(crate) async fn open_channel(
             .rgb_get_asset_metadata(*contract_id)?
             .asset_schema;
         let assignment = match schema {
-            RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa => {
+            RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa => {
                 RgbLibAssignment::Fungible(*asset_amount)
             }
             RgbLibAssetSchema::Uda => RgbLibAssignment::NonFungible,
-            RgbLibAssetSchema::Ifa => todo!(),
         };
 
         let recipient_map = map! {
@@ -2271,6 +2399,8 @@ pub(crate) async fn open_channel(
                 true,
                 FEE_RATE,
                 MIN_CHANNEL_CONFIRMATIONS,
+                None,
+                true,
             )
         })
         .await
@@ -2392,12 +2522,14 @@ pub(crate) async fn send_payment(
                 secret,
                 status,
                 amt_msat: Some(amt_msat),
+                claim_deadline_height: None,
                 created_at,
                 updated_at: created_at,
                 payee_pubkey: offer
                     .issuer_signing_pubkey()
                     .ok_or(APIError::InvalidInvoice(s!("missing signing pubkey")))?,
                 expires_at: None,
+                invoice_type: None,
             },
         )?;
 
@@ -2488,10 +2620,12 @@ pub(crate) async fn send_payment(
                 secret,
                 status,
                 amt_msat: Some(amt_msat),
+                claim_deadline_height: None,
                 created_at,
                 updated_at: created_at,
                 payee_pubkey: invoice.get_payee_pub_key(),
                 expires_at: None,
+                invoice_type: None,
             },
         )?;
         let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
@@ -2931,7 +3065,6 @@ pub(crate) async fn decode_ln_invoice(
             bitcoin::Network::Testnet4 => rgb_lib::BitcoinNetwork::Testnet4,
             bitcoin::Network::Signet => rgb_lib::BitcoinNetwork::Signet,
             bitcoin::Network::Regtest => rgb_lib::BitcoinNetwork::Regtest,
-            _ => return Err(APIError::InvalidInvoice("unsupported network".to_string())),
         },
     })
 }
@@ -2951,7 +3084,7 @@ pub(crate) async fn decode_rgb_invoice(
         asset_id: invoice_data.asset_id,
         assignment: invoice_data.assignment,
         network: invoice_data.network,
-        expiration_timestamp: invoice_data.expiration_timestamp,
+        expiration_timestamp: invoice_data.expiration_timestamp.map(|t| t as i64),
         transport_endpoints: invoice_data.transport_endpoints,
     })
 }
@@ -2970,7 +3103,10 @@ pub(crate) async fn invoice_status(
         Some(v) => match HtlcStatus::from(v.status) {
             HtlcStatus::Pending if invoice.is_expired() => InvoiceStatus::Expired,
             HtlcStatus::Pending => InvoiceStatus::Pending,
+            HtlcStatus::Claimable => InvoiceStatus::Claimable,
+            HtlcStatus::Claiming => InvoiceStatus::Claiming,
             HtlcStatus::Succeeded => InvoiceStatus::Succeeded,
+            HtlcStatus::Cancelled => InvoiceStatus::Cancelled,
             HtlcStatus::Failed => InvoiceStatus::Failed,
         },
         None => return Err(APIError::UnknownLNInvoice),
@@ -2992,6 +3128,7 @@ pub(crate) async fn create_ln_invoice(
     expiry_sec: u32,
     asset_id: Option<String>,
     asset_amount: Option<u64>,
+    payment_hash: Option<String>,
 ) -> Result<LnInvoiceData, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
@@ -3009,9 +3146,25 @@ pub(crate) async fn create_ln_invoice(
         )));
     }
 
+    let created_at = get_current_timestamp();
+    let requested_payment_hash = match payment_hash {
+        Some(payment_hash) => {
+            let payment_hash = validate_and_parse_payment_hash(&payment_hash)?;
+            if unlocked_state
+                .inbound_payments()
+                .contains_key(&payment_hash)
+            {
+                return Err(APIError::PaymentHashAlreadyUsed);
+            }
+            Some(payment_hash)
+        }
+        None => None,
+    };
+
     let invoice_params = Bolt11InvoiceParameters {
         amount_msats: amt_msat,
         invoice_expiry_delta_secs: Some(expiry_sec),
+        payment_hash: requested_payment_hash,
         contract_id,
         asset_amount,
         ..Default::default()
@@ -3025,8 +3178,13 @@ pub(crate) async fn create_ln_invoice(
         Err(e) => return Err(APIError::FailedInvoiceCreation(e.to_string())),
     };
 
-    let payment_hash = PaymentHash((*invoice.payment_hash()).to_byte_array());
-    let created_at = get_current_timestamp();
+    let (payment_hash, invoice_type) = match requested_payment_hash {
+        Some(payment_hash) => (payment_hash, InvoiceType::Hodl),
+        None => (
+            PaymentHash((*invoice.payment_hash()).to_byte_array()),
+            InvoiceType::AutoClaim,
+        ),
+    };
     unlocked_state.add_inbound_payment(
         payment_hash,
         PaymentInfo {
@@ -3034,16 +3192,25 @@ pub(crate) async fn create_ln_invoice(
             secret: Some(*invoice.payment_secret()),
             status: HtlcStatus::Pending,
             amt_msat,
+            claim_deadline_height: None,
             created_at,
             updated_at: created_at,
             payee_pubkey: unlocked_state.channel_manager.get_our_node_id(),
             expires_at: Some(created_at + expiry_sec as u64),
+            invoice_type: Some(invoice_type),
         },
     );
 
     Ok(LnInvoiceData {
         invoice: invoice.to_string(),
     })
+}
+
+fn payment_type_from_invoice(invoice_type: Option<InvoiceType>) -> PaymentType {
+    match invoice_type.unwrap_or(InvoiceType::AutoClaim) {
+        InvoiceType::AutoClaim => PaymentType::InboundAutoClaim,
+        InvoiceType::Hodl => PaymentType::InboundHodl,
+    }
 }
 
 pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentData>, APIError> {
@@ -3071,7 +3238,7 @@ pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentDat
             asset_amount,
             asset_id,
             payment_hash: hex_str(&payment_hash.0),
-            inbound: true,
+            payment_type: payment_type_from_invoice(payment_info.invoice_type),
             status: payment_info.status,
             created_at: payment_info.created_at,
             updated_at: payment_info.updated_at,
@@ -3098,7 +3265,7 @@ pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentDat
             asset_amount,
             asset_id,
             payment_hash: hex_str(&payment_hash.0),
-            inbound: false,
+            payment_type: PaymentType::Outbound,
             status: payment_info.status,
             created_at: payment_info.created_at,
             updated_at: payment_info.updated_at,
@@ -3144,7 +3311,7 @@ pub(crate) async fn get_payment(
                 asset_amount,
                 asset_id,
                 payment_hash: hex_str(&payment_hash.0),
-                inbound: true,
+                payment_type: payment_type_from_invoice(payment_info.invoice_type),
                 status: payment_info.status,
                 created_at: payment_info.created_at,
                 updated_at: payment_info.updated_at,
@@ -3172,7 +3339,7 @@ pub(crate) async fn get_payment(
                 asset_amount,
                 asset_id,
                 payment_hash: hex_str(&payment_hash.0),
-                inbound: false,
+                payment_type: PaymentType::Outbound,
                 status: payment_info.status,
                 created_at: payment_info.created_at,
                 updated_at: payment_info.updated_at,
@@ -3183,6 +3350,125 @@ pub(crate) async fn get_payment(
     }
 
     Err(APIError::PaymentNotFound(payment_hash_hex))
+}
+
+pub(crate) async fn cancel_hodl_invoice(
+    state: Arc<AppState>,
+    request: CancelHodlInvoiceRequestData,
+) -> Result<(), APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let payment_hash = validate_and_parse_payment_hash(&request.payment_hash)?;
+    let payment_info = unlocked_state
+        .get_inbound_payments()
+        .payments
+        .get(&payment_hash)
+        .cloned()
+        .ok_or(APIError::UnknownLNInvoice)?;
+    if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl)) {
+        return Err(APIError::InvoiceNotHodl);
+    }
+    match payment_info.status {
+        HtlcStatus::Succeeded => return Err(APIError::InvoiceAlreadyClaimed),
+        HtlcStatus::Claimable => {}
+        HtlcStatus::Claiming => return Err(APIError::InvoiceSettlingInProgress),
+        _ => return Err(APIError::InvoiceNotClaimable),
+    }
+
+    unlocked_state
+        .fail_htlc_backwards_and_update_inbound_payment(payment_hash, HtlcStatus::Cancelled);
+    Ok(())
+}
+
+pub(crate) async fn claim_hodl_invoice(
+    state: Arc<AppState>,
+    request: ClaimHodlInvoiceRequestData,
+) -> Result<ClaimHodlInvoiceResponseData, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let payment_hash = validate_and_parse_payment_hash(&request.payment_hash)?;
+    let preimage = validate_and_parse_payment_preimage(&request.payment_preimage, &payment_hash)?;
+
+    {
+        let mut inbound = unlocked_state.get_inbound_payments();
+        let Some(existing_payment_mut) = inbound.payments.get_mut(&payment_hash) else {
+            return Err(APIError::UnknownLNInvoice);
+        };
+
+        if !matches!(existing_payment_mut.invoice_type, Some(InvoiceType::Hodl)) {
+            return Err(APIError::InvoiceNotHodl);
+        }
+
+        match existing_payment_mut.status {
+            HtlcStatus::Succeeded => {
+                let computed_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
+                if computed_hash != payment_hash {
+                    return Err(APIError::InvalidPaymentPreimage);
+                }
+                if let Some(stored_preimage) = existing_payment_mut.preimage {
+                    if stored_preimage != preimage {
+                        return Err(APIError::InvalidPaymentPreimage);
+                    }
+                }
+                return Ok(ClaimHodlInvoiceResponseData { changed: false });
+            }
+            HtlcStatus::Claiming => return Err(APIError::InvoiceSettlingInProgress),
+            HtlcStatus::Claimable => {}
+            _ => return Err(APIError::InvoiceNotClaimable),
+        }
+
+        let current_height = unlocked_state.channel_manager.current_best_block().height;
+        let now_ts = get_current_timestamp();
+
+        if let Some(deadline_height) = existing_payment_mut.claim_deadline_height {
+            if current_height >= deadline_height {
+                return Err(APIError::ClaimDeadlineExceeded);
+            }
+        }
+
+        if let Some(expiry) = existing_payment_mut.expires_at {
+            if now_ts >= expiry {
+                return Err(APIError::InvoiceExpired);
+            }
+        }
+
+        existing_payment_mut.status = HtlcStatus::Claiming;
+        existing_payment_mut.updated_at = now_ts;
+        unlocked_state.save_inbound_payments(inbound);
+    }
+
+    unlocked_state.channel_manager.claim_funds(preimage);
+    Ok(ClaimHodlInvoiceResponseData { changed: true })
+}
+
+pub(crate) async fn inflate(
+    state: Arc<AppState>,
+    request: InflateRequestData,
+) -> Result<InflateResponseData, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    if *unlocked_state.rgb_send_lock.lock().unwrap() {
+        return Err(APIError::OpenChannelInProgress);
+    }
+
+    let unlocked_state_copy = unlocked_state.clone();
+    let inflate_result = tokio::task::spawn_blocking(move || {
+        unlocked_state_copy.rgb_inflate(
+            request.asset_id,
+            request.inflation_amounts,
+            request.fee_rate,
+            request.min_confirmations,
+        )
+    })
+    .await
+    .unwrap()?;
+
+    Ok(InflateResponseData {
+        txid: inflate_result.txid,
+    })
 }
 
 fn map_swap(
@@ -3281,10 +3567,10 @@ pub(crate) async fn list_transactions(
     for tx in unlocked_state.rgb_list_transactions(skip_sync)? {
         transactions.push(TransactionData {
             transaction_type: match tx.transaction_type {
-                rgb_lib::TransactionType::RgbSend => TransactionType::RgbSend,
-                rgb_lib::TransactionType::Drain => TransactionType::Drain,
-                rgb_lib::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
-                rgb_lib::TransactionType::User => TransactionType::User,
+                rgb_lib::wallet::TransactionType::RgbSend => TransactionType::RgbSend,
+                rgb_lib::wallet::TransactionType::Drain => TransactionType::Drain,
+                rgb_lib::wallet::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
+                rgb_lib::wallet::TransactionType::User => TransactionType::User,
             },
             txid: tx.txid,
             received: tx.received,
@@ -3314,6 +3600,7 @@ pub(crate) async fn list_transfers(
             created_at: transfer.created_at,
             updated_at: transfer.updated_at,
             status: match transfer.status {
+                rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
                 rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
                 rgb_lib::TransferStatus::WaitingConfirmations => {
                     TransferStatus::WaitingConfirmations
@@ -3324,17 +3611,17 @@ pub(crate) async fn list_transfers(
             requested_assignment: transfer.requested_assignment,
             assignments: transfer.assignments,
             kind: match transfer.kind {
-                rgb_lib::TransferKind::Issuance => TransferKind::Issuance,
-                rgb_lib::TransferKind::ReceiveBlind => TransferKind::ReceiveBlind,
-                rgb_lib::TransferKind::ReceiveWitness => TransferKind::ReceiveWitness,
-                rgb_lib::TransferKind::Send => TransferKind::Send,
-                rgb_lib::TransferKind::Inflation => TransferKind::Inflation,
+                rgb_lib::wallet::TransferKind::Issuance => TransferKind::Issuance,
+                rgb_lib::wallet::TransferKind::ReceiveBlind => TransferKind::ReceiveBlind,
+                rgb_lib::wallet::TransferKind::ReceiveWitness => TransferKind::ReceiveWitness,
+                rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
+                rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
             },
             txid: transfer.txid,
             recipient_id: transfer.recipient_id,
             receive_utxo: transfer.receive_utxo.map(|u| u.to_string()),
             change_utxo: transfer.change_utxo.map(|u| u.to_string()),
-            expiration: transfer.expiration,
+            expiration: transfer.expiration_timestamp.map(|t| t as i64),
             transport_endpoints: transfer
                 .transport_endpoints
                 .iter()
