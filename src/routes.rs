@@ -4489,3 +4489,63 @@ pub(crate) async fn unlock(
     })
     .await
 }
+
+#[cfg(feature = "vss")]
+pub(crate) async fn vss_backup(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap().clone();
+    drop(guard);
+
+    let vss_client = unlocked_state
+        .rgb_wallet_wrapper
+        .vss_client
+        .as_ref()
+        .ok_or_else(|| APIError::Unexpected("VSS is not configured".to_string()))?
+        .clone();
+
+    let wrapper = unlocked_state.rgb_wallet_wrapper.clone();
+    let version = tokio::task::spawn_blocking(move || {
+        let wallet = wrapper.get_rgb_wallet();
+        let rt = vss_client.handle().clone();
+        rt.block_on(wallet.vss_backup(&vss_client))
+    })
+    .await
+    .map_err(|e| APIError::Unexpected(format!("VSS backup task failed: {e}")))?
+    .map_err(|e| APIError::Unexpected(format!("VSS backup failed: {e}")))?;
+
+    Ok(Json(serde_json::json!({ "version": version })))
+}
+
+#[cfg(feature = "vss")]
+pub(crate) async fn vss_backup_info(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap().clone();
+    drop(guard);
+
+    let vss_client = unlocked_state
+        .rgb_wallet_wrapper
+        .vss_client
+        .as_ref()
+        .ok_or_else(|| APIError::Unexpected("VSS is not configured".to_string()))?
+        .clone();
+
+    let wrapper = unlocked_state.rgb_wallet_wrapper.clone();
+    let info = tokio::task::spawn_blocking(move || {
+        let wallet = wrapper.get_rgb_wallet();
+        let rt = vss_client.handle().clone();
+        rt.block_on(wallet.vss_backup_info(&vss_client))
+    })
+    .await
+    .map_err(|e| APIError::Unexpected(format!("VSS backup info task failed: {e}")))?
+    .map_err(|e| APIError::Unexpected(format!("VSS backup info failed: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "backup_exists": info.backup_exists,
+        "server_version": info.server_version,
+        "backup_required": info.backup_required,
+    })))
+}

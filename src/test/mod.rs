@@ -96,6 +96,8 @@ impl Default for UserArgs {
             virtual_peer_pubkeys: vec![],
             lsp_base_url: None,
             lsp_bearer_token: None,
+            vss_url: None,
+            vss_unencrypted: false,
         }
     }
 }
@@ -2282,3 +2284,5 @@ mod swap_roundtrip_sell;
 mod upload_asset_media;
 mod vanilla_payment_on_rgb_channel;
 mod virtual_channels;
+#[cfg(feature = "vss")]
+mod vss;

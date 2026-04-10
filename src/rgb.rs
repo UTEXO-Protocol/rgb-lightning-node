@@ -359,11 +359,23 @@ impl UnlockedAppState {
 pub(crate) struct RgbLibWalletWrapper {
     pub(crate) wallet: Arc<Mutex<RgbLibWallet>>,
     pub(crate) online: Online,
+    #[cfg(feature = "vss")]
+    pub(crate) vss_client: Option<Arc<rgb_lib::wallet::vss::VssBackupClient>>,
 }
 
 impl RgbLibWalletWrapper {
     pub(crate) fn new(wallet: Arc<Mutex<RgbLibWallet>>, online: Online) -> Self {
-        RgbLibWalletWrapper { wallet, online }
+        RgbLibWalletWrapper {
+            wallet,
+            online,
+            #[cfg(feature = "vss")]
+            vss_client: None,
+        }
+    }
+
+    #[cfg(feature = "vss")]
+    pub(crate) fn set_vss_client(&mut self, client: rgb_lib::wallet::vss::VssBackupClient) {
+        self.vss_client = Some(Arc::new(client));
     }
 
     pub(crate) fn get_rgb_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {

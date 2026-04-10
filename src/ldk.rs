@@ -1,7 +1,7 @@
 use crate::async_order::{
     AsyncOrderAccessControl, AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot,
 };
-use crate::kv_store::SeaOrmKvStore;
+use crate::synced_kv_store::SyncedKvStore;
 use amplify::{map, s};
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::hashes::{sha256, Hash as BitcoinHash};
@@ -892,7 +892,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
     Arc<FilesystemLogger>,
     Arc<
         MonitorUpdatingPersister<
-            Arc<SeaOrmKvStore>,
+            Arc<SyncedKvStore>,
             Arc<FilesystemLogger>,
             Arc<KeysManager>,
             Arc<KeysManager>,
@@ -961,7 +961,7 @@ pub(crate) struct RgbOutputSpender {
     static_state: Arc<StaticState>,
     rgb_wallet_wrapper: Arc<RgbLibWalletWrapper>,
     keys_manager: Arc<KeysManager>,
-    kv_store: Arc<SeaOrmKvStore>,
+    kv_store: Arc<SyncedKvStore>,
     txes: Arc<Mutex<OutputSpenderTxes>>,
     proxy_endpoint: String,
 }
@@ -971,7 +971,7 @@ pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
     Arc<RgbLibWalletWrapper>,
     Arc<BitcoindClient>,
     Arc<dyn Filter + Send + Sync>,
-    KVStoreSyncWrapper<Arc<SeaOrmKvStore>>,
+    KVStoreSyncWrapper<Arc<SyncedKvStore>>,
     Arc<FilesystemLogger>,
     Arc<RgbOutputSpender>,
 >;
@@ -2674,9 +2674,67 @@ pub(crate) async fn start_ldk(
     let static_state = &app_state.static_state;
 
     // Initialize Persistence using shared database connection
-    let kv_store = Arc::new(SeaOrmKvStore::from_connection(Arc::clone(
+    let local_kv_store = Arc::new(crate::kv_store::SeaOrmKvStore::from_connection(Arc::clone(
         &static_state.database,
     )));
+
+    // Initialize VSS replication if configured
+    #[cfg(feature = "vss")]
+    let kv_store = if let Some(ref vss_url) = static_state.vss_url {
+        let network: Network = static_state.network.into();
+        let xkey: ExtendedKey = mnemonic
+            .clone()
+            .into_extended_key()
+            .expect("valid mnemonic");
+        let master_xprv = &xkey.into_xprv(network).expect("valid xprv");
+        // Derive VSS signing key at m/535'/1' (separate from LDK's m/535')
+        let vss_xprv = master_xprv
+            .derive_priv(
+                &Secp256k1_30::new(),
+                &[
+                    ChildNumber::Hardened { index: 535 },
+                    ChildNumber::Hardened { index: 1 },
+                ],
+            )
+            .unwrap();
+        let vss_signing_key = vss_xprv.private_key;
+
+        // Derive store_id from the VSS key's public key
+        let secp = Secp256k1_30::new();
+        let vss_pubkey = vss_signing_key.public_key(&secp);
+        let store_id = hex_str(&vss_pubkey.serialize());
+
+        tracing::info!(store_id, "Initializing VSS KV store");
+        let vss_kv_store = Arc::new(
+            crate::vss_kv_store::VssKvStore::new(vss_url.clone(), store_id, vss_signing_key)
+                .map_err(|e| APIError::FailedVssInit(e.to_string()))?,
+        );
+        let synced = Arc::new(SyncedKvStore::with_vss(local_kv_store, vss_kv_store));
+
+        // Auto-restore from VSS if local DB has no channel manager data
+        let has_local_data = synced
+            .read(
+                CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+                CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+                CHANNEL_MANAGER_PERSISTENCE_KEY,
+            )
+            .is_ok();
+        if !has_local_data {
+            match synced.restore_from_vss() {
+                Ok(0) => tracing::info!("No VSS backup data found, starting fresh"),
+                Ok(n) => tracing::info!(keys_restored = n, "Restored LDK state from VSS"),
+                Err(e) => tracing::warn!(error = %e, "VSS restore failed, starting fresh"),
+            }
+        }
+
+        synced
+    } else {
+        Arc::new(SyncedKvStore::local_only(local_kv_store))
+    };
+
+    #[cfg(not(feature = "vss"))]
+    let kv_store = Arc::new(SyncedKvStore::local_only(local_kv_store));
+
     let kv_store_dyn: Arc<dyn KVStoreSync + Send + Sync> =
         Arc::clone(&kv_store) as Arc<dyn KVStoreSync + Send + Sync>;
 
@@ -2979,6 +3037,44 @@ pub(crate) async fn start_ldk(
     .await
     .unwrap();
     let rgb_online = rgb_wallet.go_online(false, indexer_url.to_string())?;
+
+    // Configure VSS backup for the RGB wallet if VSS is enabled
+    #[cfg(feature = "vss")]
+    if let Some(ref vss_url) = static_state.vss_url {
+        let network: Network = static_state.network.into();
+        let xkey: ExtendedKey = mnemonic
+            .clone()
+            .into_extended_key()
+            .expect("valid mnemonic");
+        let master_xprv_vss = &xkey.into_xprv(network).expect("valid xprv");
+        let vss_xprv = master_xprv_vss
+            .derive_priv(
+                &Secp256k1_30::new(),
+                &[
+                    ChildNumber::Hardened { index: 535 },
+                    ChildNumber::Hardened { index: 1 },
+                ],
+            )
+            .unwrap();
+        let vss_signing_key = vss_xprv.private_key;
+        let secp = Secp256k1_30::new();
+        let vss_pubkey = vss_signing_key.public_key(&secp);
+        let rgb_store_id = format!("{}_rgb", hex_str(&vss_pubkey.serialize()));
+
+        let vss_config = rgb_lib::wallet::vss::VssBackupConfig::new(
+            vss_url.clone(),
+            rgb_store_id,
+            vss_signing_key,
+        )
+        .with_encryption(!static_state.vss_unencrypted)
+        .with_auto_backup(true);
+
+        match rgb_wallet.configure_vss_backup(vss_config) {
+            Ok(()) => tracing::info!("VSS auto-backup enabled for RGB wallet"),
+            Err(e) => tracing::warn!("Failed to configure VSS backup for RGB wallet: {e}"),
+        }
+    }
+
     save_config(
         &static_state.database,
         kv_store.as_ref(),
@@ -3004,10 +3100,47 @@ pub(crate) async fn start_ldk(
         &master_fingerprint.to_string(),
     )?;
 
-    let rgb_wallet_wrapper = Arc::new(RgbLibWalletWrapper::new(
-        Arc::new(Mutex::new(rgb_wallet)),
-        rgb_online,
-    ));
+    #[allow(unused_mut)]
+    let mut rgb_wallet_wrapper =
+        RgbLibWalletWrapper::new(Arc::new(Mutex::new(rgb_wallet)), rgb_online);
+
+    // Create and store the VssBackupClient for manual backup/info API routes
+    #[cfg(feature = "vss")]
+    if let Some(ref vss_url) = static_state.vss_url {
+        let network: Network = static_state.network.into();
+        let xkey: ExtendedKey = mnemonic
+            .clone()
+            .into_extended_key()
+            .expect("valid mnemonic");
+        let master_xprv_client = &xkey.into_xprv(network).expect("valid xprv");
+        let vss_xprv = master_xprv_client
+            .derive_priv(
+                &Secp256k1_30::new(),
+                &[
+                    ChildNumber::Hardened { index: 535 },
+                    ChildNumber::Hardened { index: 1 },
+                ],
+            )
+            .unwrap();
+        let vss_signing_key = vss_xprv.private_key;
+        let secp = Secp256k1_30::new();
+        let vss_pubkey = vss_signing_key.public_key(&secp);
+        let rgb_store_id = format!("{}_rgb", hex_str(&vss_pubkey.serialize()));
+
+        let client_config = rgb_lib::wallet::vss::VssBackupConfig::new(
+            vss_url.clone(),
+            rgb_store_id,
+            vss_signing_key,
+        )
+        .with_encryption(!static_state.vss_unencrypted);
+
+        match rgb_lib::wallet::vss::VssBackupClient::new(client_config) {
+            Ok(client) => rgb_wallet_wrapper.set_vss_client(client),
+            Err(e) => tracing::warn!("Failed to create VssBackupClient: {e}"),
+        }
+    }
+
+    let rgb_wallet_wrapper = Arc::new(rgb_wallet_wrapper);
 
     // Initialize the OutputSweeper.
     let txes: OutputSpenderTxes = match kv_store.read("", "", OUTPUT_SPENDER_TXES_KEY) {

@@ -394,6 +394,40 @@ Here is a list of projects using RLN, in alphabetical order:
 - [Tiramisu Wallet]
 
 
+## VSS Cloud Backup (optional)
+
+The node supports cloud backup via [VSS] (Versioned Storage Service).
+When enabled, LDK channel state and RGB wallet data are replicated to a VSS
+server for disaster recovery.
+
+### Setup
+
+Start the VSS server alongside regtest services:
+```sh
+VSS=1 ./regtest.sh start
+```
+
+Or manually:
+```sh
+docker compose --profile vss up -d
+```
+
+### Usage
+
+Pass `--vss-url` when starting the node:
+```sh
+cargo run --features vss -- /tmp/rlndata --vss-url http://localhost:8081/vss
+```
+
+Options:
+- `--vss-url <URL>` — VSS server URL (enables VSS)
+- `--vss-unencrypted` — Disable encryption for VSS backups (default: encrypted)
+
+API endpoints (when VSS is enabled):
+- `POST /vssbackup` — trigger manual RGB wallet backup
+- `GET /vssbackupinfo` — check backup status
+
+[VSS]: https://github.com/lightningdevkit/vss-server
 [Biscuit tokens]: https://www.biscuitsec.org/
 [RGB proxy server]: https://github.com/RGB-Tools/rgb-proxy-server
 [ldk-sample]: https://github.com/lightningdevkit/ldk-sample

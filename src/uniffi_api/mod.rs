@@ -46,6 +46,8 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
         virtual_peer_pubkeys: request.virtual_peer_pubkeys.unwrap_or_default(),
         lsp_base_url: request.lsp_base_url,
         lsp_bearer_token: request.lsp_bearer_token,
+        vss_url: None,
+        vss_unencrypted: false,
     };
     block_on_app(NodeHandle::new(config))
 }

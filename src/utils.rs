@@ -1,5 +1,5 @@
 use crate::database::RlnDatabase;
-use crate::kv_store::SeaOrmKvStore;
+use crate::synced_kv_store::SyncedKvStore;
 use amplify::s;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -106,6 +106,12 @@ pub(crate) struct StaticState {
     pub(crate) database: Arc<DatabaseConnection>,
     pub(crate) lsp_base_url: Option<String>,
     pub(crate) lsp_bearer_token: Option<String>,
+    /// VSS server URL (None = VSS disabled)
+    #[cfg_attr(not(feature = "vss"), allow(dead_code))]
+    pub(crate) vss_url: Option<String>,
+    /// Whether VSS backups should be unencrypted
+    #[cfg_attr(not(feature = "vss"), allow(dead_code))]
+    pub(crate) vss_unencrypted: bool,
 }
 
 pub(crate) struct UnlockedAppState {
@@ -119,7 +125,7 @@ pub(crate) struct UnlockedAppState {
     pub(crate) peer_manager: Arc<PeerManager>,
     pub(crate) async_order_handler: Arc<AsyncOrderMessageHandler>,
     pub(crate) async_payments_preimage_root: Arc<AsyncPaymentsPreimageRoot>,
-    pub(crate) kv_store: Arc<SeaOrmKvStore>,
+    pub(crate) kv_store: Arc<SyncedKvStore>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,
@@ -405,6 +411,10 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
 
     let cancel_token = CancellationToken::new();
 
+    if args.vss_url.is_some() {
+        tracing::info!(vss_url = ?args.vss_url, "VSS cloud backup enabled");
+    }
+
     let static_state = Arc::new(StaticState {
         enable_virtual_channels_v0: args.enable_virtual_channels_v0,
         ldk_peer_listening_port: args.ldk_peer_listening_port,
@@ -417,6 +427,8 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         database: Arc::new(database),
         lsp_base_url: args.lsp_base_url.clone(),
         lsp_bearer_token: args.lsp_bearer_token.clone(),
+        vss_url: args.vss_url.clone(),
+        vss_unencrypted: args.vss_unencrypted,
     });
 
     let app_state = Arc::new(AppState {

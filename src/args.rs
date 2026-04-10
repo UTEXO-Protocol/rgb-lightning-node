@@ -48,6 +48,14 @@ struct Args {
 
     #[arg(long)]
     lsp_bearer_token: Option<String>,
+
+    /// VSS server URL for cloud backup (e.g., http://localhost:8081/vss)
+    #[arg(long)]
+    vss_url: Option<String>,
+
+    /// Disable encryption for VSS backups (default: encrypted)
+    #[arg(long, default_value_t = false)]
+    vss_unencrypted: bool,
 }
 
 pub(crate) struct UserArgs {
@@ -61,6 +69,8 @@ pub(crate) struct UserArgs {
     pub(crate) virtual_peer_pubkeys: Vec<PublicKey>,
     pub(crate) lsp_base_url: Option<String>,
     pub(crate) lsp_bearer_token: Option<String>,
+    pub(crate) vss_url: Option<String>,
+    pub(crate) vss_unencrypted: bool,
 }
 
 pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
@@ -94,5 +104,7 @@ pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
         virtual_peer_pubkeys,
         lsp_base_url: args.lsp_base_url,
         lsp_bearer_token: args.lsp_bearer_token,
+        vss_url: args.vss_url,
+        vss_unencrypted: args.vss_unencrypted,
     })
 }
