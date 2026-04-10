@@ -769,17 +769,18 @@ impl UnlockedAppState {
         let kv = self.kv_store.as_ref();
 
         for namespace in [RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS] {
-            if let Ok(keys) = kv.list(RGB_PRIMARY_NS, namespace) {
-                for key in keys {
-                    if key.starts_with(&channel_id_hex)
-                        && key.len() > channel_id_hex.len()
-                        && key.ends_with("_pending")
-                    {
-                        return Err(
-                            "virtual cleanup is blocked while RGB payment temp artifacts remain"
-                                .to_string(),
-                        );
-                    }
+            let keys = kv
+                .list(RGB_PRIMARY_NS, namespace)
+                .map_err(|_| "virtual cleanup could not inspect RGB temp artifacts".to_string())?;
+            for key in keys {
+                if key.starts_with(&channel_id_hex)
+                    && key.len() > channel_id_hex.len()
+                    && key.ends_with("_pending")
+                {
+                    return Err(
+                        "virtual cleanup is blocked while RGB payment temp artifacts remain"
+                            .to_string(),
+                    );
                 }
             }
         }
