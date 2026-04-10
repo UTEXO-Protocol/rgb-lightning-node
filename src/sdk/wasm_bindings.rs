@@ -20,7 +20,8 @@ use serde_wasm_bindgen::to_value as to_js_value;
 use wasm_bindgen::prelude::*;
 
 use crate::sdk::{
-    self, BlockTime, ChannelData, ChannelIdData, ChannelStatus, EstimateFeeData, NetworkInfoData,
+    self, BlockTime, CancelHodlInvoiceRequestData, ChannelData, ChannelIdData, ChannelStatus,
+    ClaimHodlInvoiceRequestData, ClaimHodlInvoiceResponseData, EstimateFeeData, NetworkInfoData,
     NodeInfoData, PeerData, TransactionData, TransactionType, WasmNetwork, WasmRgbKeysData,
     WasmRuntimeCapabilitiesData, WasmSdkState, WasmSdkStateConfig,
 };
@@ -287,6 +288,19 @@ impl From<TransactionData> for JsTransactionData {
     }
 }
 
+#[derive(Serialize)]
+struct JsClaimHodlInvoiceResponseData {
+    changed: bool,
+}
+
+impl From<ClaimHodlInvoiceResponseData> for JsClaimHodlInvoiceResponseData {
+    fn from(value: ClaimHodlInvoiceResponseData) -> Self {
+        Self {
+            changed: value.changed,
+        }
+    }
+}
+
 #[wasm_bindgen]
 pub struct JsSdkState {
     inner: WasmSdkState,
@@ -462,6 +476,50 @@ impl JsSdkState {
         let mapped = JsChannelIdData::from(data);
         js_obj(&mapped)
     }
+
+    #[wasm_bindgen(js_name = cancelHodlInvoice)]
+    pub fn cancel_hodl_invoice(&self, payment_hash: String) -> Result<(), JsValue> {
+        block_on(sdk::cancel_hodl_invoice(
+            self.inner.clone(),
+            CancelHodlInvoiceRequestData { payment_hash },
+        ))
+        .map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = claimHodlInvoiceJson)]
+    pub fn claim_hodl_invoice_json(
+        &self,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<String, JsValue> {
+        let data = block_on(sdk::claim_hodl_invoice(
+            self.inner.clone(),
+            ClaimHodlInvoiceRequestData {
+                payment_hash,
+                payment_preimage,
+            },
+        ))
+        .map_err(js_err)?;
+        serde_json::to_string(&JsClaimHodlInvoiceResponseData::from(data)).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = claimHodlInvoiceValue)]
+    pub fn claim_hodl_invoice_value(
+        &self,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<JsValue, JsValue> {
+        let data = block_on(sdk::claim_hodl_invoice(
+            self.inner.clone(),
+            ClaimHodlInvoiceRequestData {
+                payment_hash,
+                payment_preimage,
+            },
+        ))
+        .map_err(js_err)?;
+        let mapped = JsClaimHodlInvoiceResponseData::from(data);
+        js_obj(&mapped)
+    }
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
@@ -594,6 +652,35 @@ mod tests {
         assert!(
             err_s.contains("Unknown temporary channel ID"),
             "unexpected error message: {err_s}"
+        );
+    }
+
+    #[test]
+    fn hodl_invoice_binding_methods_exist_and_validate() {
+        let state = sdk_init(
+            "bind-hodl".to_string(),
+            Some("regtest".to_string()),
+            Some(0),
+            Some(1.0),
+        )
+        .expect("sdk_init should succeed");
+
+        let invalid = state
+            .cancel_hodl_invoice("abc".to_string())
+            .expect_err("cancelHodlInvoice should validate payment_hash");
+        let invalid_s = invalid.as_string().unwrap_or_default();
+        assert!(
+            invalid_s.contains("payment_hash must be 64 hex chars"),
+            "unexpected error message: {invalid_s}"
+        );
+
+        let unsupported = state
+            .claim_hodl_invoice_json("00".repeat(32), "11".repeat(32))
+            .expect_err("claimHodlInvoiceJson should be unsupported on wasm runtime");
+        let unsupported_s = unsupported.as_string().unwrap_or_default();
+        assert!(
+            unsupported_s.contains("Operation is not yet available on wasm target"),
+            "unexpected error message: {unsupported_s}"
         );
     }
 

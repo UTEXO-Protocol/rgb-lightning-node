@@ -17,7 +17,7 @@ pub(crate) fn send_onion_message(request_json: String) -> Result<(), JsValue> {
 
     if request.node_ids.is_empty() {
         return Err(JsValue::from_str(
-            "sendonionmessage requires at least one node id for the path",
+            "SendOnionMessage requires at least one node id for the path",
         ));
     }
     for pk_str in request.node_ids {

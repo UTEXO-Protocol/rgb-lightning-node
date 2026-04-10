@@ -73,6 +73,22 @@ pub struct ChannelIdData {
 }
 
 #[derive(Clone, Debug)]
+pub struct CancelHodlInvoiceRequestData {
+    pub payment_hash: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClaimHodlInvoiceRequestData {
+    pub payment_hash: String,
+    pub payment_preimage: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClaimHodlInvoiceResponseData {
+    pub changed: bool,
+}
+
+#[derive(Clone, Debug)]
 pub enum WasmNetwork {
     Mainnet,
     Testnet,
@@ -335,10 +351,11 @@ pub enum WasmApiError {
 
 pub(crate) mod engine {
     use super::{
-        AddressData, ChannelData, ChannelIdData, ChannelStatus, EstimateFeeData, NetworkInfoData,
-        NodeInfoData, PeerData, TransactionData, TransactionType, WasmApiError, WasmHealthData,
-        WasmRgbKeysData, WasmRuntimeCapabilitiesData, WasmSdkInfoData, WasmSdkState,
-        WASM_SDK_BOUNDARY_READY,
+        validate_fixed_hex, AddressData, CancelHodlInvoiceRequestData, ChannelData, ChannelIdData,
+        ChannelStatus, ClaimHodlInvoiceRequestData, ClaimHodlInvoiceResponseData, EstimateFeeData,
+        NetworkInfoData, NodeInfoData, PeerData, TransactionData, TransactionType, WasmApiError,
+        WasmHealthData, WasmRgbKeysData, WasmRuntimeCapabilitiesData, WasmSdkInfoData,
+        WasmSdkState, WASM_SDK_BOUNDARY_READY,
     };
     use std::future::Future;
     use std::pin::Pin;
@@ -416,6 +433,18 @@ pub(crate) mod engine {
             network: super::WasmNetwork,
             mnemonic: String,
         ) -> Pin<Box<dyn Future<Output = Result<WasmRgbKeysData, WasmApiError>> + Send>>;
+
+        fn cancel_hodl_invoice(
+            &self,
+            _state: WasmSdkState,
+            request: CancelHodlInvoiceRequestData,
+        ) -> Pin<Box<dyn Future<Output = Result<(), WasmApiError>> + Send>>;
+
+        fn claim_hodl_invoice(
+            &self,
+            _state: WasmSdkState,
+            request: ClaimHodlInvoiceRequestData,
+        ) -> Pin<Box<dyn Future<Output = Result<ClaimHodlInvoiceResponseData, WasmApiError>> + Send>>;
     }
 
     /// Placeholder engine for wasm builds while SDK runtime APIs are incrementally ported.
@@ -677,12 +706,52 @@ pub(crate) mod engine {
                 }
             })
         }
+
+        fn cancel_hodl_invoice(
+            &self,
+            _state: WasmSdkState,
+            request: CancelHodlInvoiceRequestData,
+        ) -> Pin<Box<dyn Future<Output = Result<(), WasmApiError>> + Send>> {
+            Box::pin(async move {
+                validate_fixed_hex(&request.payment_hash, "payment_hash", 32)?;
+                Err(WasmApiError::Unsupported)
+            })
+        }
+
+        fn claim_hodl_invoice(
+            &self,
+            _state: WasmSdkState,
+            request: ClaimHodlInvoiceRequestData,
+        ) -> Pin<Box<dyn Future<Output = Result<ClaimHodlInvoiceResponseData, WasmApiError>> + Send>>
+        {
+            Box::pin(async move {
+                validate_fixed_hex(&request.payment_hash, "payment_hash", 32)?;
+                validate_fixed_hex(&request.payment_preimage, "payment_preimage", 32)?;
+                Err(WasmApiError::Unsupported)
+            })
+        }
     }
 
     pub(crate) fn default_engine() -> &'static WasmSdkEngine {
         static ENGINE: WasmSdkEngine = WasmSdkEngine;
         &ENGINE
     }
+}
+
+fn validate_fixed_hex(value: &str, field: &str, expected_bytes: usize) -> Result<(), WasmApiError> {
+    let trimmed = value.trim();
+    let expected_len = expected_bytes * 2;
+    if trimmed.len() != expected_len {
+        return Err(WasmApiError::InvalidRequest(format!(
+            "{field} must be {expected_len} hex chars"
+        )));
+    }
+    if !trimmed.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err(WasmApiError::InvalidRequest(format!(
+            "{field} must be a valid hex string"
+        )));
+    }
+    Ok(())
 }
 
 /// Indicates that the wasm SDK boundary module is compiled and available.
@@ -786,6 +855,22 @@ pub fn rgb_restore_keys(
 ) -> Pin<Box<dyn Future<Output = Result<WasmRgbKeysData, WasmApiError>> + Send>> {
     use crate::sdk::engine::WasmEngine;
     engine::default_engine().rgb_restore_keys(network, mnemonic)
+}
+
+pub fn cancel_hodl_invoice(
+    state: WasmSdkState,
+    request: CancelHodlInvoiceRequestData,
+) -> Pin<Box<dyn Future<Output = Result<(), WasmApiError>> + Send>> {
+    use crate::sdk::engine::WasmEngine;
+    engine::default_engine().cancel_hodl_invoice(state, request)
+}
+
+pub fn claim_hodl_invoice(
+    state: WasmSdkState,
+    request: ClaimHodlInvoiceRequestData,
+) -> Pin<Box<dyn Future<Output = Result<ClaimHodlInvoiceResponseData, WasmApiError>> + Send>> {
+    use crate::sdk::engine::WasmEngine;
+    engine::default_engine().claim_hodl_invoice(state, request)
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
@@ -910,6 +995,49 @@ mod tests {
         config.app_id = "".to_string();
         let err = block_on(init(config)).expect_err("init should fail");
         assert!(matches!(err, WasmApiError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn hodl_invoice_api_is_available_and_validates_inputs() {
+        let state = WasmSdkState::new("app-hodl");
+
+        let invalid_cancel = block_on(cancel_hodl_invoice(
+            state.clone(),
+            CancelHodlInvoiceRequestData {
+                payment_hash: "abc".to_string(),
+            },
+        ))
+        .expect_err("cancel_hodl_invoice should validate payment_hash");
+        assert!(matches!(invalid_cancel, WasmApiError::InvalidRequest(_)));
+
+        let unsupported_cancel = block_on(cancel_hodl_invoice(
+            state.clone(),
+            CancelHodlInvoiceRequestData {
+                payment_hash: "00".repeat(32),
+            },
+        ))
+        .expect_err("cancel_hodl_invoice should be unsupported on wasm runtime");
+        assert!(matches!(unsupported_cancel, WasmApiError::Unsupported));
+
+        let invalid_claim = block_on(claim_hodl_invoice(
+            state.clone(),
+            ClaimHodlInvoiceRequestData {
+                payment_hash: "00".repeat(32),
+                payment_preimage: "xyz".to_string(),
+            },
+        ))
+        .expect_err("claim_hodl_invoice should validate payment_preimage");
+        assert!(matches!(invalid_claim, WasmApiError::InvalidRequest(_)));
+
+        let unsupported_claim = block_on(claim_hodl_invoice(
+            state,
+            ClaimHodlInvoiceRequestData {
+                payment_hash: "00".repeat(32),
+                payment_preimage: "11".repeat(32),
+            },
+        ))
+        .expect_err("claim_hodl_invoice should be unsupported on wasm runtime");
+        assert!(matches!(unsupported_claim, WasmApiError::Unsupported));
     }
 
     #[cfg(feature = "real-wasm-rgb")]
