@@ -4,15 +4,26 @@ Baseline source: async SDK endpoints in `src/sdk/mod.rs` (51 entries).
 
 Status legend:
 - `runtime-backed`: backed by `rgb-lib-wasm` wallet/runtime behavior.
-- `scaffolded`: present in wasm SDK, but LN/LDK behavior is modeled/scaffolded.
+- `unsupported-by-design`: intentionally unavailable in wasm with stable error/contract coverage.
 - `missing`: no direct wasm-sdk endpoint yet.
 
-Checklist tags used in Notes for scaffolded LN/payment/read endpoints:
+Checklist tags used in Notes for LN/payment/read endpoints:
 - `IV`: input validation parity
 - `ST`: state transition parity
 - `OS`: output shape parity
 - `EC`: error contract parity
 - `ET`: endpoint tests present (node/facade/node-handle)
+
+## Core Rewritten Parts (SDK -> WASM)
+
+Core SDK behavior has been rewritten in wasm where native runtime assumptions do not hold in browser/JS environments:
+
+| Area | What was rewritten in wasm | Motivation |
+|---|---|---|
+| Runtime storage | Browser-persistent state stores for node/runtime/swap/media state (with in-memory fallback paths where needed). | Native file/daemon-backed state assumptions do not map cleanly to wasm; browser persistence is required for session continuity, deterministic restore, and testability across SDK instances. |
+| Transport/event bridge | Runtime transport/read-event ingestion pipeline with queue/drain semantics and deterministic event application. | Native LDK transport loops are not directly portable to wasm execution surfaces, so wasm needs explicit event ingestion and replay-safe transitions for peer/channel/payment parity. |
+| Runtime authority split | Explicit runtime-backend selection (`scaffold` / `ldk_bridge`) with runtime-manager-authoritative state on `ldk_bridge`. | Keeps compatibility and test harness flexibility while allowing progressive migration to authoritative runtime-backed behavior without changing facade contracts. |
+| Swap runtime | Dedicated wasm swap runtime manager (`bindings/wasm-sdk/src/swap_runtime.rs`) for maker/taker lifecycle + persistence. | Decouples swap state from native process assumptions and provides deterministic lifecycle handling plus persistent recovery in browser contexts. |
 
 | Native SDK endpoint (`src/sdk/mod.rs`) | Wasm equivalent (`bindings/wasm-sdk`) | Status | Notes |
 |---|---|---|---|
@@ -32,7 +43,7 @@ Checklist tags used in Notes for scaffolded LN/payment/read endpoints:
 | `get_asset_media` | `getAssetMediaValue` / `getAssetMediaJson` | runtime-backed | Media-digest lookup backed by wasm media store with native-like digest validation and stable `{bytes_hex}` response shape; media entries are browser-persistent (`localStorage`) with in-memory cache fallback. |
 | `list_assets` | `listAssetsValue` / `listAssetsJson` | runtime-backed | Wallet-backed listing. |
 | `send_rgb` | `sendBegin` + `sendEndValue/Json` | runtime-backed | Two-step PSBT flow. |
-| `send_rgb_from_groups` | `walletSendRgbFromGroupsValue` / `walletSendRgbFromGroupsJson` and wallet-handle `sendRgbFromGroupsValue` / `sendRgbFromGroupsJson` | runtime-backed | Adapter implemented on wallet surfaces via real `send_begin` orchestration; legacy SDK-only `sendRgbFromGroups*` remains scaffolded for compatibility. |
+| `send_rgb_from_groups` | `walletSendRgbFromGroupsValue` / `walletSendRgbFromGroupsJson` and wallet-handle `sendRgbFromGroupsValue` / `sendRgbFromGroupsJson` | runtime-backed | Adapter implemented on wallet surfaces via real `send_begin` orchestration; legacy SDK-only `sendRgbFromGroups*` remains compatibility-only/unsupported on wasm facade. |
 | `init` | `initValue` / `initJson` | runtime-backed | Stateful wasm lifecycle initialization (`password+mnemonic` bootstrap) with stable validation/error contracts and runtime-session authority propagation (`initialized=true`, `authorized=false`). |
 | `unlock` | `unlock` | runtime-backed | Runtime-backed lifecycle unlock with request parsing, init precondition, password validation, and runtime-session authorization transition (`authorized=true`). |
 | `lock` | `lock` | runtime-backed | Runtime-backed lifecycle lock with init precondition and deterministic authorization transition (`authorized=false`) so runtime managers reject locked sessions until next unlock. |
@@ -40,9 +51,9 @@ Checklist tags used in Notes for scaffolded LN/payment/read endpoints:
 | `disconnect_peer` | `disconnectPeer` | runtime-backed | Runtime-backed disconnect path with secp256k1 validation and `peer_disconnected` transport transition application, including stale channel cleanup and runtime-manager-authoritative state transitions on `ldk_bridge`. |
 | `close_channel` | `closeChannel` | runtime-backed | Runtime-backed channel-close transition via `channel_closed` transport event path with runtime-manager-authoritative application on `ldk_bridge`, runtime-ready guard parity, and stable not-found contract. |
 | `create_utxos` | `createUtxosBegin` + `createUtxosEnd/Json` | runtime-backed | Two-step PSBT flow. |
-| `issue_asset_nia` | `walletIssueAssetNiaValue` / `walletIssueAssetNiaJson` and wallet-handle `issueAssetNiaValue` / `issueAssetNiaJson` | runtime-backed | Wired to `rgb-lib-wasm` `Wallet::issue_asset_nia`; legacy SDK-only `issueAssetNia*` remains scaffolded for compatibility. |
-| `issue_asset_cfa` | `walletIssueAssetCfaValue` / `walletIssueAssetCfaJson` and wallet-handle `issueAssetCfaValue` / `issueAssetCfaJson` | runtime-backed | Wired via `rgb-lib-wasm` `Wallet::issue_asset_ifa` compatibility mapping; legacy SDK-only `issueAssetCfa*` remains scaffolded for compatibility. |
-| `issue_asset_uda` | `walletIssueAssetUdaValue` / `walletIssueAssetUdaJson` and wallet-handle `issueAssetUdaValue` / `issueAssetUdaJson` | scaffolded | Explicit unsupported contract: `rgb-lib-wasm` currently has no UDA issuance primitive; legacy SDK-only `issueAssetUda*` remains scaffolded for compatibility. |
+| `issue_asset_nia` | `walletIssueAssetNiaValue` / `walletIssueAssetNiaJson` and wallet-handle `issueAssetNiaValue` / `issueAssetNiaJson` | runtime-backed | Wired to `rgb-lib-wasm` `Wallet::issue_asset_nia`; legacy SDK-only `issueAssetNia*` remains compatibility-only/unsupported on wasm facade. |
+| `issue_asset_cfa` | `walletIssueAssetCfaValue` / `walletIssueAssetCfaJson` and wallet-handle `issueAssetCfaValue` / `issueAssetCfaJson` | runtime-backed | Wired via `rgb-lib-wasm` `Wallet::issue_asset_ifa` compatibility mapping; legacy SDK-only `issueAssetCfa*` remains compatibility-only/unsupported on wasm facade. |
+| `issue_asset_uda` | `walletIssueAssetUdaValue` / `walletIssueAssetUdaJson` and wallet-handle `issueAssetUdaValue` / `issueAssetUdaJson` | unsupported-by-design | Explicit unsupported contract: `rgb-lib-wasm` currently has no UDA issuance primitive; legacy SDK-only `issueAssetUda*` remains compatibility-only/unsupported on wasm facade. |
 | `keysend` | `keysendValue` / `keysendJson` | runtime-backed | Runtime-backed payment send path enforcing native min amount parity (`SDK_HTLC_MIN_MSAT`), destination pubkey validation, RGB payload validation (`asset_id` format + `asset_amount > 0`), and no-route failure transitions through runtime payment-status events. On `ldk_bridge`, delivery requires connected destination peer state (`peer.started=true`). |
 | `send_btc` | `sendBtcBegin` + `sendBtcEnd` | runtime-backed | Two-step PSBT flow. |
 | `post_asset_media` | `postAssetMediaValue` / `postAssetMediaJson` | runtime-backed | Media upload stores hex payload in wasm media store keyed by SHA-256 digest and returns stable `{digest}` response shape; writes persist to browser storage for cross-instance retrieval parity. |
@@ -74,7 +85,6 @@ This section locks target behavior per native endpoint and defines strict accept
 
 Target mode legend:
 - `runtime-backed`: endpoint should be fully runtime-backed in wasm.
-- `scaffold-to-runtime`: currently scaffolded, target is full runtime-backed parity.
 - `unsupported-by-design`: explicit long-term unsupported in wasm, with stable error contracts.
 
 Gate profile criteria:
@@ -144,7 +154,7 @@ Endpoint target freeze:
 
 ## Unsupported Contract Coverage (Step 3)
 
-The endpoints below are intentionally scaffolded/unsupported and now have explicit rationale + deterministic error-contract tests.
+The endpoints below are intentionally unsupported-by-design and have explicit rationale + deterministic error-contract tests.
 
 | Endpoint group | Wasm endpoint surfaces | Unsupported rationale | Tested surfaces |
 |---|---|---|---|
