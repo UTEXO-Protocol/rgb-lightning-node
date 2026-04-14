@@ -2256,6 +2256,7 @@ mod openchannel_optional_addr;
 mod openchannel_push_asset_amount;
 mod payment;
 mod refuse_high_fees;
+mod auth_db_persistence;
 mod restart;
 mod send_receive;
 mod swap_assets_liquidity_both_ways;

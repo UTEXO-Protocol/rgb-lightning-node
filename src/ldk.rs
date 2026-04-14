@@ -1026,6 +1026,14 @@ fn _update_rgb_channel_amount(
                 } else {
                     (rgb_payment_info.amount, 0)
                 };
+                if kv_store.read_rgb_channel_info(channel_id_str, false).is_err() {
+                    tracing::warn!(
+                        "Skipping RGB channel balance update for channel {} because channel RGB info is missing",
+                        channel_id_str
+                    );
+                    continue;
+                }
+
                 update_rgb_channel_amount(
                     channel_id_str,
                     offered,
