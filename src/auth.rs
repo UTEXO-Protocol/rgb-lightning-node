@@ -176,18 +176,13 @@ impl AppState {
         let revocation_ids = token_to_revoke.revocation_identifiers();
         let db = self.get_db();
 
-        let ids_to_persist: Vec<Vec<u8>> = {
-            let mut revoked = self.revoked_tokens.lock().unwrap();
-            let mut to_persist = Vec::with_capacity(revocation_ids.len());
-            for id in revocation_ids {
-                revoked.insert(id.clone());
-                to_persist.push(id);
-            }
-            to_persist
-        };
-
-        for id in &ids_to_persist {
+        for id in &revocation_ids {
             db.add_revoked_token(&hex_str(id))?;
+        }
+
+        let mut revoked = self.revoked_tokens.lock().unwrap();
+        for id in revocation_ids {
+            revoked.insert(id);
         }
 
         Ok(())

@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::database::entities::{ChannelPeerActMod, ChannelPeerEntity, RevokedTokenActMod, RevokedTokenEntity};
+use crate::database::entities::{
+    ChannelPeerActMod, ChannelPeerEntity, RevokedTokenActMod, RevokedTokenEntity,
+};
 use crate::database::RlnDatabase;
 use crate::disk::FilesystemLogger;
 use crate::utils::{AppState, StaticState};
@@ -38,22 +40,20 @@ fn build_state(storage_dir_path: PathBuf, database: DatabaseConnection) -> AppSt
 fn setup_test_db() -> DatabaseConnection {
     let db_path = std::env::temp_dir().join(format!("rln-db-test-{}", uuid::Uuid::new_v4()));
     let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
-    let db =
-        crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
-            .expect("db connection");
+    let db = crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
+        .expect("db connection");
     crate::runtime::block_on(Migrator::up(&db, None)).expect("run migrations");
     db
 }
 
 #[test]
-fn revoke_token_updates_in_memory_before_db_persist() {
+fn revoke_token_does_not_update_in_memory_when_db_persist_fails() {
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let db_path = tmp_dir.path().join("rln_db");
     let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
-    let database = crate::runtime::block_on(Database::connect(ConnectOptions::new(
-        connection_string,
-    )))
-    .expect("db connection");
+    let database =
+        crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
+            .expect("db connection");
 
     // Intentionally do not run migrations to force DB persist failure.
     let state = build_state(tmp_dir.path().to_path_buf(), database);
@@ -61,30 +61,29 @@ fn revoke_token_updates_in_memory_before_db_persist() {
     let token = biscuit!("role(\"custom\");")
         .build(&keypair)
         .expect("valid biscuit");
-    let expected_ids: HashSet<Vec<u8>> = token.revocation_identifiers().into_iter().collect();
 
     let res = state.revoke_token(&token);
     assert!(res.is_err(), "revoke_token should fail without DB schema");
 
-    // Reproduces concern #2: in-memory set was updated even though DB write failed.
+    // In-memory set must remain unchanged if DB write fails.
     let revoked = state.revoked_tokens.lock().unwrap();
-    for id in expected_ids {
-        assert!(
-            revoked.contains(&id),
-            "revocation id should already be present in memory after failure"
-        );
-    }
+    assert!(
+        revoked.is_empty(),
+        "in-memory set must not be updated when DB write fails"
+    );
 }
 
 #[test]
 fn load_revoked_tokens_silently_ignores_malformed_hex_rows() {
     let db = setup_test_db();
 
-    crate::runtime::block_on(RevokedTokenEntity::insert(RevokedTokenActMod {
-        token_id: ActiveValue::Set("zzzzzz-not-hex".to_string()),
-        revoked_at: ActiveValue::Set(Utc::now()),
-    })
-    .exec(&db))
+    crate::runtime::block_on(
+        RevokedTokenEntity::insert(RevokedTokenActMod {
+            token_id: ActiveValue::Set("zzzzzz-not-hex".to_string()),
+            revoked_at: ActiveValue::Set(Utc::now()),
+        })
+        .exec(&db),
+    )
     .expect("insert malformed token");
 
     let rln_db = RlnDatabase::new(db);
@@ -101,20 +100,19 @@ fn load_revoked_tokens_silently_ignores_malformed_hex_rows() {
 fn read_channel_peer_data_silently_ignores_malformed_rows() {
     let db = setup_test_db();
 
-    crate::runtime::block_on(ChannelPeerEntity::insert(ChannelPeerActMod {
-        pubkey: ActiveValue::Set("not-a-pubkey".to_string()),
-        address: ActiveValue::Set("not-an-address".to_string()),
-        created_at: ActiveValue::Set(Utc::now()),
-    })
-    .exec(&db))
+    crate::runtime::block_on(
+        ChannelPeerEntity::insert(ChannelPeerActMod {
+            pubkey: ActiveValue::Set("not-a-pubkey".to_string()),
+            address: ActiveValue::Set("not-an-address".to_string()),
+            created_at: ActiveValue::Set(Utc::now()),
+        })
+        .exec(&db),
+    )
     .expect("insert malformed channel peer");
 
     let rln_db = RlnDatabase::new(db);
     let peers = rln_db
         .read_channel_peer_data()
         .expect("read_channel_peer_data should not error");
-    assert!(
-        peers.is_empty(),
-        "malformed peer rows are silently skipped"
-    );
+    assert!(peers.is_empty(), "malformed peer rows are silently skipped");
 }

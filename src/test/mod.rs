@@ -2227,6 +2227,7 @@ pub fn set_mock_fee(fee: u32) {
     crate::fee_mock::set_mock_fee_for_tests(Some(fee));
 }
 
+mod auth_db_persistence;
 mod authentication;
 mod backup_and_restore;
 mod close_coop_nobtc_acceptor;
@@ -2256,7 +2257,6 @@ mod openchannel_optional_addr;
 mod openchannel_push_asset_amount;
 mod payment;
 mod refuse_high_fees;
-mod auth_db_persistence;
 mod restart;
 mod send_receive;
 mod swap_assets_liquidity_both_ways;

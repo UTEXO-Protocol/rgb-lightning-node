@@ -973,11 +973,38 @@ pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
     Arc<RgbOutputSpender>,
 >;
 
-fn _update_rgb_channel_amount(
+fn _safe_update_rgb_channel_amount(
+    channel_id: &str,
+    rgb_offered_htlc: u64,
+    rgb_received_htlc: u64,
+    kv_store: &dyn KVStoreSync,
+) -> io::Result<bool> {
+    match kv_store.read_rgb_channel_info(channel_id, false) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            tracing::warn!(
+                "Skipping RGB channel balance update for channel {} because channel RGB info is missing",
+                channel_id
+            );
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    }
+    update_rgb_channel_amount(
+        channel_id,
+        rgb_offered_htlc,
+        rgb_received_htlc,
+        false,
+        kv_store,
+    );
+    Ok(true)
+}
+
+fn _finalize_rgb_channel_payment(
     payment_hash: &PaymentHash,
     receiver: bool,
     kv_store: &Arc<dyn KVStoreSync + Send + Sync>,
-) {
+) -> io::Result<()> {
     let payment_hash_str = hex_str(&payment_hash.0);
     let pending_suffix = format!("{payment_hash_str}_pending");
     let mut applied_any = false;
@@ -989,13 +1016,7 @@ fn _update_rgb_channel_amount(
             RGB_PAYMENT_INFO_OUTBOUND_NS
         };
 
-        let keys = match kv_store.list(RGB_PRIMARY_NS, namespace) {
-            Ok(keys) => keys,
-            Err(_) => {
-                tracing::warn!("failed to list keys in namespace {namespace}");
-                continue;
-            }
-        };
+        let keys = kv_store.list(RGB_PRIMARY_NS, namespace)?;
 
         let mut applied_keys = Vec::new();
 
@@ -1008,39 +1029,35 @@ fn _update_rgb_channel_amount(
                 continue;
             }
 
-            if let Ok(data) = kv_store.read(RGB_PRIMARY_NS, namespace, key) {
-                let rgb_payment_info: RgbPaymentInfo = match bincode::deserialize(&data) {
-                    Ok(info) => info,
-                    Err(e) => {
-                        tracing::warn!("failed to parse payment info for key {key}: {e}");
-                        continue;
-                    }
-                };
+            let data = match kv_store.read(RGB_PRIMARY_NS, namespace, key) {
+                Ok(data) => data,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
 
-                if rgb_payment_info.swap_payment && receiver != rgb_payment_info.inbound {
+            let rgb_payment_info: RgbPaymentInfo = match bincode::deserialize(&data) {
+                Ok(info) => info,
+                Err(e) => {
+                    tracing::warn!("failed to parse payment info for key {key}: {e}");
                     continue;
                 }
+            };
 
-                let (offered, received) = if receiver {
-                    (0, rgb_payment_info.amount)
-                } else {
-                    (rgb_payment_info.amount, 0)
-                };
-                if kv_store.read_rgb_channel_info(channel_id_str, false).is_err() {
-                    tracing::warn!(
-                        "Skipping RGB channel balance update for channel {} because channel RGB info is missing",
-                        channel_id_str
-                    );
-                    continue;
-                }
+            if rgb_payment_info.swap_payment && receiver != rgb_payment_info.inbound {
+                continue;
+            }
 
-                update_rgb_channel_amount(
-                    channel_id_str,
-                    offered,
-                    received,
-                    false,
-                    kv_store.as_ref(),
-                );
+            let (offered, received) = if receiver {
+                (0, rgb_payment_info.amount)
+            } else {
+                (rgb_payment_info.amount, 0)
+            };
+            if _safe_update_rgb_channel_amount(
+                channel_id_str,
+                offered,
+                received,
+                kv_store.as_ref(),
+            )? {
                 applied_keys.push(key.clone());
                 applied_any = true;
             }
@@ -1054,13 +1071,10 @@ fn _update_rgb_channel_amount(
     if applied_any {
         let raw_pending_key = format!("{payment_hash_str}_pending");
         for namespace in [RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS] {
-            let remaining = kv_store
-                .list(RGB_PRIMARY_NS, namespace)
-                .map(|keys| {
-                    keys.iter()
-                        .any(|k| k.ends_with(&pending_suffix) && k.len() > pending_suffix.len())
-                })
-                .unwrap_or(false);
+            let keys = kv_store.list(RGB_PRIMARY_NS, namespace)?;
+            let remaining = keys
+                .iter()
+                .any(|k| k.ends_with(&pending_suffix) && k.len() > pending_suffix.len());
             if !remaining {
                 let _ = kv_store.remove(RGB_PRIMARY_NS, namespace, &raw_pending_key, false);
             }
@@ -1068,6 +1082,8 @@ fn _update_rgb_channel_amount(
     } else {
         tracing::warn!("no matching payment info found for payment_hash={payment_hash_str}");
     }
+
+    Ok(())
 }
 
 fn _finalize_virtual_rgb_channel_info(
@@ -1676,7 +1692,13 @@ async fn handle_ldk_events(
 
             let kv_store_dyn: Arc<dyn KVStoreSync + Send + Sync> =
                 Arc::clone(&unlocked_state.kv_store) as Arc<dyn KVStoreSync + Send + Sync>;
-            _update_rgb_channel_amount(&payment_hash, true, &kv_store_dyn);
+            if let Err(e) = _finalize_rgb_channel_payment(&payment_hash, true, &kv_store_dyn) {
+                tracing::error!(
+                    "RGB balance update failed for claimed payment {}: {e}",
+                    hex_str(&payment_hash.0)
+                );
+                return Err(ReplayEvent());
+            }
             if is_maker_swap {
                 unlocked_state.update_maker_swap_status(&payment_hash, SwapStatus::Succeeded);
             } else {
@@ -1701,7 +1723,13 @@ async fn handle_ldk_events(
         } => {
             let kv_store_dyn: Arc<dyn KVStoreSync + Send + Sync> =
                 Arc::clone(&unlocked_state.kv_store) as Arc<dyn KVStoreSync + Send + Sync>;
-            _update_rgb_channel_amount(&payment_hash, false, &kv_store_dyn);
+            if let Err(e) = _finalize_rgb_channel_payment(&payment_hash, false, &kv_store_dyn) {
+                tracing::error!(
+                    "RGB balance update failed for sent payment {}: {e}",
+                    hex_str(&payment_hash.0)
+                );
+                return Err(ReplayEvent());
+            }
 
             if unlocked_state.is_maker_swap(&payment_hash) {
                 tracing::info!(
@@ -1893,22 +1921,32 @@ async fn handle_ldk_events(
             let next_channel_id_str = next_channel_id.expect("next_channel_id").to_string();
 
             if let Some(outbound_amount_forwarded_rgb) = outbound_amount_forwarded_rgb {
-                update_rgb_channel_amount(
+                if let Err(e) = _safe_update_rgb_channel_amount(
                     &next_channel_id_str,
                     outbound_amount_forwarded_rgb,
                     0,
-                    false,
                     unlocked_state.kv_store.as_ref(),
-                );
+                ) {
+                    tracing::error!(
+                        "RGB outbound balance update failed for forwarded payment on channel {}: {e}",
+                        next_channel_id_str
+                    );
+                    return Err(ReplayEvent());
+                }
             }
             if let Some(inbound_amount_forwarded_rgb) = inbound_amount_forwarded_rgb {
-                update_rgb_channel_amount(
+                if let Err(e) = _safe_update_rgb_channel_amount(
                     &prev_channel_id_str,
                     0,
                     inbound_amount_forwarded_rgb,
-                    false,
                     unlocked_state.kv_store.as_ref(),
-                );
+                ) {
+                    tracing::error!(
+                        "RGB inbound balance update failed for forwarded payment on channel {}: {e}",
+                        prev_channel_id_str
+                    );
+                    return Err(ReplayEvent());
+                }
             }
 
             if unlocked_state.is_taker_swap(&payment_hash) {
@@ -3503,6 +3541,218 @@ pub(crate) fn clear_rgb_payment_pending(payment_hash: &PaymentHash, kv_store: &d
                     let _ = kv_store.remove(RGB_PRIMARY_NS, namespace, &key, false);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv_store::SeaOrmKvStore;
+    use lightning::rgb_utils::{RgbInfo, RGB_CHANNEL_INFO_NS};
+    use rgb_lib::AssetSchema;
+    use rln_migration::{Migrator, MigratorTrait};
+    use sea_orm::{ConnectOptions, Database};
+    use std::str::FromStr;
+
+    fn test_contract_id() -> rgb_lib::ContractId {
+        rgb_lib::ContractId::from_str("rgb:EIkAVQvq-WbAb5JG-CYxbUER-oqDNwne-ZNxBDID-p0cpf9U")
+            .unwrap()
+    }
+
+    fn build_kv_store() -> Arc<dyn KVStoreSync + Send + Sync> {
+        let db_path = std::env::temp_dir().join(format!("rln-ldk-unit-{}", uuid::Uuid::new_v4()));
+        let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
+        let db =
+            crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
+                .expect("db connection");
+        crate::runtime::block_on(Migrator::up(&db, None)).expect("run migrations");
+        Arc::new(SeaOrmKvStore::from_connection(Arc::new(db)))
+    }
+
+    fn seed_channel_info(
+        kv_store: &Arc<dyn KVStoreSync + Send + Sync>,
+        channel_id: &str,
+        local_rgb_amount: u64,
+        remote_rgb_amount: u64,
+    ) {
+        let info = RgbInfo {
+            contract_id: test_contract_id(),
+            schema: AssetSchema::Nia,
+            local_rgb_amount,
+            remote_rgb_amount,
+        };
+        let data = bincode::serialize(&info).expect("serialize rgb info");
+        kv_store
+            .write(RGB_PRIMARY_NS, RGB_CHANNEL_INFO_NS, channel_id, data)
+            .expect("write rgb channel info");
+    }
+
+    fn seed_pending_payment_key(
+        kv_store: &Arc<dyn KVStoreSync + Send + Sync>,
+        namespace: &str,
+        channel_id: &str,
+        payment_hash: &PaymentHash,
+        swap_payment: bool,
+        inbound: bool,
+    ) -> String {
+        let info = RgbPaymentInfo {
+            contract_id: test_contract_id(),
+            amount: 25,
+            local_rgb_amount: 100,
+            remote_rgb_amount: 0,
+            swap_payment,
+            inbound,
+        };
+        let key = format!("{}{}_pending", channel_id, hex_str(&payment_hash.0));
+        let data = bincode::serialize(&info).expect("serialize rgb payment info");
+        kv_store
+            .write(RGB_PRIMARY_NS, namespace, &key, data)
+            .expect("write rgb payment info");
+        key
+    }
+
+    fn read_local_amount(kv_store: &Arc<dyn KVStoreSync + Send + Sync>, channel_id: &str) -> u64 {
+        let data = kv_store
+            .read(RGB_PRIMARY_NS, RGB_CHANNEL_INFO_NS, channel_id)
+            .expect("read rgb channel info");
+        let info: RgbInfo = bincode::deserialize(&data).expect("deserialize rgb info");
+        info.local_rgb_amount
+    }
+
+    #[test]
+    fn finalize_rgb_channel_payment_clears_pending_markers_after_apply() {
+        let kv_store = build_kv_store();
+        let channel_id = "a".repeat(64);
+        let payment_hash = PaymentHash([0xAB; 32]);
+        seed_channel_info(&kv_store, &channel_id, 0, 100);
+        let key = seed_pending_payment_key(
+            &kv_store,
+            RGB_PAYMENT_INFO_INBOUND_NS,
+            &channel_id,
+            &payment_hash,
+            false,
+            true,
+        );
+
+        _finalize_rgb_channel_payment(&payment_hash, true, &kv_store).expect("scanner succeeds");
+
+        assert!(matches!(
+            kv_store.read(RGB_PRIMARY_NS, RGB_PAYMENT_INFO_INBOUND_NS, &key),
+            Err(e) if e.kind() == io::ErrorKind::NotFound
+        ));
+        assert_eq!(read_local_amount(&kv_store, &channel_id), 25);
+    }
+
+    #[test]
+    fn finalize_rgb_channel_payment_leaves_pending_markers_when_nothing_applies() {
+        let kv_store = build_kv_store();
+        let channel_id = "b".repeat(64);
+        let payment_hash = PaymentHash([0xCD; 32]);
+        seed_channel_info(&kv_store, &channel_id, 100, 0);
+        let key = seed_pending_payment_key(
+            &kv_store,
+            RGB_PAYMENT_INFO_INBOUND_NS,
+            &channel_id,
+            &payment_hash,
+            true,
+            true,
+        );
+
+        _finalize_rgb_channel_payment(&payment_hash, false, &kv_store)
+            .expect("scanner succeeds without applying");
+
+        assert!(kv_store
+            .read(RGB_PRIMARY_NS, RGB_PAYMENT_INFO_INBOUND_NS, &key)
+            .is_ok());
+        assert_eq!(read_local_amount(&kv_store, &channel_id), 100);
+    }
+
+    #[test]
+    fn finalize_rgb_channel_payment_ignores_non_pending_keys() {
+        let kv_store = build_kv_store();
+        let channel_id = "c".repeat(64);
+        let payment_hash = PaymentHash([0xEF; 32]);
+        seed_channel_info(&kv_store, &channel_id, 100, 0);
+        let final_key = format!("{}{}", channel_id, hex_str(&payment_hash.0));
+        let info = RgbPaymentInfo {
+            contract_id: test_contract_id(),
+            amount: 25,
+            local_rgb_amount: 100,
+            remote_rgb_amount: 0,
+            swap_payment: false,
+            inbound: true,
+        };
+        kv_store
+            .write(
+                RGB_PRIMARY_NS,
+                RGB_PAYMENT_INFO_INBOUND_NS,
+                &final_key,
+                bincode::serialize(&info).unwrap(),
+            )
+            .unwrap();
+
+        _finalize_rgb_channel_payment(&payment_hash, true, &kv_store).expect("scanner succeeds");
+
+        assert!(kv_store
+            .read(RGB_PRIMARY_NS, RGB_PAYMENT_INFO_INBOUND_NS, &final_key)
+            .is_ok());
+        assert_eq!(read_local_amount(&kv_store, &channel_id), 100);
+    }
+
+    #[test]
+    fn finalize_rgb_channel_payment_only_touches_matching_payment_hash() {
+        let kv_store = build_kv_store();
+        let channel_id = "d".repeat(64);
+        let target_hash = PaymentHash([0x11; 32]);
+        let other_hash = PaymentHash([0x22; 32]);
+        seed_channel_info(&kv_store, &channel_id, 0, 100);
+        let target_key = seed_pending_payment_key(
+            &kv_store,
+            RGB_PAYMENT_INFO_INBOUND_NS,
+            &channel_id,
+            &target_hash,
+            false,
+            true,
+        );
+        let other_key = seed_pending_payment_key(
+            &kv_store,
+            RGB_PAYMENT_INFO_INBOUND_NS,
+            &channel_id,
+            &other_hash,
+            false,
+            true,
+        );
+
+        _finalize_rgb_channel_payment(&target_hash, true, &kv_store).expect("scanner succeeds");
+
+        assert!(matches!(
+            kv_store.read(RGB_PRIMARY_NS, RGB_PAYMENT_INFO_INBOUND_NS, &target_key),
+            Err(e) if e.kind() == io::ErrorKind::NotFound
+        ));
+        assert!(kv_store
+            .read(RGB_PRIMARY_NS, RGB_PAYMENT_INFO_INBOUND_NS, &other_key)
+            .is_ok());
+    }
+
+    #[test]
+    fn finalize_rgb_channel_payment_propagates_non_not_found_errors() {
+        let db_path = std::env::temp_dir().join(format!("rln-ldk-unit-{}", uuid::Uuid::new_v4()));
+        let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
+        let db =
+            crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
+                .expect("db connection");
+        let kv_store: Arc<dyn KVStoreSync + Send + Sync> =
+            Arc::new(SeaOrmKvStore::from_connection(Arc::new(db)));
+
+        let result = _finalize_rgb_channel_payment(&PaymentHash([0; 32]), true, &kv_store);
+        match result {
+            Err(e) => assert_ne!(
+                e.kind(),
+                io::ErrorKind::NotFound,
+                "real DB errors must not be classified as NotFound"
+            ),
+            Ok(()) => panic!("expected error when kv_store table is missing"),
         }
     }
 }

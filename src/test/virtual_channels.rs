@@ -103,7 +103,10 @@ async fn virtual_open_non_allowlisted_host_does_not_become_operational() {
     fund_and_create_utxos(host_node_address, None).await;
 
     let open_request = OpenChannelRequest {
-        peer_pubkey_and_opt_addr: format!("{}@127.0.0.1:{}", client_node_info.pubkey, client_node_peer_port),
+        peer_pubkey_and_opt_addr: format!(
+            "{}@127.0.0.1:{}",
+            client_node_info.pubkey, client_node_peer_port
+        ),
         capacity_sat: 100_000,
         push_msat: 0,
         asset_amount: None,
@@ -133,10 +136,8 @@ async fn virtual_open_non_allowlisted_host_does_not_become_operational() {
     while started_at.elapsed() < std::time::Duration::from_secs(20) {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        let host_has_operational_virtual = list_channels(host_node_address)
-            .await
-            .into_iter()
-            .any(|c| {
+        let host_has_operational_virtual =
+            list_channels(host_node_address).await.into_iter().any(|c| {
                 c.peer_pubkey == client_node_info.pubkey
                     && c.virtual_open_mode.as_deref() == Some("trusted_no_broadcast")
                     && c.ready
