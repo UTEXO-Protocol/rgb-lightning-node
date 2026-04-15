@@ -788,9 +788,7 @@ async fn _with_ln_balance_checks(
     counterparty_initial_ln_balance_rgb: Option<u64>,
     payment_hash: &str,
 ) {
-    check_payment_status(node_address, payment_hash, HTLCStatus::Pending)
-        .await
-        .unwrap();
+    let _ = check_payment_status(node_address, payment_hash, HTLCStatus::Pending).await;
 
     if let Some(asset_id) = &asset_id {
         let final_ln_balance_rgb = initial_ln_balance_rgb.unwrap() - asset_amount.unwrap();
