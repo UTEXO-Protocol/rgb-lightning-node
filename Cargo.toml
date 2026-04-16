@@ -106,3 +106,8 @@ bench = false
 name = "lib_core"
 path = "src/test/lib_core.rs"
 required-features = ["uniffi", "test-utils"]
+
+[[test]]
+name = "lib_sdk"
+path = "src/test/lib_sdk/mod.rs"
+required-features = ["uniffi"]
