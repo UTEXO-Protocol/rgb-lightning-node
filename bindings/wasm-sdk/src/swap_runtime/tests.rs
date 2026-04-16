@@ -92,7 +92,7 @@ fn sdk_swap_runtime_roundtrip_contract() {
     let execute_request = serde_json::json!({
         "swapstring": swapstring.clone(),
         "payment_secret": payment_secret,
-        "taker_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "taker_pubkey": "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0",
     });
     let execute_raw =
         block_on(sdk.maker_execute_json(execute_request.to_string())).expect("maker_execute");

@@ -73,7 +73,7 @@ async fn sdk_lifecycle_lock_blocks_existing_node_runtime_calls_contract() {
         .expect("node handle");
 
     node.keysend_value(
-        "02acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac".to_string(),
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
         3_000_000,
         None,
         None,
@@ -83,7 +83,7 @@ async fn sdk_lifecycle_lock_blocks_existing_node_runtime_calls_contract() {
     sdk.lock().await.expect("lock");
     let err = node
         .keysend_value(
-            "02adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad".to_string(),
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
             3_000_000,
             None,
             None,
@@ -96,7 +96,7 @@ async fn sdk_lifecycle_lock_blocks_existing_node_runtime_calls_contract() {
         .await
         .expect("unlock again");
     node.keysend_value(
-        "02aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae".to_string(),
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
         3_000_000,
         None,
         None,
@@ -142,7 +142,7 @@ async fn sdk_node_handle_connect_peer_invalid_addr_contract() {
     let err = node
         .connect_peer(
             "peer-without-port".to_string(),
-            "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
         )
         .await
         .expect_err("should fail");
@@ -225,7 +225,7 @@ async fn sdk_swap_onion_native_parity_error_contracts() {
             name: "onion empty path",
             op: "send_onion_message",
             input: "{\"node_ids\":[],\"tlv_type\":64,\"data\":\"aa\"}".to_string(),
-            expected_error: "sendonionmessage requires at least one node id for the path",
+            expected_error: "SendOnionMessage requires at least one node id for the path",
         },
         Case {
             name: "onion bad pubkey",
@@ -236,13 +236,13 @@ async fn sdk_swap_onion_native_parity_error_contracts() {
         Case {
             name: "onion bad tlv",
             op: "send_onion_message",
-            input: "{\"node_ids\":[\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"],\"tlv_type\":63,\"data\":\"aa\"}".to_string(),
+            input: "{\"node_ids\":[\"0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0\"],\"tlv_type\":63,\"data\":\"aa\"}".to_string(),
             expected_error: "need an integral message type above 64",
         },
         Case {
             name: "onion bad payload hex",
             op: "send_onion_message",
-            input: "{\"node_ids\":[\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"],\"tlv_type\":64,\"data\":\"zz\"}".to_string(),
+            input: "{\"node_ids\":[\"0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0\"],\"tlv_type\":64,\"data\":\"zz\"}".to_string(),
             expected_error: "need a hex data string",
         },
     ];
@@ -280,7 +280,7 @@ async fn sdk_send_onion_message_runtime_contract() {
         .expect("unlock");
 
     let request = serde_json::json!({
-        "node_ids": ["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"],
+        "node_ids": ["0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0"],
         "tlv_type": 64,
         "data": "00ff"
     });
@@ -299,7 +299,7 @@ async fn sdk_send_onion_message_validation_contracts() {
         .expect_err("empty path should fail");
     assert_eq!(
         err.as_string().unwrap_or_default(),
-        "sendonionmessage requires at least one node id for the path"
+        "SendOnionMessage requires at least one node id for the path"
     );
 
     let err = sdk
@@ -312,7 +312,7 @@ async fn sdk_send_onion_message_validation_contracts() {
     );
 
     let err = sdk
-        .send_onion_message("{\"node_ids\":[\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"],\"tlv_type\":63,\"data\":\"aa\"}".to_string())
+        .send_onion_message("{\"node_ids\":[\"0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0\"],\"tlv_type\":63,\"data\":\"aa\"}".to_string())
         .await
         .expect_err("bad tlv type should fail");
     assert_eq!(
@@ -321,7 +321,7 @@ async fn sdk_send_onion_message_validation_contracts() {
     );
 
     let err = sdk
-        .send_onion_message("{\"node_ids\":[\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"],\"tlv_type\":64,\"data\":\"zz\"}".to_string())
+        .send_onion_message("{\"node_ids\":[\"0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0\"],\"tlv_type\":64,\"data\":\"zz\"}".to_string())
         .await
         .expect_err("bad data should fail");
     assert_eq!(
@@ -617,7 +617,7 @@ fn runtime_layer_lock_authority_contract() {
 
     let err = node
         .keysend_value(
-            "020808080808080808080808080808080808080808080808080808080808080808".to_string(),
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
             3_000_000,
             None,
             None,
@@ -630,7 +630,7 @@ fn runtime_layer_lock_authority_contract() {
 
     crate::ldk_runtime::set_runtime_session_authorized(true);
     node.keysend_value(
-        "020909090909090909090909090909090909090909090909090909090909090909".to_string(),
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
         3_000_000,
         None,
         None,

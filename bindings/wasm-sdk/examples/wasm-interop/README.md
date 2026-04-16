@@ -23,18 +23,20 @@ the same high-level sequence as
 1. SDK init + unlock
 2. Create node A / node B runtime handles
 3. Connect peers
-4. Open channel
+4. Open `trusted_no_broadcast` virtual channel (`openChannelValueWithOptions`)
 5. Wait for channel usable
 6. Keysend A -> B and wait final status
 7. Keysend B -> A ("drain") and wait final status
-8. Close channel and verify removal
+8. Close channel with retry/fallback (`nodeA` then `nodeB`) and verify close semantics on both nodes
+9. Verify removal on node A
 
 Differences vs native Python flow:
 
 1. It runs against the wasm runtime model (`ldk_bridge`) in browser memory/storage.
 2. Payment finalization is driven through wasm status update APIs (event-driven parity path),
    not native daemon callbacks.
-3. Channel visibility parity is currently validated on node A side in this browser flow.
+3. Trusted virtual close is treated as host-authoritative parity:
+   close completion accepts node A done state while node B may transiently lag.
 
 ## Prerequisites
 

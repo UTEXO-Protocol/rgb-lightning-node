@@ -19,7 +19,8 @@ use crate::ldk_event_applier::{
 };
 use crate::ldk_runtime::{
     ldk_runtime_manager, LdkRuntimeChannelStateData, LdkRuntimeManager, LdkRuntimePaymentStateData,
-    LdkRuntimePeerStateData, LdkRuntimeStatusData,
+    LdkRuntimePeerStateData, LdkRuntimeStatusData, LdkRuntimeVirtualChannelSessionData,
+    LdkRuntimeVirtualChannelSessionStatusData,
 };
 use crate::peer_session::{
     clear_rln_ldk_peer_manager_hooks, install_rln_ldk_peer_manager_hooks, RlnLdkPeerManagerHooks,
@@ -33,6 +34,7 @@ const SDK_OPENRGBCHANNEL_MIN_SAT: u64 = SDK_HTLC_MIN_MSAT / 1000 * 10 + 10;
 const SDK_OPENCHANNEL_MIN_SAT: u64 = 5_506;
 const SDK_OPENCHANNEL_MAX_SAT: u64 = 16_777_215;
 const SDK_OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
+const SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RlnWasmNodePeerData {
@@ -68,6 +70,7 @@ pub struct RlnWasmNodeChannelData {
     pub capacity_sat: u64,
     pub asset_id: Option<String>,
     pub asset_local_amount: Option<u64>,
+    pub virtual_open_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -246,7 +249,9 @@ pub struct RlnWasmNode {
 impl RlnWasmNode {
     fn ensure_runtime_ready(&self) -> Result<(), JsValue> {
         crate::ensure_sdk_node_runtime_allowed()?;
-        self.ldk_runtime.ensure_started()
+        self.ldk_runtime.ensure_started()?;
+        self.ldk_runtime.virtual_channel_reconcile_sessions();
+        Ok(())
     }
 
     #[wasm_bindgen(constructor)]
@@ -457,6 +462,17 @@ impl RlnWasmNode {
                 .map(|entry| entry.data.clone())
                 .collect::<Vec<_>>()
         };
+        for channel in &mut data {
+            if channel.virtual_open_mode.is_none()
+                && self
+                    .ldk_runtime
+                    .virtual_channel_session_get(&channel.channel_id)
+                    .is_some()
+            {
+                channel.virtual_open_mode =
+                    Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST.to_string());
+            }
+        }
         data.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
         crate::js_obj(&data)
     }
@@ -1349,6 +1365,26 @@ impl RlnWasmNode {
         asset_id: Option<String>,
         asset_local_amount: Option<u64>,
     ) -> Result<JsValue, JsValue> {
+        self.open_channel_value_with_options(
+            peer_pubkey,
+            capacity_sat,
+            public,
+            asset_id,
+            asset_local_amount,
+            None,
+        )
+    }
+
+    #[wasm_bindgen(js_name = openChannelValueWithOptions)]
+    pub fn open_channel_value_with_options(
+        &self,
+        peer_pubkey: String,
+        capacity_sat: u64,
+        public: bool,
+        asset_id: Option<String>,
+        asset_local_amount: Option<u64>,
+        virtual_open_mode: Option<String>,
+    ) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
         let peer_pubkey = peer_pubkey.trim().to_string();
         if peer_pubkey.trim().is_empty() {
@@ -1356,6 +1392,25 @@ impl RlnWasmNode {
         }
         if SecpPublicKey::from_str(peer_pubkey.trim()).is_err() {
             return Err(JsValue::from_str("invalid peer_pubkey"));
+        }
+        let normalized_virtual_open_mode = match virtual_open_mode {
+            None => None,
+            Some(mode) => {
+                let mode = mode.trim().to_string();
+                if mode.is_empty() {
+                    return Err(JsValue::from_str("virtual_open_mode cannot be empty"));
+                }
+                if mode != SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST {
+                    return Err(JsValue::from_str(&format!(
+                        "unknown virtual_open_mode: {mode}"
+                    )));
+                }
+                Some(mode)
+            }
+        };
+        let is_virtual_open = normalized_virtual_open_mode.is_some();
+        if is_virtual_open && public {
+            return Err(JsValue::from_str("virtual channels requires public=false"));
         }
         if let Some(id) = &asset_id {
             if id.trim().is_empty() {
@@ -1405,15 +1460,25 @@ impl RlnWasmNode {
         if !has_peer {
             return Err(JsValue::from_str("peer is not connected"));
         }
-
         let mut seq = self.next_channel_seq.borrow_mut();
         *seq += 1;
         let next = *seq;
 
         let temporary_channel_id = format!("wasm-tmp:{}:{}", peer_pubkey, next);
+        let reserved_temporary_channel_id = if is_virtual_open {
+            Some(
+                self.ldk_runtime
+                    .virtual_channel_add_intent(&peer_pubkey, Some(temporary_channel_id.clone()))
+                    .map_err(|e| JsValue::from_str(&e))?,
+            )
+        } else {
+            None
+        };
         let channel_id = format!("wasm-chan:{}:{}", peer_pubkey, next);
         let data = RlnWasmNodeChannelData {
-            temporary_channel_id: temporary_channel_id.clone(),
+            temporary_channel_id: reserved_temporary_channel_id
+                .clone()
+                .unwrap_or_else(|| temporary_channel_id.clone()),
             channel_id: channel_id.clone(),
             peer_pubkey,
             status: "pending".to_string(),
@@ -1423,6 +1488,7 @@ impl RlnWasmNode {
             capacity_sat,
             asset_id,
             asset_local_amount,
+            virtual_open_mode: normalized_virtual_open_mode,
         };
 
         if self.use_runtime_state_for_ln_views() {
@@ -1432,7 +1498,7 @@ impl RlnWasmNode {
             self.channels.borrow_mut().insert(
                 channel_id.clone(),
                 ChannelEntry {
-                    temporary_channel_id,
+                    temporary_channel_id: temporary_channel_id.clone(),
                     data: data.clone(),
                 },
             );
@@ -1446,9 +1512,21 @@ impl RlnWasmNode {
             )?
             .applied;
         if !applied {
+            if let Some(temp_id) = reserved_temporary_channel_id.as_deref() {
+                let _ = self.ldk_runtime.virtual_channel_draft_delete(temp_id);
+            }
             return Err(JsValue::from_str(
                 "failed to apply channel_usable transport event",
             ));
+        }
+        if is_virtual_open {
+            self.ldk_runtime.virtual_channel_session_add_from_open(
+                &channel_id,
+                reserved_temporary_channel_id
+                    .as_deref()
+                    .unwrap_or(&temporary_channel_id),
+                &data.peer_pubkey,
+            );
         }
         self.persist_runtime_event_log_state();
         let channel = if self.use_runtime_state_for_ln_views() {
@@ -1477,12 +1555,35 @@ impl RlnWasmNode {
         asset_id: Option<String>,
         asset_local_amount: Option<u64>,
     ) -> Result<String, JsValue> {
-        let value = self.open_channel_value(
+        let value = self.open_channel_value_with_options(
             peer_pubkey,
             capacity_sat,
             public,
             asset_id,
             asset_local_amount,
+            None,
+        )?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = openChannelJsonWithOptions)]
+    pub fn open_channel_json_with_options(
+        &self,
+        peer_pubkey: String,
+        capacity_sat: u64,
+        public: bool,
+        asset_id: Option<String>,
+        asset_local_amount: Option<u64>,
+        virtual_open_mode: Option<String>,
+    ) -> Result<String, JsValue> {
+        let value = self.open_channel_value_with_options(
+            peer_pubkey,
+            capacity_sat,
+            public,
+            asset_id,
+            asset_local_amount,
+            virtual_open_mode,
         )?;
         let parsed: serde_json::Value = crate::js_from(value)?;
         crate::js_to_json(&parsed)
@@ -1490,9 +1591,110 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = closeChannel)]
     pub fn close_channel(&self, channel_id: String) -> Result<(), JsValue> {
+        self.close_channel_with_options(channel_id, None, false)
+    }
+
+    #[wasm_bindgen(js_name = closeChannelWithOptions)]
+    pub fn close_channel_with_options(
+        &self,
+        channel_id: String,
+        peer_pubkey: Option<String>,
+        force: bool,
+    ) -> Result<(), JsValue> {
         self.ensure_runtime_ready()?;
         if channel_id.trim().is_empty() {
             return Err(JsValue::from_str("channel_id cannot be empty"));
+        }
+        let virtual_session = self.ldk_runtime.virtual_channel_session_get(&channel_id);
+        if let Some(session) = virtual_session.as_ref() {
+            if let Some(peer_pubkey) = peer_pubkey.as_ref() {
+                let peer_pubkey = peer_pubkey.trim().to_string();
+                if peer_pubkey.trim().is_empty() {
+                    return Err(JsValue::from_str("peer_pubkey cannot be empty"));
+                }
+                if SecpPublicKey::from_str(peer_pubkey.trim()).is_err() {
+                    return Err(JsValue::from_str("invalid peer_pubkey"));
+                }
+                if session.peer_pubkey != peer_pubkey {
+                    return Err(JsValue::from_str(
+                        "peer pubkey does not match trusted virtual channel session",
+                    ));
+                }
+            }
+        }
+        let channel = if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime
+                .list_channels()
+                .into_iter()
+                .find(|channel| channel.channel_id == channel_id)
+                .map(Self::channel_data_from_runtime_state)
+        } else {
+            self.channels
+                .borrow()
+                .get(&channel_id)
+                .map(|entry| entry.data.clone())
+        };
+        let Some(channel) = channel else {
+            if let Some(session) = virtual_session.as_ref() {
+                if session.status != LdkRuntimeVirtualChannelSessionStatusData::Abandoned {
+                    let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                        &channel_id,
+                        LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+                    );
+                }
+                self.persist_runtime_event_log_state();
+                return Ok(());
+            }
+            return Err(JsValue::from_str("channel not found"));
+        };
+        if virtual_session.is_some()
+            && channel.virtual_open_mode.as_deref()
+                != Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
+        {
+            return Err(JsValue::from_str(&format!(
+                "virtual channel session exists for {channel_id}, but live channel is not trusted_no_broadcast"
+            )));
+        }
+        if let Some(peer_pubkey) = peer_pubkey {
+            let peer_pubkey = peer_pubkey.trim().to_string();
+            if peer_pubkey.trim().is_empty() {
+                return Err(JsValue::from_str("peer_pubkey cannot be empty"));
+            }
+            if SecpPublicKey::from_str(peer_pubkey.trim()).is_err() {
+                return Err(JsValue::from_str("invalid peer_pubkey"));
+            }
+            let channel_matches_peer = channel.peer_pubkey == peer_pubkey;
+            if !channel_matches_peer {
+                return Err(JsValue::from_str(
+                    "cannot find the channel with the provided peer pubkey",
+                ));
+            }
+        }
+        let is_virtual_channel = channel.virtual_open_mode.as_deref()
+            == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST);
+        if is_virtual_channel {
+            let Some(session) = virtual_session.as_ref() else {
+                return Err(JsValue::from_str(
+                    "virtual cleanup is host-only and requires a host-side session",
+                ));
+            };
+            if session.status == LdkRuntimeVirtualChannelSessionStatusData::AbandonPending {
+                return Err(JsValue::from_str("virtual cleanup is already in progress"));
+            }
+            self.ensure_virtual_cleanup_has_no_client_value(&channel, session)?;
+        }
+        if force {
+            if is_virtual_channel {
+                return Err(JsValue::from_str(
+                    "force=true is not supported for trusted virtual channels",
+                ));
+            }
+        }
+        if is_virtual_channel {
+            let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                &channel_id,
+                LdkRuntimeVirtualChannelSessionStatusData::AbandonPending,
+            );
         }
         let applied = self
             .apply_and_record_transport_event(
@@ -1503,9 +1705,137 @@ impl RlnWasmNode {
             )?
             .applied;
         if !applied {
+            if is_virtual_channel {
+                let live_virtual_channel_still_exists = if self.use_runtime_state_for_ln_views() {
+                    self.ldk_runtime.list_channels().into_iter().any(|entry| {
+                        entry.channel_id == channel_id
+                            && entry.virtual_open_mode.as_deref()
+                                == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
+                    })
+                } else {
+                    self.channels.borrow().values().any(|entry| {
+                        entry.data.channel_id == channel_id
+                            && entry.data.virtual_open_mode.as_deref()
+                                == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
+                    })
+                };
+                if live_virtual_channel_still_exists {
+                    let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                        &channel_id,
+                        LdkRuntimeVirtualChannelSessionStatusData::Active,
+                    );
+                    return Err(JsValue::from_str("channel not found"));
+                }
+                let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                    &channel_id,
+                    LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+                );
+                self.persist_runtime_event_log_state();
+                return Ok(());
+            }
             return Err(JsValue::from_str("channel not found"));
         }
+        if is_virtual_channel {
+            let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                &channel_id,
+                LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+            );
+        }
         self.persist_runtime_event_log_state();
+        Ok(())
+    }
+
+    fn ensure_virtual_cleanup_has_no_client_value(
+        &self,
+        channel: &RlnWasmNodeChannelData,
+        session: &LdkRuntimeVirtualChannelSessionData,
+    ) -> Result<(), JsValue> {
+        let payments = if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime
+                .list_payments()
+                .into_iter()
+                .map(Self::payment_data_from_runtime_state)
+                .collect::<Vec<_>>()
+        } else {
+            self.payments
+                .borrow()
+                .values()
+                .map(|entry| entry.data.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut net_counterparty_btc_msat: i128 = 0;
+        let mut net_counterparty_rgb_amount: HashMap<String, i128> = HashMap::new();
+
+        for payment in payments {
+            if payment.created_at < session.created_at {
+                continue;
+            }
+            let outbound_to_counterparty =
+                !payment.inbound && payment.payee_pubkey == session.peer_pubkey;
+            let inbound_maybe_from_counterparty = payment.inbound
+                && payment
+                    .asset_id
+                    .as_deref()
+                    .map(|asset| channel.asset_id.as_deref() == Some(asset))
+                    .unwrap_or(channel.asset_id.is_none());
+
+            if payment.status == "pending" && (outbound_to_counterparty || inbound_maybe_from_counterparty) {
+                return Err(JsValue::from_str(
+                    "virtual cleanup is blocked while HTLCs are still in flight",
+                ));
+            }
+            if payment.status != "succeeded" {
+                continue;
+            }
+
+            if outbound_to_counterparty {
+                if let Some(msat) = payment.amt_msat {
+                    net_counterparty_btc_msat += msat as i128;
+                }
+                if let (Some(asset_id), Some(asset_amount)) =
+                    (payment.asset_id.as_ref(), payment.asset_amount)
+                {
+                    let entry = net_counterparty_rgb_amount
+                        .entry(asset_id.clone())
+                        .or_insert(0);
+                    *entry += asset_amount as i128;
+                }
+            } else if inbound_maybe_from_counterparty {
+                if let Some(msat) = payment.amt_msat {
+                    net_counterparty_btc_msat -= msat as i128;
+                }
+                if let (Some(asset_id), Some(asset_amount)) =
+                    (payment.asset_id.as_ref(), payment.asset_amount)
+                {
+                    let entry = net_counterparty_rgb_amount
+                        .entry(asset_id.clone())
+                        .or_insert(0);
+                    *entry -= asset_amount as i128;
+                }
+            }
+        }
+
+        if net_counterparty_btc_msat > 0 {
+            let mut floor_sat = (net_counterparty_btc_msat / 1000) as u64;
+            if floor_sat == 0 {
+                floor_sat = 1;
+            }
+            return Err(JsValue::from_str(&format!(
+                "virtual cleanup is blocked while counterparty BTC balance floor is {floor_sat} sat"
+            )));
+        }
+
+        if let Some((asset_id, amount)) = net_counterparty_rgb_amount
+            .iter()
+            .find(|(_, amount)| **amount > 0)
+            .map(|(asset_id, amount)| (asset_id.clone(), *amount as u64))
+        {
+            return Err(JsValue::from_str(&format!(
+                "virtual cleanup is blocked while counterparty RGB balance is {amount} (asset_id={asset_id})"
+            )));
+        }
+
         Ok(())
     }
 
@@ -1602,6 +1932,7 @@ impl RlnWasmNode {
             capacity_sat: data.capacity_sat,
             asset_id: data.asset_id.clone(),
             asset_local_amount: data.asset_local_amount,
+            virtual_open_mode: data.virtual_open_mode.clone(),
         }
     }
 
@@ -1619,6 +1950,7 @@ impl RlnWasmNode {
             capacity_sat: state.capacity_sat,
             asset_id: state.asset_id,
             asset_local_amount: state.asset_local_amount,
+            virtual_open_mode: state.virtual_open_mode,
         }
     }
 
@@ -1939,16 +2271,36 @@ impl RlnWasmNode {
             RuntimeTransportEvent::PeerDisconnected { peer_pubkey } => {
                 let removed_peer = self.peers.borrow_mut().remove(peer_pubkey).is_some();
                 let mut channels = self.channels.borrow_mut();
+                let removed_channel_ids = channels
+                    .values()
+                    .filter(|ch| ch.data.peer_pubkey == *peer_pubkey)
+                    .map(|ch| ch.data.channel_id.clone())
+                    .collect::<Vec<_>>();
                 let before = channels.len();
                 channels.retain(|_, ch| ch.data.peer_pubkey != *peer_pubkey);
                 let removed_channels = channels.len() != before;
+                if removed_channels {
+                    for channel_id in removed_channel_ids {
+                        let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                            &channel_id,
+                            LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+                        );
+                    }
+                }
                 removed_peer || removed_channels
             }
             RuntimeTransportEvent::PeerReconnected { peer_pubkey } => {
                 self.peers.borrow().contains_key(peer_pubkey)
             }
             RuntimeTransportEvent::ChannelClosed { channel_id } => {
-                self.channels.borrow_mut().remove(channel_id).is_some()
+                let removed = self.channels.borrow_mut().remove(channel_id).is_some();
+                if removed {
+                    let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                        channel_id,
+                        LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+                    );
+                }
+                removed
             }
             RuntimeTransportEvent::ChannelUsable { channel_id } => {
                 let mut guard = self.channels.borrow_mut();

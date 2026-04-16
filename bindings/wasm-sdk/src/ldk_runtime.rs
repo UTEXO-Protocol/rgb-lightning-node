@@ -56,6 +56,59 @@ fn ensure_runtime_session_authorized() -> Result<(), JsValue> {
     })
 }
 
+fn unix_now_secs() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        (js_sys::Date::now() as u64) / 1000
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+}
+
+fn reconcile_virtual_channel_state(
+    channels: &HashMap<String, LdkRuntimeChannelStateData>,
+    drafts: &mut HashMap<String, LdkRuntimeVirtualChannelDraftData>,
+    sessions: &mut HashMap<String, LdkRuntimeVirtualChannelSessionData>,
+) {
+    drafts.retain(|_, draft| {
+        !sessions
+            .values()
+            .any(|session| session.peer_pubkey == draft.peer_pubkey)
+    });
+
+    let mut needs_touch = false;
+    for session in sessions.values_mut() {
+        let live_channel = channels.get(&session.channel_id);
+        match live_channel {
+            Some(channel) => {
+                if channel.virtual_open_mode.is_none() {
+                    if session.status != LdkRuntimeVirtualChannelSessionStatusData::Abandoned {
+                        session.status = LdkRuntimeVirtualChannelSessionStatusData::Abandoned;
+                        session.updated_at = unix_now_secs();
+                        needs_touch = true;
+                    }
+                }
+            }
+            None => {
+                if session.status != LdkRuntimeVirtualChannelSessionStatusData::Abandoned {
+                    session.status = LdkRuntimeVirtualChannelSessionStatusData::Abandoned;
+                    session.updated_at = unix_now_secs();
+                    needs_touch = true;
+                }
+            }
+        }
+    }
+    if needs_touch {
+        // updates already applied in-place
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LdkRuntimePeerStateData {
     pub pubkey: String,
@@ -75,6 +128,32 @@ pub struct LdkRuntimeChannelStateData {
     pub capacity_sat: u64,
     pub asset_id: Option<String>,
     pub asset_local_amount: Option<u64>,
+    pub virtual_open_mode: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LdkRuntimeVirtualChannelSessionStatusData {
+    Active,
+    AbandonPending,
+    Abandoned,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LdkRuntimeVirtualChannelDraftData {
+    pub temporary_channel_id: String,
+    pub peer_pubkey: String,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LdkRuntimeVirtualChannelSessionData {
+    pub channel_id: String,
+    pub former_temporary_channel_id: String,
+    pub peer_pubkey: String,
+    pub status: LdkRuntimeVirtualChannelSessionStatusData,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +192,38 @@ pub trait LdkRuntimeManager {
     fn upsert_payment(&self, payment: LdkRuntimePaymentStateData);
     fn get_payment(&self, payment_hash: &str) -> Option<LdkRuntimePaymentStateData>;
     fn list_payments(&self) -> Vec<LdkRuntimePaymentStateData>;
+    fn virtual_channel_add_intent(
+        &self,
+        peer_pubkey: &str,
+        temporary_channel_id: Option<String>,
+    ) -> Result<String, String>;
+    fn virtual_channel_draft_delete(&self, temporary_channel_id: &str) -> bool;
+    fn virtual_channel_draft_get(
+        &self,
+        temporary_channel_id: &str,
+    ) -> Option<LdkRuntimeVirtualChannelDraftData>;
+    fn virtual_channel_draft_store(&self) -> Vec<LdkRuntimeVirtualChannelDraftData>;
+    fn virtual_channel_session_add_from_open(
+        &self,
+        channel_id: &str,
+        temporary_channel_id: &str,
+        peer_pubkey: &str,
+    );
+    fn virtual_channel_session_get(
+        &self,
+        channel_id: &str,
+    ) -> Option<LdkRuntimeVirtualChannelSessionData>;
+    fn virtual_channel_session_get_by_peer(
+        &self,
+        peer_pubkey: &str,
+    ) -> Option<LdkRuntimeVirtualChannelSessionData>;
+    fn virtual_channel_session_update_status(
+        &self,
+        channel_id: &str,
+        status: LdkRuntimeVirtualChannelSessionStatusData,
+    ) -> bool;
+    fn virtual_channel_session_store(&self) -> Vec<LdkRuntimeVirtualChannelSessionData>;
+    fn virtual_channel_reconcile_sessions(&self);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +258,10 @@ struct LdkRuntimeSnapshot {
     channels: Vec<LdkRuntimeChannelStateData>,
     #[serde(default)]
     payments: Vec<LdkRuntimePaymentStateData>,
+    #[serde(default)]
+    virtual_channel_drafts: Vec<LdkRuntimeVirtualChannelDraftData>,
+    #[serde(default)]
+    virtual_channel_sessions: Vec<LdkRuntimeVirtualChannelSessionData>,
 }
 
 trait LdkRuntimeStorage {
@@ -216,6 +331,8 @@ struct ScaffoldLdkRuntimeManager {
     peers: RefCell<HashMap<String, LdkRuntimePeerStateData>>,
     channels: RefCell<HashMap<String, LdkRuntimeChannelStateData>>,
     payments: RefCell<HashMap<String, LdkRuntimePaymentStateData>>,
+    virtual_channel_drafts: RefCell<HashMap<String, LdkRuntimeVirtualChannelDraftData>>,
+    virtual_channel_sessions: RefCell<HashMap<String, LdkRuntimeVirtualChannelSessionData>>,
 }
 
 struct LdkBridgeRuntimeManager {
@@ -228,6 +345,8 @@ struct LdkBridgeRuntimeManager {
     peers: RefCell<HashMap<String, LdkRuntimePeerStateData>>,
     channels: RefCell<HashMap<String, LdkRuntimeChannelStateData>>,
     payments: RefCell<HashMap<String, LdkRuntimePaymentStateData>>,
+    virtual_channel_drafts: RefCell<HashMap<String, LdkRuntimeVirtualChannelDraftData>>,
+    virtual_channel_sessions: RefCell<HashMap<String, LdkRuntimeVirtualChannelSessionData>>,
 }
 
 impl ScaffoldLdkRuntimeManager {
@@ -241,6 +360,8 @@ impl ScaffoldLdkRuntimeManager {
             peers: RefCell::new(HashMap::new()),
             channels: RefCell::new(HashMap::new()),
             payments: RefCell::new(HashMap::new()),
+            virtual_channel_drafts: RefCell::new(HashMap::new()),
+            virtual_channel_sessions: RefCell::new(HashMap::new()),
         }
     }
 
@@ -254,6 +375,18 @@ impl ScaffoldLdkRuntimeManager {
             peers: self.peers.borrow().values().cloned().collect(),
             channels: self.channels.borrow().values().cloned().collect(),
             payments: self.payments.borrow().values().cloned().collect(),
+            virtual_channel_drafts: self
+                .virtual_channel_drafts
+                .borrow()
+                .values()
+                .cloned()
+                .collect(),
+            virtual_channel_sessions: self
+                .virtual_channel_sessions
+                .borrow()
+                .values()
+                .cloned()
+                .collect(),
         }
     }
 
@@ -274,6 +407,8 @@ impl LdkBridgeRuntimeManager {
             peers: RefCell::new(HashMap::new()),
             channels: RefCell::new(HashMap::new()),
             payments: RefCell::new(HashMap::new()),
+            virtual_channel_drafts: RefCell::new(HashMap::new()),
+            virtual_channel_sessions: RefCell::new(HashMap::new()),
         }
     }
 
@@ -287,6 +422,18 @@ impl LdkBridgeRuntimeManager {
             peers: self.peers.borrow().values().cloned().collect(),
             channels: self.channels.borrow().values().cloned().collect(),
             payments: self.payments.borrow().values().cloned().collect(),
+            virtual_channel_drafts: self
+                .virtual_channel_drafts
+                .borrow()
+                .values()
+                .cloned()
+                .collect(),
+            virtual_channel_sessions: self
+                .virtual_channel_sessions
+                .borrow()
+                .values()
+                .cloned()
+                .collect(),
         }
     }
 
@@ -334,6 +481,8 @@ impl LdkRuntimeManager for ScaffoldLdkRuntimeManager {
             self.peers.borrow_mut().clear();
             self.channels.borrow_mut().clear();
             self.payments.borrow_mut().clear();
+            self.virtual_channel_drafts.borrow_mut().clear();
+            self.virtual_channel_sessions.borrow_mut().clear();
             for mut peer in snapshot.peers {
                 peer.started = false;
                 self.peers.borrow_mut().insert(peer.pubkey.clone(), peer);
@@ -347,6 +496,22 @@ impl LdkRuntimeManager for ScaffoldLdkRuntimeManager {
                 self.payments
                     .borrow_mut()
                     .insert(payment.payment_hash.clone(), payment);
+            }
+            for draft in snapshot.virtual_channel_drafts {
+                self.virtual_channel_drafts
+                    .borrow_mut()
+                    .insert(draft.temporary_channel_id.clone(), draft);
+            }
+            for session in snapshot.virtual_channel_sessions {
+                self.virtual_channel_sessions
+                    .borrow_mut()
+                    .insert(session.channel_id.clone(), session);
+            }
+            {
+                let channels = self.channels.borrow();
+                let mut drafts = self.virtual_channel_drafts.borrow_mut();
+                let mut sessions = self.virtual_channel_sessions.borrow_mut();
+                reconcile_virtual_channel_state(&channels, &mut drafts, &mut sessions);
             }
         } else {
             *self.storage_initialized.borrow_mut() = true;
@@ -428,6 +593,13 @@ impl LdkRuntimeManager for ScaffoldLdkRuntimeManager {
     fn remove_channel(&self, channel_id: &str) -> bool {
         let removed = self.channels.borrow_mut().remove(channel_id).is_some();
         if removed {
+            let mut sessions = self.virtual_channel_sessions.borrow_mut();
+            if let Some(session) = sessions.get_mut(channel_id) {
+                session.status = LdkRuntimeVirtualChannelSessionStatusData::Abandoned;
+                session.updated_at = unix_now_secs();
+            }
+        }
+        if removed {
             self.persist_state();
         }
         removed
@@ -435,10 +607,24 @@ impl LdkRuntimeManager for ScaffoldLdkRuntimeManager {
 
     fn remove_channels_by_peer(&self, peer_pubkey: &str) -> usize {
         let mut channels = self.channels.borrow_mut();
+        let removed_channel_ids = channels
+            .values()
+            .filter(|ch| ch.peer_pubkey == peer_pubkey)
+            .map(|ch| ch.channel_id.clone())
+            .collect::<Vec<_>>();
         let before = channels.len();
         channels.retain(|_, ch| ch.peer_pubkey != peer_pubkey);
         let removed = before.saturating_sub(channels.len());
         drop(channels);
+        if removed > 0 {
+            let mut sessions = self.virtual_channel_sessions.borrow_mut();
+            for channel_id in removed_channel_ids {
+                if let Some(session) = sessions.get_mut(&channel_id) {
+                    session.status = LdkRuntimeVirtualChannelSessionStatusData::Abandoned;
+                    session.updated_at = unix_now_secs();
+                }
+            }
+        }
         if removed > 0 {
             self.persist_state();
         }
@@ -488,6 +674,166 @@ impl LdkRuntimeManager for ScaffoldLdkRuntimeManager {
     fn list_payments(&self) -> Vec<LdkRuntimePaymentStateData> {
         self.payments.borrow().values().cloned().collect()
     }
+
+    fn virtual_channel_add_intent(
+        &self,
+        peer_pubkey: &str,
+        temporary_channel_id: Option<String>,
+    ) -> Result<String, String> {
+        let duplicate_virtual_draft = self
+            .virtual_channel_drafts
+            .borrow()
+            .values()
+            .any(|draft| draft.peer_pubkey == peer_pubkey);
+        if duplicate_virtual_draft {
+            return Err("virtual channel draft already exists for this peer pair".to_string());
+        }
+
+        let duplicate_virtual_session =
+            self.virtual_channel_sessions
+                .borrow()
+                .values()
+                .any(|session| {
+                    session.peer_pubkey == peer_pubkey
+                        && session.status != LdkRuntimeVirtualChannelSessionStatusData::Abandoned
+                });
+        if duplicate_virtual_session {
+            return Err("virtual channel session already exists for this peer pair".to_string());
+        }
+
+        let temporary_channel_id = temporary_channel_id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "temporary_channel_id is required".to_string())?;
+        if self.channels.borrow().contains_key(&temporary_channel_id)
+            || self
+                .virtual_channel_drafts
+                .borrow()
+                .contains_key(&temporary_channel_id)
+        {
+            return Err("temporary_channel_id already used".to_string());
+        }
+
+        self.virtual_channel_drafts.borrow_mut().insert(
+            temporary_channel_id.clone(),
+            LdkRuntimeVirtualChannelDraftData {
+                temporary_channel_id: temporary_channel_id.clone(),
+                peer_pubkey: peer_pubkey.to_string(),
+                created_at: unix_now_secs(),
+            },
+        );
+        self.persist_state();
+        Ok(temporary_channel_id)
+    }
+
+    fn virtual_channel_draft_delete(&self, temporary_channel_id: &str) -> bool {
+        let removed = self
+            .virtual_channel_drafts
+            .borrow_mut()
+            .remove(temporary_channel_id)
+            .is_some();
+        if removed {
+            self.persist_state();
+        }
+        removed
+    }
+
+    fn virtual_channel_draft_get(
+        &self,
+        temporary_channel_id: &str,
+    ) -> Option<LdkRuntimeVirtualChannelDraftData> {
+        self.virtual_channel_drafts
+            .borrow()
+            .get(temporary_channel_id)
+            .cloned()
+    }
+
+    fn virtual_channel_draft_store(&self) -> Vec<LdkRuntimeVirtualChannelDraftData> {
+        self.virtual_channel_drafts
+            .borrow()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn virtual_channel_session_add_from_open(
+        &self,
+        channel_id: &str,
+        temporary_channel_id: &str,
+        peer_pubkey: &str,
+    ) {
+        let now = unix_now_secs();
+        self.virtual_channel_sessions.borrow_mut().insert(
+            channel_id.to_string(),
+            LdkRuntimeVirtualChannelSessionData {
+                channel_id: channel_id.to_string(),
+                former_temporary_channel_id: temporary_channel_id.to_string(),
+                peer_pubkey: peer_pubkey.to_string(),
+                status: LdkRuntimeVirtualChannelSessionStatusData::Active,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        self.virtual_channel_drafts
+            .borrow_mut()
+            .remove(temporary_channel_id);
+        self.persist_state();
+    }
+
+    fn virtual_channel_session_get(
+        &self,
+        channel_id: &str,
+    ) -> Option<LdkRuntimeVirtualChannelSessionData> {
+        self.virtual_channel_sessions
+            .borrow()
+            .get(channel_id)
+            .cloned()
+    }
+
+    fn virtual_channel_session_get_by_peer(
+        &self,
+        peer_pubkey: &str,
+    ) -> Option<LdkRuntimeVirtualChannelSessionData> {
+        self.virtual_channel_sessions
+            .borrow()
+            .values()
+            .find(|session| session.peer_pubkey == peer_pubkey)
+            .cloned()
+    }
+
+    fn virtual_channel_session_update_status(
+        &self,
+        channel_id: &str,
+        status: LdkRuntimeVirtualChannelSessionStatusData,
+    ) -> bool {
+        let mut sessions = self.virtual_channel_sessions.borrow_mut();
+        let Some(session) = sessions.get_mut(channel_id) else {
+            return false;
+        };
+        session.status = status;
+        session.updated_at = unix_now_secs();
+        drop(sessions);
+        self.persist_state();
+        true
+    }
+
+    fn virtual_channel_session_store(&self) -> Vec<LdkRuntimeVirtualChannelSessionData> {
+        self.virtual_channel_sessions
+            .borrow()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn virtual_channel_reconcile_sessions(&self) {
+        let channels = self.channels.borrow();
+        let mut drafts = self.virtual_channel_drafts.borrow_mut();
+        let mut sessions = self.virtual_channel_sessions.borrow_mut();
+        reconcile_virtual_channel_state(&channels, &mut drafts, &mut sessions);
+        drop(sessions);
+        drop(drafts);
+        drop(channels);
+        self.persist_state();
+    }
 }
 
 impl LdkRuntimeManager for LdkBridgeRuntimeManager {
@@ -532,6 +878,8 @@ impl LdkRuntimeManager for LdkBridgeRuntimeManager {
             self.peers.borrow_mut().clear();
             self.channels.borrow_mut().clear();
             self.payments.borrow_mut().clear();
+            self.virtual_channel_drafts.borrow_mut().clear();
+            self.virtual_channel_sessions.borrow_mut().clear();
             for mut peer in snapshot.peers {
                 peer.started = false;
                 self.peers.borrow_mut().insert(peer.pubkey.clone(), peer);
@@ -545,6 +893,22 @@ impl LdkRuntimeManager for LdkBridgeRuntimeManager {
                 self.payments
                     .borrow_mut()
                     .insert(payment.payment_hash.clone(), payment);
+            }
+            for draft in snapshot.virtual_channel_drafts {
+                self.virtual_channel_drafts
+                    .borrow_mut()
+                    .insert(draft.temporary_channel_id.clone(), draft);
+            }
+            for session in snapshot.virtual_channel_sessions {
+                self.virtual_channel_sessions
+                    .borrow_mut()
+                    .insert(session.channel_id.clone(), session);
+            }
+            {
+                let channels = self.channels.borrow();
+                let mut drafts = self.virtual_channel_drafts.borrow_mut();
+                let mut sessions = self.virtual_channel_sessions.borrow_mut();
+                reconcile_virtual_channel_state(&channels, &mut drafts, &mut sessions);
             }
         } else {
             *self.storage_initialized.borrow_mut() = true;
@@ -628,6 +992,13 @@ impl LdkRuntimeManager for LdkBridgeRuntimeManager {
     fn remove_channel(&self, channel_id: &str) -> bool {
         let removed = self.channels.borrow_mut().remove(channel_id).is_some();
         if removed {
+            let mut sessions = self.virtual_channel_sessions.borrow_mut();
+            if let Some(session) = sessions.get_mut(channel_id) {
+                session.status = LdkRuntimeVirtualChannelSessionStatusData::Abandoned;
+                session.updated_at = unix_now_secs();
+            }
+        }
+        if removed {
             self.persist_state();
         }
         removed
@@ -635,10 +1006,24 @@ impl LdkRuntimeManager for LdkBridgeRuntimeManager {
 
     fn remove_channels_by_peer(&self, peer_pubkey: &str) -> usize {
         let mut channels = self.channels.borrow_mut();
+        let removed_channel_ids = channels
+            .values()
+            .filter(|ch| ch.peer_pubkey == peer_pubkey)
+            .map(|ch| ch.channel_id.clone())
+            .collect::<Vec<_>>();
         let before = channels.len();
         channels.retain(|_, ch| ch.peer_pubkey != peer_pubkey);
         let removed = before.saturating_sub(channels.len());
         drop(channels);
+        if removed > 0 {
+            let mut sessions = self.virtual_channel_sessions.borrow_mut();
+            for channel_id in removed_channel_ids {
+                if let Some(session) = sessions.get_mut(&channel_id) {
+                    session.status = LdkRuntimeVirtualChannelSessionStatusData::Abandoned;
+                    session.updated_at = unix_now_secs();
+                }
+            }
+        }
         if removed > 0 {
             self.persist_state();
         }
@@ -687,6 +1072,166 @@ impl LdkRuntimeManager for LdkBridgeRuntimeManager {
 
     fn list_payments(&self) -> Vec<LdkRuntimePaymentStateData> {
         self.payments.borrow().values().cloned().collect()
+    }
+
+    fn virtual_channel_add_intent(
+        &self,
+        peer_pubkey: &str,
+        temporary_channel_id: Option<String>,
+    ) -> Result<String, String> {
+        let duplicate_virtual_draft = self
+            .virtual_channel_drafts
+            .borrow()
+            .values()
+            .any(|draft| draft.peer_pubkey == peer_pubkey);
+        if duplicate_virtual_draft {
+            return Err("virtual channel draft already exists for this peer pair".to_string());
+        }
+
+        let duplicate_virtual_session =
+            self.virtual_channel_sessions
+                .borrow()
+                .values()
+                .any(|session| {
+                    session.peer_pubkey == peer_pubkey
+                        && session.status != LdkRuntimeVirtualChannelSessionStatusData::Abandoned
+                });
+        if duplicate_virtual_session {
+            return Err("virtual channel session already exists for this peer pair".to_string());
+        }
+
+        let temporary_channel_id = temporary_channel_id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "temporary_channel_id is required".to_string())?;
+        if self.channels.borrow().contains_key(&temporary_channel_id)
+            || self
+                .virtual_channel_drafts
+                .borrow()
+                .contains_key(&temporary_channel_id)
+        {
+            return Err("temporary_channel_id already used".to_string());
+        }
+
+        self.virtual_channel_drafts.borrow_mut().insert(
+            temporary_channel_id.clone(),
+            LdkRuntimeVirtualChannelDraftData {
+                temporary_channel_id: temporary_channel_id.clone(),
+                peer_pubkey: peer_pubkey.to_string(),
+                created_at: unix_now_secs(),
+            },
+        );
+        self.persist_state();
+        Ok(temporary_channel_id)
+    }
+
+    fn virtual_channel_draft_delete(&self, temporary_channel_id: &str) -> bool {
+        let removed = self
+            .virtual_channel_drafts
+            .borrow_mut()
+            .remove(temporary_channel_id)
+            .is_some();
+        if removed {
+            self.persist_state();
+        }
+        removed
+    }
+
+    fn virtual_channel_draft_get(
+        &self,
+        temporary_channel_id: &str,
+    ) -> Option<LdkRuntimeVirtualChannelDraftData> {
+        self.virtual_channel_drafts
+            .borrow()
+            .get(temporary_channel_id)
+            .cloned()
+    }
+
+    fn virtual_channel_draft_store(&self) -> Vec<LdkRuntimeVirtualChannelDraftData> {
+        self.virtual_channel_drafts
+            .borrow()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn virtual_channel_session_add_from_open(
+        &self,
+        channel_id: &str,
+        temporary_channel_id: &str,
+        peer_pubkey: &str,
+    ) {
+        let now = unix_now_secs();
+        self.virtual_channel_sessions.borrow_mut().insert(
+            channel_id.to_string(),
+            LdkRuntimeVirtualChannelSessionData {
+                channel_id: channel_id.to_string(),
+                former_temporary_channel_id: temporary_channel_id.to_string(),
+                peer_pubkey: peer_pubkey.to_string(),
+                status: LdkRuntimeVirtualChannelSessionStatusData::Active,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        self.virtual_channel_drafts
+            .borrow_mut()
+            .remove(temporary_channel_id);
+        self.persist_state();
+    }
+
+    fn virtual_channel_session_get(
+        &self,
+        channel_id: &str,
+    ) -> Option<LdkRuntimeVirtualChannelSessionData> {
+        self.virtual_channel_sessions
+            .borrow()
+            .get(channel_id)
+            .cloned()
+    }
+
+    fn virtual_channel_session_get_by_peer(
+        &self,
+        peer_pubkey: &str,
+    ) -> Option<LdkRuntimeVirtualChannelSessionData> {
+        self.virtual_channel_sessions
+            .borrow()
+            .values()
+            .find(|session| session.peer_pubkey == peer_pubkey)
+            .cloned()
+    }
+
+    fn virtual_channel_session_update_status(
+        &self,
+        channel_id: &str,
+        status: LdkRuntimeVirtualChannelSessionStatusData,
+    ) -> bool {
+        let mut sessions = self.virtual_channel_sessions.borrow_mut();
+        let Some(session) = sessions.get_mut(channel_id) else {
+            return false;
+        };
+        session.status = status;
+        session.updated_at = unix_now_secs();
+        drop(sessions);
+        self.persist_state();
+        true
+    }
+
+    fn virtual_channel_session_store(&self) -> Vec<LdkRuntimeVirtualChannelSessionData> {
+        self.virtual_channel_sessions
+            .borrow()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn virtual_channel_reconcile_sessions(&self) {
+        let channels = self.channels.borrow();
+        let mut drafts = self.virtual_channel_drafts.borrow_mut();
+        let mut sessions = self.virtual_channel_sessions.borrow_mut();
+        reconcile_virtual_channel_state(&channels, &mut drafts, &mut sessions);
+        drop(sessions);
+        drop(drafts);
+        drop(channels);
+        self.persist_state();
     }
 }
 

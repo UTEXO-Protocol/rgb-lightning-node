@@ -28,8 +28,8 @@
     <h1>RLN WASM Virtual Channel SDK Flow</h1>
     <p>
       Runs the same high-level sequence as the Python virtual-channel SDK example:
-      init/unlock, connect peers, open channel, keysend A->B, keysend B->A,
-      close channel.
+      init/unlock, connect peers, open `trusted_no_broadcast` virtual channel,
+      keysend A->B, keysend B->A, close channel (with host/fallback close retry).
     </p>
     <p>
       Note: this is the wasm runtime flow, so settlement statuses are driven via
