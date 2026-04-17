@@ -164,6 +164,10 @@ pub struct LdkRuntimePaymentStateData {
     pub payment_hash: String,
     pub inbound: bool,
     pub status: String,
+    #[serde(default)]
+    pub invoice_type: Option<String>,
+    #[serde(default)]
+    pub preimage: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub payee_pubkey: String,

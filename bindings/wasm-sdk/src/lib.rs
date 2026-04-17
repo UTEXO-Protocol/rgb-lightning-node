@@ -1036,6 +1036,76 @@ impl RlnWasmSdk {
         node.create_ln_invoice_json(amt_msat, expiry_sec, asset_id, asset_amount)
     }
 
+    #[wasm_bindgen(js_name = createHodlLnInvoiceValue)]
+    pub fn create_hodl_ln_invoice_value(
+        &self,
+        node: &RlnWasmNode,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: String,
+    ) -> Result<JsValue, JsValue> {
+        node.create_hodl_ln_invoice_value(
+            amt_msat,
+            expiry_sec,
+            asset_id,
+            asset_amount,
+            payment_hash,
+        )
+    }
+
+    #[wasm_bindgen(js_name = createHodlLnInvoiceJson)]
+    pub fn create_hodl_ln_invoice_json(
+        &self,
+        node: &RlnWasmNode,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: String,
+    ) -> Result<String, JsValue> {
+        node.create_hodl_ln_invoice_json(amt_msat, expiry_sec, asset_id, asset_amount, payment_hash)
+    }
+
+    #[wasm_bindgen(js_name = claimHodlInvoiceValue)]
+    pub fn claim_hodl_invoice_value(
+        &self,
+        node: &RlnWasmNode,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<JsValue, JsValue> {
+        node.claim_hodl_invoice_value(payment_hash, payment_preimage)
+    }
+
+    #[wasm_bindgen(js_name = claimHodlInvoiceJson)]
+    pub fn claim_hodl_invoice_json(
+        &self,
+        node: &RlnWasmNode,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<String, JsValue> {
+        node.claim_hodl_invoice_json(payment_hash, payment_preimage)
+    }
+
+    #[wasm_bindgen(js_name = cancelHodlInvoiceValue)]
+    pub fn cancel_hodl_invoice_value(
+        &self,
+        node: &RlnWasmNode,
+        payment_hash: String,
+    ) -> Result<JsValue, JsValue> {
+        node.cancel_hodl_invoice_value(payment_hash)
+    }
+
+    #[wasm_bindgen(js_name = cancelHodlInvoiceJson)]
+    pub fn cancel_hodl_invoice_json(
+        &self,
+        node: &RlnWasmNode,
+        payment_hash: String,
+    ) -> Result<String, JsValue> {
+        node.cancel_hodl_invoice_json(payment_hash)
+    }
+
     #[wasm_bindgen(js_name = walletGetAddress)]
     pub fn wallet_get_address(&self, wallet: &RlnWasmWallet) -> Result<String, JsValue> {
         wallet.get_address()
@@ -1741,6 +1811,72 @@ impl RlnWasmSdkNodeHandle {
     ) -> Result<String, JsValue> {
         self.inner
             .create_ln_invoice_json(amt_msat, expiry_sec, asset_id, asset_amount)
+    }
+
+    #[wasm_bindgen(js_name = createHodlLnInvoiceValue)]
+    pub fn create_hodl_ln_invoice_value(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: String,
+    ) -> Result<JsValue, JsValue> {
+        self.inner.create_hodl_ln_invoice_value(
+            amt_msat,
+            expiry_sec,
+            asset_id,
+            asset_amount,
+            payment_hash,
+        )
+    }
+
+    #[wasm_bindgen(js_name = createHodlLnInvoiceJson)]
+    pub fn create_hodl_ln_invoice_json(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: String,
+    ) -> Result<String, JsValue> {
+        self.inner.create_hodl_ln_invoice_json(
+            amt_msat,
+            expiry_sec,
+            asset_id,
+            asset_amount,
+            payment_hash,
+        )
+    }
+
+    #[wasm_bindgen(js_name = claimHodlInvoiceValue)]
+    pub fn claim_hodl_invoice_value(
+        &self,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<JsValue, JsValue> {
+        self.inner
+            .claim_hodl_invoice_value(payment_hash, payment_preimage)
+    }
+
+    #[wasm_bindgen(js_name = claimHodlInvoiceJson)]
+    pub fn claim_hodl_invoice_json(
+        &self,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .claim_hodl_invoice_json(payment_hash, payment_preimage)
+    }
+
+    #[wasm_bindgen(js_name = cancelHodlInvoiceValue)]
+    pub fn cancel_hodl_invoice_value(&self, payment_hash: String) -> Result<JsValue, JsValue> {
+        self.inner.cancel_hodl_invoice_value(payment_hash)
+    }
+
+    #[wasm_bindgen(js_name = cancelHodlInvoiceJson)]
+    pub fn cancel_hodl_invoice_json(&self, payment_hash: String) -> Result<String, JsValue> {
+        self.inner.cancel_hodl_invoice_json(payment_hash)
     }
 
     #[wasm_bindgen(js_name = failPendingPayments)]

@@ -35,6 +35,8 @@ const SDK_OPENCHANNEL_MIN_SAT: u64 = 5_506;
 const SDK_OPENCHANNEL_MAX_SAT: u64 = 16_777_215;
 const SDK_OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
 const SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
+const SDK_INVOICE_TYPE_AUTO_CLAIM: &str = "auto_claim";
+const SDK_INVOICE_TYPE_HODL: &str = "hodl";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RlnWasmNodePeerData {
@@ -81,6 +83,8 @@ pub struct RlnWasmNodePaymentData {
     pub payment_hash: String,
     pub inbound: bool,
     pub status: String,
+    pub invoice_type: Option<String>,
+    pub preimage: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub payee_pubkey: String,
@@ -117,6 +121,11 @@ pub struct RlnWasmNodeDecodeLnInvoiceData {
 #[derive(Clone, Debug, Serialize)]
 pub struct RlnWasmNodeInvoiceStatusData {
     pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RlnWasmNodeClaimHodlInvoiceData {
+    pub changed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -801,6 +810,8 @@ impl RlnWasmNode {
             payment_hash: payment_hash.clone(),
             inbound: false,
             status: "pending".to_string(),
+            invoice_type: None,
+            preimage: None,
             created_at: now,
             updated_at: now,
             payee_pubkey,
@@ -903,6 +914,8 @@ impl RlnWasmNode {
             payment_hash: payment_hash.clone(),
             inbound: false,
             status: "pending".to_string(),
+            invoice_type: None,
+            preimage: None,
             created_at: now,
             updated_at: now,
             payee_pubkey: dest_pubkey,
@@ -1089,13 +1102,14 @@ impl RlnWasmNode {
         crate::js_to_json(&parsed)
     }
 
-    #[wasm_bindgen(js_name = createLnInvoiceValue)]
-    pub fn create_ln_invoice_value(
+    fn create_ln_invoice_value_internal(
         &self,
         amt_msat: Option<u64>,
         expiry_sec: u32,
         asset_id: Option<String>,
         asset_amount: Option<u64>,
+        payment_hash_override: Option<String>,
+        invoice_type: &str,
     ) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
         if expiry_sec == 0 {
@@ -1130,7 +1144,33 @@ impl RlnWasmNode {
             )));
         }
 
-        let (payment_hash, payment_secret) = self.next_invoice_payment_identity();
+        let (payment_hash, payment_secret) = if let Some(payment_hash_hex) = payment_hash_override {
+            let payment_hash_hex = payment_hash_hex.trim().to_string();
+            if payment_hash_hex.is_empty() {
+                return Err(JsValue::from_str("payment_hash cannot be empty"));
+            }
+            let payment_hash_bytes =
+                decode_fixed_hex::<32>(&payment_hash_hex, "invalid payment_hash")?;
+            if self.use_runtime_state_for_ln_views() {
+                if self.ldk_runtime.get_payment(&payment_hash_hex).is_some() {
+                    return Err(JsValue::from_str("payment_hash already used"));
+                }
+            } else if self.payments.borrow().contains_key(&payment_hash_hex) {
+                return Err(JsValue::from_str("payment_hash already used"));
+            }
+            let payment_hash = Sha256::from_slice(&payment_hash_bytes)
+                .map_err(|_| JsValue::from_str("invalid payment_hash"))?;
+            let secret_seed = format!(
+                "wasm-hodl-secret:{payment_hash_hex}:{}",
+                self.next_payment_number()
+            );
+            let secret_hash = Sha256::hash(secret_seed.as_bytes());
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(secret_hash.as_ref());
+            (payment_hash, PaymentSecret(secret))
+        } else {
+            self.next_invoice_payment_identity()
+        };
         let now = unix_now_secs();
         let (node_secret_key, node_pubkey) = self.scaffold_node_signing_identity()?;
         let currency = self.invoice_currency()?;
@@ -1158,6 +1198,8 @@ impl RlnWasmNode {
             payment_hash: payment_hash_hex.clone(),
             inbound: true,
             status: "pending".to_string(),
+            invoice_type: Some(invoice_type.to_string()),
+            preimage: None,
             created_at: now,
             updated_at: now,
             payee_pubkey: node_pubkey.to_string(),
@@ -1180,6 +1222,24 @@ impl RlnWasmNode {
         })
     }
 
+    #[wasm_bindgen(js_name = createLnInvoiceValue)]
+    pub fn create_ln_invoice_value(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<JsValue, JsValue> {
+        self.create_ln_invoice_value_internal(
+            amt_msat,
+            expiry_sec,
+            asset_id,
+            asset_amount,
+            None,
+            SDK_INVOICE_TYPE_AUTO_CLAIM,
+        )
+    }
+
     #[wasm_bindgen(js_name = createLnInvoiceJson)]
     pub fn create_ln_invoice_json(
         &self,
@@ -1189,6 +1249,176 @@ impl RlnWasmNode {
         asset_amount: Option<u64>,
     ) -> Result<String, JsValue> {
         let value = self.create_ln_invoice_value(amt_msat, expiry_sec, asset_id, asset_amount)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = createHodlLnInvoiceValue)]
+    pub fn create_hodl_ln_invoice_value(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: String,
+    ) -> Result<JsValue, JsValue> {
+        self.create_ln_invoice_value_internal(
+            amt_msat,
+            expiry_sec,
+            asset_id,
+            asset_amount,
+            Some(payment_hash),
+            SDK_INVOICE_TYPE_HODL,
+        )
+    }
+
+    #[wasm_bindgen(js_name = createHodlLnInvoiceJson)]
+    pub fn create_hodl_ln_invoice_json(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: String,
+    ) -> Result<String, JsValue> {
+        let value = self.create_hodl_ln_invoice_value(
+            amt_msat,
+            expiry_sec,
+            asset_id,
+            asset_amount,
+            payment_hash,
+        )?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = cancelHodlInvoiceValue)]
+    pub fn cancel_hodl_invoice_value(&self, payment_hash: String) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let payment_hash = payment_hash.trim().to_string();
+        if payment_hash.is_empty() {
+            return Err(JsValue::from_str("payment_hash cannot be empty"));
+        }
+        decode_fixed_hex::<32>(&payment_hash, "invalid payment_hash")?;
+        let mut payment = if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime
+                .get_payment(&payment_hash)
+                .map(Self::payment_data_from_runtime_state)
+                .ok_or_else(|| JsValue::from_str("unknown LN invoice"))?
+        } else {
+            self.payments
+                .borrow()
+                .get(&payment_hash)
+                .map(|entry| entry.data.clone())
+                .ok_or_else(|| JsValue::from_str("unknown LN invoice"))?
+        };
+        if !matches!(payment.invoice_type.as_deref(), Some(SDK_INVOICE_TYPE_HODL)) {
+            return Err(JsValue::from_str("invoice is not hodl"));
+        }
+        match payment.status.as_str() {
+            "succeeded" => return Err(JsValue::from_str("invoice is already claimed")),
+            "claiming" => return Err(JsValue::from_str("invoice settling is in progress")),
+            "claimable" => {}
+            _ => return Err(JsValue::from_str("invoice is not claimable")),
+        }
+        payment.status = "cancelled".to_string();
+        payment.updated_at = unix_now_secs();
+        if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime
+                .upsert_payment(Self::payment_runtime_state_from_data(&payment));
+        } else {
+            self.payments
+                .borrow_mut()
+                .insert(payment_hash, PaymentEntry { data: payment });
+        }
+        self.persist_runtime_event_log_state();
+        crate::js_obj(&serde_json::json!({}))
+    }
+
+    #[wasm_bindgen(js_name = cancelHodlInvoiceJson)]
+    pub fn cancel_hodl_invoice_json(&self, payment_hash: String) -> Result<String, JsValue> {
+        let value = self.cancel_hodl_invoice_value(payment_hash)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = claimHodlInvoiceValue)]
+    pub fn claim_hodl_invoice_value(
+        &self,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let payment_hash = payment_hash.trim().to_string();
+        if payment_hash.is_empty() {
+            return Err(JsValue::from_str("payment_hash cannot be empty"));
+        }
+        let payment_hash_bytes = decode_fixed_hex::<32>(&payment_hash, "invalid payment_hash")?;
+        let payment_preimage = payment_preimage.trim().to_string();
+        if payment_preimage.is_empty() {
+            return Err(JsValue::from_str("payment_preimage cannot be empty"));
+        }
+        let payment_preimage_bytes =
+            decode_fixed_hex::<32>(&payment_preimage, "invalid payment_preimage")?;
+        let computed_hash = Sha256::hash(&payment_preimage_bytes);
+        if computed_hash.to_byte_array() != payment_hash_bytes {
+            return Err(JsValue::from_str("invalid payment_preimage"));
+        }
+
+        let mut payment = if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime
+                .get_payment(&payment_hash)
+                .map(Self::payment_data_from_runtime_state)
+                .ok_or_else(|| JsValue::from_str("unknown LN invoice"))?
+        } else {
+            self.payments
+                .borrow()
+                .get(&payment_hash)
+                .map(|entry| entry.data.clone())
+                .ok_or_else(|| JsValue::from_str("unknown LN invoice"))?
+        };
+        if !matches!(payment.invoice_type.as_deref(), Some(SDK_INVOICE_TYPE_HODL)) {
+            return Err(JsValue::from_str("invoice is not hodl"));
+        }
+        match payment.status.as_str() {
+            "succeeded" => {
+                if let Some(stored_preimage) = payment.preimage.as_deref() {
+                    if stored_preimage != payment_preimage {
+                        return Err(JsValue::from_str("invalid payment_preimage"));
+                    }
+                }
+                return crate::js_obj(&RlnWasmNodeClaimHodlInvoiceData { changed: false });
+            }
+            "claiming" => return Err(JsValue::from_str("invoice settling is in progress")),
+            "claimable" => {}
+            _ => return Err(JsValue::from_str("invoice is not claimable")),
+        }
+
+        payment.status = "claiming".to_string();
+        payment.updated_at = unix_now_secs();
+        payment.preimage = Some(payment_preimage);
+        payment.status = "succeeded".to_string();
+        payment.updated_at = unix_now_secs();
+
+        if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime
+                .upsert_payment(Self::payment_runtime_state_from_data(&payment));
+        } else {
+            self.payments
+                .borrow_mut()
+                .insert(payment_hash, PaymentEntry { data: payment });
+        }
+        self.persist_runtime_event_log_state();
+        crate::js_obj(&RlnWasmNodeClaimHodlInvoiceData { changed: true })
+    }
+
+    #[wasm_bindgen(js_name = claimHodlInvoiceJson)]
+    pub fn claim_hodl_invoice_json(
+        &self,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<String, JsValue> {
+        let value = self.claim_hodl_invoice_value(payment_hash, payment_preimage)?;
         let parsed: serde_json::Value = crate::js_from(value)?;
         crate::js_to_json(&parsed)
     }
@@ -1780,7 +2010,9 @@ impl RlnWasmNode {
                     .map(|asset| channel.asset_id.as_deref() == Some(asset))
                     .unwrap_or(channel.asset_id.is_none());
 
-            if payment.status == "pending" && (outbound_to_counterparty || inbound_maybe_from_counterparty) {
+            if payment.status == "pending"
+                && (outbound_to_counterparty || inbound_maybe_from_counterparty)
+            {
                 return Err(JsValue::from_str(
                     "virtual cleanup is blocked while HTLCs are still in flight",
                 ));
@@ -1964,6 +2196,8 @@ impl RlnWasmNode {
             payment_hash: data.payment_hash.clone(),
             inbound: data.inbound,
             status: data.status.clone(),
+            invoice_type: data.invoice_type.clone(),
+            preimage: data.preimage.clone(),
             created_at: data.created_at,
             updated_at: data.updated_at,
             payee_pubkey: data.payee_pubkey.clone(),
@@ -1980,6 +2214,8 @@ impl RlnWasmNode {
             payment_hash: state.payment_hash,
             inbound: state.inbound,
             status: state.status,
+            invoice_type: state.invoice_type,
+            preimage: state.preimage,
             created_at: state.created_at,
             updated_at: state.updated_at,
             payee_pubkey: state.payee_pubkey,
@@ -2333,9 +2569,9 @@ fn unix_now_secs() -> u64 {
 fn normalize_payment_status(status: &str) -> Result<String, JsValue> {
     let normalized = status.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "pending" | "succeeded" | "failed" | "expired" => Ok(normalized),
+        "pending" | "claimable" | "claiming" | "succeeded" | "cancelled" | "failed" | "expired" => Ok(normalized),
         _ => Err(JsValue::from_str(
-            "status must be one of: pending, succeeded, failed, expired",
+            "status must be one of: pending, claimable, claiming, succeeded, cancelled, failed, expired",
         )),
     }
 }
@@ -2396,7 +2632,16 @@ fn is_valid_payment_status_transition(current: &str, next: &str) -> bool {
     if current == next {
         return true;
     }
-    !matches!(current, "succeeded" | "expired")
+    match current {
+        "pending" => matches!(next, "claimable" | "succeeded" | "failed" | "expired"),
+        "claimable" => matches!(
+            next,
+            "claiming" | "succeeded" | "cancelled" | "failed" | "expired"
+        ),
+        "claiming" => matches!(next, "succeeded" | "failed"),
+        "succeeded" | "cancelled" | "expired" => false,
+        _ => true,
+    }
 }
 
 fn next_runtime_event_seq(next_runtime_event_seq: &Rc<RefCell<u64>>) -> u64 {
@@ -3115,6 +3360,16 @@ fn validate_asset_id_format(asset_id: &str) -> Result<(), JsValue> {
         return Err(JsValue::from_str("invalid asset_id"));
     }
     Ok(())
+}
+
+fn decode_fixed_hex<const N: usize>(value: &str, error: &str) -> Result<[u8; N], JsValue> {
+    let bytes = hex::decode(value).map_err(|_| JsValue::from_str(error))?;
+    if bytes.len() != N {
+        return Err(JsValue::from_str(error));
+    }
+    let mut out = [0u8; N];
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 #[cfg(test)]

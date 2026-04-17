@@ -153,6 +153,8 @@ fn bridge_apply_payment_status_via_event_stream_updates_runtime_and_log() {
             .to_string(),
         inbound: false,
         status: "pending".to_string(),
+        invoice_type: None,
+        preimage: None,
         created_at: 1,
         updated_at: 1,
         payee_pubkey: "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0"
@@ -777,6 +779,8 @@ fn hook_payload_mixed_stream_preserves_event_order_and_terminal_payment_state_co
         payment_hash: "pay-mixed".to_string(),
         inbound: false,
         status: "pending".to_string(),
+        invoice_type: None,
+        preimage: None,
         created_at: 10,
         updated_at: 10,
         payee_pubkey: "peer-mixed".to_string(),
@@ -1089,6 +1093,8 @@ fn bridge_backend_payment_views_use_runtime_state_contract() {
         payment_hash: "pay-1".to_string(),
         inbound: false,
         status: "pending".to_string(),
+        invoice_type: None,
+        preimage: None,
         created_at: 5,
         updated_at: 5,
         payee_pubkey: "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0"
@@ -1124,6 +1130,8 @@ fn bridge_backend_ingest_event_syncs_runtime_payment_state_contract() {
         payment_hash: "pay-sync".to_string(),
         inbound: false,
         status: "pending".to_string(),
+        invoice_type: None,
+        preimage: None,
         created_at: 7,
         updated_at: 7,
         payee_pubkey: "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0"
@@ -1156,6 +1164,8 @@ fn bridge_backend_fail_pending_syncs_runtime_payment_state_contract() {
         payment_hash: "pay-fail".to_string(),
         inbound: false,
         status: "pending".to_string(),
+        invoice_type: None,
+        preimage: None,
         created_at: 8,
         updated_at: 8,
         payee_pubkey: "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0"
@@ -1289,6 +1299,8 @@ fn bridge_backend_runtime_state_restores_across_node_instances_contract() {
             payment_hash: "pay-restore".to_string(),
             inbound: false,
             status: "succeeded".to_string(),
+            invoice_type: None,
+            preimage: None,
             created_at: 10,
             updated_at: 11,
             payee_pubkey: "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0"
@@ -1629,6 +1641,8 @@ fn fail_pending_payments_uses_payment_status_runtime_events() {
                 payment_hash: "p1".to_string(),
                 inbound: false,
                 status: "pending".to_string(),
+                invoice_type: None,
+                preimage: None,
                 created_at: 1,
                 updated_at: 1,
                 payee_pubkey: "peer1".to_string(),
@@ -1645,6 +1659,8 @@ fn fail_pending_payments_uses_payment_status_runtime_events() {
                 payment_hash: "p2".to_string(),
                 inbound: false,
                 status: "succeeded".to_string(),
+                invoice_type: None,
+                preimage: None,
                 created_at: 1,
                 updated_at: 1,
                 payee_pubkey: "peer2".to_string(),
@@ -1817,6 +1833,8 @@ fn payment_status_event_rejects_terminal_state_regression_and_logs_error() {
                 payment_hash: "pay-terminal".to_string(),
                 inbound: false,
                 status: "pending".to_string(),
+                invoice_type: None,
+                preimage: None,
                 created_at: 1,
                 updated_at: 1,
                 payee_pubkey: "peer-x".to_string(),
@@ -1942,6 +1960,8 @@ fn ingest_read_event_value_updates_payment_and_returns_payment_data() {
                 payment_hash: "pay-ingest".to_string(),
                 inbound: false,
                 status: "pending".to_string(),
+                invoice_type: None,
+                preimage: None,
                 created_at: 10,
                 updated_at: 10,
                 payee_pubkey: "peer-pay".to_string(),
@@ -1979,6 +1999,8 @@ fn ingest_read_event_json_and_invalid_transport_contracts() {
                 payment_hash: "pay-json".to_string(),
                 inbound: true,
                 status: "pending".to_string(),
+                invoice_type: None,
+                preimage: None,
                 created_at: 15,
                 updated_at: 15,
                 payee_pubkey: "peer-payee".to_string(),
@@ -2317,11 +2339,10 @@ fn close_channel_rejects_virtual_cleanup_when_counterparty_btc_value_remains_con
     let err = node
         .close_channel_with_options(channel_id, None, false)
         .expect_err("should fail");
-    assert!(
-        err.as_string()
-            .unwrap_or_default()
-            .contains("counterparty BTC balance floor is")
-    );
+    assert!(err
+        .as_string()
+        .unwrap_or_default()
+        .contains("counterparty BTC balance floor is"));
 }
 
 #[test]
@@ -2379,6 +2400,95 @@ fn close_channel_allows_virtual_cleanup_after_btc_roundtrip_contract() {
 
     node.close_channel_with_options(channel_id, None, false)
         .expect("close should succeed after roundtrip");
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn hodl_invoice_claim_is_idempotent_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.hodl-claim.example".to_string(),
+        "ldk_bridge".to_string(),
+    )
+    .expect("node should build");
+
+    let preimage_bytes = [7u8; 32];
+    let preimage_hex = hex::encode(preimage_bytes);
+    let payment_hash = hex::encode(Sha256::hash(&preimage_bytes).to_byte_array());
+    let invoice_js = node
+        .create_hodl_ln_invoice_value(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None, payment_hash)
+        .expect("create hodl invoice");
+    let invoice_doc: serde_json::Value = crate::js_from(invoice_js).expect("parse invoice");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+
+    let _ = node
+        .update_payment_status_by_invoice(invoice.clone(), "claimable".to_string())
+        .expect("simulate received hodl payment");
+    let decoded: serde_json::Value = crate::js_from(
+        node.decode_ln_invoice_value(invoice.clone())
+            .expect("decode invoice"),
+    )
+    .expect("decoded json");
+    let payment_hash = decoded["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+
+    let first_claim = node
+        .claim_hodl_invoice_value(payment_hash.clone(), preimage_hex.clone())
+        .expect("claim should succeed");
+    let first_doc: serde_json::Value = crate::js_from(first_claim).expect("parse claim");
+    assert_eq!(first_doc["changed"], true);
+
+    let second_claim = node
+        .claim_hodl_invoice_value(payment_hash, preimage_hex)
+        .expect("re-claim should be idempotent");
+    let second_doc: serde_json::Value = crate::js_from(second_claim).expect("parse claim");
+    assert_eq!(second_doc["changed"], false);
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn hodl_invoice_cancel_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.hodl-cancel.example".to_string(),
+        "ldk_bridge".to_string(),
+    )
+    .expect("node should build");
+
+    let preimage_bytes = [9u8; 32];
+    let payment_hash = hex::encode(Sha256::hash(&preimage_bytes).to_byte_array());
+    let invoice_js = node
+        .create_hodl_ln_invoice_value(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None, payment_hash)
+        .expect("create hodl invoice");
+    let invoice_doc: serde_json::Value = crate::js_from(invoice_js).expect("parse invoice");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    let decoded: serde_json::Value = crate::js_from(
+        node.decode_ln_invoice_value(invoice.clone())
+            .expect("decode invoice"),
+    )
+    .expect("decoded json");
+    let payment_hash = decoded["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+
+    let _ = node
+        .update_payment_status_by_invoice(invoice.clone(), "claimable".to_string())
+        .expect("simulate received hodl payment");
+    let _ = node
+        .cancel_hodl_invoice_value(payment_hash)
+        .expect("cancel should succeed");
+
+    let status: serde_json::Value =
+        crate::js_from(node.invoice_status_value(invoice).expect("invoice status"))
+            .expect("status json");
+    assert_eq!(status["status"], "cancelled");
 }
 
 #[test]
