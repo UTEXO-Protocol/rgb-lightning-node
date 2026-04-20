@@ -1263,12 +1263,9 @@ pub fn scaffold_ldk_runtime_manager(runtime_key: String) -> Rc<dyn LdkRuntimeMan
 }
 
 #[cfg(test)]
-pub fn reset_scaffold_runtime_storage_for_tests() {
-    SCAFFOLD_RUNTIME_STORAGE.with(|storage| storage.borrow_mut().clear());
-    RUNTIME_SESSION_AUTHORITY_STATE.with(|state| {
-        *state.borrow_mut() = RuntimeSessionAuthorityState::default();
-    });
-}
+mod test_utils;
+#[cfg(test)]
+pub(crate) use test_utils::reset_scaffold_runtime_storage_for_tests;
 
 #[cfg(test)]
 mod tests;

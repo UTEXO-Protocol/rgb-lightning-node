@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::to_value as to_js_value;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 mod ldk_event_applier;
@@ -15,10 +16,14 @@ mod onion_runtime;
 mod peer_session;
 mod runtime_store;
 mod swap_runtime;
+#[cfg(test)]
+mod test_utils;
 pub use ldk_runtime::*;
 pub use ln_node::*;
 pub use ln_transport::*;
 pub use peer_session::*;
+#[cfg(test)]
+pub(crate) use test_utils::reset_wasm_runtime_state_for_tests;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RlnWasmSdkRuntimeCapabilitiesData {
@@ -93,38 +98,11 @@ thread_local! {
         RefCell::new(WasmSdkLifecycleState::default());
     static WASM_MEDIA_STORE: RefCell<HashMap<String, WasmMediaStoreEntry>> =
         RefCell::new(HashMap::new());
+    static WASM_SDK_DEFAULT_WALLET: RefCell<Option<Rc<RefCell<rgb_lib_wasm::Wallet>>>> =
+        RefCell::new(None);
 }
 
 const MEDIA_STORAGE_PREFIX: &str = "rln:wasm:media:";
-
-#[cfg(test)]
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn reset_wasm_sdk_lifecycle_state_for_tests() {
-    WASM_SDK_LIFECYCLE_STATE.with(|state| {
-        let next = WasmSdkLifecycleState::default();
-        *state.borrow_mut() = next.clone();
-        sync_runtime_session_authority_from_lifecycle(&next);
-    });
-}
-
-#[cfg(test)]
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn reset_wasm_runtime_state_for_tests() {
-    reset_wasm_sdk_lifecycle_state_for_tests();
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
-    crate::ln_node::reset_runtime_event_log_storage_for_tests();
-    crate::swap_runtime::reset_swap_runtime_state_for_tests();
-    reset_wasm_media_store_for_tests();
-}
-
-#[cfg(test)]
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn reset_wasm_media_store_for_tests() {
-    WASM_MEDIA_STORE.with(|store| {
-        store.borrow_mut().clear();
-    });
-    clear_wasm_media_storage();
-}
 
 pub(crate) fn ensure_sdk_node_runtime_allowed() -> Result<(), JsValue> {
     WASM_SDK_LIFECYCLE_STATE.with(|state| {
@@ -153,6 +131,61 @@ fn sync_runtime_session_authority_from_lifecycle(state: &WasmSdkLifecycleState) 
     crate::ldk_runtime::set_runtime_session_authorized(state.unlocked);
 }
 
+fn build_auto_wallet_data_json_from_mnemonic(mnemonic: &str) -> Result<String, JsValue> {
+    use rgb_lib_wasm::wallet::{DatabaseType, WalletData};
+    let keys =
+        rgb_lib_wasm::restore_keys(rgb_lib_wasm::BitcoinNetwork::Regtest, mnemonic.to_string())
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let fingerprint = keys.master_fingerprint.clone();
+    let wallet_data = WalletData {
+        data_dir: format!("/tmp/rln_wasm_sdk_auto_{fingerprint}"),
+        bitcoin_network: rgb_lib_wasm::BitcoinNetwork::Regtest,
+        database_type: DatabaseType::Sqlite,
+        max_allocations_per_utxo: 5,
+        account_xpub_vanilla: keys.account_xpub_vanilla,
+        account_xpub_colored: keys.account_xpub_colored,
+        mnemonic: Some(keys.mnemonic),
+        master_fingerprint: keys.master_fingerprint,
+        vanilla_keychain: None,
+        supported_schemas: vec![
+            rgb_lib_wasm::AssetSchema::Nia,
+            rgb_lib_wasm::AssetSchema::Ifa,
+        ],
+    };
+    serde_json::to_string(&wallet_data).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+async fn bootstrap_default_wallet_from_lifecycle() -> Result<(), JsValue> {
+    let mnemonic = WASM_SDK_LIFECYCLE_STATE.with(|state| {
+        let state = state.borrow();
+        if !state.initialized {
+            return Err(JsValue::from_str("sdk is not initialized"));
+        }
+        state
+            .mnemonic
+            .clone()
+            .ok_or_else(|| JsValue::from_str("sdk lifecycle state is inconsistent"))
+    })?;
+    let wallet_data_json = build_auto_wallet_data_json_from_mnemonic(&mnemonic)?;
+    let wallet = RlnWasmWallet::create(&wallet_data_json).await?;
+    WASM_SDK_DEFAULT_WALLET.with(|slot| {
+        *slot.borrow_mut() = Some(Rc::clone(&wallet.inner));
+    });
+    Ok(())
+}
+
+fn maybe_attach_default_wallet_to_node(node: &RlnWasmNode) {
+    WASM_SDK_DEFAULT_WALLET.with(|slot| {
+        if let Some(wallet) = slot.borrow().as_ref() {
+            node.attach_wallet_shared(Rc::clone(wallet));
+        }
+    });
+}
+
+pub(crate) fn try_attach_default_wallet_to_node(node: &RlnWasmNode) {
+    maybe_attach_default_wallet_to_node(node);
+}
+
 impl From<rgb_lib_wasm::keys::Keys> for RlnRgbKeysData {
     fn from(value: rgb_lib_wasm::keys::Keys) -> Self {
         Self {
@@ -178,7 +211,8 @@ pub(crate) fn js_to_json<T: Serialize>(value: &T) -> Result<String, JsValue> {
 }
 
 fn parse_online(value: JsValue) -> Result<rgb_lib_wasm::wallet::Online, JsValue> {
-    if let Ok(online) = serde_wasm_bindgen::from_value::<rgb_lib_wasm::wallet::Online>(value.clone())
+    if let Ok(online) =
+        serde_wasm_bindgen::from_value::<rgb_lib_wasm::wallet::Online>(value.clone())
     {
         return Ok(online);
     }
@@ -405,7 +439,7 @@ fn normalize_media_digest(input: &str) -> Result<String, JsValue> {
     Ok(digest)
 }
 
-fn derive_cfa_ticker(name: &str) -> String {
+pub(crate) fn derive_cfa_ticker(name: &str) -> String {
     let mut ticker: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -542,7 +576,7 @@ pub fn rgb_restore_keys_value(network: String, mnemonic: String) -> Result<JsVal
 
 #[wasm_bindgen]
 pub struct RlnWasmWallet {
-    inner: RefCell<rgb_lib_wasm::Wallet>,
+    pub(crate) inner: std::rc::Rc<RefCell<rgb_lib_wasm::Wallet>>,
 }
 
 #[wasm_bindgen]
@@ -658,7 +692,8 @@ impl RlnWasmSdk {
             state.unlocked = true;
             sync_runtime_session_authority_from_lifecycle(&state);
             Ok(())
-        })
+        })?;
+        bootstrap_default_wallet_from_lifecycle().await
     }
 
     #[wasm_bindgen(js_name = lock)]
@@ -671,7 +706,11 @@ impl RlnWasmSdk {
             state.unlocked = false;
             sync_runtime_session_authority_from_lifecycle(&state);
             Ok(())
-        })
+        })?;
+        WASM_SDK_DEFAULT_WALLET.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = sendRgbFromGroupsValue)]
@@ -749,32 +788,45 @@ impl RlnWasmSdk {
         onion_runtime::send_onion_message(request_json)
     }
 
+    #[wasm_bindgen(js_name = attachWallet)]
+    pub fn attach_wallet(&self, node: &RlnWasmNode, wallet: &RlnWasmWallet) -> Result<(), JsValue> {
+        node.attach_wallet(wallet)
+    }
+
     #[wasm_bindgen(js_name = issueAssetNiaValue)]
-    pub async fn issue_asset_nia_value(&self, _request_json: String) -> Result<JsValue, JsValue> {
-        Err(JsValue::from_str(
-            "issue_asset_nia is not supported in wasm scaffold: RLN issuance adapter is unavailable",
-        ))
+    pub fn issue_asset_nia_value(
+        &self,
+        node: &RlnWasmNode,
+        request_js: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        node.issue_asset_nia_value(request_js)
     }
 
     #[wasm_bindgen(js_name = issueAssetNiaJson)]
-    pub async fn issue_asset_nia_json(&self, request_json: String) -> Result<String, JsValue> {
-        let value = self.issue_asset_nia_value(request_json).await?;
-        let parsed: serde_json::Value = js_from(value)?;
-        js_to_json(&parsed)
+    pub fn issue_asset_nia_json(
+        &self,
+        node: &RlnWasmNode,
+        request_js: JsValue,
+    ) -> Result<String, JsValue> {
+        node.issue_asset_nia_json(request_js)
     }
 
     #[wasm_bindgen(js_name = issueAssetCfaValue)]
-    pub async fn issue_asset_cfa_value(&self, _request_json: String) -> Result<JsValue, JsValue> {
-        Err(JsValue::from_str(
-            "issue_asset_cfa is not supported in wasm scaffold: RLN issuance adapter is unavailable",
-        ))
+    pub fn issue_asset_cfa_value(
+        &self,
+        node: &RlnWasmNode,
+        request_js: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        node.issue_asset_cfa_value(request_js)
     }
 
     #[wasm_bindgen(js_name = issueAssetCfaJson)]
-    pub async fn issue_asset_cfa_json(&self, request_json: String) -> Result<String, JsValue> {
-        let value = self.issue_asset_cfa_value(request_json).await?;
-        let parsed: serde_json::Value = js_from(value)?;
-        js_to_json(&parsed)
+    pub fn issue_asset_cfa_json(
+        &self,
+        node: &RlnWasmNode,
+        request_js: JsValue,
+    ) -> Result<String, JsValue> {
+        node.issue_asset_cfa_json(request_js)
     }
 
     #[wasm_bindgen(js_name = issueAssetUdaValue)]
@@ -864,7 +916,9 @@ impl RlnWasmSdk {
     #[wasm_bindgen(js_name = newNode)]
     pub fn new_node(&self, proxy_url: String) -> Result<RlnWasmNode, JsValue> {
         ensure_sdk_node_runtime_allowed()?;
-        RlnWasmNode::new(proxy_url)
+        let node = RlnWasmNode::new(proxy_url)?;
+        maybe_attach_default_wallet_to_node(&node);
+        Ok(node)
     }
 
     #[wasm_bindgen(js_name = newNodeWithRuntimeBackend)]
@@ -874,15 +928,17 @@ impl RlnWasmSdk {
         runtime_backend: String,
     ) -> Result<RlnWasmNode, JsValue> {
         ensure_sdk_node_runtime_allowed()?;
-        RlnWasmNode::new_with_runtime_backend(proxy_url, runtime_backend)
+        let node = RlnWasmNode::new_with_runtime_backend(proxy_url, runtime_backend)?;
+        maybe_attach_default_wallet_to_node(&node);
+        Ok(node)
     }
 
     #[wasm_bindgen(js_name = createNodeHandle)]
     pub fn create_node_handle(&self, proxy_url: String) -> Result<RlnWasmSdkNodeHandle, JsValue> {
         ensure_sdk_node_runtime_allowed()?;
-        Ok(RlnWasmSdkNodeHandle {
-            inner: RlnWasmNode::new(proxy_url)?,
-        })
+        let node = RlnWasmNode::new(proxy_url)?;
+        maybe_attach_default_wallet_to_node(&node);
+        Ok(RlnWasmSdkNodeHandle { inner: node })
     }
 
     #[wasm_bindgen(js_name = createNodeHandleWithRuntimeBackend)]
@@ -892,9 +948,9 @@ impl RlnWasmSdk {
         runtime_backend: String,
     ) -> Result<RlnWasmSdkNodeHandle, JsValue> {
         ensure_sdk_node_runtime_allowed()?;
-        Ok(RlnWasmSdkNodeHandle {
-            inner: RlnWasmNode::new_with_runtime_backend(proxy_url, runtime_backend)?,
-        })
+        let node = RlnWasmNode::new_with_runtime_backend(proxy_url, runtime_backend)?;
+        maybe_attach_default_wallet_to_node(&node);
+        Ok(RlnWasmSdkNodeHandle { inner: node })
     }
 
     #[wasm_bindgen(js_name = createWalletHandle)]
@@ -1185,42 +1241,6 @@ impl RlnWasmSdk {
         asset_id: String,
     ) -> Result<String, JsValue> {
         wallet.get_asset_media_json(asset_id)
-    }
-
-    #[wasm_bindgen(js_name = walletIssueAssetNiaValue)]
-    pub fn wallet_issue_asset_nia_value(
-        &self,
-        wallet: &RlnWasmWallet,
-        request_js: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        wallet.issue_asset_nia_value(request_js)
-    }
-
-    #[wasm_bindgen(js_name = walletIssueAssetNiaJson)]
-    pub fn wallet_issue_asset_nia_json(
-        &self,
-        wallet: &RlnWasmWallet,
-        request_js: JsValue,
-    ) -> Result<String, JsValue> {
-        wallet.issue_asset_nia_json(request_js)
-    }
-
-    #[wasm_bindgen(js_name = walletIssueAssetCfaValue)]
-    pub fn wallet_issue_asset_cfa_value(
-        &self,
-        wallet: &RlnWasmWallet,
-        request_js: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        wallet.issue_asset_cfa_value(request_js)
-    }
-
-    #[wasm_bindgen(js_name = walletIssueAssetCfaJson)]
-    pub fn wallet_issue_asset_cfa_json(
-        &self,
-        wallet: &RlnWasmWallet,
-        request_js: JsValue,
-    ) -> Result<String, JsValue> {
-        wallet.issue_asset_cfa_json(request_js)
     }
 
     #[wasm_bindgen(js_name = walletIssueAssetUdaValue)]
@@ -1920,6 +1940,31 @@ impl RlnWasmSdkNodeHandle {
     pub fn clear_auto_peer_manager_hooks(&self) {
         self.inner.clear_auto_peer_manager_hooks();
     }
+
+    #[wasm_bindgen(js_name = attachWallet)]
+    pub fn attach_wallet(&self, wallet: &RlnWasmWallet) -> Result<(), JsValue> {
+        self.inner.attach_wallet(wallet)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetNiaValue)]
+    pub fn issue_asset_nia_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
+        self.inner.issue_asset_nia_value(request_js)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetNiaJson)]
+    pub fn issue_asset_nia_json(&self, request_js: JsValue) -> Result<String, JsValue> {
+        self.inner.issue_asset_nia_json(request_js)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetCfaValue)]
+    pub fn issue_asset_cfa_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
+        self.inner.issue_asset_cfa_value(request_js)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetCfaJson)]
+    pub fn issue_asset_cfa_json(&self, request_js: JsValue) -> Result<String, JsValue> {
+        self.inner.issue_asset_cfa_json(request_js)
+    }
 }
 
 #[wasm_bindgen]
@@ -1967,26 +2012,6 @@ impl RlnWasmSdkWalletHandle {
     #[wasm_bindgen(js_name = getAssetMediaJson)]
     pub fn get_asset_media_json(&self, asset_id: String) -> Result<String, JsValue> {
         self.inner.get_asset_media_json(asset_id)
-    }
-
-    #[wasm_bindgen(js_name = issueAssetNiaValue)]
-    pub fn issue_asset_nia_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
-        self.inner.issue_asset_nia_value(request_js)
-    }
-
-    #[wasm_bindgen(js_name = issueAssetNiaJson)]
-    pub fn issue_asset_nia_json(&self, request_js: JsValue) -> Result<String, JsValue> {
-        self.inner.issue_asset_nia_json(request_js)
-    }
-
-    #[wasm_bindgen(js_name = issueAssetCfaValue)]
-    pub fn issue_asset_cfa_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
-        self.inner.issue_asset_cfa_value(request_js)
-    }
-
-    #[wasm_bindgen(js_name = issueAssetCfaJson)]
-    pub fn issue_asset_cfa_json(&self, request_js: JsValue) -> Result<String, JsValue> {
-        self.inner.issue_asset_cfa_json(request_js)
     }
 
     #[wasm_bindgen(js_name = issueAssetUdaValue)]
@@ -2373,7 +2398,7 @@ impl RlnWasmWallet {
         let wallet = rgb_lib_wasm::Wallet::new(wallet_data)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(Self {
-            inner: RefCell::new(wallet),
+            inner: std::rc::Rc::new(RefCell::new(wallet)),
         })
     }
 
@@ -2399,7 +2424,7 @@ impl RlnWasmWallet {
         }
 
         Ok(Self {
-            inner: RefCell::new(wallet),
+            inner: std::rc::Rc::new(RefCell::new(wallet)),
         })
     }
 
@@ -2514,84 +2539,6 @@ impl RlnWasmWallet {
     #[wasm_bindgen(js_name = getAssetMediaJson)]
     pub fn get_asset_media_json(&self, asset_id: String) -> Result<String, JsValue> {
         let value = self.get_asset_media_value(asset_id)?;
-        let parsed: serde_json::Value = js_from(value)?;
-        js_to_json(&parsed)
-    }
-
-    #[wasm_bindgen(js_name = issueAssetNiaValue)]
-    pub fn issue_asset_nia_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
-        let request: WasmIssueAssetNiaRequest = serde_wasm_bindgen::from_value(request_js)
-            .map_err(|e| JsValue::from_str(&format!("Invalid issue_asset_nia request: {e}")))?;
-        if request.amounts.is_empty() {
-            return Err(JsValue::from_str("amounts cannot be empty"));
-        }
-        if request.ticker.trim().is_empty() {
-            return Err(JsValue::from_str("ticker cannot be empty"));
-        }
-        if request.name.trim().is_empty() {
-            return Err(JsValue::from_str("name cannot be empty"));
-        }
-        let asset = self
-            .inner
-            .borrow()
-            .issue_asset_nia(
-                request.ticker,
-                request.name,
-                request.precision,
-                request.amounts,
-            )
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        js_obj(&asset)
-    }
-
-    #[wasm_bindgen(js_name = issueAssetNiaJson)]
-    pub fn issue_asset_nia_json(&self, request_js: JsValue) -> Result<String, JsValue> {
-        let value = self.issue_asset_nia_value(request_js)?;
-        let parsed: serde_json::Value = js_from(value)?;
-        js_to_json(&parsed)
-    }
-
-    #[wasm_bindgen(js_name = issueAssetCfaValue)]
-    pub fn issue_asset_cfa_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
-        let request: WasmIssueAssetCfaRequest = serde_wasm_bindgen::from_value(request_js)
-            .map_err(|e| JsValue::from_str(&format!("Invalid issue_asset_cfa request: {e}")))?;
-        if request.amounts.is_empty() {
-            return Err(JsValue::from_str("amounts cannot be empty"));
-        }
-        if request.name.trim().is_empty() {
-            return Err(JsValue::from_str("name cannot be empty"));
-        }
-        let ticker = derive_cfa_ticker(&request.name);
-        let asset = self
-            .inner
-            .borrow()
-            .issue_asset_ifa(
-                ticker,
-                request.name,
-                request.precision,
-                request.amounts,
-                vec![],
-                0,
-                None,
-            )
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let mapped = WasmAssetCfaData {
-            asset_id: asset.asset_id,
-            name: asset.name,
-            details: request.details.or(asset.details),
-            precision: asset.precision,
-            issued_supply: asset.initial_supply,
-            timestamp: asset.timestamp,
-            added_at: asset.added_at,
-            balance: asset.balance,
-            media: asset.media,
-        };
-        js_obj(&mapped)
-    }
-
-    #[wasm_bindgen(js_name = issueAssetCfaJson)]
-    pub fn issue_asset_cfa_json(&self, request_js: JsValue) -> Result<String, JsValue> {
-        let value = self.issue_asset_cfa_value(request_js)?;
         let parsed: serde_json::Value = js_from(value)?;
         js_to_json(&parsed)
     }
@@ -3409,8 +3356,6 @@ pub async fn check_ln_peer_websocket_json(
 
 #[cfg(all(test, target_arch = "wasm32"))]
 mod sdk_contract_tests;
-#[cfg(all(test, target_arch = "wasm32"))]
-mod test_support;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wallet_contract_tests;
 #[cfg(all(test, target_arch = "wasm32"))]

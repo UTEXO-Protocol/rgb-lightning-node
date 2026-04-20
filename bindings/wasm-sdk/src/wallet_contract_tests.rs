@@ -1,4 +1,4 @@
-use crate::test_support::test_wallet_data_json;
+use crate::test_utils::test_wallet_data_json;
 use crate::*;
 use rgb_lib_wasm::AssetSchema;
 use wasm_bindgen::JsValue;

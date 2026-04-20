@@ -27,6 +27,9 @@ use crate::peer_session::{
     RlnWasmPeerSession, RlnWasmRustPeerManagerBridge,
 };
 use crate::runtime_store::{browser_persistent_state_store, RuntimeStateStore};
+use crate::{
+    derive_cfa_ticker, WasmAssetCfaData, WasmIssueAssetCfaRequest, WasmIssueAssetNiaRequest,
+};
 
 const SDK_HTLC_MIN_MSAT: u64 = 3_000_000;
 const SDK_INVOICE_MIN_MSAT: u64 = SDK_HTLC_MIN_MSAT;
@@ -231,11 +234,9 @@ thread_local! {
 const RUNTIME_EVENT_LOG_STORAGE_PREFIX: &str = "rln:wasm:runtime-events:";
 
 #[cfg(test)]
-pub(crate) fn reset_runtime_event_log_storage_for_tests() {
-    RUNTIME_EVENT_LOG_STORAGE.with(|state| {
-        state.borrow_mut().clear();
-    });
-}
+mod test_utils;
+#[cfg(test)]
+pub(crate) use test_utils::reset_runtime_event_log_storage_for_tests;
 
 #[wasm_bindgen]
 pub struct RlnWasmNode {
@@ -252,6 +253,7 @@ pub struct RlnWasmNode {
     next_payment_seq: RefCell<u64>,
     next_runtime_event_seq: Rc<RefCell<u64>>,
     network: RefCell<String>,
+    wallet: RefCell<Option<std::rc::Rc<RefCell<rgb_lib_wasm::Wallet>>>>,
 }
 
 #[wasm_bindgen]
@@ -302,7 +304,114 @@ impl RlnWasmNode {
             next_payment_seq: RefCell::new(0),
             next_runtime_event_seq: Rc::new(RefCell::new(next_runtime_event_seq)),
             network: RefCell::new("regtest".to_string()),
+            wallet: RefCell::new(None),
         })
+    }
+
+    fn with_attached_wallet<T>(
+        &self,
+        f: impl FnOnce(&mut rgb_lib_wasm::Wallet) -> Result<T, JsValue>,
+    ) -> Result<T, JsValue> {
+        if self.wallet.borrow().is_none() {
+            crate::try_attach_default_wallet_to_node(self);
+        }
+        let wallet_ref = self
+            .wallet
+            .borrow()
+            .clone()
+            .ok_or_else(|| JsValue::from_str("wallet is not attached to node"))?;
+        let mut wallet = wallet_ref.borrow_mut();
+        f(&mut wallet)
+    }
+
+    #[wasm_bindgen(js_name = attachWallet)]
+    pub fn attach_wallet(&self, wallet: &crate::RlnWasmWallet) -> Result<(), JsValue> {
+        self.attach_wallet_shared(Rc::clone(&wallet.inner));
+        Ok(())
+    }
+
+    pub(crate) fn attach_wallet_shared(&self, wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>) {
+        *self.wallet.borrow_mut() = Some(wallet);
+    }
+
+    #[wasm_bindgen(js_name = issueAssetNiaValue)]
+    pub fn issue_asset_nia_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let request: WasmIssueAssetNiaRequest = serde_wasm_bindgen::from_value(request_js)
+            .map_err(|e| JsValue::from_str(&format!("Invalid issue_asset_nia request: {e}")))?;
+        if request.amounts.is_empty() {
+            return Err(JsValue::from_str("amounts cannot be empty"));
+        }
+        if request.ticker.trim().is_empty() {
+            return Err(JsValue::from_str("ticker cannot be empty"));
+        }
+        if request.name.trim().is_empty() {
+            return Err(JsValue::from_str("name cannot be empty"));
+        }
+        let asset = self.with_attached_wallet(|wallet| {
+            wallet
+                .issue_asset_nia(
+                    request.ticker,
+                    request.name,
+                    request.precision,
+                    request.amounts,
+                )
+                .map_err(|e| JsValue::from_str(&e.to_string()))
+        })?;
+        crate::js_obj(&asset)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetNiaJson)]
+    pub fn issue_asset_nia_json(&self, request_js: JsValue) -> Result<String, JsValue> {
+        let value = self.issue_asset_nia_value(request_js)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetCfaValue)]
+    pub fn issue_asset_cfa_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let request: WasmIssueAssetCfaRequest = serde_wasm_bindgen::from_value(request_js)
+            .map_err(|e| JsValue::from_str(&format!("Invalid issue_asset_cfa request: {e}")))?;
+        if request.amounts.is_empty() {
+            return Err(JsValue::from_str("amounts cannot be empty"));
+        }
+        if request.name.trim().is_empty() {
+            return Err(JsValue::from_str("name cannot be empty"));
+        }
+        let ticker = derive_cfa_ticker(&request.name);
+        let asset = self.with_attached_wallet(|wallet| {
+            wallet
+                .issue_asset_ifa(
+                    ticker,
+                    request.name,
+                    request.precision,
+                    request.amounts,
+                    vec![],
+                    0,
+                    None,
+                )
+                .map_err(|e| JsValue::from_str(&e.to_string()))
+        })?;
+        let mapped = WasmAssetCfaData {
+            asset_id: asset.asset_id,
+            name: asset.name,
+            details: request.details.or(asset.details),
+            precision: asset.precision,
+            issued_supply: asset.initial_supply,
+            timestamp: asset.timestamp,
+            added_at: asset.added_at,
+            balance: asset.balance,
+            media: asset.media,
+        };
+        crate::js_obj(&mapped)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetCfaJson)]
+    pub fn issue_asset_cfa_json(&self, request_js: JsValue) -> Result<String, JsValue> {
+        let value = self.issue_asset_cfa_value(request_js)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
     }
 
     #[wasm_bindgen(js_name = connectPeer)]
@@ -2010,8 +2119,10 @@ impl RlnWasmNode {
                     .map(|asset| channel.asset_id.as_deref() == Some(asset))
                     .unwrap_or(channel.asset_id.is_none());
 
-            if payment.status == "pending"
-                && (outbound_to_counterparty || inbound_maybe_from_counterparty)
+            if matches!(
+                payment.status.as_str(),
+                "pending" | "claimable" | "claiming"
+            ) && (outbound_to_counterparty || inbound_maybe_from_counterparty)
             {
                 return Err(JsValue::from_str(
                     "virtual cleanup is blocked while HTLCs are still in flight",
@@ -2127,27 +2238,6 @@ impl RlnWasmNode {
                 .map(|entry| entry.session.is_started())
                 .unwrap_or(false)
         }
-    }
-
-    #[cfg(test)]
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    pub(crate) fn test_upsert_runtime_peer(
-        &self,
-        pubkey: String,
-        peer_addr: String,
-        started: bool,
-    ) {
-        self.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
-            pubkey,
-            peer_addr,
-            started,
-        });
-    }
-
-    #[cfg(test)]
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    pub(crate) fn test_set_runtime_peer_started(&self, pubkey: &str, started: bool) -> bool {
-        self.ldk_runtime.set_peer_started(pubkey, started)
     }
 
     fn channel_runtime_state_from_data(

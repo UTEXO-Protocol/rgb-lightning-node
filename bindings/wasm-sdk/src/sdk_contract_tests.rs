@@ -1,4 +1,4 @@
-use crate::test_support::test_wallet_data_json;
+use crate::test_utils::test_wallet_data_json;
 use crate::*;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::*;
@@ -331,75 +331,79 @@ async fn sdk_send_onion_message_validation_contracts() {
 }
 
 #[wasm_bindgen_test(async)]
-async fn sdk_issue_asset_nia_unsupported_contract() {
+async fn sdk_issue_asset_nia_uses_unlock_bootstrapped_wallet_contract() {
+    reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
-    let err = sdk
-        .issue_asset_nia_json("{}".to_string())
+    sdk.init_json("phase-issue-asset-nia".to_string(), None)
         .await
-        .expect_err("should fail");
-    let msg = err.as_string().expect("error string");
-    assert_eq!(
-        msg,
-        "issue_asset_nia is not supported in wasm scaffold: RLN issuance adapter is unavailable"
-    );
-}
+        .expect("init");
+    sdk.unlock("{\"password\":\"phase-issue-asset-nia\"}".to_string())
+        .await
+        .expect("unlock");
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3001".to_string())
+        .expect("node handle");
 
-#[wasm_bindgen_test]
-fn sdk_wallet_handle_issue_asset_nia_invalid_request_contract() {
-    let sdk = RlnWasmSdk::new();
-    let wallet_json = test_wallet_data_json();
-    let wallet = sdk
-        .create_wallet_handle(&wallet_json)
-        .expect("wallet handle");
-    let err = wallet
+    let err = node
         .issue_asset_nia_value(JsValue::from_str("not-an-object"))
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
     assert!(msg.contains("Invalid issue_asset_nia request"));
 }
 
-#[wasm_bindgen_test]
-fn sdk_wallet_handle_issue_asset_nia_empty_amounts_contract() {
+#[wasm_bindgen_test(async)]
+async fn sdk_issue_asset_nia_invalid_request_contract() {
+    reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
-    let wallet_json = test_wallet_data_json();
-    let wallet = sdk
-        .create_wallet_handle(&wallet_json)
-        .expect("wallet handle");
-    let request = serde_wasm_bindgen::to_value(&WasmIssueAssetNiaRequest {
-        amounts: vec![],
-        ticker: "TOK".to_string(),
-        name: "Token".to_string(),
-        precision: 0,
-    })
-    .expect("request");
-    let err = wallet
-        .issue_asset_nia_value(request)
+    sdk.init_json("phase-issue-asset-nia-invalid".to_string(), None)
+        .await
+        .expect("init");
+    sdk.unlock("{\"password\":\"phase-issue-asset-nia-invalid\"}".to_string())
+        .await
+        .expect("unlock");
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3001".to_string())
+        .expect("node handle");
+    let err = node
+        .issue_asset_nia_value(JsValue::from_str("not-an-object"))
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
-    assert_eq!(msg, "amounts cannot be empty");
+    assert!(msg.contains("Invalid issue_asset_nia request"));
 }
 
-#[wasm_bindgen_test]
-fn sdk_wallet_handle_issue_asset_cfa_invalid_request_contract() {
+#[wasm_bindgen_test(async)]
+async fn sdk_issue_asset_cfa_invalid_request_contract() {
+    reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
-    let wallet_json = test_wallet_data_json();
-    let wallet = sdk
-        .create_wallet_handle(&wallet_json)
-        .expect("wallet handle");
-    let err = wallet
+    sdk.init_json("phase-issue-asset-cfa-invalid".to_string(), None)
+        .await
+        .expect("init");
+    sdk.unlock("{\"password\":\"phase-issue-asset-cfa-invalid\"}".to_string())
+        .await
+        .expect("unlock");
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3001".to_string())
+        .expect("node handle");
+    let err = node
         .issue_asset_cfa_value(JsValue::from_str("not-an-object"))
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
     assert!(msg.contains("Invalid issue_asset_cfa request"));
 }
 
-#[wasm_bindgen_test]
-fn sdk_wallet_handle_issue_asset_cfa_empty_amounts_contract() {
+#[wasm_bindgen_test(async)]
+async fn sdk_issue_asset_cfa_empty_amounts_contract() {
+    reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
-    let wallet_json = test_wallet_data_json();
-    let wallet = sdk
-        .create_wallet_handle(&wallet_json)
-        .expect("wallet handle");
+    sdk.init_json("phase-issue-asset-cfa-empty".to_string(), None)
+        .await
+        .expect("init");
+    sdk.unlock("{\"password\":\"phase-issue-asset-cfa-empty\"}".to_string())
+        .await
+        .expect("unlock");
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3001".to_string())
+        .expect("node handle");
     let request = serde_wasm_bindgen::to_value(&WasmIssueAssetCfaRequest {
         amounts: vec![],
         name: "Collectible".to_string(),
@@ -408,11 +412,39 @@ fn sdk_wallet_handle_issue_asset_cfa_empty_amounts_contract() {
         file_digest: None,
     })
     .expect("request");
-    let err = wallet
+    let err = node
         .issue_asset_cfa_value(request)
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
     assert_eq!(msg, "amounts cannot be empty");
+}
+
+#[wasm_bindgen_test(async)]
+async fn sdk_issue_asset_nia_node_created_before_unlock_uses_default_wallet_contract() {
+    reset_wasm_runtime_state_for_tests();
+    let sdk = RlnWasmSdk::new();
+    sdk.init_json("phase-issue-asset-nia-late-unlock".to_string(), None)
+        .await
+        .expect("init");
+
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3001".to_string())
+        .expect_err("node should be locked before unlock");
+    let msg = node.as_string().expect("error string");
+    assert_eq!(msg, "sdk node runtime is locked; call unlock first");
+
+    sdk.unlock("{\"password\":\"phase-issue-asset-nia-late-unlock\"}".to_string())
+        .await
+        .expect("unlock");
+
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3001".to_string())
+        .expect("node handle after unlock");
+    let err = node
+        .issue_asset_nia_value(JsValue::from_str("not-an-object"))
+        .expect_err("should fail on validation, not missing wallet");
+    let msg = err.as_string().expect("error string");
+    assert!(msg.contains("Invalid issue_asset_nia request"));
 }
 
 #[wasm_bindgen_test]
@@ -536,20 +568,6 @@ fn send_rgb_from_groups_recipient_map_shape_contract() {
         .get("rgb:asset:demo")
         .expect("asset recipients");
     assert_eq!(recipients.len(), 1);
-}
-
-#[wasm_bindgen_test(async)]
-async fn sdk_issue_asset_cfa_unsupported_contract() {
-    let sdk = RlnWasmSdk::new();
-    let err = sdk
-        .issue_asset_cfa_json("{}".to_string())
-        .await
-        .expect_err("should fail");
-    let msg = err.as_string().expect("error string");
-    assert_eq!(
-        msg,
-        "issue_asset_cfa is not supported in wasm scaffold: RLN issuance adapter is unavailable"
-    );
 }
 
 #[wasm_bindgen_test(async)]

@@ -1,11 +1,17 @@
 import init, {
   RlnWasmInvoice,
   RlnWasmSdk,
-  rgbGenerateKeysValue,
+  rgbRestoreKeysValue,
 } from "../../pkg/rln_wasm_sdk.js";
 
 const DEFAULT_INDEXER_URL = "http://127.0.0.1:3002";
 const DEFAULT_TRANSPORT_ENDPOINT = "rpc://127.0.0.1:3000/json-rpc";
+const FIXED_LIFECYCLE_MNEMONIC =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const FIXED_SENDER_MNEMONIC =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const FIXED_RECEIVER_MNEMONIC =
+  "legal winner thank year wave sausage worth useful legal winner thank yellow";
 
 function log(message, data = undefined) {
   const out = document.getElementById("out");
@@ -33,23 +39,18 @@ function readPositiveInt(id, fallback) {
   return n;
 }
 
-function parseWalletData(id) {
-  const raw = readText(id);
-  if (!raw) {
-    throw new Error(`${id} cannot be empty`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`${id} is not valid JSON: ${String(err)}`);
-  }
-  return JSON.stringify(parsed);
+function senderFundingHint(senderAddress) {
+  return {
+    sender_address: senderAddress,
+    action: "Fund this sender address on regtest and mine >= 1 block (recommended: 6).",
+    example_amount_btc: 1,
+    js_hook: "Optionally define window.regtestFund({ address, amountBtc, mineBlocks })",
+  };
 }
 
-function buildWalletDataFromGeneratedKeys(keys, role, seed) {
+function buildWalletDataFromGeneratedKeys(keys, role) {
   return {
-    data_dir: `/tmp/rln_wasm_${role}_${seed}`,
+    data_dir: `/tmp/rln_wasm_${role}_fixed`,
     bitcoin_network: "Regtest",
     database_type: "Sqlite",
     max_allocations_per_utxo: 5,
@@ -62,28 +63,20 @@ function buildWalletDataFromGeneratedKeys(keys, role, seed) {
   };
 }
 
-function ensureWalletDataInputsFilled() {
-  const senderWalletInput = document.getElementById("senderWalletData");
-  const receiverWalletInput = document.getElementById("receiverWalletData");
-  if (!senderWalletInput || !receiverWalletInput) {
-    return;
-  }
-  if (senderWalletInput.value.trim() && receiverWalletInput.value.trim()) {
-    return;
-  }
+async function createRlnInstance(role, walletMnemonic, transportEndpoint, lifecycle) {
+  const keys = rgbRestoreKeysValue("regtest", walletMnemonic);
+  const walletData = buildWalletDataFromGeneratedKeys(keys, role);
+  const walletDataJson = JSON.stringify(walletData);
 
-  const seed = Date.now().toString();
-  const senderKeys = rgbGenerateKeysValue("regtest");
-  const receiverKeys = rgbGenerateKeysValue("regtest");
-  const senderWalletData = buildWalletDataFromGeneratedKeys(senderKeys, "sender", seed);
-  const receiverWalletData = buildWalletDataFromGeneratedKeys(receiverKeys, "receiver", seed);
+  const sdk = new RlnWasmSdk();
+  await sdk.initValue(lifecycle.password, lifecycle.mnemonic);
+  await sdk.unlock(JSON.stringify({ password: lifecycle.password }));
 
-  senderWalletInput.value = JSON.stringify(senderWalletData, null, 2);
-  receiverWalletInput.value = JSON.stringify(receiverWalletData, null, 2);
-  log("WalletData generated at runtime", {
-    sender_mnemonic_words: senderKeys.mnemonic.split(" ").length,
-    receiver_mnemonic_words: receiverKeys.mnemonic.split(" ").length,
-  });
+  const node = sdk.createNodeHandle(transportEndpoint);
+  const wallet = await sdk.createWallet(walletDataJson);
+  node.attachWallet(wallet);
+
+  return { sdk, node, wallet };
 }
 
 async function signPsbt(unsignedPsbt) {
@@ -131,6 +124,28 @@ async function ensureRgbAllocations(walletHandle, online) {
   return after;
 }
 
+async function tryAutoFundSender(senderAddress, senderWallet, senderOnline) {
+  if (typeof window.regtestFund !== "function") {
+    return false;
+  }
+
+  await window.regtestFund({
+    address: senderAddress,
+    amountBtc: 1,
+    mineBlocks: 6,
+  });
+  await senderWallet.syncOnline(senderOnline);
+
+  const refreshed = senderWallet.getBtcBalanceValue();
+  const spendable =
+    refreshed &&
+    refreshed.vanilla &&
+    typeof refreshed.vanilla.spendable === "number"
+      ? refreshed.vanilla.spendable
+      : 0;
+  return spendable > 0;
+}
+
 function pickInvoiceString(invoiceResponse) {
   if (typeof invoiceResponse === "string") return invoiceResponse;
   if (invoiceResponse && typeof invoiceResponse.invoice === "string") {
@@ -160,30 +175,37 @@ async function run() {
 
   await init();
   log("WASM init", { ok: true });
-  ensureWalletDataInputsFilled();
 
-  const indexerUrl = readText("indexerUrl");
-  const transportEndpoint = readText("transportEndpoint");
+  const indexerUrl = DEFAULT_INDEXER_URL;
+  const transportEndpoint = DEFAULT_TRANSPORT_ENDPOINT;
   const issueAmount = readPositiveInt("issueAmount", 1000);
   const sendAmount = readPositiveInt("sendAmount", 100);
-
-  if (!indexerUrl) {
-    throw new Error("indexerUrl cannot be empty");
-  }
-  if (!transportEndpoint) {
-    throw new Error("transportEndpoint cannot be empty");
-  }
   if (sendAmount > issueAmount) {
     throw new Error("sendAmount cannot be greater than issueAmount");
   }
 
-  const senderWalletDataJson = parseWalletData("senderWalletData");
-  const receiverWalletDataJson = parseWalletData("receiverWalletData");
-
-  const sdk = new RlnWasmSdk();
-  const sender = await sdk.createWalletHandleAsync(senderWalletDataJson);
-  const receiver = await sdk.createWalletHandleAsync(receiverWalletDataJson);
-  log("Wallet handles created", { ok: true });
+  const lifecycle = {
+    password: "rln-fixed-password",
+    mnemonic: FIXED_LIFECYCLE_MNEMONIC,
+  };
+  const senderRln = await createRlnInstance(
+    "sender",
+    FIXED_SENDER_MNEMONIC,
+    transportEndpoint,
+    lifecycle
+  );
+  const receiverRln = await createRlnInstance(
+    "receiver",
+    FIXED_RECEIVER_MNEMONIC,
+    transportEndpoint,
+    lifecycle
+  );
+  const sender = senderRln.wallet;
+  const receiver = receiverRln.wallet;
+  const senderNode = senderRln.node;
+  const receiverNode = receiverRln.node;
+  log("Two RLN instances initialized and unlocked", { ok: true });
+  log("Using fixed endpoints", { indexerUrl, transportEndpoint });
   log("Wallet addresses", {
     sender_address: sender.getAddress(),
     receiver_address: receiver.getAddress(),
@@ -199,19 +221,35 @@ async function run() {
   await sender.syncOnline(senderOnline);
   await receiver.syncOnline(receiverOnline);
   log("Initial sync complete", { ok: true });
-  log("BTC balances before issue", {
+  const btcBefore = {
     sender: sender.getBtcBalanceValue(),
     receiver: receiver.getBtcBalanceValue(),
-  });
+  };
+  log("BTC balances before issue", btcBefore);
+  const senderSpendableBefore =
+    btcBefore.sender &&
+    btcBefore.sender.vanilla &&
+    typeof btcBefore.sender.vanilla.spendable === "number"
+      ? btcBefore.sender.vanilla.spendable
+      : 0;
+  if (senderSpendableBefore <= 0) {
+    const senderAddress = sender.getAddress();
+    const fundedViaHook = await tryAutoFundSender(senderAddress, sender, senderOnline);
+    if (!fundedViaHook) {
+      log("Sender wallet requires regtest funding", senderFundingHint(senderAddress));
+      throw new Error("Sender spendable BTC is zero. Fund sender wallet and rerun.");
+    }
+    log("Sender auto-funded via window.regtestFund", { ok: true });
+  }
   await ensureRgbAllocations(sender, senderOnline);
 
   const issueReq = {
     ticker: "TST",
-    name: "WASM RGB Demo",
+    name: "WASM RLN Demo",
     precision: 0,
     amounts: [issueAmount],
   };
-  const issued = sender.issueAssetNiaValue(issueReq);
+  const issued = senderNode.issueAssetNiaValue(issueReq);
   const assetId = issued.asset_id;
   log("Asset issued", issued);
 
@@ -228,6 +266,7 @@ async function run() {
   const invoiceObj = new RlnWasmInvoice(invoiceString);
   const invoiceData = invoiceObj.invoiceDataValue();
   log("Decoded RGB invoice", invoiceData);
+  log("Receiver node info", receiverNode.nodeInfoValue());
 
   const recipient = {
     recipient_id: invoiceData.recipient_id || invoiceData.recipientId,
@@ -274,39 +313,4 @@ if (runBtn) {
       log("RGB transfer flow failed", String(err));
     });
   });
-}
-
-const indexerInput = document.getElementById("indexerUrl");
-if (indexerInput && !indexerInput.value.trim()) {
-  indexerInput.value = DEFAULT_INDEXER_URL;
-}
-
-const transportInput = document.getElementById("transportEndpoint");
-if (transportInput && !transportInput.value.trim()) {
-  transportInput.value = DEFAULT_TRANSPORT_ENDPOINT;
-}
-
-const senderWalletInput = document.getElementById("senderWalletData");
-const receiverWalletInput = document.getElementById("receiverWalletData");
-if (
-  senderWalletInput &&
-  receiverWalletInput &&
-  !senderWalletInput.value.trim() &&
-  !receiverWalletInput.value.trim()
-) {
-  // Generate once on page load for convenience.
-  // A new runtime-generated pair will also be created in run() when fields are empty.
-  const seed = Date.now().toString();
-  const senderKeys = rgbGenerateKeysValue("regtest");
-  const receiverKeys = rgbGenerateKeysValue("regtest");
-  senderWalletInput.value = JSON.stringify(
-    buildWalletDataFromGeneratedKeys(senderKeys, "sender", seed),
-    null,
-    2
-  );
-  receiverWalletInput.value = JSON.stringify(
-    buildWalletDataFromGeneratedKeys(receiverKeys, "receiver", seed),
-    null,
-    2
-  );
 }

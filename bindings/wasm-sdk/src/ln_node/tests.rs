@@ -2404,6 +2404,57 @@ fn close_channel_allows_virtual_cleanup_after_btc_roundtrip_contract() {
 
 #[test]
 #[cfg(target_arch = "wasm32")]
+fn close_channel_rejects_virtual_cleanup_when_claimable_invoice_exists_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.virtual-close-claimable.example".to_string(),
+        "ldk_bridge".to_string(),
+    )
+    .expect("node should build");
+    let peer_pubkey =
+        "02dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    let opened = node
+        .open_channel_value_with_options(
+            peer_pubkey,
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            Some("trusted_no_broadcast".to_string()),
+        )
+        .expect("open virtual channel");
+    let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
+    let channel_id = opened_json["channel_id"]
+        .as_str()
+        .expect("channel id")
+        .to_string();
+
+    let invoice_json = node
+        .create_ln_invoice_json(Some(SDK_HTLC_MIN_MSAT), 3600, None, None)
+        .expect("create invoice");
+    let invoice_doc: serde_json::Value = serde_json::from_str(&invoice_json).expect("parse");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    node.update_payment_status_by_invoice(invoice, "claimable".to_string())
+        .expect("simulate claimable payment");
+
+    let err = node
+        .close_channel_with_options(channel_id, None, false)
+        .expect_err("should fail");
+    assert_eq!(
+        err.as_string().unwrap_or_default(),
+        "virtual cleanup is blocked while HTLCs are still in flight"
+    );
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
 fn hodl_invoice_claim_is_idempotent_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.hodl-claim.example".to_string(),

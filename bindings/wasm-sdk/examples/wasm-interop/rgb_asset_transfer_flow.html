@@ -42,24 +42,10 @@
   <body>
     <h1>RLN WASM RGB Asset Transfer Flow</h1>
     <p>
-      Browser PoC for wallet-level RGB transfer: <code>issueAssetNia</code> ->
+      Browser PoC for two RLN instances (sender + receiver): <code>issueAssetNia</code> ->
       <code>blindReceive</code> -> <code>sendBegin</code> -> sign PSBT ->
       <code>sendEnd</code>.
     </p>
-
-    <div class="row">
-      <label for="indexerUrl">Indexer URL</label>
-      <input id="indexerUrl" type="text" value="http://127.0.0.1:3002" />
-    </div>
-
-    <div class="row">
-      <label for="transportEndpoint">RGB transport endpoint</label>
-      <input
-        id="transportEndpoint"
-        type="text"
-        value="rpc://127.0.0.1:3000/json-rpc"
-      />
-    </div>
 
     <div class="row">
       <label for="issueAmount">Issue amount</label>
@@ -69,16 +55,6 @@
     <div class="row">
       <label for="sendAmount">Send amount</label>
       <input id="sendAmount" type="number" value="100" />
-    </div>
-
-    <div class="row">
-      <label for="senderWalletData">Sender walletData JSON</label>
-      <textarea id="senderWalletData" placeholder="Leave empty to auto-generate at runtime"></textarea>
-    </div>
-
-    <div class="row">
-      <label for="receiverWalletData">Receiver walletData JSON</label>
-      <textarea id="receiverWalletData" placeholder="Leave empty to auto-generate at runtime"></textarea>
     </div>
 
     <div class="row">

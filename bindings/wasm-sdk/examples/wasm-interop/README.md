@@ -105,7 +105,7 @@ window.signPsbt = async (unsignedPsbt) => {
 ```
 
 In real usage, replace this with your wallet/hardware signer integration.
-5. The RGB transfer page now pre-fills defaults for:
+5. The RGB transfer page uses fixed constants in JS for:
    - `Indexer URL`: `http://127.0.0.1:3002`
    - `RGB transport endpoint`: `rpc://127.0.0.1:3000/json-rpc`
-   - sender/receiver `walletData` JSON generated at runtime via `rgbGenerateKeysValue("regtest")`
+   - sender/receiver RLN instances are initialized at runtime, each with generated keys and a generated wallet bootstrap
