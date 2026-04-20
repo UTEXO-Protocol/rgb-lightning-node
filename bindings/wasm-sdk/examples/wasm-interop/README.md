@@ -82,8 +82,30 @@ http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/virtual_channels_f
 
 Click `Run Flow`.
 
+For RGB asset issuance + transfer flow, open:
+
+```text
+http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/rgb_asset_transfer_flow.html
+```
+
+Click `Run RGB Transfer Flow`.
+
 ## Notes
 
 1. This example is browser-only (`--target web`).
 2. It focuses on deterministic interop surface checks, not full native RLN node runtime behavior.
 3. Peer-session start may fail in normal local runs if proxy/peer is not reachable; the example logs this as non-fatal.
+4. `rgb_asset_transfer_flow.html` requires a PSBT signer callback in the page context:
+
+```js
+window.signPsbt = async (unsignedPsbt) => {
+  // return signed PSBT string
+  return unsignedPsbt;
+};
+```
+
+In real usage, replace this with your wallet/hardware signer integration.
+5. The RGB transfer page now pre-fills defaults for:
+   - `Indexer URL`: `http://127.0.0.1:3002`
+   - `RGB transport endpoint`: `rpc://127.0.0.1:3000/json-rpc`
+   - sender/receiver `walletData` JSON generated at runtime via `rgbGenerateKeysValue("regtest")`

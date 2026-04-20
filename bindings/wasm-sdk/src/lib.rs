@@ -178,8 +178,25 @@ pub(crate) fn js_to_json<T: Serialize>(value: &T) -> Result<String, JsValue> {
 }
 
 fn parse_online(value: JsValue) -> Result<rgb_lib_wasm::wallet::Online, JsValue> {
-    serde_wasm_bindgen::from_value(value)
-        .map_err(|e| JsValue::from_str(&format!("Invalid Online object: {e}")))
+    if let Ok(online) = serde_wasm_bindgen::from_value::<rgb_lib_wasm::wallet::Online>(value.clone())
+    {
+        return Ok(online);
+    }
+    let wasm_online: WasmOnlineData = serde_wasm_bindgen::from_value(value)
+        .map_err(|e| JsValue::from_str(&format!("Invalid Online object: {e}")))?;
+    let id = wasm_online.id.parse::<u64>().map_err(|_| {
+        JsValue::from_str("Invalid Online object: id must be a u64 string or safe integer")
+    })?;
+    Ok(rgb_lib_wasm::wallet::Online {
+        id,
+        indexer_url: wasm_online.indexer_url,
+    })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WasmOnlineData {
+    id: String,
+    indexer_url: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2813,7 +2830,11 @@ impl RlnWasmWallet {
             .go_online(skip_consistency_check, indexer_url)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        js_obj(&online)
+        let mapped = WasmOnlineData {
+            id: online.id.to_string(),
+            indexer_url: online.indexer_url,
+        };
+        js_obj(&mapped)
     }
 
     #[wasm_bindgen(js_name = goOnlineJson)]
@@ -2825,7 +2846,7 @@ impl RlnWasmWallet {
         let value = self
             .go_online_value(skip_consistency_check, indexer_url)
             .await?;
-        let parsed: serde_json::Value = js_from(value)?;
+        let parsed: WasmOnlineData = js_from(value)?;
         js_to_json(&parsed)
     }
 
