@@ -2076,21 +2076,26 @@ async fn handle_ldk_events(
                         is_channel_rgb(&channel_id, unlocked_state.kv_store.as_ref());
                     tracing::info!("Initiator of the channel (colored: {})", is_chan_colored);
 
-                    let _txid = tokio::task::spawn_blocking(move || {
+                    let join_result = tokio::task::spawn_blocking(move || {
                         if is_chan_colored {
                             state_copy.rgb_send_end(psbt_str_copy).map(|r| r.txid)
                         } else {
                             state_copy.rgb_send_btc_end(psbt_str_copy)
                         }
                     })
-                    .await
-                    .unwrap()
-                    .map_err(|e| {
-                        tracing::error!("Error completing channel opening: {e:?}");
+                    .await;
+
+                    *unlocked_state.rgb_send_lock.lock().unwrap() = false;
+
+                    let finalize_result = join_result.map_err(|join_err| {
+                        tracing::error!("Channel opening finalization task failed: {join_err:?}");
                         ReplayEvent()
                     })?;
 
-                    *unlocked_state.rgb_send_lock.lock().unwrap() = false;
+                    let _txid = finalize_result.map_err(|e| {
+                        tracing::error!("Error completing channel opening: {e:?}");
+                        ReplayEvent()
+                    })?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     // acceptor — read consignment from KVStore
@@ -2901,6 +2906,7 @@ pub(crate) async fn start_ldk(
                     AssetSchema::Uda,
                     AssetSchema::Ifa,
                 ],
+                reuse_addresses: false,
             },
             keys,
         )

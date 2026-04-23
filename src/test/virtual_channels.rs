@@ -6,12 +6,6 @@ const VIRTUAL_TIMEOUT_BOUNDARY_SYNC_TIMEOUT_SECS: f32 = 30.0;
 
 /// Assert that a virtual channel marker exists in KVStore (not on filesystem).
 fn assert_virtual_marker_in_kvstore(test_dir: &str, channel_id: &str) {
-    use crate::kv_store::SeaOrmKvStore;
-    use crate::utils::get_db_path;
-    use lightning::util::persist::KVStoreSync;
-    use sea_orm::{ConnectOptions, Database};
-    use std::sync::Arc;
-
     let db_path = get_db_path(&std::path::PathBuf::from(test_dir));
     let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
     let db = crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
@@ -24,45 +18,82 @@ fn assert_virtual_marker_in_kvstore(test_dir: &str, channel_id: &str) {
     );
 }
 
-fn write_orphan_rgb_pending_key_for_payment_hash(
-    test_dir: &str,
-    channel_id_hex: &str,
-    payment_hash_hex: &str,
-    asset_id: &str,
-) {
-    use crate::kv_store::SeaOrmKvStore;
-    use crate::utils::get_db_path;
-    use lightning::rgb_utils::{RgbPaymentInfo, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS};
-    use lightning::util::persist::KVStoreSync;
-    use rgb_lib::ContractId;
-    use sea_orm::{ConnectOptions, Database};
-    use std::str::FromStr;
-    use std::sync::Arc;
-
-    let db_path = get_db_path(&std::path::PathBuf::from(test_dir));
-    let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
-    let db = crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
-        .expect("connect to test db");
-    let kv_store = SeaOrmKvStore::from_connection(Arc::new(db));
-
-    let contract_id = ContractId::from_str(asset_id).expect("valid issued asset id");
-    let info = RgbPaymentInfo {
-        contract_id,
-        amount: 1,
-        local_rgb_amount: 0,
-        remote_rgb_amount: 0,
-        swap_payment: false,
-        inbound: false,
+async fn close_channel_response(
+    node_address: SocketAddr,
+    channel_id: &str,
+    peer_pubkey: &str,
+    force: bool,
+) -> reqwest::Response {
+    let payload = CloseChannelRequest {
+        channel_id: channel_id.to_string(),
+        peer_pubkey: peer_pubkey.to_string(),
+        force,
     };
-    let key = format!("{channel_id_hex}{payment_hash_hex}_pending");
-    kv_store
-        .write(
-            RGB_PRIMARY_NS,
-            RGB_PAYMENT_INFO_OUTBOUND_NS,
-            &key,
-            bincode::serialize(&info).expect("serialize rgb payment info"),
+    reqwest::Client::new()
+        .post(format!("http://{node_address}/closechannel"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn issue_asset_nia_with_amounts(node_address: SocketAddr, amounts: Vec<u64>) -> AssetNIA {
+    println!("issuing NIA asset on node {node_address}");
+    let payload = IssueAssetNIARequest {
+        amounts,
+        ticker: s!("USDT"),
+        name: s!("Tether"),
+        precision: 0,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/issueassetnia"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<IssueAssetNIAResponse>()
+        .await
+        .unwrap()
+        .asset
+}
+
+async fn mine_blocks_and_wait_for_sync(
+    host_node_address: SocketAddr,
+    client_node_address: SocketAddr,
+    blocks_to_mine: u16,
+) {
+    mine_n_blocks(false, blocks_to_mine);
+
+    let expected_block_height = get_block_count();
+    let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut host_node_last_height = 0;
+    let mut client_node_last_height = 0;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs_f32(VIRTUAL_TIMEOUT_BOUNDARY_SYNC_TIMEOUT_SECS),
+        async {
+            loop {
+                poll_interval.tick().await;
+                host_node_last_height = network_info(host_node_address).await.height;
+                client_node_last_height = network_info(client_node_address).await.height;
+                if host_node_last_height == expected_block_height
+                    && client_node_last_height == expected_block_height
+                {
+                    break;
+                }
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "nodes did not sync to block height {expected_block_height} after mining \
+             {blocks_to_mine} blocks (host={host_node_last_height}, \
+             client={client_node_last_height})"
         )
-        .expect("write orphan pending key");
+    });
 }
 
 #[tokio::test]
@@ -158,122 +189,6 @@ async fn virtual_open_non_allowlisted_host_does_not_become_operational() {
             "non-allowlisted inbound trusted virtual open must not become operational"
         );
     }
-}
-
-#[tokio::test]
-#[traced_test]
-#[serial_test::serial]
-async fn virtual_reconciliation_ignores_orphan_pending_rgb_entries() {
-    initialize();
-
-    let test_storage_root = format!("{TEST_DIR_BASE}orphan_pending/");
-    let host_node_peer_port = next_peer_port();
-    let client_node_peer_port = next_peer_port();
-
-    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
-        &format!("{test_storage_root}host_node"),
-        host_node_peer_port,
-        false,
-        true,
-        vec![],
-    )
-    .await;
-    let host_node_info = node_info(host_node_address).await;
-
-    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
-        &format!("{test_storage_root}client_node"),
-        client_node_peer_port,
-        false,
-        true,
-        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
-    )
-    .await;
-    let client_node_info = node_info(client_node_address).await;
-
-    fund_and_create_utxos(host_node_address, None).await;
-    let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
-
-    let _opened_virtual_channel = open_virtual_channel(
-        host_node_address,
-        &client_node_info.pubkey,
-        Some(client_node_peer_port),
-        Some(100_000),
-        Some(0),
-        None,
-        None,
-    )
-    .await;
-
-    let invoice = ln_invoice(client_node_address, Some(2_000_000), None, None, 3600).await;
-    let decoded_invoice = decode_ln_invoice(host_node_address, &invoice.invoice).await;
-    let payment_hash_hex = decoded_invoice.payment_hash;
-
-    write_orphan_rgb_pending_key_for_payment_hash(
-        &format!("{test_storage_root}host_node"),
-        &"11".repeat(32),
-        &payment_hash_hex,
-        &issued_asset_id,
-    );
-
-    let payment = send_payment(host_node_address, invoice.invoice).await;
-    assert_eq!(payment.status, HTLCStatus::Succeeded);
-    let _ = node_info(host_node_address).await;
-}
-
-async fn close_channel_response(
-    node_address: SocketAddr,
-    channel_id: &str,
-    peer_pubkey: &str,
-    force: bool,
-) -> reqwest::Response {
-    let payload = CloseChannelRequest {
-        channel_id: channel_id.to_string(),
-        peer_pubkey: peer_pubkey.to_string(),
-        force,
-    };
-    reqwest::Client::new()
-        .post(format!("http://{node_address}/closechannel"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap()
-}
-
-async fn mine_blocks_and_wait_for_sync(
-    host_node_address: SocketAddr,
-    client_node_address: SocketAddr,
-    blocks_to_mine: u16,
-) {
-    mine_n_blocks(false, blocks_to_mine);
-
-    let expected_block_height = get_block_count();
-    let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(1));
-    let mut host_node_last_height = 0;
-    let mut client_node_last_height = 0;
-
-    tokio::time::timeout(
-        std::time::Duration::from_secs_f32(VIRTUAL_TIMEOUT_BOUNDARY_SYNC_TIMEOUT_SECS),
-        async {
-            loop {
-                poll_interval.tick().await;
-                host_node_last_height = network_info(host_node_address).await.height;
-                client_node_last_height = network_info(client_node_address).await.height;
-                if host_node_last_height == expected_block_height
-                    && client_node_last_height == expected_block_height
-                {
-                    break;
-                }
-            }
-        },
-    )
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "nodes did not sync to block height {expected_block_height} after mining \
-             {blocks_to_mine} blocks (host={host_node_last_height}, \
-             client={client_node_last_height})"
-        )
-    });
 }
 
 #[tokio::test]
@@ -575,6 +490,86 @@ async fn virtual_open_rejects_invalid_requests() {
         "InvalidRequest",
     )
     .await;
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_reconciliation_ignores_orphan_pending_rgb_entries() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}orphan_pending/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_info = node_info(host_node_address).await;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+    let client_node_info = node_info(client_node_address).await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let issued_asset_id = issue_asset_nia(host_node_address).await.asset_id;
+
+    let _opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(0),
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let invoice = ln_invoice(client_node_address, Some(2_000_000), None, None, 3600).await;
+    let decoded_invoice = decode_ln_invoice(host_node_address, &invoice.invoice).await;
+    let payment_hash_hex = decoded_invoice.payment_hash;
+
+    let host_node_test_dir = format!("{test_storage_root}host_node");
+    let channel_id_hex = "11".repeat(32);
+    let db_path = get_db_path(&std::path::PathBuf::from(&host_node_test_dir));
+    let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
+    let db = crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
+        .expect("connect to test db");
+    let kv_store = SeaOrmKvStore::from_connection(Arc::new(db));
+    let contract_id = ContractId::from_str(&issued_asset_id).expect("valid issued asset id");
+    let orphan_payment_info = RgbPaymentInfo {
+        contract_id,
+        amount: 1,
+        local_rgb_amount: 0,
+        remote_rgb_amount: 0,
+        swap_payment: false,
+        inbound: false,
+    };
+    let orphan_pending_key = format!("{channel_id_hex}{payment_hash_hex}_pending");
+    kv_store
+        .write(
+            RGB_PRIMARY_NS,
+            RGB_PAYMENT_INFO_OUTBOUND_NS,
+            &orphan_pending_key,
+            bincode::serialize(&orphan_payment_info).expect("serialize rgb payment info"),
+        )
+        .expect("write orphan pending key");
+
+    let payment = send_payment(host_node_address, invoice.invoice).await;
+    assert_eq!(payment.status, HTLCStatus::Succeeded);
+    let _ = node_info(host_node_address).await;
 }
 
 #[tokio::test]
