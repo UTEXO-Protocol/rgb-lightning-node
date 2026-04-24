@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>RLN WASM RGB Asset Transfer Flow</title>
+    <title>RLN WASM RGB over Lightning Flow</title>
     <style>
       body {
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
@@ -40,11 +40,12 @@
     </style>
   </head>
   <body>
-    <h1>RLN WASM RGB Asset Transfer Flow</h1>
+    <h1>RLN WASM RGB over Lightning Flow</h1>
     <p>
-      Browser PoC for two RLN instances (sender + receiver): <code>issueAssetNia</code> ->
-      <code>blindReceive</code> -> <code>sendBegin</code> -> sign PSBT ->
-      <code>sendEnd</code>.
+      Browser PoC for two RLN instances (sender + receiver):
+      <code>connectPeer</code> -> <code>openChannelValue</code> ->
+      <code>issueAssetNia</code> -> <code>createLnInvoiceValue</code> ->
+      <code>sendPaymentValue</code> with RGB payload.
     </p>
 
     <div class="row">
@@ -77,7 +78,17 @@
     </div>
 
     <div class="row">
-      <button id="run">Run RGB Transfer Flow</button>
+      <label for="senderPeerAddr">Sender peer addr</label>
+      <input id="senderPeerAddr" type="text" value="127.0.0.1:9745" />
+    </div>
+
+    <div class="row">
+      <label for="receiverPeerAddr">Receiver peer addr</label>
+      <input id="receiverPeerAddr" type="text" value="127.0.0.1:9746" />
+    </div>
+
+    <div class="row">
+      <button id="run">Run RGB over Lightning Flow</button>
     </div>
 
     <div id="out"></div>

@@ -17,6 +17,12 @@ pub(crate) fn reset_runtime_event_log_storage_for_tests() {
     TRUSTED_VIRTUAL_AUTHORITATIVE_SETTLEMENT_STORAGE.with(|state| {
         state.borrow_mut().clear();
     });
+    NODE_PUBKEY_RUNTIME_SCOPE_INDEX.with(|state| {
+        state.borrow_mut().clear();
+    });
+    KNOWN_RUNTIME_SCOPE_KEYS.with(|state| {
+        state.borrow_mut().clear();
+    });
 }
 
 impl RlnWasmNode {

@@ -124,6 +124,18 @@ fn runtime_event_log_snapshot_persists_tail_window_contract() {
 }
 
 #[test]
+fn runtime_scope_key_canonicalizes_proxy_aliases_contract() {
+    assert_eq!(
+        runtime_scope_key(" HTTP://LOCALHOST:3001/ ", None),
+        "http://localhost:3001"
+    );
+    assert_eq!(
+        runtime_scope_key("ws://LOCALHOST:3001//", Some("  runtime-a  ")),
+        "ws://localhost:3001#runtime:runtime-a"
+    );
+}
+
+#[test]
 #[cfg(target_arch = "wasm32")]
 fn drain_pending_peer_hook_events_applies_queued_payloads() {
     let ldk_runtime =
@@ -1512,6 +1524,7 @@ fn bridge_backend_trusted_virtual_keysend_finalizes_via_runtime_virtual_payment_
         peer_addr: "127.0.0.1:9735".to_string(),
         started: true,
     });
+    assert!(node.test_set_runtime_peer_started(&peer_pubkey, true));
 
     let opened_js = node
         .open_channel_value_with_options(
@@ -3403,6 +3416,180 @@ fn bridge_send_payment_requires_connected_known_payee_peer_contract() {
     assert_eq!(second_doc["status"], "pending");
 }
 
+#[test]
+fn bridge_send_payment_on_usable_channel_finalizes_via_runtime_channel_payment_engine_event() {
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    let sender = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.sender.channel-success.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("sender node");
+    let receiver = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.receiver.channel-success.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("receiver node");
+
+    let invoice_json = receiver
+        .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+        .expect("create receiver invoice");
+    let invoice_doc: serde_json::Value = serde_json::from_str(&invoice_json).expect("parse");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    let decoded = sender
+        .decode_ln_invoice_value(invoice.clone())
+        .expect("decode invoice");
+    let decoded_doc: serde_json::Value = crate::js_from(decoded).expect("parse decoded");
+    let payee_pubkey = decoded_doc["payee_pubkey"]
+        .as_str()
+        .expect("payee pubkey")
+        .to_string();
+
+    sender.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: payee_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    assert!(sender.test_set_runtime_peer_started(&payee_pubkey, true));
+    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-chan-runtime-success".to_string(),
+        channel_id: "chan-runtime-success".to_string(),
+        peer_pubkey: payee_pubkey.clone(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    let send_js = sender
+        .send_payment_value(invoice, Some(SDK_INVOICE_MIN_MSAT), None, None)
+        .expect("send payment");
+    let send_doc: serde_json::Value = crate::js_from(send_js).expect("parse send");
+    assert_eq!(send_doc["status"], "succeeded");
+    let payment_hash = send_doc["payment_hash"]
+        .as_str()
+        .expect("payment_hash")
+        .to_string();
+
+    let payment_js = sender
+        .get_payment_value(payment_hash.clone())
+        .expect("get payment");
+    let payment_doc: serde_json::Value = crate::js_from(payment_js).expect("parse payment");
+    assert_eq!(payment_doc["status"], "succeeded");
+
+    let events: serde_json::Value =
+        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
+            .expect("parse runtime events");
+    let events = events.as_array().expect("events array");
+    assert!(events.iter().any(|event| {
+        event.get("source").and_then(|value| value.as_str())
+            == Some("runtime_channel_payment_engine")
+            && event.get("event_kind").and_then(|value| value.as_str()) == Some("payment_status")
+            && event.get("payment_hash").and_then(|value| value.as_str()) == Some(&payment_hash)
+            && event.get("status").and_then(|value| value.as_str()) == Some("succeeded")
+            && event.get("applied").and_then(|value| value.as_bool()) == Some(true)
+    }));
+}
+
+#[test]
+fn bridge_send_payment_propagates_receiver_terminal_status_and_rgb_transfer_contract() {
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::reset_runtime_event_log_storage_for_tests();
+    let sender = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.sender.receiver-propagation.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("sender node");
+    let receiver = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.receiver.receiver-propagation.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("receiver node");
+
+    let rgb_asset_id = "rgb:ReceiverTerminalStatusParity-Asset_1~alpha".to_string();
+    let invoice_json = receiver
+        .create_ln_invoice_json(
+            Some(SDK_INVOICE_MIN_MSAT),
+            3600,
+            Some(rgb_asset_id.clone()),
+            Some(9),
+        )
+        .expect("create receiver rgb invoice");
+    let invoice_doc: serde_json::Value = serde_json::from_str(&invoice_json).expect("parse");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    let decoded = sender
+        .decode_ln_invoice_value(invoice.clone())
+        .expect("decode invoice");
+    let decoded_doc: serde_json::Value = crate::js_from(decoded).expect("parse decoded");
+    let payee_pubkey = decoded_doc["payee_pubkey"]
+        .as_str()
+        .expect("payee pubkey")
+        .to_string();
+
+    sender.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: payee_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-rx-propagation".to_string(),
+        channel_id: "chan-rx-propagation".to_string(),
+        peer_pubkey: payee_pubkey,
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    let send_js = sender
+        .send_payment_value(
+            invoice,
+            Some(SDK_INVOICE_MIN_MSAT),
+            Some(rgb_asset_id.clone()),
+            Some(9),
+        )
+        .expect("send payment");
+    let send_doc: serde_json::Value = crate::js_from(send_js).expect("parse send");
+    let payment_hash = send_doc["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+    assert_eq!(send_doc["status"], "succeeded");
+
+    let receiver_payment_js = receiver
+        .get_payment_value(payment_hash.clone())
+        .expect("receiver payment");
+    let receiver_payment: serde_json::Value =
+        crate::js_from(receiver_payment_js).expect("parse receiver payment");
+    assert_eq!(receiver_payment["status"], "succeeded");
+
+    let receiver_transfers_js = receiver
+        .list_rgb_ln_transfers_value()
+        .expect("receiver transfers");
+    let receiver_transfers: serde_json::Value =
+        crate::js_from(receiver_transfers_js).expect("parse receiver transfers");
+    let transfers = receiver_transfers.as_array().expect("transfer array");
+    let matching = transfers
+        .iter()
+        .find(|entry| entry["payment_hash"] == payment_hash)
+        .expect("matching transfer");
+    assert_eq!(matching["status"], "succeeded");
+    assert_eq!(matching["asset_id"], rgb_asset_id);
+}
+
 #[cfg(target_arch = "wasm32")]
 #[test]
 fn asset_id_validation_contract_for_ln_methods() {
@@ -3446,6 +3633,855 @@ fn asset_id_validation_contract_for_ln_methods() {
         )
         .expect_err("should fail");
     assert_eq!(open_err.as_string().unwrap_or_default(), "invalid asset_id");
+}
+
+#[cfg(target_arch = "wasm32")]
+#[test]
+fn asset_id_validation_accepts_canonical_rgb_id_for_ln_methods_contract() {
+    let node = RlnWasmNode::new("ws://proxy.example".to_string()).expect("node should build");
+    let rgb_asset = "rgb:DemoAsset-Alpha_1~beta".to_string();
+    let pubkey = "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+
+    node.create_ln_invoice_value(
+        Some(SDK_INVOICE_MIN_MSAT),
+        3600,
+        Some(rgb_asset.clone()),
+        Some(1),
+    )
+    .expect("create ln invoice should accept canonical rgb asset id");
+
+    node.keysend_value(
+        pubkey.clone(),
+        SDK_HTLC_MIN_MSAT,
+        Some(rgb_asset.clone()),
+        Some(1),
+    )
+    .expect("keysend should accept canonical rgb asset id");
+
+    node.open_channel_value(
+        pubkey,
+        SDK_OPENRGBCHANNEL_MIN_SAT,
+        false,
+        Some(rgb_asset),
+        Some(1),
+    )
+    .expect("open channel should accept canonical rgb asset id");
+}
+
+#[wasm_bindgen_test]
+fn close_channel_regular_coop_and_force_contracts() {
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    let peer_pubkey =
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.close-regular.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node");
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-close-regular-1".to_string(),
+        channel_id: "chan-close-regular-1".to_string(),
+        peer_pubkey: peer_pubkey.clone(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+    node.close_channel_with_options(
+        "chan-close-regular-1".to_string(),
+        Some(peer_pubkey.clone()),
+        false,
+    )
+    .expect("regular coop close");
+
+    let channels_js = node.list_channels_value().expect("list channels after coop");
+    let channels: serde_json::Value = crate::js_from(channels_js).expect("parse channels");
+    assert!(channels.as_array().expect("channels array").is_empty());
+
+    node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-close-regular-2".to_string(),
+        channel_id: "chan-close-regular-2".to_string(),
+        peer_pubkey: peer_pubkey.clone(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+    node.close_channel_with_options(
+        "chan-close-regular-2".to_string(),
+        Some(peer_pubkey),
+        true,
+    )
+    .expect("regular force close");
+
+    let channels_js = node.list_channels_value().expect("list channels after force");
+    let channels: serde_json::Value = crate::js_from(channels_js).expect("parse channels");
+    assert!(channels.as_array().expect("channels array").is_empty());
+}
+
+#[wasm_bindgen_test]
+fn close_channel_regular_coop_persists_across_node_recreation_contract() {
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::reset_runtime_event_log_storage_for_tests();
+    let peer_pubkey =
+        "03aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    let runtime_proxy = "ws://proxy.close-regular-restart.example".to_string();
+
+    let node = RlnWasmNode::new_with_runtime_backend(
+        runtime_proxy.clone(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node");
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-close-restart-1".to_string(),
+        channel_id: "chan-close-restart-1".to_string(),
+        peer_pubkey: peer_pubkey.clone(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    node.close_channel_with_options(
+        "chan-close-restart-1".to_string(),
+        Some(peer_pubkey),
+        false,
+    )
+    .expect("regular coop close");
+
+    let recreated = RlnWasmNode::new_with_runtime_backend(
+        runtime_proxy,
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("recreated node");
+    let channels_js = recreated
+        .list_channels_value()
+        .expect("list channels after recreation");
+    let channels: serde_json::Value = crate::js_from(channels_js).expect("parse channels");
+    assert!(
+        channels.as_array().expect("channels array").is_empty(),
+        "closed channel should not reappear after recreation"
+    );
+
+    let events: serde_json::Value = serde_json::from_str(
+        &recreated
+            .list_runtime_events_json()
+            .expect("runtime events should persist"),
+    )
+    .expect("parse runtime events");
+    let entries = events.as_array().expect("events array");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["event_kind"] == "channel_closed"
+                && entry["source"] == "node_api"
+                && entry["applied"] == true),
+        "expected persisted channel_closed runtime event"
+    );
+}
+
+#[wasm_bindgen_test]
+fn close_channel_regular_force_records_channel_closed_sequence_contract() {
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::reset_runtime_event_log_storage_for_tests();
+    let peer_pubkey =
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.close-force-seq.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node");
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    let channel_id = "chan-close-force-1".to_string();
+    node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-close-force-1".to_string(),
+        channel_id: channel_id.clone(),
+        peer_pubkey: peer_pubkey.clone(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    node.close_channel_with_options(channel_id, Some(peer_pubkey), true)
+        .expect("regular force close");
+
+    let events: serde_json::Value = serde_json::from_str(
+        &node.list_runtime_events_json().expect("runtime events json"),
+    )
+    .expect("parse runtime events");
+    let entries = events.as_array().expect("events array");
+    let closed_index = entries
+        .iter()
+        .position(|entry| {
+            entry["event_kind"] == "channel_closed"
+                && entry["source"] == "node_api"
+                && entry["applied"] == true
+        })
+        .expect("channel_closed event should be recorded");
+    let usable_index = entries
+        .iter()
+        .position(|entry| {
+            entry["event_kind"] == "channel_usable"
+                && entry["source"] == "node_api"
+                && entry["applied"] == true
+        });
+    if let Some(usable_index) = usable_index {
+        assert!(
+            usable_index < closed_index,
+            "channel_usable should be recorded before channel_closed"
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+fn close_channel_counterparty_event_persists_across_node_recreation_contract() {
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::reset_runtime_event_log_storage_for_tests();
+    let peer_pubkey =
+        "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string();
+    let runtime_proxy = "ws://proxy.close-counterparty-restart.example".to_string();
+
+    let node = RlnWasmNode::new_with_runtime_backend(
+        runtime_proxy.clone(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node");
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey,
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-close-counterparty-1".to_string(),
+        channel_id: "chan-close-counterparty-1".to_string(),
+        peer_pubkey: "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_string(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    let closed_payload_hex = hex::encode("channel_closed:chan-close-counterparty-1");
+    let applied_js = node
+        .ingest_runtime_transport_event_payload_hex_value(closed_payload_hex)
+        .expect("ingest counterparty close");
+    let applied: serde_json::Value = crate::js_from(applied_js).expect("parse applied");
+    assert_eq!(applied["event_kind"], "channel_closed");
+    assert_eq!(applied["applied"], true);
+
+    let recreated = RlnWasmNode::new_with_runtime_backend(runtime_proxy, "wasm_native_ldk".to_string())
+        .expect("recreated node");
+    let channels_js = recreated
+        .list_channels_value()
+        .expect("list channels after recreation");
+    let channels: serde_json::Value = crate::js_from(channels_js).expect("parse channels");
+    assert!(
+        channels.as_array().expect("channels array").is_empty(),
+        "counterparty-closed channel should not reappear after recreation"
+    );
+
+    let events: serde_json::Value = serde_json::from_str(
+        &recreated
+            .list_runtime_events_json()
+            .expect("runtime events should persist"),
+    )
+    .expect("parse runtime events");
+    let entries = events.as_array().expect("events array");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["event_kind"] == "channel_closed"
+                && entry["source"] == "runtime_transport_api"
+                && entry["applied"] == true),
+        "expected persisted runtime_transport_api channel_closed event"
+    );
+}
+
+#[wasm_bindgen_test]
+fn close_channel_force_after_restart_records_sequence_contract() {
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::reset_runtime_event_log_storage_for_tests();
+    let peer_pubkey =
+        "03dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_string();
+    let runtime_proxy = "ws://proxy.close-force-restart.example".to_string();
+    let channel_id = "chan-close-force-restart-1".to_string();
+
+    let first = RlnWasmNode::new_with_runtime_backend(
+        runtime_proxy.clone(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("first node");
+    first.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    first.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-close-force-restart-1".to_string(),
+        channel_id: channel_id.clone(),
+        peer_pubkey: peer_pubkey.clone(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+    let usable_payload_hex = hex::encode(format!("channel_usable:{channel_id}"));
+    first
+        .ingest_runtime_transport_event_payload_hex_value(usable_payload_hex)
+        .expect("ingest usable before restart");
+
+    let second = RlnWasmNode::new_with_runtime_backend(runtime_proxy, "wasm_native_ldk".to_string())
+        .expect("second node");
+    second
+        .close_channel_with_options(channel_id.clone(), Some(peer_pubkey), true)
+        .expect("force close after restart");
+
+    let events: serde_json::Value = serde_json::from_str(
+        &second.list_runtime_events_json().expect("runtime events json"),
+    )
+    .expect("parse runtime events");
+    let entries = events.as_array().expect("events array");
+    let usable_index = entries
+        .iter()
+        .position(|entry| {
+            entry["event_kind"] == "channel_usable"
+                && entry["source"] == "runtime_transport_api"
+                && entry["applied"] == true
+        })
+        .expect("persisted channel_usable event should exist");
+    let closed_index = entries
+        .iter()
+        .position(|entry| {
+            entry["event_kind"] == "channel_closed"
+                && entry["source"] == "node_api"
+                && entry["applied"] == true
+        })
+        .expect("channel_closed event should be recorded");
+    assert!(
+        usable_index < closed_index,
+        "persisted channel_usable should precede post-restart channel_closed"
+    );
+}
+
+#[wasm_bindgen_test]
+fn multi_hop_route_without_direct_payee_finalizes_via_runtime_routed_engine_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sender = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.sender.multi-hop.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("sender node");
+    let relay = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.relay.multi-hop.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("relay node");
+    let receiver = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.receiver.multi-hop.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("receiver node");
+
+    let invoice_json = receiver
+        .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+        .expect("receiver invoice");
+    let invoice_doc: serde_json::Value = serde_json::from_str(&invoice_json).expect("parse");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    let decoded_js = sender
+        .decode_ln_invoice_value(invoice.clone())
+        .expect("decode receiver invoice");
+    let decoded: serde_json::Value = crate::js_from(decoded_js).expect("parse decoded");
+    let payment_hash = decoded["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+    let mut receiver_payment = receiver
+        .ldk_runtime
+        .get_payment(&payment_hash)
+        .expect("receiver pending payment must exist");
+    receiver_payment.status = "pending".to_string();
+    receiver_payment.updated_at = unix_now_secs();
+    receiver.ldk_runtime.upsert_payment(receiver_payment);
+
+    let relay_invoice_json = relay
+        .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+        .expect("relay invoice");
+    let relay_invoice_doc: serde_json::Value =
+        serde_json::from_str(&relay_invoice_json).expect("parse relay invoice");
+    let relay_invoice = relay_invoice_doc["invoice"]
+        .as_str()
+        .expect("relay invoice string")
+        .to_string();
+    let relay_pubkey = lightning_invoice::Bolt11Invoice::from_str(&relay_invoice)
+        .expect("parse relay invoice")
+        .recover_payee_pub_key()
+        .to_string();
+
+    let _ = sender.list_peers_value().expect("warm sender runtime");
+    let _ = relay.list_peers_value().expect("warm relay runtime");
+    let _ = receiver.list_peers_value().expect("warm receiver runtime");
+    sender.test_upsert_runtime_peer(relay_pubkey.clone(), "127.0.0.1:9735".to_string(), true);
+    assert!(sender.test_set_runtime_peer_started(&relay_pubkey, true));
+    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-mh-relay".to_string(),
+        channel_id: "chan-mh-relay".to_string(),
+        peer_pubkey: relay_pubkey,
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    let send_js = sender
+        .send_payment_value(invoice, Some(SDK_INVOICE_MIN_MSAT), None, None)
+        .expect("send payment");
+    let send_doc: serde_json::Value = crate::js_from(send_js).expect("parse send");
+    assert_eq!(send_doc["status"], "succeeded");
+    assert_eq!(send_doc["payment_hash"], payment_hash);
+
+    let receiver_payment_js = receiver
+        .get_payment_value(payment_hash.clone())
+        .expect("receiver payment");
+    let receiver_payment: serde_json::Value =
+        crate::js_from(receiver_payment_js).expect("parse receiver payment");
+    assert_eq!(receiver_payment["status"], "succeeded");
+
+    let events: serde_json::Value =
+        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
+            .expect("parse runtime events");
+    let events = events.as_array().expect("events array");
+    assert!(events.iter().any(|event| {
+        event.get("source").and_then(|value| value.as_str())
+            == Some("runtime_routed_payment_engine")
+            && event.get("payment_hash").and_then(|value| value.as_str()) == Some(&payment_hash)
+            && event.get("status").and_then(|value| value.as_str()) == Some("succeeded")
+    }));
+}
+
+#[test]
+fn multi_hop_route_prefers_direct_usable_channel_over_routed_engine_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sender = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.sender.multi-hop-direct-pref.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("sender node");
+    let relay = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.relay.multi-hop-direct-pref.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("relay node");
+    let receiver = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.receiver.multi-hop-direct-pref.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("receiver node");
+
+    let invoice_json = receiver
+        .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+        .expect("receiver invoice");
+    let invoice_doc: serde_json::Value = serde_json::from_str(&invoice_json).expect("parse");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    let parsed_invoice =
+        lightning_invoice::Bolt11Invoice::from_str(&invoice).expect("parse receiver invoice");
+    let payee_pubkey = parsed_invoice
+        .payee_pub_key()
+        .copied()
+        .unwrap_or_else(|| parsed_invoice.recover_payee_pub_key())
+        .to_string();
+    let recovered_payee_pubkey = parsed_invoice.recover_payee_pub_key().to_string();
+    let decoded_js = sender
+        .decode_ln_invoice_value(invoice.clone())
+        .expect("decode receiver invoice");
+    let decoded: serde_json::Value = crate::js_from(decoded_js).expect("parse decoded");
+    let payment_hash = decoded["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+
+    let relay_invoice_json = relay
+        .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+        .expect("relay invoice");
+    let relay_invoice_doc: serde_json::Value =
+        serde_json::from_str(&relay_invoice_json).expect("parse relay invoice");
+    let relay_invoice = relay_invoice_doc["invoice"]
+        .as_str()
+        .expect("relay invoice")
+        .to_string();
+    let relay_pubkey = lightning_invoice::Bolt11Invoice::from_str(&relay_invoice)
+        .expect("parse relay invoice")
+        .recover_payee_pub_key()
+        .to_string();
+
+    let _ = sender.list_peers_value().expect("warm sender runtime");
+    let _ = relay.list_peers_value().expect("warm relay runtime");
+    let _ = receiver.list_peers_value().expect("warm receiver runtime");
+    sender.test_upsert_runtime_peer(payee_pubkey.clone(), "127.0.0.1:9735".to_string(), true);
+    assert!(sender.test_set_runtime_peer_started(&payee_pubkey, true));
+    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-mh-direct-pref-payee".to_string(),
+        channel_id: "chan-mh-direct-pref-payee".to_string(),
+        peer_pubkey: payee_pubkey.clone(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+    if recovered_payee_pubkey != payee_pubkey {
+        sender.test_upsert_runtime_peer(
+            recovered_payee_pubkey.clone(),
+            "127.0.0.1:9735".to_string(),
+            true,
+        );
+        assert!(sender.test_set_runtime_peer_started(&recovered_payee_pubkey, true));
+        sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-mh-direct-pref-payee-recovered".to_string(),
+            channel_id: "chan-mh-direct-pref-payee-recovered".to_string(),
+            peer_pubkey: recovered_payee_pubkey,
+            status: "opened".to_string(),
+            ready: true,
+            is_usable: true,
+            public: false,
+            capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+            asset_id: None,
+            asset_local_amount: None,
+            virtual_open_mode: None,
+        });
+    }
+    sender.test_upsert_runtime_peer(relay_pubkey.clone(), "127.0.0.1:9736".to_string(), true);
+    assert!(sender.test_set_runtime_peer_started(&relay_pubkey, true));
+    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-mh-direct-pref-relay".to_string(),
+        channel_id: "chan-mh-direct-pref-relay".to_string(),
+        peer_pubkey: relay_pubkey,
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    let send_js = sender
+        .send_payment_value(invoice, Some(SDK_INVOICE_MIN_MSAT), None, None)
+        .expect("send payment");
+    let send_doc: serde_json::Value = crate::js_from(send_js).expect("parse send");
+    assert_eq!(send_doc["status"], "succeeded");
+    assert_eq!(send_doc["payment_hash"], payment_hash);
+
+    let events: serde_json::Value =
+        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
+            .expect("parse runtime events");
+    let events = events.as_array().expect("events array");
+    assert!(events.iter().any(|event| {
+        event.get("source").and_then(|value| value.as_str())
+            == Some("runtime_channel_payment_engine")
+            && event.get("event_kind").and_then(|value| value.as_str()) == Some("payment_status")
+            && event.get("payment_hash").and_then(|value| value.as_str()) == Some(&payment_hash)
+            && event.get("status").and_then(|value| value.as_str()) == Some("succeeded")
+            && event.get("applied").and_then(|value| value.as_bool()) == Some(true)
+    }));
+    assert!(!events.iter().any(|event| {
+        event.get("source").and_then(|value| value.as_str())
+            == Some("runtime_routed_payment_engine")
+            && event.get("payment_hash").and_then(|value| value.as_str()) == Some(&payment_hash)
+    }));
+}
+
+#[wasm_bindgen_test]
+fn multi_hop_route_requires_pending_receiver_invoice_contract() {
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::reset_runtime_event_log_storage_for_tests();
+    let sender = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.sender.multi-hop-route-gate.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("sender node");
+    let relay = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.relay.multi-hop-route-gate.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("relay node");
+    let receiver = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.receiver.multi-hop-route-gate.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("receiver node");
+
+    let invoice_json = receiver
+        .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+        .expect("receiver invoice");
+    let invoice_doc: serde_json::Value = serde_json::from_str(&invoice_json).expect("parse");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    let payee_pubkey = lightning_invoice::Bolt11Invoice::from_str(&invoice)
+        .expect("parse receiver invoice")
+        .recover_payee_pub_key()
+        .to_string();
+    let decoded_js = sender
+        .decode_ln_invoice_value(invoice.clone())
+        .expect("decode receiver invoice");
+    let decoded: serde_json::Value = crate::js_from(decoded_js).expect("parse decoded");
+    let payment_hash = decoded["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+
+    let mut receiver_payment = receiver
+        .ldk_runtime
+        .get_payment(&payment_hash)
+        .expect("receiver pending payment must exist");
+    receiver_payment.status = "failed".to_string();
+    receiver_payment.updated_at = unix_now_secs();
+    receiver.ldk_runtime.upsert_payment(receiver_payment);
+
+    let relay_invoice_json = relay
+        .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+        .expect("relay invoice");
+    let relay_invoice_doc: serde_json::Value =
+        serde_json::from_str(&relay_invoice_json).expect("parse relay invoice");
+    let relay_invoice = relay_invoice_doc["invoice"]
+        .as_str()
+        .expect("relay invoice")
+        .to_string();
+    let relay_pubkey = lightning_invoice::Bolt11Invoice::from_str(&relay_invoice)
+        .expect("parse relay invoice")
+        .recover_payee_pub_key()
+        .to_string();
+
+    let _ = sender.list_peers_value().expect("warm sender runtime");
+    sender.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: relay_pubkey.clone(),
+        peer_addr: "127.0.0.1:9736".to_string(),
+        started: true,
+    });
+    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-mh-route-gate-relay".to_string(),
+        channel_id: "chan-mh-route-gate-relay".to_string(),
+        peer_pubkey: relay_pubkey,
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+    assert!(
+        sender.ldk_runtime.get_peer(&payee_pubkey).is_none(),
+        "sender should not have direct payee peer for routed scenario"
+    );
+
+    let send_js = sender
+        .send_payment_value(invoice, Some(SDK_INVOICE_MIN_MSAT), None, None)
+        .expect("send payment");
+    let send_doc: serde_json::Value = crate::js_from(send_js).expect("parse send");
+    assert_eq!(send_doc["payment_hash"], payment_hash);
+    assert_eq!(
+        send_doc["status"], "pending",
+        "without a pending inbound receiver payment, routed simulation must not auto-succeed"
+    );
+
+    let events: serde_json::Value =
+        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
+            .expect("parse runtime events");
+    let events = events.as_array().expect("events array");
+    assert!(!events.iter().any(|event| {
+        event.get("source").and_then(|value| value.as_str())
+            == Some("runtime_routed_payment_engine")
+            && event.get("payment_hash").and_then(|value| value.as_str()) == Some(&payment_hash)
+    }));
+}
+
+#[wasm_bindgen_test]
+fn open_channel_with_push_asset_amount_success_path_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.open-push-asset.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node");
+    let _ = node.list_peers_value().expect("warm runtime");
+    let peer_pubkey =
+        "02c11d7dfdd1ca9301508397ec8cc08758aadd95361af8562946146c33be606b58".to_string();
+    node.test_upsert_runtime_peer(peer_pubkey.clone(), "127.0.0.1:9735".to_string(), true);
+    assert!(node.test_set_runtime_peer_started(&peer_pubkey, true));
+
+    let opened_js = node
+        .open_channel_value(
+            peer_pubkey,
+            SDK_OPENRGBCHANNEL_MIN_SAT,
+            false,
+            Some("rgb:PushAssetParity-1".to_string()),
+            Some(10),
+        )
+        .expect("open rgb channel with push amount");
+    let opened: serde_json::Value = crate::js_from(opened_js).expect("parse opened");
+    assert_eq!(opened["status"], "opened");
+    assert_eq!(opened["is_usable"], true);
+    assert_eq!(opened["asset_id"], "rgb:PushAssetParity-1");
+    assert_eq!(opened["asset_local_amount"], 10);
+}
+
+#[test]
+fn vanilla_payment_on_rgb_channel_success_path_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sender = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.vanilla-over-rgb.sender.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("sender node");
+    let receiver = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.vanilla-over-rgb.receiver.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("receiver node");
+
+    let invoice_json = receiver
+        .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+        .expect("receiver invoice");
+    let invoice_doc: serde_json::Value = serde_json::from_str(&invoice_json).expect("parse");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    let parsed_invoice =
+        lightning_invoice::Bolt11Invoice::from_str(&invoice).expect("parse receiver invoice");
+    let payee_pubkey = parsed_invoice
+        .payee_pub_key()
+        .copied()
+        .unwrap_or_else(|| parsed_invoice.recover_payee_pub_key())
+        .to_string();
+    let recovered_payee_pubkey = parsed_invoice.recover_payee_pub_key().to_string();
+
+    let _ = sender.list_peers_value().expect("warm sender runtime");
+    let _ = receiver.list_peers_value().expect("warm receiver runtime");
+    sender.test_upsert_runtime_peer(payee_pubkey.clone(), "127.0.0.1:9735".to_string(), true);
+    assert!(sender.test_set_runtime_peer_started(&payee_pubkey, true));
+    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-vanilla-rgb-1".to_string(),
+        channel_id: "chan-vanilla-rgb-1".to_string(),
+        peer_pubkey: payee_pubkey.clone(),
+        status: "opened".to_string(),
+        ready: true,
+        is_usable: true,
+        public: false,
+        capacity_sat: SDK_OPENRGBCHANNEL_MIN_SAT,
+        asset_id: Some("rgb:VanillaOverRgbParity-1".to_string()),
+        asset_local_amount: Some(100),
+        virtual_open_mode: None,
+    });
+    if recovered_payee_pubkey != payee_pubkey {
+        sender.test_upsert_runtime_peer(
+            recovered_payee_pubkey.clone(),
+            "127.0.0.1:9735".to_string(),
+            true,
+        );
+        assert!(sender.test_set_runtime_peer_started(&recovered_payee_pubkey, true));
+        sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-vanilla-rgb-1-recovered".to_string(),
+            channel_id: "chan-vanilla-rgb-1-recovered".to_string(),
+            peer_pubkey: recovered_payee_pubkey,
+            status: "opened".to_string(),
+            ready: true,
+            is_usable: true,
+            public: false,
+            capacity_sat: SDK_OPENRGBCHANNEL_MIN_SAT,
+            asset_id: Some("rgb:VanillaOverRgbParity-1".to_string()),
+            asset_local_amount: Some(100),
+            virtual_open_mode: None,
+        });
+    }
+    let channels_js = sender.list_channels_value().expect("list sender channels");
+    let channels: serde_json::Value = crate::js_from(channels_js).expect("parse channels");
+    let channels = channels.as_array().expect("channels array");
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0]["peer_pubkey"], payee_pubkey);
+    assert_eq!(channels[0]["is_usable"], true);
+
+    let send_js = sender
+        .send_payment_value(invoice, Some(SDK_INVOICE_MIN_MSAT), None, None)
+        .expect("send vanilla payment over rgb channel");
+    let send_doc: serde_json::Value = crate::js_from(send_js).expect("parse send");
+    assert_eq!(send_doc["status"], "succeeded");
+    let payment_hash = send_doc["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+
+    let events: serde_json::Value =
+        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
+            .expect("parse runtime events");
+    let events = events.as_array().expect("events array");
+    assert!(events.iter().any(|event| {
+        event.get("source").and_then(|value| value.as_str())
+            == Some("runtime_channel_payment_engine")
+            && event.get("event_kind").and_then(|value| value.as_str()) == Some("payment_status")
+            && event.get("payment_hash").and_then(|value| value.as_str()) == Some(&payment_hash)
+            && event.get("status").and_then(|value| value.as_str()) == Some("succeeded")
+            && event.get("applied").and_then(|value| value.as_bool()) == Some(true)
+    }));
 }
 
 #[test]

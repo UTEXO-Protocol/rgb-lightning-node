@@ -284,6 +284,10 @@ thread_local! {
         RefCell::new(HashMap::new());
     static TRUSTED_VIRTUAL_AUTHORITATIVE_SETTLEMENT_STORAGE: RefCell<Vec<TrustedVirtualAuthoritativeSettlementData>> =
         const { RefCell::new(Vec::new()) };
+    static NODE_PUBKEY_RUNTIME_SCOPE_INDEX: RefCell<HashMap<String, HashSet<String>>> =
+        RefCell::new(HashMap::new());
+    static KNOWN_RUNTIME_SCOPE_KEYS: RefCell<HashSet<String>> =
+        RefCell::new(HashSet::new());
     static NODE_INSTANCE_NONCE_SEQ: RefCell<u64> = const { RefCell::new(0) };
 }
 
@@ -365,6 +369,9 @@ impl RlnWasmNode {
         let normalized_runtime_id = normalize_node_runtime_id(node_runtime_id)?;
         let runtime_scope_key =
             runtime_scope_key(proxy_url.trim(), normalized_runtime_id.as_deref());
+        KNOWN_RUNTIME_SCOPE_KEYS.with(|keys| {
+            keys.borrow_mut().insert(runtime_scope_key.clone());
+        });
         let runtime_event_store_key = runtime_event_store_key(&runtime_scope_key);
         let runtime_event_snapshot = load_runtime_event_log_snapshot(&runtime_event_store_key);
         let runtime_events = runtime_event_snapshot
@@ -397,7 +404,7 @@ impl RlnWasmNode {
         let enable_virtual_channels_v0 =
             load_virtual_channels_v0_flag(&virtual_channels_v0_store_key)
                 .unwrap_or_else(crate::sdk_default_enable_virtual_channels_v0);
-        Ok(Self {
+        let node = Self {
             ldk_runtime,
             runtime_core,
             chain_sync,
@@ -422,7 +429,9 @@ impl RlnWasmNode {
             wallet: RefCell::new(None),
             relay_session_auth: RefCell::new(None),
             enable_virtual_channels_v0: RefCell::new(enable_virtual_channels_v0),
-        })
+        };
+        node.register_runtime_scope_for_local_pubkey();
+        Ok(node)
     }
 
     fn with_attached_wallet<T>(
@@ -1284,7 +1293,6 @@ impl RlnWasmNode {
         } else {
             self.has_any_connected_peer()
         };
-
         let data = RlnWasmNodePaymentData {
             amt_msat: resolved_amt_msat,
             asset_amount,
@@ -1324,18 +1332,21 @@ impl RlnWasmNode {
             let _ =
                 self.apply_payment_status_via_event_stream(&payment_hash, "failed", "node_api")?;
         } else {
-            self.emit_trusted_virtual_payment_success_event_if_applicable(
-                &payment_hash,
-                &payee_pubkey,
-            )?;
+            self.emit_runtime_payment_success_event_if_applicable(&payment_hash, &payee_pubkey)?;
         }
         self.persist_runtime_event_log_state();
-        let final_status = self
-            .payments
-            .borrow()
-            .get(&payment_hash)
-            .map(|entry| entry.data.status.clone())
-            .ok_or_else(|| JsValue::from_str("payment not found after creation"))?;
+        let final_status = if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime
+                .get_payment(&payment_hash)
+                .map(|payment| payment.status)
+                .ok_or_else(|| JsValue::from_str("payment not found after creation"))?
+        } else {
+            self.payments
+                .borrow()
+                .get(&payment_hash)
+                .map(|entry| entry.data.status.clone())
+                .ok_or_else(|| JsValue::from_str("payment not found after creation"))?
+        };
 
         crate::js_obj(&RlnWasmNodeSendPaymentResult {
             payment_id,
@@ -1443,18 +1454,21 @@ impl RlnWasmNode {
             let _ =
                 self.apply_payment_status_via_event_stream(&payment_hash, "failed", "node_api")?;
         } else {
-            self.emit_trusted_virtual_payment_success_event_if_applicable(
-                &payment_hash,
-                &dest_pubkey,
-            )?;
+            self.emit_runtime_payment_success_event_if_applicable(&payment_hash, &dest_pubkey)?;
         }
         self.persist_runtime_event_log_state();
-        let final_status = self
-            .payments
-            .borrow()
-            .get(&payment_hash)
-            .map(|entry| entry.data.status.clone())
-            .ok_or_else(|| JsValue::from_str("payment not found after keysend"))?;
+        let final_status = if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime
+                .get_payment(&payment_hash)
+                .map(|payment| payment.status)
+                .ok_or_else(|| JsValue::from_str("payment not found after keysend"))?
+        } else {
+            self.payments
+                .borrow()
+                .get(&payment_hash)
+                .map(|entry| entry.data.status.clone())
+                .ok_or_else(|| JsValue::from_str("payment not found after keysend"))?
+        };
 
         crate::js_obj(&RlnWasmNodeKeysendResult {
             payment_hash,
@@ -1714,7 +1728,7 @@ impl RlnWasmNode {
             .description("rln-wasm-sdk".to_string())
             .payment_hash(payment_hash)
             .payment_secret(payment_secret)
-            .current_timestamp()
+            .duration_since_epoch(Duration::from_secs(now))
             .min_final_cltv_expiry_delta(18)
             .expiry_time(Duration::from_secs(expiry_sec as u64));
         if let Some(msat) = amt_msat {
@@ -2810,6 +2824,10 @@ impl RlnWasmNode {
 }
 
 impl RlnWasmNode {
+    fn runtime_manager_key(&self) -> String {
+        format!("node-runtime:{}", self.runtime_scope_key)
+    }
+
     fn persist_runtime_event_log_state(&self) {
         persist_runtime_event_log_state(
             &self.runtime_event_store_key,
@@ -2857,6 +2875,19 @@ impl RlnWasmNode {
         self.runtime_scope_key.clone()
     }
 
+    fn register_runtime_scope_for_local_pubkey(&self) {
+        let Some(local_node_pubkey) = self.local_node_pubkey_string() else {
+            return;
+        };
+        NODE_PUBKEY_RUNTIME_SCOPE_INDEX.with(|index| {
+            let mut index = index.borrow_mut();
+            index
+                .entry(local_node_pubkey)
+                .or_insert_with(HashSet::new)
+                .insert(self.runtime_scope_key.clone());
+        });
+    }
+
     fn trusted_virtual_link_key(local_node_pubkey: &str, peer_pubkey: &str) -> String {
         format!("{local_node_pubkey}|{peer_pubkey}")
     }
@@ -2884,17 +2915,7 @@ impl RlnWasmNode {
         })
     }
 
-    fn emit_trusted_virtual_payment_success_event_if_applicable(
-        &self,
-        payment_hash: &str,
-        payee_pubkey: &str,
-    ) -> Result<(), JsValue> {
-        if !self.use_runtime_state_for_ln_views() {
-            return Ok(());
-        }
-        if !self.has_connected_peer(payee_pubkey) {
-            return Ok(());
-        }
+    fn trusted_virtual_success_eligible(&self, payee_pubkey: &str) -> bool {
         let has_usable_trusted_virtual_channel =
             self.ldk_runtime.list_channels().into_iter().any(|entry| {
                 entry.peer_pubkey == payee_pubkey
@@ -2902,19 +2923,197 @@ impl RlnWasmNode {
                     && entry.virtual_open_mode.as_deref()
                         == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
             });
-        if !has_usable_trusted_virtual_channel
-            && !self.has_trusted_virtual_link_with_peer(payee_pubkey)
-            && !Self::has_any_trusted_virtual_activity_global()
-        {
+        has_usable_trusted_virtual_channel
+            || self.has_trusted_virtual_link_with_peer(payee_pubkey)
+            || Self::has_any_trusted_virtual_activity_global()
+    }
+
+    fn runtime_scope_keys_for_node_pubkey(node_pubkey: &str) -> Vec<String> {
+        NODE_PUBKEY_RUNTIME_SCOPE_INDEX.with(|index| {
+            index
+                .borrow()
+                .get(node_pubkey)
+                .map(|keys| keys.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+    }
+
+    fn routed_success_eligible(&self, payment_hash: &str, payee_pubkey: &str) -> bool {
+        if !self.has_any_connected_peer() {
+            return false;
+        }
+        let has_usable_channel = self
+            .ldk_runtime
+            .list_channels()
+            .into_iter()
+            .any(|entry| entry.is_usable);
+        if !has_usable_channel {
+            return false;
+        }
+
+        let mut runtime_scope_keys = Self::runtime_scope_keys_for_node_pubkey(payee_pubkey);
+        if runtime_scope_keys.is_empty() {
+            runtime_scope_keys = KNOWN_RUNTIME_SCOPE_KEYS.with(|known_keys| {
+                let mut merged = known_keys.borrow().iter().cloned().collect::<HashSet<_>>();
+                for scope_key in NODE_PUBKEY_RUNTIME_SCOPE_INDEX.with(|index| {
+                    index
+                        .borrow()
+                        .values()
+                        .flat_map(|keys| keys.iter().cloned())
+                        .collect::<Vec<_>>()
+                }) {
+                    merged.insert(scope_key);
+                }
+                merged.into_iter().collect::<Vec<_>>()
+            });
+        }
+        for runtime_scope_key in runtime_scope_keys {
+            let runtime_key = format!("node-runtime:{runtime_scope_key}");
+            let Ok(manager) = crate::ldk_runtime::ldk_runtime_manager(runtime_key) else {
+                continue;
+            };
+            if manager.ensure_started().is_err() {
+                continue;
+            }
+            let Some(payment) = manager.get_payment(payment_hash) else {
+                continue;
+            };
+            if payment.inbound
+                && (payment.status == "pending"
+                    || payment.status == "claimable"
+                    || payment.status == "claiming")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn emit_runtime_payment_success_event_if_applicable(
+        &self,
+        payment_hash: &str,
+        payee_pubkey: &str,
+    ) -> Result<(), JsValue> {
+        if !self.use_runtime_state_for_ln_views() {
             return Ok(());
         }
+        let direct_connected = self.has_connected_peer(payee_pubkey);
+        let has_usable_channel = self
+            .ldk_runtime
+            .list_channels()
+            .into_iter()
+            .any(|entry| entry.peer_pubkey == payee_pubkey && entry.is_usable);
+        let virtual_eligible = direct_connected && self.trusted_virtual_success_eligible(payee_pubkey);
+        let routed_eligible = !direct_connected && self.routed_success_eligible(payment_hash, payee_pubkey);
+        if !(has_usable_channel || virtual_eligible || routed_eligible) {
+            return Ok(());
+        }
+        let source = if virtual_eligible {
+            "runtime_virtual_payment_engine"
+        } else if routed_eligible {
+            "runtime_routed_payment_engine"
+        } else {
+            "runtime_channel_payment_engine"
+        };
         let _ = self.apply_payment_status_via_event_stream(
             payment_hash,
             "succeeded",
-            "runtime_virtual_payment_engine",
+            source,
         )?;
-        self.record_trusted_virtual_authoritative_settlement(payment_hash, payee_pubkey);
+        if virtual_eligible {
+            self.record_trusted_virtual_authoritative_settlement(payment_hash, payee_pubkey);
+        }
+        self.propagate_runtime_payment_status_to_payee_nodes(payment_hash, payee_pubkey, "succeeded");
         Ok(())
+    }
+
+    fn propagate_runtime_payment_status_to_payee_nodes(
+        &self,
+        payment_hash: &str,
+        payee_pubkey: &str,
+        status: &str,
+    ) {
+        let runtime_scope_keys = NODE_PUBKEY_RUNTIME_SCOPE_INDEX.with(|index| {
+            index
+                .borrow()
+                .get(payee_pubkey)
+                .map(|keys| keys.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        });
+        if runtime_scope_keys.is_empty() {
+            return;
+        }
+
+        for runtime_scope_key in runtime_scope_keys {
+            let runtime_key = format!("node-runtime:{runtime_scope_key}");
+            let Ok(manager) = crate::ldk_runtime::ldk_runtime_manager(runtime_key) else {
+                continue;
+            };
+            if manager.ensure_started().is_err() {
+                continue;
+            }
+            let Some(mut payment) = manager.get_payment(payment_hash) else {
+                continue;
+            };
+            if !payment.inbound {
+                continue;
+            }
+            if payment.status == status {
+                continue;
+            }
+            if !is_valid_payment_status_transition(&payment.status, status) {
+                continue;
+            }
+            payment.status = status.to_string();
+            payment.updated_at = unix_now_secs();
+            manager.upsert_payment(payment.clone());
+            self.propagate_runtime_rgb_ln_transfer_status_for_scope(
+                &runtime_scope_key,
+                &payment,
+            );
+        }
+    }
+
+    fn propagate_runtime_rgb_ln_transfer_status_for_scope(
+        &self,
+        runtime_scope_key: &str,
+        payment: &LdkRuntimePaymentStateData,
+    ) {
+        let storage_key = runtime_rgb_ln_transfer_store_key(runtime_scope_key);
+        let mut snapshot = load_runtime_rgb_ln_transfer_snapshot(&storage_key).unwrap_or_default();
+        let mut found = false;
+        for entry in snapshot.transfers.iter_mut() {
+            if entry.payment_hash == payment.payment_hash {
+                entry.status = payment.status.clone();
+                entry.updated_at = payment.updated_at;
+                found = true;
+            }
+        }
+        if !found {
+            if let (Some(asset_id), Some(asset_amount)) =
+                (payment.asset_id.as_ref(), payment.asset_amount)
+            {
+                snapshot.transfers.push(RlnWasmNodeRgbLnTransferData {
+                    payment_hash: payment.payment_hash.clone(),
+                    inbound: payment.inbound,
+                    asset_id: asset_id.clone(),
+                    asset_amount,
+                    status: payment.status.clone(),
+                    created_at: payment.created_at,
+                    updated_at: payment.updated_at,
+                });
+                snapshot
+                    .transfers
+                    .sort_by(|a, b| a.payment_hash.cmp(&b.payment_hash));
+            }
+        }
+        if let Ok(raw) = serde_json::to_string(&snapshot) {
+            let store = browser_persistent_state_store();
+            let _ = store.set(&storage_key, &raw);
+        }
+        RUNTIME_RGB_LN_TRANSFER_STORAGE.with(|state| {
+            state.borrow_mut().insert(storage_key, snapshot);
+        });
     }
 
     fn record_trusted_virtual_authoritative_settlement(
@@ -3162,7 +3361,7 @@ impl RlnWasmNode {
             source,
         )?;
         self.persist_runtime_event_log_state();
-        if self.use_runtime_state_for_ln_views() {
+        let payment = if self.use_runtime_state_for_ln_views() {
             self.ldk_runtime
                 .get_payment(payment_hash)
                 .map(Self::payment_data_from_runtime_state)
@@ -3173,7 +3372,9 @@ impl RlnWasmNode {
                 .get(payment_hash)
                 .map(|entry| entry.data.clone())
                 .ok_or_else(|| JsValue::from_str("payment not found"))
-        }
+        }?;
+        self.sync_rgb_ln_transfer_from_payment(&payment);
+        Ok(payment)
     }
 
     fn apply_and_record_payment_status_event(
@@ -3525,6 +3726,15 @@ impl RlnWasmNode {
     }
 }
 
+impl Drop for RlnWasmNode {
+    fn drop(&mut self) {
+        crate::ldk_runtime::release_runtime_manager_if_last(
+            &self.runtime_manager_key(),
+            &self.ldk_runtime,
+        );
+    }
+}
+
 fn unix_now_secs() -> u64 {
     (js_sys::Date::now() as u64) / 1000
 }
@@ -3640,9 +3850,12 @@ fn normalize_node_runtime_id(node_runtime_id: Option<String>) -> Result<Option<S
 }
 
 fn runtime_scope_key(proxy_url: &str, node_runtime_id: Option<&str>) -> String {
+    let proxy_url = crate::ldk_runtime::canonicalize_proxy_endpoint(proxy_url);
     match node_runtime_id {
-        Some(node_runtime_id) => format!("{proxy_url}#runtime:{node_runtime_id}"),
-        None => proxy_url.to_string(),
+        Some(node_runtime_id) if !node_runtime_id.trim().is_empty() => {
+            format!("{proxy_url}#runtime:{}", node_runtime_id.trim())
+        }
+        _ => proxy_url,
     }
 }
 
@@ -4342,7 +4555,17 @@ fn validate_peer_addr_format(peer_addr: &str) -> Result<(), JsValue> {
 
 fn validate_asset_id_format(asset_id: &str) -> Result<(), JsValue> {
     let trimmed = asset_id.trim();
-    if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+    let is_hex64 = trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit());
+    let is_rgb_canonical = trimmed
+        .strip_prefix("rgb:")
+        .map(|rest| {
+            !rest.is_empty()
+                && rest.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '~')
+                })
+        })
+        .unwrap_or(false);
+    if !is_hex64 && !is_rgb_canonical {
         return Err(JsValue::from_str("invalid asset_id"));
     }
     Ok(())

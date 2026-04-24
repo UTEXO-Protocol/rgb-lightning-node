@@ -29,6 +29,59 @@ cd bindings/wasm-sdk
 wasm-pack build --target web --out-dir pkg
 ```
 
+## Run Local Environment
+
+Use this when you want to run browser interop flows against local regtest infra.
+
+Prerequisites:
+
+- Docker + Docker Compose
+- Rust toolchain (for `wasm-pack` build and optional gateway runs)
+- `wasm-pack` (`cargo install wasm-pack`)
+
+Start local infra (from repo root):
+
+```sh
+cd bindings/wasm-sdk
+docker compose -f compose.wasm.yaml up -d
+```
+
+This brings up:
+
+- RGB proxy: `127.0.0.1:3000`
+- WASM proxy gateway: `127.0.0.1:3001`
+- Esplora HTTP: `127.0.0.1:3002`
+- Electrum: `127.0.0.1:50001`
+- Bitcoind RPC: `127.0.0.1:18443`
+
+Build WASM package for browser examples:
+
+```sh
+cd bindings/wasm-sdk
+wasm-pack build --target web --dev
+```
+
+Serve repository files (from repo root):
+
+```sh
+python3 -m http.server 8080
+```
+
+Open examples:
+
+- `http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/`
+- `http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/virtual_channels_flow.html`
+- `http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/rgb_asset_transfer_flow.html`
+
+Stop local infra:
+
+```sh
+cd bindings/wasm-sdk
+docker compose -f compose.wasm.yaml down
+```
+
+If ports are busy, either stop conflicting services or edit `compose.wasm.yaml` port mappings.
+
 ## Runtime model
 
 - Public API: `wasm_native_ldk` runtime only.
@@ -49,7 +102,20 @@ WASM checks are wired into CI in `.github/workflows/test.yaml`:
 
 - `wasm-sdk` (native host checks for crate)
 - `wasm-sdk-wasm32` (target compatibility check)
-- `wasm-sdk-browser` (headless browser wasm-bindgen test execution via `wasm-pack test`)
+- `wasm-sdk-browser` (blocking headless browser run in Chrome)
+- `wasm-sdk-browser-diagnostic-firefox` (non-blocking diagnostic run in Firefox)
+
+Both browser jobs pin:
+- `wasm-pack` to `0.13.1`
+- `wasm-bindgen-test-runner` to `0.2.117` (verified in CI after test bootstrap)
+
+Local browser test command (same wrapper used by CI):
+
+```sh
+WASM_BINDGEN_TEST_TIMEOUT=300 WASM_TEST_BROWSER=chrome ./bindings/wasm-sdk/scripts/run-browser-tests.sh
+```
+
+`WASM_TEST_BROWSER` supports `chrome` (default) and `firefox`.
 
 ## Additional docs
 

@@ -1,23 +1,33 @@
-import init, {
-  RlnWasmInvoice,
-  RlnWasmSdk,
-  rgbRestoreKeysValue,
-} from "../../pkg/rln_wasm_sdk.js";
+import init, { rgbRestoreKeysValue, RlnWasmSdk } from "../../pkg/rln_wasm_sdk.js";
 
 const DEFAULT_INDEXER_URL = "http://127.0.0.1:3002";
 const DEFAULT_NODE_PROXY_URL = "ws://127.0.0.1:3001";
 const DEFAULT_TRANSPORT_ENDPOINT = "http://127.0.0.1:3001/rgb/json-rpc";
+const DEFAULT_NODE_A_PEER_ADDR = "127.0.0.1:9745";
+const DEFAULT_NODE_B_PEER_ADDR = "127.0.0.1:9746";
 const DEFAULT_FUND_AMOUNT_BTC = 1;
 const DEFAULT_FUND_MINE_BLOCKS = 6;
-const MIN_VANILLA_SPENDABLE_FOR_RGB_SEND_SAT = 5000;
-const MIN_VANILLA_SETTLED_FOR_RGB_SEND_SAT = 2000;
-const VERBOSE_LOGS = false;
+const MIN_VANILLA_SPENDABLE_SAT = 5000;
+const MIN_VANILLA_SETTLED_SAT = 2000;
+const OPEN_CHANNEL_CAPACITY_SAT = 500_000n;
+const LN_RGB_PAYMENT_MSAT = 3_000_000n;
+const INVOICE_EXPIRY_SEC = 3600;
+const CHANNEL_READY_TIMEOUT_MS = 30_000;
+const PAYMENT_READY_TIMEOUT_MS = 20_000;
 const FIXED_LIFECYCLE_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const FIXED_SENDER_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const FIXED_RECEIVER_MNEMONIC =
   "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+function safeJson(value) {
+  return JSON.stringify(
+    value,
+    (_k, v) => (typeof v === "bigint" ? v.toString() : v),
+    2
+  );
+}
 
 function log(message, data = undefined) {
   const out = document.getElementById("out");
@@ -26,13 +36,8 @@ function log(message, data = undefined) {
   line.textContent =
     data === undefined
       ? String(message)
-      : `${message}: ${JSON.stringify(data, null, 2)}`;
+      : `${message}: ${safeJson(data)}`;
   out.appendChild(line);
-}
-
-function logVerbose(message, data = undefined) {
-  if (!VERBOSE_LOGS) return;
-  log(message, data);
 }
 
 function readText(id) {
@@ -48,6 +53,16 @@ function readPositiveInt(id, fallback) {
     throw new Error(`${id} must be a positive integer`);
   }
   return n;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function assertCondition(condition, errorMessage) {
+  if (!condition) {
+    throw new Error(errorMessage);
+  }
 }
 
 function toAmountNumber(value) {
@@ -75,10 +90,6 @@ function readVanillaStats(balanceObj) {
   };
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function senderFundingHint(senderAddress) {
   return {
     sender_address: senderAddress,
@@ -88,8 +99,6 @@ function senderFundingHint(senderAddress) {
       "POST <gateway>/dev/regtest/fund (enabled by default in wasm-proxy-gateway local dev)",
     js_hook: "Optional override: window.regtestFund({ address, amountBtc, mineBlocks })",
     manual_fallback: "./regtest.sh sendtoaddress <address> 1 && ./regtest.sh mine 6",
-    indexer_note:
-      "WASM wallet online mode requires a valid Esplora URL (default: http://127.0.0.1:3002).",
   };
 }
 
@@ -108,24 +117,15 @@ function toHttpOrigin(url) {
 function toRgbTransportEndpoint(url) {
   if (!url) return "";
   const trimmed = String(url).trim();
-  if (trimmed.startsWith("rpc://")) {
-    return trimmed;
-  }
-  if (trimmed.startsWith("http://")) {
-    return `rpc://${trimmed.slice("http://".length)}`;
-  }
-  if (trimmed.startsWith("https://")) {
-    return `rpc://${trimmed.slice("https://".length)}`;
-  }
+  if (trimmed.startsWith("rpc://")) return trimmed;
+  if (trimmed.startsWith("http://")) return `rpc://${trimmed.slice("http://".length)}`;
+  if (trimmed.startsWith("https://")) return `rpc://${trimmed.slice("https://".length)}`;
   return trimmed;
 }
 
 async function tryGatewayAutoFund(nodeProxyUrl, senderAddress) {
   const base = toHttpOrigin(nodeProxyUrl);
-  if (!base) {
-    return false;
-  }
-
+  if (!base) return false;
   const endpoint = `${base}/dev/regtest/fund`;
   const response = await fetch(endpoint, {
     method: "POST",
@@ -148,6 +148,113 @@ async function tryGatewayAutoFund(nodeProxyUrl, senderAddress) {
   return true;
 }
 
+async function tryAutoFundWallet(address, wallet, online, nodeProxyUrl) {
+  if (typeof window.regtestFund === "function") {
+    await window.regtestFund({
+      address,
+      amountBtc: DEFAULT_FUND_AMOUNT_BTC,
+      mineBlocks: DEFAULT_FUND_MINE_BLOCKS,
+    });
+  } else {
+    const funded = await tryGatewayAutoFund(nodeProxyUrl, address);
+    if (!funded) return false;
+  }
+
+  for (let i = 0; i < 60; i += 1) {
+    await wallet.syncOnline(online);
+    const refreshed = wallet.getBtcBalanceValue();
+    const vanilla = readVanillaStats(refreshed);
+    if (
+      vanilla.spendable >= MIN_VANILLA_SPENDABLE_SAT &&
+      vanilla.settled >= MIN_VANILLA_SETTLED_SAT
+    ) {
+      return true;
+    }
+    await sleep(1000);
+  }
+  return false;
+}
+
+async function waitForSettledVanilla(wallet, online, minSettledSat, attempts) {
+  for (let i = 0; i < attempts; i += 1) {
+    await wallet.syncOnline(online);
+    const refreshed = wallet.getBtcBalanceValue();
+    const vanilla = readVanillaStats(refreshed);
+    if (vanilla.settled >= minSettledSat) {
+      return true;
+    }
+    await sleep(1000);
+  }
+  return false;
+}
+
+async function ensureWalletVanillaBudget(
+  label,
+  wallet,
+  online,
+  nodeProxyUrl,
+  fundingAddress
+) {
+  const before = wallet.getBtcBalanceValue();
+  const vanilla = readVanillaStats(before);
+  if (
+    vanilla.spendable >= MIN_VANILLA_SPENDABLE_SAT &&
+    vanilla.settled >= MIN_VANILLA_SETTLED_SAT
+  ) {
+    return;
+  }
+  if (
+    vanilla.spendable >= MIN_VANILLA_SPENDABLE_SAT &&
+    vanilla.settled < MIN_VANILLA_SETTLED_SAT
+  ) {
+    const settledReady = await waitForSettledVanilla(
+      wallet,
+      online,
+      MIN_VANILLA_SETTLED_SAT,
+      45
+    );
+    if (settledReady) {
+      return;
+    }
+  }
+
+  const walletAddress = String(fundingAddress || "").trim();
+  if (!walletAddress) {
+    throw new Error(`${label} fundingAddress cannot be empty`);
+  }
+  const funded = await tryAutoFundWallet(walletAddress, wallet, online, nodeProxyUrl);
+  if (!funded) {
+    if (label === "sender") {
+      log("Sender wallet requires regtest funding", senderFundingHint(walletAddress));
+    } else {
+      log("Receiver wallet requires regtest funding", {
+        receiver_address: walletAddress,
+        action: "Fund this receiver address on regtest and mine >= 1 block (recommended: 6).",
+      });
+    }
+    throw new Error(
+      `${label} vanilla budget is insufficient (need spendable>=${MIN_VANILLA_SPENDABLE_SAT}, settled>=${MIN_VANILLA_SETTLED_SAT})`
+    );
+  }
+}
+
+async function ensureRgbAllocations(walletHandle, online) {
+  const before = walletHandle.getBtcBalanceValue();
+  const coloredSpendable = readBalanceAmount(before, "colored", "spendable");
+  if (coloredSpendable > 0) return;
+  const unsignedPsbt = await walletHandle.createUtxosBegin(
+    online,
+    true,
+    5,
+    undefined,
+    1n,
+    false
+  );
+  const signedPsbt = walletHandle.signPsbtValue(unsignedPsbt);
+  await walletHandle.createUtxosEnd(online, signedPsbt, false);
+  await walletHandle.syncOnline(online);
+}
+
 function buildWalletDataFromGeneratedKeys(keys, role) {
   return {
     data_dir: `/tmp/rln_wasm_${role}_fixed`,
@@ -165,6 +272,7 @@ function buildWalletDataFromGeneratedKeys(keys, role) {
 
 async function createRlnInstance(
   role,
+  runtimeId,
   walletMnemonic,
   nodeProxyUrl,
   transportEndpoint,
@@ -175,172 +283,90 @@ async function createRlnInstance(
   const walletDataJson = JSON.stringify(walletData);
 
   const sdk = new RlnWasmSdk();
+  if (typeof sdk.setDefaultEnableVirtualChannelsV0 === "function") {
+    sdk.setDefaultEnableVirtualChannelsV0(true);
+  }
   await sdk.preloadPersistentRuntimeState();
   sdk.setDefaultRgbProxyTransport(transportEndpoint, null, null);
   await sdk.initValue(lifecycle.password, lifecycle.mnemonic);
   await sdk.unlock(JSON.stringify({ password: lifecycle.password }));
 
-  const node = sdk.createNodeHandle(nodeProxyUrl);
+  const node = sdk.createNodeHandleWithRuntimeId(nodeProxyUrl, runtimeId);
   const wallet = await sdk.createWallet(walletDataJson);
   node.attachWallet(wallet);
 
   return { sdk, node, wallet };
 }
 
-async function signPsbt(walletHandle, unsignedPsbt) {
-  if (
-    walletHandle &&
-    typeof walletHandle.signPsbtValue === "function"
-  ) {
-    const signed = walletHandle.signPsbtValue(unsignedPsbt);
-    if (!signed || typeof signed !== "string") {
-      throw new Error("wallet.signPsbtValue returned an invalid signed PSBT");
-    }
-    return signed;
+function normalizeNodePubkey(value) {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
   }
-
-  if (typeof window.signPsbt === "function") {
-    const signed = await window.signPsbt(unsignedPsbt);
-    if (!signed || typeof signed !== "string") {
-      throw new Error("window.signPsbt returned an invalid signed PSBT");
+  if (value && typeof value === "object") {
+    const candidate = value.pubkey ?? value.node_pubkey ?? value.nodePubkey;
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
     }
-    return signed;
   }
+  throw new Error("failed to resolve node pubkey from nodePubkeyValue");
+}
 
+function resolveNodePubkey(nodeHandle) {
+  if (typeof nodeHandle.nodePubkeyJson === "function") {
+    const raw = nodeHandle.nodePubkeyJson();
+    if (typeof raw === "string" && raw.trim().length > 0) {
+      try {
+        return normalizeNodePubkey(JSON.parse(raw));
+      } catch (_err) {
+        return normalizeNodePubkey(raw);
+      }
+    }
+  }
+  return normalizeNodePubkey(nodeHandle.nodePubkeyValue());
+}
+
+function assertChannelPeer(channel, expectedPeerPubkey) {
+  assertCondition(channel.peer_pubkey === expectedPeerPubkey, "channel peer pubkey mismatch");
+}
+
+async function waitForChannelUsable(nodeHandle, peerPubkey, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastSnapshot = [];
+  while (Date.now() < deadline) {
+    if (typeof nodeHandle.processNativeRuntimeQueueValue === "function") {
+      nodeHandle.processNativeRuntimeQueueValue();
+    }
+    const channels = nodeHandle.listChannelsValue();
+    lastSnapshot = channels.map((c) => ({
+      channel_id: c.channel_id,
+      peer_pubkey: c.peer_pubkey,
+      status: c.status,
+      is_usable: c.is_usable,
+      virtual_open_mode: c.virtual_open_mode ?? null,
+    }));
+    const found = channels.find((c) => c.peer_pubkey === peerPubkey);
+    if (found && found.is_usable) {
+      return found;
+    }
+    await sleep(200);
+  }
   throw new Error(
-    "No signer configured. Use wallet.signPsbtValue or inject window.signPsbt(unsignedPsbt) => signedPsbt."
+    `channel did not become usable in time, last=${JSON.stringify(lastSnapshot)}`
   );
 }
 
-async function ensureRgbAllocations(walletHandle, online) {
-  const before = walletHandle.getBtcBalanceValue();
-  const coloredSpendable = readBalanceAmount(before, "colored", "spendable");
-  if (coloredSpendable > 0) {
-    return before;
+async function waitForPaymentStatus(nodeHandle, paymentHash, expectedStatus, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const payment = nodeHandle.getPaymentValue(paymentHash);
+    if (payment.status === expectedStatus) {
+      return payment;
+    }
+    await sleep(200);
   }
-
-  logVerbose("No colored allocations, creating UTXOs", { before });
-  const unsignedPsbt = await walletHandle.createUtxosBegin(
-    online,
-    true,
-    5,
-    undefined,
-    1n,
-    false
+  throw new Error(
+    `payment ${paymentHash} did not reach status '${expectedStatus}' in time`
   );
-  logVerbose("createUtxosBegin ready", { unsigned_psbt_length: unsignedPsbt.length });
-
-  const signedPsbt = await signPsbt(walletHandle, unsignedPsbt);
-  const created = await walletHandle.createUtxosEnd(online, signedPsbt, false);
-  logVerbose("createUtxosEnd result", { created });
-
-  await walletHandle.syncOnline(online);
-  const after = walletHandle.getBtcBalanceValue();
-  logVerbose("BTC balances after createUtxos", after);
-  return after;
-}
-
-async function tryAutoFundSender(
-  senderAddress,
-  senderWallet,
-  senderOnline,
-  nodeProxyUrl,
-  minSpendableSat = 1,
-  minSettledSat = 1
-) {
-  if (typeof window.regtestFund === "function") {
-    await window.regtestFund({
-      address: senderAddress,
-      amountBtc: DEFAULT_FUND_AMOUNT_BTC,
-      mineBlocks: DEFAULT_FUND_MINE_BLOCKS,
-    });
-  } else {
-    const funded = await tryGatewayAutoFund(nodeProxyUrl, senderAddress);
-    if (!funded) {
-      return false;
-    }
-  }
-  for (let i = 0; i < 60; i += 1) {
-    await senderWallet.syncOnline(senderOnline);
-    const refreshed = senderWallet.getBtcBalanceValue();
-    const vanilla = readVanillaStats(refreshed);
-    logVerbose("Wallet BTC balance after funding sync", { attempt: i + 1, vanilla });
-    if (vanilla.spendable >= minSpendableSat && vanilla.settled >= minSettledSat) {
-      return true;
-    }
-    await sleep(1000);
-  }
-  return false;
-}
-
-async function waitForSettledVanilla(senderWallet, senderOnline, minSettledSat, attempts) {
-  for (let i = 0; i < attempts; i += 1) {
-    await senderWallet.syncOnline(senderOnline);
-    const refreshed = senderWallet.getBtcBalanceValue();
-    const vanilla = readVanillaStats(refreshed);
-    logVerbose("Waiting for settled vanilla balance", { attempt: i + 1, vanilla });
-    if (vanilla.settled >= minSettledSat) {
-      return true;
-    }
-    await sleep(1000);
-  }
-  return false;
-}
-
-async function ensureSenderVanillaFeeBudget(
-  sender,
-  senderOnline,
-  nodeProxyUrl,
-  minSpendableSat,
-  minSettledSat
-) {
-  const before = sender.getBtcBalanceValue();
-  const vanilla = readVanillaStats(before);
-  logVerbose("Wallet vanilla balance check", { vanilla, minSpendableSat, minSettledSat });
-  if (vanilla.spendable >= minSpendableSat && vanilla.settled >= minSettledSat) {
-    return;
-  }
-
-  if (vanilla.spendable >= minSpendableSat && vanilla.settled < minSettledSat) {
-    const settledReady = await waitForSettledVanilla(sender, senderOnline, minSettledSat, 30);
-    if (settledReady) {
-      return;
-    }
-  }
-
-  const senderAddress = sender.getAddress();
-  const funded = await tryAutoFundSender(
-    senderAddress,
-    sender,
-    senderOnline,
-    nodeProxyUrl,
-    minSpendableSat,
-    minSettledSat
-  );
-  if (!funded) {
-    throw new Error(
-      `Sender vanilla budget is insufficient after autofund (need spendable>=${minSpendableSat} and settled>=${minSettledSat})`
-    );
-  }
-}
-
-async function waitForAssetBalance(walletHandle, online, assetId, label, refreshAssetId = null) {
-  for (let i = 0; i < 20; i += 1) {
-    try {
-      await walletHandle.refreshValue(online, refreshAssetId, [], false);
-    } catch (_err) {
-      // refresh can fail transiently while transport/indexer catches up
-    }
-    await walletHandle.syncOnline(online);
-    try {
-      const balance = walletHandle.getAssetBalanceValue(assetId);
-      logVerbose(`${label} asset balance ready`, { attempt: i + 1, balance });
-      return balance;
-    } catch (_err) {
-      await sleep(1000);
-    }
-  }
-  throw new Error(`${label} asset balance not available yet for ${assetId}`);
 }
 
 function pickInvoiceString(invoiceResponse) {
@@ -351,19 +377,26 @@ function pickInvoiceString(invoiceResponse) {
   if (invoiceResponse && typeof invoiceResponse.invoice_string === "string") {
     return invoiceResponse.invoice_string;
   }
-  throw new Error("blindReceiveValue response does not contain invoice string");
+  throw new Error("createLnInvoiceValue response does not contain invoice string");
 }
 
-function pickTransportEndpoints(invoiceData, fallbackEndpoint) {
-  const endpoints =
-    invoiceData.transport_endpoints || invoiceData.transportEndpoints || [];
-  if (Array.isArray(endpoints) && endpoints.length > 0) {
-    return endpoints;
+function paymentHashFromResult(sendResult) {
+  const hash = sendResult?.payment_hash ?? sendResult?.paymentHash;
+  if (!hash || typeof hash !== "string") {
+    throw new Error("payment response missing payment_hash");
   }
-  if (fallbackEndpoint) {
-    return [fallbackEndpoint];
-  }
-  throw new Error("No transport endpoints available for recipient");
+  return hash;
+}
+
+function transferMatchesPayment(transfer, paymentHash, assetId, assetAmount) {
+  const transferHash = transfer?.payment_hash ?? transfer?.paymentHash;
+  const transferAssetId = transfer?.asset_id ?? transfer?.assetId;
+  const transferAssetAmount = Number(transfer?.asset_amount ?? transfer?.assetAmount ?? 0);
+  return (
+    transferHash === paymentHash &&
+    transferAssetId === assetId &&
+    transferAssetAmount === Number(assetAmount)
+  );
 }
 
 async function run() {
@@ -375,9 +408,10 @@ async function run() {
 
   const indexerUrl = readText("indexerUrl") || DEFAULT_INDEXER_URL;
   const nodeProxyUrl = readText("nodeProxyUrl") || DEFAULT_NODE_PROXY_URL;
-  const transportEndpoint =
-    readText("transportEndpoint") || DEFAULT_TRANSPORT_ENDPOINT;
+  const transportEndpoint = readText("transportEndpoint") || DEFAULT_TRANSPORT_ENDPOINT;
   const transportEndpointRgb = toRgbTransportEndpoint(transportEndpoint);
+  const senderPeerAddr = readText("senderPeerAddr") || DEFAULT_NODE_A_PEER_ADDR;
+  const receiverPeerAddr = readText("receiverPeerAddr") || DEFAULT_NODE_B_PEER_ADDR;
   const issueAmount = readPositiveInt("issueAmount", 1000);
   const sendAmount = readPositiveInt("sendAmount", 100);
   if (sendAmount > issueAmount) {
@@ -390,6 +424,7 @@ async function run() {
   };
   const senderRln = await createRlnInstance(
     "sender",
+    "wasm-rgb-ln-sender",
     FIXED_SENDER_MNEMONIC,
     nodeProxyUrl,
     transportEndpoint,
@@ -397,6 +432,7 @@ async function run() {
   );
   const receiverRln = await createRlnInstance(
     "receiver",
+    "wasm-rgb-ln-receiver",
     FIXED_RECEIVER_MNEMONIC,
     nodeProxyUrl,
     transportEndpoint,
@@ -406,16 +442,25 @@ async function run() {
   const receiver = receiverRln.wallet;
   const senderNode = senderRln.node;
   const receiverNode = receiverRln.node;
+  const senderPubkey = resolveNodePubkey(senderNode);
+  const receiverPubkey = resolveNodePubkey(receiverNode);
+  const senderAddress = sender.getAddress();
+  const receiverAddress = receiver.getAddress();
+
   log("Two RLN instances initialized and unlocked", { ok: true });
   log("Using fixed endpoints", {
     indexerUrl,
     nodeProxyUrl,
     transportEndpoint,
     transportEndpointRgb,
+    senderPeerAddr,
+    receiverPeerAddr,
+    senderPubkey,
+    receiverPubkey,
   });
   log("Wallet addresses", {
-    sender_address: sender.getAddress(),
-    receiver_address: receiver.getAddress(),
+    sender_address: senderAddress,
+    receiver_address: receiverAddress,
   });
 
   const senderOnline = await sender.goOnlineValue(false, indexerUrl);
@@ -428,126 +473,109 @@ async function run() {
   await sender.syncOnline(senderOnline);
   await receiver.syncOnline(receiverOnline);
   log("Initial sync complete", { ok: true });
-  const btcBefore = {
+  log("BTC balances before flow", {
     sender: sender.getBtcBalanceValue(),
     receiver: receiver.getBtcBalanceValue(),
-  };
-  log("BTC balances before issue", btcBefore);
-  try {
-    await ensureSenderVanillaFeeBudget(
-      sender,
-      senderOnline,
-      nodeProxyUrl,
-      MIN_VANILLA_SPENDABLE_FOR_RGB_SEND_SAT,
-      MIN_VANILLA_SETTLED_FOR_RGB_SEND_SAT
-    );
-  } catch (err) {
-    const senderAddress = sender.getAddress();
-    log("Sender wallet requires regtest funding", senderFundingHint(senderAddress));
-    throw err;
-  }
+  });
+
+  await ensureWalletVanillaBudget(
+    "sender",
+    sender,
+    senderOnline,
+    nodeProxyUrl,
+    senderAddress
+  );
+  await ensureWalletVanillaBudget(
+    "receiver",
+    receiver,
+    receiverOnline,
+    nodeProxyUrl,
+    receiverAddress
+  );
   await ensureRgbAllocations(sender, senderOnline);
+  await ensureRgbAllocations(receiver, receiverOnline);
+
+  await senderNode.connectPeer(receiverPeerAddr, receiverPubkey);
+  await receiverNode.connectPeer(senderPeerAddr, senderPubkey);
+  log("Peers connected", {
+    senderPeerAddr,
+    receiverPeerAddr,
+  });
+
+  const opened = senderNode.openChannelValue(
+    receiverPubkey,
+    OPEN_CHANNEL_CAPACITY_SAT,
+    false,
+    undefined,
+    undefined
+  );
+  assertChannelPeer(opened, receiverPubkey);
+  log("Channel open requested", opened);
+
+  const channel = await waitForChannelUsable(senderNode, receiverPubkey, CHANNEL_READY_TIMEOUT_MS);
+  assertChannelPeer(channel, receiverPubkey);
+  log("Channel is usable", channel);
 
   const issueReq = {
     ticker: "TST",
-    name: "WASM RLN Demo",
+    name: "WASM RGB over LN Demo",
     precision: 0,
     amounts: [issueAmount],
   };
   const issued = senderNode.issueAssetNiaValue(issueReq);
   const assetId = issued.asset_id;
   log("Asset issued", issued);
-  await sender.syncOnline(senderOnline);
-  const afterIssueBtc = sender.getBtcBalanceValue();
-  log("Sender BTC balance after issue", afterIssueBtc);
-  await ensureSenderVanillaFeeBudget(
-    sender,
-    senderOnline,
-    nodeProxyUrl,
-    MIN_VANILLA_SPENDABLE_FOR_RGB_SEND_SAT,
-    MIN_VANILLA_SETTLED_FOR_RGB_SEND_SAT
-  );
-
-  try {
-    await ensureSenderVanillaFeeBudget(
-      receiver,
-      receiverOnline,
-      nodeProxyUrl,
-      MIN_VANILLA_SPENDABLE_FOR_RGB_SEND_SAT,
-      MIN_VANILLA_SETTLED_FOR_RGB_SEND_SAT
-    );
-    await ensureRgbAllocations(receiver, receiverOnline);
-  } catch (err) {
-    log("Receiver wallet requires regtest funding", {
-      receiver_address: receiver.getAddress(),
-      action: "Fund receiver address and rerun",
-      error: String(err),
-    });
-    throw err;
-  }
-
-  const receiveData = receiver.blindReceiveValue(
-    null,
-    { Fungible: sendAmount },
-    3600,
-    [transportEndpointRgb],
-    1
-  );
-  log("Receiver blind invoice", receiveData);
-
-  const invoiceString = pickInvoiceString(receiveData);
-  const invoiceObj = new RlnWasmInvoice(invoiceString);
-  const invoiceData = invoiceObj.invoiceDataValue();
-  log("Decoded RGB invoice", invoiceData);
-  log("Receiver node info", receiverNode.nodeInfoValue());
-
-  const recipient = {
-    recipient_id: invoiceData.recipient_id || invoiceData.recipientId,
-    witness_data: null,
-    assignment: { Fungible: sendAmount },
-    transport_endpoints: pickTransportEndpoints(invoiceData, transportEndpointRgb),
-  };
-  if (!recipient.recipient_id) {
-    throw new Error("Recipient id missing in decoded RGB invoice");
-  }
-
-  const recipientMap = {
-    [assetId]: [recipient],
-  };
-
-  const unsignedPsbt = await sender.sendBegin(senderOnline, recipientMap, false, 1n, 1);
-  log("Unsigned PSBT ready", { unsigned_psbt_length: unsignedPsbt.length });
-
-  const signedPsbt = await signPsbt(sender, unsignedPsbt);
-  log("Signed PSBT obtained", { signed_psbt_length: signedPsbt.length });
-
-  const sendResult = await sender.sendEndValue(senderOnline, signedPsbt, false);
-  log("sendEnd result", sendResult);
-
-  await sender.syncOnline(senderOnline);
-  await receiver.syncOnline(receiverOnline);
-
-  const senderBalance = await waitForAssetBalance(
-    sender,
-    senderOnline,
+  const lnInvoiceDoc = receiverNode.createLnInvoiceValue(
+    LN_RGB_PAYMENT_MSAT,
+    INVOICE_EXPIRY_SEC,
     assetId,
-    "Sender",
-    assetId
+    BigInt(sendAmount)
   );
-  const receiverBalance = await waitForAssetBalance(
-    receiver,
-    receiverOnline,
-    assetId,
-    "Receiver",
-    null
-  );
-  log("Sender asset balance", senderBalance);
-  log("Receiver asset balance", receiverBalance);
+  const lnInvoice = pickInvoiceString(lnInvoiceDoc);
+  log("Receiver RGB-LN invoice created", {
+    invoice_preview: lnInvoice.slice(0, 24),
+    invoice_length: lnInvoice.length,
+    amt_msat: LN_RGB_PAYMENT_MSAT,
+    asset_id: assetId,
+    asset_amount: sendAmount,
+  });
 
-  log("RGB transfer flow completed", {
+  const sendResult = senderNode.sendPaymentValue(
+    lnInvoice,
+    LN_RGB_PAYMENT_MSAT,
+    assetId,
+    BigInt(sendAmount)
+  );
+  log("Sender RGB-LN payment sent", sendResult);
+  const paymentHash = paymentHashFromResult(sendResult);
+
+  const senderPayment = await waitForPaymentStatus(
+    senderNode,
+    paymentHash,
+    "succeeded",
+    PAYMENT_READY_TIMEOUT_MS
+  );
+  log("Sender payment finalized", senderPayment);
+
+  const senderTransfers = senderNode.listRgbLnTransfersValue();
+  const receiverTransfers = receiverNode.listRgbLnTransfersValue();
+  const senderTransfer = senderTransfers.find((t) =>
+    transferMatchesPayment(t, paymentHash, assetId, sendAmount)
+  );
+  const receiverTransfer = receiverTransfers.find((t) =>
+    transferMatchesPayment(t, paymentHash, assetId, sendAmount)
+  );
+  assertCondition(Boolean(senderTransfer), "sender RGB-LN transfer record not found");
+  assertCondition(Boolean(receiverTransfer), "receiver RGB-LN transfer record not found");
+
+  log("Sender RGB-LN transfers", senderTransfers);
+  log("Receiver RGB-LN transfers", receiverTransfers);
+  log("RGB over Lightning flow completed", {
     ok: true,
     asset_id: assetId,
     sent_amount: sendAmount,
+    payment_hash: paymentHash,
+    channel_id: channel.channel_id,
   });
 }
 
@@ -555,7 +583,7 @@ const runBtn = document.getElementById("run");
 if (runBtn) {
   runBtn.addEventListener("click", () => {
     run().catch((err) => {
-      log("RGB transfer flow failed", String(err));
+      log("RGB over Lightning flow failed", String(err));
     });
   });
 }

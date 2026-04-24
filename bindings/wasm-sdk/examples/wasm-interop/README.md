@@ -152,16 +152,22 @@ Alternatively, you can fill relay auth values directly in the
 
 If UI values are present, they are used first and callback mode is skipped.
 
-For RGB asset issuance + transfer flow, open:
+For RGB-over-Lightning flow, open:
 
 ```text
 http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/rgb_asset_transfer_flow.html
 ```
 
-Click `Run RGB Transfer Flow`.
+Click `Run RGB over Lightning Flow`.
 `rgb_asset_transfer_flow.html` is prefilled with local defaults for:
 indexer URL (`http://127.0.0.1:3002`), node proxy URL (`ws://127.0.0.1:3001`),
-and RGB transport endpoint (`http://127.0.0.1:3001/rgb/json-rpc`).
+RGB transport endpoint (`http://127.0.0.1:3001/rgb/json-rpc`),
+and peer addresses (`127.0.0.1:9745` / `127.0.0.1:9746`).
+
+The flow is:
+`connectPeer` -> `openChannelValue` ->
+`issueAssetNia` -> `createLnInvoiceValue` ->
+`sendPaymentValue` with `asset_id` + `asset_amount`.
 
 When sender wallet BTC is zero, the page now tries automatic local regtest funding
 through wasm gateway endpoint `POST /dev/regtest/fund`.
@@ -185,26 +191,16 @@ If auto-funding is disabled or unavailable, the page logs a manual fallback comm
 1. This example is browser-only (`--target web`).
 2. It focuses on deterministic interop surface checks, not full native RLN node runtime behavior.
 3. Peer-session start may fail in normal local runs if proxy/peer is not reachable; the example logs this as non-fatal.
-4. `rgb_asset_transfer_flow.html` signs PSBTs via wallet-native `signPsbtValue` by default.
-   If you want to delegate signing to an external signer/wallet, define this callback:
-
-```js
-window.signPsbt = async (unsignedPsbt) => {
-  // return signed PSBT string from your external signer
-  return unsignedPsbt;
-}
-```
-
-In real usage, this callback is optional and can be used for hardware/external wallet integration.
-5. The RGB transfer page uses fixed constants in JS for:
+4. The RGB over Lightning page uses fixed constants in JS for:
    - `Indexer URL`: `http://127.0.0.1:3002`
    - `Node proxy URL` (for node handle construction): `ws://127.0.0.1:3001`
    - `RGB transport endpoint`: `http://127.0.0.1:3001/rgb/json-rpc`
-   - sender/receiver RLN instances are initialized at runtime, each with generated keys and a generated wallet bootstrap
-   - each SDK instance configures transport once via `setDefaultRgbProxyTransport(...)`; `blindReceive` then uses wallet defaults when `transport_endpoints` is omitted
-6. Additional runtime observability/control APIs are available on node/facade/node-handle surfaces:
+   - `LN amount`: `3_000_000 msat` (minimum RGB-LN compatible amount)
+   - canonical RGB `asset_id` values (`rgb:...`) are accepted in LN APIs
+   - sender/receiver RLN instances are initialized at runtime and each SDK instance configures transport via `setDefaultRgbProxyTransport(...)`
+5. Additional runtime observability/control APIs are available on node/facade/node-handle surfaces:
    - `ldkRuntimeComponentsValue/Json` (runtime component readiness + lifecycle counters)
    - `chainSyncStart*` / `chainSyncStatus*` / `chainSyncStop*` / `chainSyncTick*` / `chainSyncEnqueueRebroadcastTx`
    - `listRgbLnTransfersValue/Json` (RGB-over-LN transfer ledger derived from LN payment state)
-7. `manual_js_wasm_interop.js` and `manual_js_virtual_channels_sdk_flow.js` now demonstrate these APIs directly
+6. `manual_js_wasm_interop.js` and `manual_js_virtual_channels_sdk_flow.js` now demonstrate these APIs directly
    (components status, chain sync start/status/stop, RGB-LN transfer listing).

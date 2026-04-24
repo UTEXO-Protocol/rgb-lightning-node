@@ -1,4 +1,5 @@
 use super::*;
+use std::rc::Rc;
 
 fn sample_snapshot() -> LdkRuntimeSnapshot {
     LdkRuntimeSnapshot {
@@ -202,4 +203,32 @@ fn runtime_component_status_tracks_lifecycle_counters_contract() {
     assert_eq!(status.channels_opened, 1);
     assert_eq!(status.channels_closed, 1);
     assert!(!status.key_manager_fingerprint.is_empty());
+}
+
+#[test]
+fn runtime_key_canonicalization_normalizes_equivalent_proxy_shapes_contract() {
+    assert_eq!(
+        canonicalize_runtime_key(" node-runtime:HTTP://LOCALHOST:3001/ "),
+        "node-runtime:http://localhost:3001"
+    );
+    assert_eq!(
+        canonicalize_runtime_key("node-runtime:ws://LOCALHOST:3001//"),
+        "node-runtime:ws://localhost:3001"
+    );
+    assert_eq!(
+        canonicalize_runtime_key("node-runtime:http://localhost:3001/#runtime:  abc  "),
+        "node-runtime:http://localhost:3001#runtime:abc"
+    );
+}
+
+#[test]
+fn runtime_manager_registry_reuses_alias_runtime_keys_contract() {
+    super::test_utils::reset_runtime_storage_for_tests();
+
+    let manager_a = ldk_runtime_manager("node-runtime:HTTP://LOCALHOST:3001/".to_string())
+        .expect("runtime manager a");
+    let manager_b = ldk_runtime_manager(" node-runtime:http://localhost:3001 ".to_string())
+        .expect("runtime manager b");
+
+    assert!(Rc::ptr_eq(&manager_a, &manager_b));
 }

@@ -602,13 +602,20 @@ fn detect_wasm_indexer_protocol(indexer_url: &str) -> Result<&'static str, JsVal
 pub fn wasm_init() {
     static PANIC_HOOK_INIT: Once = Once::new();
     PANIC_HOOK_INIT.call_once(|| {
-        if std::thread::panicking() {
-            return;
+        let install_result = std::panic::catch_unwind(|| {
+            if std::thread::panicking() {
+                return;
+            }
+            std::panic::set_hook(Box::new(|info| {
+                let msg = format!("[rln-wasm-sdk panic] {info}");
+                web_sys::console::error_1(&msg.into());
+            }));
+        });
+        if install_result.is_err() {
+            web_sys::console::warn_1(
+                &"[rln-wasm-sdk] failed to install panic hook; continuing".into(),
+            );
         }
-        std::panic::set_hook(Box::new(|info| {
-            let msg = format!("[rln-wasm-sdk panic] {info}");
-            web_sys::console::error_1(&msg.into());
-        }));
     });
 }
 

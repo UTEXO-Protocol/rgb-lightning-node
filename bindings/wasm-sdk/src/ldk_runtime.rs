@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use bitcoin_hashes::sha256::Hash as Sha256;
 use bitcoin_hashes::Hash as _;
@@ -336,6 +336,8 @@ struct LdkRuntimeCheckpointEnvelope {
 
 thread_local! {
     static FALLBACK_RUNTIME_STORAGE: RefCell<HashMap<String, LdkRuntimeSnapshot>> =
+        RefCell::new(HashMap::new());
+    static RUNTIME_MANAGER_REGISTRY: RefCell<HashMap<String, Weak<dyn LdkRuntimeManager>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -961,36 +963,88 @@ fn runtime_key_fingerprint(runtime_key: &str) -> String {
     hex::encode(&hash[..8])
 }
 
-fn normalize_runtime_backend_label(runtime_backend: Option<String>) -> Result<String, JsValue> {
-    match runtime_backend
-        .unwrap_or_else(|| "wasm_native_ldk".to_string())
-        .trim()
-        .to_string()
-        .as_str()
-    {
-        "wasm_native_ldk" => Ok("wasm_native_ldk".to_string()),
-        other => Err(JsValue::from_str(&format!(
-            "unknown runtime backend: {other}"
-        ))),
-    }
-}
+const WASM_NATIVE_LDK_BACKEND_LABEL: &str = "wasm_native_ldk";
 
-pub fn ldk_runtime_manager_with_backend(
-    runtime_key: String,
-    runtime_backend: Option<String>,
-) -> Result<Rc<dyn LdkRuntimeManager>, JsValue> {
-    let backend_label = normalize_runtime_backend_label(runtime_backend)?;
+pub fn ldk_runtime_manager(runtime_key: String) -> Result<Rc<dyn LdkRuntimeManager>, JsValue> {
+    let runtime_key = canonicalize_runtime_key(&runtime_key);
+    let manager_registry_key = runtime_key.clone();
+    if let Some(manager) = RUNTIME_MANAGER_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry.retain(|_, weak| weak.strong_count() > 0);
+        registry.get(&manager_registry_key).and_then(Weak::upgrade)
+    }) {
+        return Ok(manager);
+    }
     let storage: Rc<dyn LdkRuntimeStorage> = Rc::new(BrowserBackedLdkRuntimeStorage);
     let manager: Rc<dyn LdkRuntimeManager> = Rc::new(WasmNativeRuntimeManager::new(
         runtime_key,
-        backend_label,
+        WASM_NATIVE_LDK_BACKEND_LABEL.to_string(),
         storage,
     ));
+    RUNTIME_MANAGER_REGISTRY.with(|registry| {
+        registry
+            .borrow_mut()
+            .insert(manager_registry_key, Rc::downgrade(&manager));
+    });
     Ok(manager)
 }
 
-pub fn ldk_runtime_manager(runtime_key: String) -> Result<Rc<dyn LdkRuntimeManager>, JsValue> {
-    ldk_runtime_manager_with_backend(runtime_key, None)
+pub fn release_runtime_manager_if_last(
+    runtime_key: &str,
+    manager: &Rc<dyn LdkRuntimeManager>,
+) {
+    let runtime_key = canonicalize_runtime_key(runtime_key);
+    RUNTIME_MANAGER_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let should_remove = registry
+            .get(&runtime_key)
+            .and_then(Weak::upgrade)
+            .map(|existing| Rc::ptr_eq(&existing, manager) && Rc::strong_count(&existing) <= 1)
+            .unwrap_or(true);
+        if should_remove {
+            registry.remove(&runtime_key);
+        }
+        registry.retain(|_, weak| weak.strong_count() > 0);
+    });
+}
+
+fn canonicalize_runtime_key(runtime_key: &str) -> String {
+    let trimmed = runtime_key.trim();
+    let Some(scope) = trimmed.strip_prefix("node-runtime:") else {
+        return trimmed.to_string();
+    };
+    format!("node-runtime:{}", canonicalize_runtime_scope(scope))
+}
+
+fn canonicalize_runtime_scope(scope: &str) -> String {
+    let scope = scope.trim();
+    if let Some((proxy, runtime_id)) = scope.split_once("#runtime:") {
+        let proxy = canonicalize_proxy_endpoint(proxy);
+        let runtime_id = runtime_id.trim();
+        if runtime_id.is_empty() {
+            proxy
+        } else {
+            format!("{proxy}#runtime:{runtime_id}")
+        }
+    } else {
+        canonicalize_proxy_endpoint(scope)
+    }
+}
+
+pub(crate) fn canonicalize_proxy_endpoint(value: &str) -> String {
+    let mut value = value.trim().to_string();
+    if let Some(scheme_sep) = value.find("://") {
+        let scheme = value[..scheme_sep].to_ascii_lowercase();
+        let rest = &value[scheme_sep + 3..];
+        let boundary = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = rest[..boundary].to_ascii_lowercase();
+        let suffix = &rest[boundary..];
+        value = format!("{scheme}://{authority}{suffix}");
+    }
+    while value.ends_with('/') {
+        value.pop();
+    }
+    value
 }
 
 #[cfg(test)]
