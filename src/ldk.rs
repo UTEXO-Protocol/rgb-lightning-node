@@ -1540,7 +1540,7 @@ async fn handle_ldk_events(
             claim_deadline,
             onion_fields: _,
             counterparty_skimmed_fee_msat: _,
-            receiving_channel_ids: _,
+            receiving_channel_ids,
             payment_id: _,
         } => {
             tracing::info!(
@@ -1548,6 +1548,33 @@ async fn handle_ldk_events(
                 payment_hash,
                 amount_msat,
             );
+
+            // `color_commitment` writes the authoritative per-HTLC record under
+            // `chan_id || payment_hash` but never under the bare `<payment_hash>` key — that would
+            // poison sibling channels in atomic RGB swaps. As the final hop we know exactly which
+            // receiving channel delivered this HTLC, so project that scoped record to the bare
+            // inbound key that `get_payment`/`list_payments` consume.
+            let kv_store = &unlocked_state.kv_store;
+            let htlc_payment_hash = hex_str(&payment_hash.0);
+            for (chan_id, _) in &receiving_channel_ids {
+                let chan_id_hex = hex_str(&chan_id.0);
+                let htlc_proxy_id = format!("{chan_id_hex}{htlc_payment_hash}");
+                if let Ok(data) =
+                    kv_store.read(RGB_PRIMARY_NS, RGB_PAYMENT_INFO_INBOUND_NS, &htlc_proxy_id)
+                {
+                    if kv_store
+                        .write(
+                            RGB_PRIMARY_NS,
+                            RGB_PAYMENT_INFO_INBOUND_NS,
+                            &htlc_payment_hash,
+                            data,
+                        )
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+            }
 
             let (payment_preimage, payment_secret, invoice) = match purpose {
                 PaymentPurpose::SpontaneousPayment(preimage) => {
