@@ -4086,6 +4086,18 @@ pub(crate) async fn send_payment(
                 }
             };
 
+            if rgb_payment.is_none() {
+                let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+                if let Some(existing) = unlocked_state.inbound_payments().get(&payment_hash) {
+                    if matches!(
+                        existing.status,
+                        HTLCStatus::Pending | HTLCStatus::Claimable | HTLCStatus::Claiming
+                    ) {
+                        return Err(APIError::PaymentHashAlreadyUsed);
+                    }
+                }
+            }
+
             let secret = payment_secret;
             unlocked_state.add_outbound_payment(
                 payment_id,

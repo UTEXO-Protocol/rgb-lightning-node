@@ -806,11 +806,15 @@ async fn inbound_payment_blocks_outbound_btc_payment_with_same_hash() {
         .post(format!("http://{lsp_addr}/sendpayment"))
         .json(&send_payment_payload)
         .send()
-        .await;
-    assert!(
-        send_payment_result.is_err(),
-        "expected outbound BTC payment request to fail"
-    );
+        .await
+        .expect("sendpayment request should reach the server");
+    check_response_is_nok(
+        send_payment_result,
+        StatusCode::BAD_REQUEST,
+        "Payment hash already used",
+        "PaymentHashAlreadyUsed",
+    )
+    .await;
     assert!(matches!(
         invoice_status(recipient_client_addr, &outbound_invoice).await,
         InvoiceStatus::Pending
