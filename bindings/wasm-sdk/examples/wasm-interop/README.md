@@ -45,7 +45,14 @@ From repo root:
 
 ```sh
 cd bindings/wasm-sdk
+docker compose -f compose.wasm.yaml up -d
 ```
+
+This starts local services needed by wasm interop pages:
+1. RGB proxy (`127.0.0.1:3000`)
+2. Esplora HTTP indexer (`127.0.0.1:3002`)
+3. Electrum (`127.0.0.1:50001`)
+4. Unified wasm gateway (`127.0.0.1:3001`)
 
 Build wasm package (`pkg/`) for browser usage:
 
@@ -67,7 +74,8 @@ From repo root:
 python3 -m http.server 8080
 ```
 
-Start the unified wasm gateway (LN websocket relay + RGB JSON-RPC pass-through):
+If you are not using `compose.wasm.yaml`, start the unified wasm gateway manually
+(LN websocket relay + RGB JSON-RPC pass-through):
 
 ```sh
 cargo run -p wasm-proxy-gateway

@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn reset_wasm_sdk_lifecycle_state_for_tests() {
@@ -66,12 +67,14 @@ pub(crate) fn reset_wasm_runtime_state_for_tests() {
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn test_wallet_data_json() -> String {
+    static TEST_WALLET_SEQ: AtomicU64 = AtomicU64::new(0);
     let mnemonic =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     let keys = rgb_lib_wasm::restore_keys(rgb_lib_wasm::BitcoinNetwork::Regtest, mnemonic.into())
         .expect("restore keys");
+    let suffix = TEST_WALLET_SEQ.fetch_add(1, Ordering::Relaxed);
     let wallet_data = serde_json::json!({
-        "data_dir": "/tmp/rln_wasm_contract_wallet",
+        "data_dir": format!("/tmp/rln_wasm_contract_wallet_{suffix}"),
         "bitcoin_network": "Regtest",
         "database_type": "Sqlite",
         "max_allocations_per_utxo": 5,

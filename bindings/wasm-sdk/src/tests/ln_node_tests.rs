@@ -1295,7 +1295,7 @@ fn bridge_backend_close_all_peers_clears_runtime_peers_without_sessions_contract
 
 #[test]
 fn bridge_backend_runtime_state_restores_across_node_instances_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.restore.example".to_string();
 
     let node_a = RlnWasmNode::new(proxy.clone()).expect("node should build");
@@ -1368,7 +1368,7 @@ fn bridge_backend_runtime_state_restores_across_node_instances_contract() {
 
 #[test]
 fn bridge_backend_restore_requires_peer_reconnect_before_open_channel_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.reconnect.example".to_string();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -1414,7 +1414,7 @@ fn bridge_backend_restore_requires_peer_reconnect_before_open_channel_contract()
 
 #[test]
 fn bridge_backend_restore_disconnected_peer_forces_send_payment_failure_until_reconnect() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.payment-reconnect.example".to_string();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -1462,7 +1462,7 @@ fn bridge_backend_restore_disconnected_peer_forces_send_payment_failure_until_re
 
 #[test]
 fn bridge_backend_restore_disconnected_peer_forces_keysend_failure_until_reconnect() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.keysend-reconnect.example".to_string();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -1500,7 +1500,7 @@ fn bridge_backend_restore_disconnected_peer_forces_keysend_failure_until_reconne
 
 #[test]
 fn bridge_backend_trusted_virtual_keysend_finalizes_via_runtime_virtual_payment_engine_event() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.virtual-keysend-event.example".to_string();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -1555,7 +1555,7 @@ fn bridge_backend_trusted_virtual_keysend_finalizes_via_runtime_virtual_payment_
 
 #[test]
 fn wasm_two_node_handles_same_proxy_distinct_runtime_ids_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.runtime-id-isolation.example".to_string();
 
     let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()))
@@ -1587,7 +1587,7 @@ fn wasm_two_node_handles_same_proxy_distinct_runtime_ids_contract() {
 
 #[test]
 fn wasm_signing_identity_differs_by_runtime_id_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.signing-identity-runtime-id.example".to_string();
 
     let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()))
@@ -1636,7 +1636,7 @@ fn wasm_signing_identity_differs_by_runtime_id_contract() {
 
 #[test]
 fn wasm_channel_payment_state_does_not_cross_runtime_ids_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.runtime-id-state-separation.example".to_string();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -1751,7 +1751,7 @@ fn bridge_backend_channel_api_open_get_list_close_contract() {
 
 #[test]
 fn runtime_lock_blocks_peer_channel_surfaces_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     crate::ldk_runtime::set_runtime_session_initialized(true);
     crate::ldk_runtime::set_runtime_session_authorized(false);
 
@@ -1809,7 +1809,7 @@ fn runtime_lock_blocks_peer_channel_surfaces_contract() {
 
 #[test]
 fn runtime_lock_blocks_network_info_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     crate::ldk_runtime::set_runtime_session_initialized(true);
     crate::ldk_runtime::set_runtime_session_authorized(false);
     let node = RlnWasmNode::new_with_runtime_backend(
@@ -1828,7 +1828,7 @@ fn runtime_lock_blocks_network_info_contract() {
 
 #[test]
 fn runtime_lock_blocks_node_info_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     crate::ldk_runtime::set_runtime_session_initialized(true);
     crate::ldk_runtime::set_runtime_session_authorized(false);
     let node = RlnWasmNode::new_with_runtime_backend(
@@ -2852,8 +2852,8 @@ fn close_channel_allows_virtual_cleanup_after_btc_roundtrip_contract() {
 #[test]
 #[cfg(target_arch = "wasm32")]
 fn close_channel_allows_virtual_cleanup_after_authoritative_peer_keysend_roundtrip_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
-    crate::ln_node::test_utils::super::test_utils::reset_runtime_event_log_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::reset_runtime_event_log_storage_for_tests();
     let node_a = RlnWasmNode::new_with_runtime_id_opt(
         "ws://proxy.virtual-close-authoritative-roundtrip.example".to_string(),
         Some("virtual-close-node-a".to_string()),
@@ -3349,7 +3349,7 @@ fn send_payment_returns_payment_secret_and_native_mismatch_error_contract() {
 
 #[test]
 fn bridge_send_payment_requires_connected_known_payee_peer_contract() {
-    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let sender = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.sender.example".to_string(),
         "wasm_native_ldk".to_string(),
@@ -6691,7 +6691,7 @@ fn node_payment_status_event_updates_swap_runtime_status_contract() {
         .expect("keysend");
     let keysend: TestKeysendData =
         serde_wasm_bindgen::from_value(keysend_js).expect("parse keysend");
-    crate::swap_runtime::test_insert_swap_with_payment_hash(&keysend.payment_hash, false);
+    crate::swap_runtime::test_utils::test_insert_swap_with_payment_hash(&keysend.payment_hash, false);
 
     let before_swap_js =
         crate::swap_runtime::get_swap_value(keysend.payment_hash.clone()).expect("get swap");

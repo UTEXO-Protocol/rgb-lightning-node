@@ -4221,8 +4221,47 @@ fn parse_transport_event_payload(payload_hex: &str) -> Option<RuntimeTransportEv
         return Some(value);
     }
 
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        let obj = value.as_object()?;
+        let kind_raw = obj
+            .get("event")
+            .or_else(|| obj.get("event_name"))
+            .or_else(|| obj.get("eventName"))
+            .or_else(|| obj.get("kind"))
+            .or_else(|| obj.get("type"))
+            .and_then(|v| v.as_str())?;
+        let kind = normalize_transport_event_kind(kind_raw)?;
+        let id = match kind {
+            "peer_disconnected" | "peer_reconnected" => obj
+                .get("peer_pubkey")
+                .or_else(|| obj.get("node_id"))
+                .or_else(|| obj.get("id"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string)?,
+            "channel_closed" | "channel_usable" | "channel_unusable" => obj
+                .get("channel_id")
+                .or_else(|| obj.get("channelId"))
+                .or_else(|| obj.get("id"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string)?,
+            _ => return None,
+        };
+        return Some(match kind {
+            "peer_disconnected" => RuntimeTransportEvent::PeerDisconnected { peer_pubkey: id },
+            "peer_reconnected" => RuntimeTransportEvent::PeerReconnected { peer_pubkey: id },
+            "channel_closed" => RuntimeTransportEvent::ChannelClosed { channel_id: id },
+            "channel_usable" => RuntimeTransportEvent::ChannelUsable { channel_id: id },
+            "channel_unusable" => RuntimeTransportEvent::ChannelUnusable { channel_id: id },
+            _ => return None,
+        });
+    }
+
     let (kind_raw, id_raw) = text.split_once(':')?;
-    let kind = kind_raw.trim();
+    let kind = normalize_transport_event_kind(kind_raw.trim())?;
     let id = id_raw.trim().to_string();
     if id.is_empty() {
         return None;
@@ -4233,6 +4272,27 @@ fn parse_transport_event_payload(payload_hex: &str) -> Option<RuntimeTransportEv
         "channel_closed" => Some(RuntimeTransportEvent::ChannelClosed { channel_id: id }),
         "channel_usable" => Some(RuntimeTransportEvent::ChannelUsable { channel_id: id }),
         "channel_unusable" => Some(RuntimeTransportEvent::ChannelUnusable { channel_id: id }),
+        _ => None,
+    }
+}
+
+fn normalize_transport_event_kind(raw: &str) -> Option<&'static str> {
+    let compact = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+    match compact.as_str() {
+        "peerdisconnected" | "peeroffline" | "peerdown" => Some("peer_disconnected"),
+        "peerreconnected" | "peerconnected" | "peeronline" | "peerup" => Some("peer_reconnected"),
+        "channelclosed" => Some("channel_closed"),
+        "channelusable" | "channelopened" | "channelready" | "channelonline" | "channelup" => {
+            Some("channel_usable")
+        }
+        "channelunusable" | "channeldisconnected" | "channeloffline" | "channeldown" => {
+            Some("channel_unusable")
+        }
         _ => None,
     }
 }

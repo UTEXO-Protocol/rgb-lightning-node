@@ -1,0 +1,70 @@
+services:
+  bitcoind:
+    image: registry.gitlab.com/hashbeam/docker/bitcoind:30.0
+    command: "-fallbackfee=0.0002"
+    environment:
+      MYUID: 1000
+      MYGID: 1000
+      RPCAUTH: "user:84c66d54d736d8b02aaa5b02e07e759b$$cc56c229b2a49ae2bfd5932cc8a6135d435bb9a7ac037ddd351d65936082c03d"
+    ports:
+      - "18443:18443"
+    volumes:
+      - ./tmp/wasm-compose/datacore:/srv/app/.bitcoin
+
+  electrs:
+    image: registry.gitlab.com/hashbeam/docker/electrs:0.10.10
+    environment:
+      MYUID: 1000
+      MYGID: 1000
+      BTCPASS: "password"
+    depends_on:
+      - bitcoind
+    ports:
+      - "50001:50001"
+    volumes:
+      - ./tmp/wasm-compose/dataindex:/srv/app/db
+
+  proxy:
+    image: ghcr.io/rgb-tools/rgb-proxy-server:0.3.0
+    ports:
+      - "3000:3000"
+
+  esplora:
+    image: bitcoindevkit/esplora:latest
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        /root/bitcoind -regtest -server -daemon -fallbackfee=0.0002 -rpcuser=admin -rpcpassword=passw -rpcallowip=0.0.0.0/0 -rpcbind=0.0.0.0 -blockfilterindex=1 -peerblockfilters=1
+        until /root/bitcoin-cli -regtest -rpcuser=admin -rpcpassword=passw getblockchaininfo; do sleep 1; done
+        /root/bitcoin-cli -regtest -rpcuser=admin -rpcpassword=passw createwallet bdk-test || true
+        ADDR=$$(/root/bitcoin-cli -regtest -rpcuser=admin -rpcpassword=passw -rpcwallet=bdk-test getnewaddress)
+        /root/bitcoin-cli -regtest -rpcuser=admin -rpcpassword=passw generatetoaddress 150 "$$ADDR"
+        exec /root/electrs --network regtest -vvv --cookie admin:passw --jsonrpc-import --electrum-rpc-addr=0.0.0.0:60401 --http-addr 0.0.0.0:3002 --cors '*'
+    ports:
+      - "3002:3002"
+
+  wasm-proxy-gateway:
+    image: rust:1.88
+    working_dir: /workspace
+    command: >
+      bash -lc "cargo run -p wasm-proxy-gateway"
+    depends_on:
+      - proxy
+      - esplora
+    environment:
+      WASM_PROXY_LISTEN_ADDR: "0.0.0.0:3001"
+      WASM_PROXY_RGB_UPSTREAM: "http://proxy:3000/json-rpc"
+      WASM_PROXY_REGTEST_SCRIPT_PATH: "/workspace/regtest.sh"
+      WASM_PROXY_REGTEST_COMPOSE_WORKDIR: "/workspace"
+      WASM_PROXY_REGTEST_ESPLORA_SERVICE: "esplora"
+      WASM_PROXY_REGTEST_ESPLORA_RPC_USER: "admin"
+      WASM_PROXY_REGTEST_ESPLORA_RPC_PASSWORD: "passw"
+      WASM_PROXY_REGTEST_ESPLORA_WALLET: "bdk-test"
+      WASM_PROXY_REGTEST_FUNDING_ENABLED: "true"
+      WASM_PROXY_REGTEST_FUNDING_USE_REGTEST_SH: "true"
+      WASM_PROXY_REGTEST_FUNDING_USE_ESPLORA_RPC: "true"
+    ports:
+      - "3001:3001"
+    volumes:
+      - ../..:/workspace

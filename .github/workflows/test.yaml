@@ -90,8 +90,15 @@ jobs:
       - name: Install Firefox
         run: sudo apt-get update && sudo apt-get install -y firefox
       - name: wasm-sdk browser tests
+        env:
+          WASM_BINDGEN_TEST_TIMEOUT: "300"
         run: |
           cd bindings/wasm-sdk
+          if command -v geckodriver >/dev/null 2>&1; then
+            export GECKODRIVER="$(command -v geckodriver)"
+          elif [ -x /snap/bin/geckodriver ]; then
+            export GECKODRIVER="/snap/bin/geckodriver"
+          fi
           wasm-pack test --headless --firefox
 
   lib-sdk-tests:

@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::sync::Once;
 use wasm_bindgen::prelude::*;
 
 mod chain_sync;
@@ -599,10 +600,16 @@ fn detect_wasm_indexer_protocol(indexer_url: &str) -> Result<&'static str, JsVal
 
 #[wasm_bindgen(start)]
 pub fn wasm_init() {
-    std::panic::set_hook(Box::new(|info| {
-        let msg = format!("[rln-wasm-sdk panic] {info}");
-        web_sys::console::error_1(&msg.into());
-    }));
+    static PANIC_HOOK_INIT: Once = Once::new();
+    PANIC_HOOK_INIT.call_once(|| {
+        if std::thread::panicking() {
+            return;
+        }
+        std::panic::set_hook(Box::new(|info| {
+            let msg = format!("[rln-wasm-sdk panic] {info}");
+            web_sys::console::error_1(&msg.into());
+        }));
+    });
 }
 
 #[wasm_bindgen(js_name = rgbGenerateKeysJson)]
