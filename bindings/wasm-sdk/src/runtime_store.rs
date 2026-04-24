@@ -4,9 +4,14 @@ use wasm_bindgen::prelude::JsValue;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
+#[cfg(test)]
+#[path = "tests/runtime_store_tests.rs"]
+mod tests;
+
 pub(crate) trait RuntimeStateStore {
     fn get(&self, key: &str) -> Result<Option<String>, JsValue>;
     fn set(&self, key: &str, value: &str) -> Result<(), JsValue>;
+    fn delete(&self, key: &str) -> Result<(), JsValue>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -22,19 +27,32 @@ impl RuntimeStateStore for BrowserPersistentStateStore {
         persist_to_indexed_db_background(key.to_string(), value.to_string());
         Ok(())
     }
+
+    fn delete(&self, key: &str) -> Result<(), JsValue> {
+        local_storage_remove_item(key)?;
+        remove_from_indexed_db_background(key.to_string());
+        Ok(())
+    }
 }
 
 pub(crate) fn browser_persistent_state_store() -> BrowserPersistentStateStore {
     BrowserPersistentStateStore
 }
 
+pub(crate) const RUNTIME_STATE_HYDRATE_PREFIXES: &[&str] = &[
+    "rln:wasm:ldk-runtime:",
+    "rln:wasm:swap-runtime:",
+    "rln:wasm:media:",
+    "rln:wasm:wallet-rgb-proxy:",
+    "rln:wasm:ln-runtime-core:",
+    "rln:wasm:chain-sync:",
+    "rln:wasm:runtime-events:",
+    "rln:wasm:rgb-ln-transfers:",
+    "rln:wasm:virtual-channels-v0:",
+];
+
 pub(crate) async fn preload_runtime_state_from_persistent_store() -> Result<(), JsValue> {
-    hydrate_local_storage_from_indexed_db_prefixes(&[
-        "rln:wasm:ldk-runtime:",
-        "rln:wasm:swap-runtime:",
-        "rln:wasm:media:",
-    ])
-    .await
+    hydrate_local_storage_from_indexed_db_prefixes(RUNTIME_STATE_HYDRATE_PREFIXES).await
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -83,8 +101,18 @@ fn persist_to_indexed_db_background(key: String, value: String) {
     });
 }
 
+#[cfg(target_arch = "wasm32")]
+fn remove_from_indexed_db_background(key: String) {
+    spawn_local(async move {
+        let _ = indexed_db_delete_item(&key).await;
+    });
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn persist_to_indexed_db_background(_key: String, _value: String) {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn remove_from_indexed_db_background(_key: String) {}
 
 #[cfg(target_arch = "wasm32")]
 fn local_storage_get_item(key: &str) -> Result<Option<String>, JsValue> {
@@ -113,8 +141,24 @@ fn local_storage_set_item(key: &str, value: &str) -> Result<(), JsValue> {
     storage.set_item(key, value)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn local_storage_remove_item(key: &str) -> Result<(), JsValue> {
+    let Some(window) = web_sys::window() else {
+        return Ok(());
+    };
+    let Some(storage) = window.local_storage()? else {
+        return Ok(());
+    };
+    storage.remove_item(key)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn local_storage_set_item(_key: &str, _value: &str) -> Result<(), JsValue> {
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn local_storage_remove_item(_key: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
@@ -172,10 +216,32 @@ export function __rln_runtime_idb_entries() {
     };
   });
 }
+
+export function __rln_runtime_idb_delete(key) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("rln_wasm_sdk_runtime", 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("state")) db.createObjectStore("state");
+    };
+    req.onerror = () => reject(req.error || new Error("indexedDB open failed"));
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction("state", "readwrite");
+      const store = tx.objectStore("state");
+      const delReq = store.delete(key);
+      delReq.onerror = () => reject(delReq.error || new Error("indexedDB delete failed"));
+      tx.oncomplete = () => { db.close(); resolve(undefined); };
+      tx.onerror = () => { db.close(); reject(tx.error || new Error("indexedDB tx failed")); };
+      tx.onabort = () => { db.close(); reject(tx.error || new Error("indexedDB tx aborted")); };
+    };
+  });
+}
 "#)]
 extern "C" {
     fn __rln_runtime_idb_set(key: &str, value: &str) -> js_sys::Promise;
     fn __rln_runtime_idb_entries() -> js_sys::Promise;
+    fn __rln_runtime_idb_delete(key: &str) -> js_sys::Promise;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -190,4 +256,11 @@ async fn indexed_db_list_entries() -> Result<Vec<JsValue>, JsValue> {
     let promise = __rln_runtime_idb_entries();
     let value = JsFuture::from(promise).await?;
     Ok(Array::from(&value).to_vec())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn indexed_db_delete_item(key: &str) -> Result<(), JsValue> {
+    let promise = __rln_runtime_idb_delete(key);
+    let _ = JsFuture::from(promise).await?;
+    Ok(())
 }

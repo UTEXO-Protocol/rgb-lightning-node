@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::str::FromStr;
 use std::time::Duration;
@@ -14,14 +14,17 @@ use secp256k1::{Message as SecpMessage, PublicKey as SecpPublicKey, Secp256k1, S
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+use crate::chain_sync::{RlnWasmChainSyncStatusData, WasmChainSyncDriver};
 use crate::ldk_event_applier::{
     ensure_manual_event_ingestion_allowed, ensure_manual_status_update_allowed,
 };
 use crate::ldk_runtime::{
-    ldk_runtime_manager, LdkRuntimeChannelStateData, LdkRuntimeManager, LdkRuntimePaymentStateData,
-    LdkRuntimePeerStateData, LdkRuntimeStatusData, LdkRuntimeVirtualChannelSessionData,
-    LdkRuntimeVirtualChannelSessionStatusData,
+    LdkRuntimeChannelStateData, LdkRuntimeComponentsStatusData, LdkRuntimeManager,
+    LdkRuntimePaymentStateData, LdkRuntimePeerStateData, LdkRuntimeStatusData,
+    LdkRuntimeVirtualChannelSessionData, LdkRuntimeVirtualChannelSessionStatusData,
 };
+use crate::ln_runtime_native::{NativeLnRuntimeCore, NativeLnRuntimeCoreStatusData};
+use crate::ln_transport::RlnWasmLnSocketConnectOptionsData;
 use crate::peer_session::{
     clear_rln_ldk_peer_manager_hooks, install_rln_ldk_peer_manager_hooks, RlnLdkPeerManagerHooks,
     RlnWasmPeerSession, RlnWasmRustPeerManagerBridge,
@@ -93,6 +96,17 @@ pub struct RlnWasmNodePaymentData {
     pub payee_pubkey: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RlnWasmNodeRgbLnTransferData {
+    pub payment_hash: String,
+    pub inbound: bool,
+    pub asset_id: String,
+    pub asset_amount: u64,
+    pub status: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct RlnWasmNodeSendPaymentResult {
     pub payment_id: String,
@@ -126,6 +140,12 @@ pub struct RlnWasmNodeInvoiceStatusData {
     pub status: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RlnWasmNodeRelaySessionAuthData {
+    pub relay_auth_token: String,
+    pub relay_node_id: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct RlnWasmNodeClaimHodlInvoiceData {
     pub changed: bool,
@@ -154,6 +174,11 @@ pub struct RlnWasmNodeRuntimeEventData {
     pub received_at: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct RlnWasmNodeRuntimeQueueProcessData {
+    pub drained: usize,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct PaymentStatusEvent {
     payment_hash: String,
@@ -167,7 +192,7 @@ enum RuntimeEventApplyMode {
     TolerantTransport,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "event")]
 enum RuntimeTransportEvent {
     #[serde(rename = "peer_disconnected")]
@@ -214,6 +239,23 @@ struct PaymentEntry {
     data: RlnWasmNodePaymentData,
 }
 
+#[derive(Clone)]
+struct TrustedVirtualScopeChannelData {
+    peer_pubkey: String,
+    local_node_pubkey: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct TrustedVirtualAuthoritativeSettlementData {
+    payment_hash: String,
+    from_pubkey: String,
+    to_pubkey: String,
+    amt_msat: Option<u64>,
+    asset_id: Option<String>,
+    asset_amount: Option<u64>,
+    created_at: u64,
+}
+
 enum PendingPeerHookEvent {
     Payload(String),
     SocketDisconnected,
@@ -226,40 +268,75 @@ struct RuntimeEventLogSnapshot {
     next_seq: u64,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct RuntimeRgbLnTransferSnapshot {
+    transfers: Vec<RlnWasmNodeRgbLnTransferData>,
+}
+
 thread_local! {
     static RUNTIME_EVENT_LOG_STORAGE: RefCell<HashMap<String, RuntimeEventLogSnapshot>> =
         RefCell::new(HashMap::new());
+    static RUNTIME_RGB_LN_TRANSFER_STORAGE: RefCell<HashMap<String, RuntimeRgbLnTransferSnapshot>> =
+        RefCell::new(HashMap::new());
+    static TRUSTED_VIRTUAL_CHANNEL_SCOPE_STORAGE: RefCell<HashMap<String, HashMap<String, TrustedVirtualScopeChannelData>>> =
+        RefCell::new(HashMap::new());
+    static TRUSTED_VIRTUAL_PEER_LINK_STORAGE: RefCell<HashMap<String, u64>> =
+        RefCell::new(HashMap::new());
+    static TRUSTED_VIRTUAL_AUTHORITATIVE_SETTLEMENT_STORAGE: RefCell<Vec<TrustedVirtualAuthoritativeSettlementData>> =
+        const { RefCell::new(Vec::new()) };
+    static NODE_INSTANCE_NONCE_SEQ: RefCell<u64> = const { RefCell::new(0) };
 }
 
 const RUNTIME_EVENT_LOG_STORAGE_PREFIX: &str = "rln:wasm:runtime-events:";
+const RUNTIME_RGB_LN_TRANSFER_STORAGE_PREFIX: &str = "rln:wasm:rgb-ln-transfers:";
+const VIRTUAL_CHANNELS_V0_STORAGE_PREFIX: &str = "rln:wasm:virtual-channels-v0:";
+const RUNTIME_EVENT_LOG_PERSIST_WINDOW: usize = 512;
 
 #[cfg(test)]
-mod test_utils;
-#[cfg(test)]
-pub(crate) use test_utils::reset_runtime_event_log_storage_for_tests;
+#[path = "tests/ln_node_test_utils.rs"]
+pub(crate) mod test_utils;
 
 #[wasm_bindgen]
 pub struct RlnWasmNode {
     proxy_url: String,
+    node_runtime_id: Option<String>,
+    runtime_scope_key: String,
     runtime_event_store_key: String,
+    rgb_ln_transfer_store_key: String,
+    virtual_channels_v0_store_key: String,
     bridge: RlnWasmRustPeerManagerBridge,
     ldk_runtime: Rc<dyn LdkRuntimeManager>,
+    runtime_core: NativeLnRuntimeCore,
+    chain_sync: WasmChainSyncDriver,
     peers: Rc<RefCell<HashMap<String, PeerEntry>>>,
     channels: Rc<RefCell<HashMap<String, ChannelEntry>>>,
     payments: Rc<RefCell<HashMap<String, PaymentEntry>>>,
     pending_peer_hook_events: Rc<RefCell<Vec<PendingPeerHookEvent>>>,
     runtime_events: Rc<RefCell<Vec<RlnWasmNodeRuntimeEventData>>>,
+    rgb_ln_transfers: Rc<RefCell<HashMap<String, RlnWasmNodeRgbLnTransferData>>>,
     next_channel_seq: RefCell<u64>,
     next_payment_seq: RefCell<u64>,
+    node_instance_nonce: u64,
     next_runtime_event_seq: Rc<RefCell<u64>>,
     network: RefCell<String>,
     wallet: RefCell<Option<std::rc::Rc<RefCell<rgb_lib_wasm::Wallet>>>>,
+    relay_session_auth: RefCell<Option<RlnWasmNodeRelaySessionAuthData>>,
+    enable_virtual_channels_v0: RefCell<bool>,
 }
 
 #[wasm_bindgen]
 impl RlnWasmNode {
+    fn next_node_instance_nonce() -> u64 {
+        NODE_INSTANCE_NONCE_SEQ.with(|seq| {
+            let mut seq = seq.borrow_mut();
+            *seq = seq.saturating_add(1);
+            *seq
+        })
+    }
+
     fn ensure_runtime_ready(&self) -> Result<(), JsValue> {
         crate::ensure_sdk_node_runtime_allowed()?;
+        self.runtime_core.ensure_started();
         self.ldk_runtime.ensure_started()?;
         self.ldk_runtime.virtual_channel_reconcile_sessions();
         Ok(())
@@ -267,18 +344,28 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(constructor)]
     pub fn new(proxy_url: String) -> Result<RlnWasmNode, JsValue> {
-        Self::new_with_runtime_backend(proxy_url, "scaffold".to_string())
+        Self::new_with_runtime_id_opt(proxy_url, None)
     }
 
-    #[wasm_bindgen(js_name = newWithRuntimeBackend)]
-    pub fn new_with_runtime_backend(
+    #[wasm_bindgen(js_name = newWithNodeRuntimeId)]
+    pub fn new_with_node_runtime_id(
         proxy_url: String,
-        runtime_backend: String,
+        node_runtime_id: String,
+    ) -> Result<RlnWasmNode, JsValue> {
+        Self::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id))
+    }
+
+    pub(crate) fn new_with_runtime_id_opt(
+        proxy_url: String,
+        node_runtime_id: Option<String>,
     ) -> Result<RlnWasmNode, JsValue> {
         if proxy_url.trim().is_empty() {
             return Err(JsValue::from_str("proxy_url cannot be empty"));
         }
-        let runtime_event_store_key = runtime_event_store_key(&proxy_url);
+        let normalized_runtime_id = normalize_node_runtime_id(node_runtime_id)?;
+        let runtime_scope_key =
+            runtime_scope_key(proxy_url.trim(), normalized_runtime_id.as_deref());
+        let runtime_event_store_key = runtime_event_store_key(&runtime_scope_key);
         let runtime_event_snapshot = load_runtime_event_log_snapshot(&runtime_event_store_key);
         let runtime_events = runtime_event_snapshot
             .as_ref()
@@ -288,23 +375,53 @@ impl RlnWasmNode {
             .as_ref()
             .map(|snapshot| snapshot.next_seq)
             .unwrap_or(0);
-        let runtime_key = format!("node-runtime:{proxy_url}");
-        let ldk_runtime = ldk_runtime_manager(runtime_key, Some(runtime_backend))?;
+        let rgb_ln_transfer_store_key = runtime_rgb_ln_transfer_store_key(&runtime_scope_key);
+        let virtual_channels_v0_store_key = virtual_channels_v0_store_key(&runtime_scope_key);
+        let rgb_ln_transfer_snapshot =
+            load_runtime_rgb_ln_transfer_snapshot(&rgb_ln_transfer_store_key);
+        let rgb_ln_transfers = rgb_ln_transfer_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .transfers
+                    .iter()
+                    .map(|entry| (entry.payment_hash.clone(), entry.clone()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let runtime_key = format!("node-runtime:{runtime_scope_key}");
+        let ldk_runtime = crate::ldk_runtime::ldk_runtime_manager(runtime_key.clone())?;
+        let runtime_core = NativeLnRuntimeCore::new(runtime_key.clone());
+        let chain_sync = WasmChainSyncDriver::new(runtime_key, "regtest".to_string())?;
+        let restored_network = chain_sync.status().network;
+        let enable_virtual_channels_v0 =
+            load_virtual_channels_v0_flag(&virtual_channels_v0_store_key)
+                .unwrap_or_else(crate::sdk_default_enable_virtual_channels_v0);
         Ok(Self {
             ldk_runtime,
+            runtime_core,
+            chain_sync,
             proxy_url,
+            node_runtime_id: normalized_runtime_id,
+            runtime_scope_key,
             runtime_event_store_key,
+            rgb_ln_transfer_store_key,
+            virtual_channels_v0_store_key,
             bridge: RlnWasmRustPeerManagerBridge::new(None)?,
             peers: Rc::new(RefCell::new(HashMap::new())),
             channels: Rc::new(RefCell::new(HashMap::new())),
             payments: Rc::new(RefCell::new(HashMap::new())),
             pending_peer_hook_events: Rc::new(RefCell::new(Vec::new())),
             runtime_events: Rc::new(RefCell::new(runtime_events)),
+            rgb_ln_transfers: Rc::new(RefCell::new(rgb_ln_transfers)),
             next_channel_seq: RefCell::new(0),
             next_payment_seq: RefCell::new(0),
+            node_instance_nonce: Self::next_node_instance_nonce(),
             next_runtime_event_seq: Rc::new(RefCell::new(next_runtime_event_seq)),
-            network: RefCell::new("regtest".to_string()),
+            network: RefCell::new(restored_network),
             wallet: RefCell::new(None),
+            relay_session_auth: RefCell::new(None),
+            enable_virtual_channels_v0: RefCell::new(enable_virtual_channels_v0),
         })
     }
 
@@ -332,6 +449,81 @@ impl RlnWasmNode {
 
     pub(crate) fn attach_wallet_shared(&self, wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>) {
         *self.wallet.borrow_mut() = Some(wallet);
+    }
+
+    #[wasm_bindgen(js_name = setRelaySessionAuth)]
+    pub fn set_relay_session_auth(
+        &self,
+        relay_auth_token: Option<String>,
+        relay_node_id: Option<String>,
+    ) -> Result<(), JsValue> {
+        match (relay_auth_token, relay_node_id) {
+            (None, None) => {
+                self.relay_session_auth.borrow_mut().take();
+                Ok(())
+            }
+            (Some(token), Some(node_id)) => {
+                let token = token.trim().to_string();
+                let node_id = node_id.trim().to_string();
+                if token.is_empty() {
+                    return Err(JsValue::from_str("relay_auth_token cannot be empty"));
+                }
+                if node_id.is_empty() {
+                    return Err(JsValue::from_str("relay_node_id cannot be empty"));
+                }
+                if SecpPublicKey::from_str(&node_id).is_err() {
+                    return Err(JsValue::from_str("invalid relay_node_id"));
+                }
+                self.relay_session_auth
+                    .borrow_mut()
+                    .replace(RlnWasmNodeRelaySessionAuthData {
+                        relay_auth_token: token,
+                        relay_node_id: node_id,
+                    });
+                Ok(())
+            }
+            _ => Err(JsValue::from_str(
+                "relay_auth_token and relay_node_id must be provided together",
+            )),
+        }
+    }
+
+    #[wasm_bindgen(js_name = relaySessionAuthValue)]
+    pub fn relay_session_auth_value(&self) -> Result<JsValue, JsValue> {
+        match self.relay_session_auth.borrow().as_ref().cloned() {
+            Some(data) => crate::js_obj(&data),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    #[wasm_bindgen(js_name = relaySessionAuthJson)]
+    pub fn relay_session_auth_json(&self) -> Result<String, JsValue> {
+        let value = self.relay_session_auth_value()?;
+        if value.is_null() || value.is_undefined() {
+            return Ok("null".to_string());
+        }
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = setEnableVirtualChannelsV0)]
+    pub fn set_enable_virtual_channels_v0(&self, enabled: bool) {
+        *self.enable_virtual_channels_v0.borrow_mut() = enabled;
+        persist_virtual_channels_v0_flag(&self.virtual_channels_v0_store_key, enabled);
+    }
+
+    #[wasm_bindgen(js_name = enableVirtualChannelsV0Value)]
+    pub fn enable_virtual_channels_v0_value(&self) -> Result<JsValue, JsValue> {
+        crate::js_obj(&serde_json::json!({
+            "enabled": *self.enable_virtual_channels_v0.borrow()
+        }))
+    }
+
+    #[wasm_bindgen(js_name = enableVirtualChannelsV0Json)]
+    pub fn enable_virtual_channels_v0_json(&self) -> Result<String, JsValue> {
+        let value = self.enable_virtual_channels_v0_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
     }
 
     #[wasm_bindgen(js_name = issueAssetNiaValue)]
@@ -445,14 +637,32 @@ impl RlnWasmNode {
             return Ok(());
         }
 
-        let session = self
-            .bridge
-            .connect_session(
-                self.proxy_url.clone(),
-                peer_addr.clone(),
-                peer_pubkey.clone(),
-            )
-            .await?;
+        let relay_session_auth = self.relay_session_auth.borrow().clone();
+        let session = if let Some(auth) = relay_session_auth {
+            let options_js = crate::js_obj(&RlnWasmLnSocketConnectOptionsData {
+                max_reconnect_attempts: Some(3),
+                reconnect_initial_delay_ms: Some(250),
+                reconnect_max_delay_ms: Some(4_000),
+                relay_auth_token: Some(auth.relay_auth_token),
+                relay_node_id: Some(auth.relay_node_id),
+            })?;
+            self.bridge
+                .connect_session_with_options(
+                    self.proxy_url.clone(),
+                    peer_addr.clone(),
+                    peer_pubkey.clone(),
+                    options_js,
+                )
+                .await?
+        } else {
+            self.bridge
+                .connect_session(
+                    self.proxy_url.clone(),
+                    peer_addr.clone(),
+                    peer_pubkey.clone(),
+                )
+                .await?
+        };
         session.start().await?;
 
         self.peers.borrow_mut().insert(
@@ -644,13 +854,104 @@ impl RlnWasmNode {
         crate::js_to_json(&parsed)
     }
 
+    #[wasm_bindgen(js_name = nodePubkeyValue)]
+    pub fn node_pubkey_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let pubkey = self
+            .local_node_pubkey_string()
+            .ok_or_else(|| JsValue::from_str("failed to derive local node pubkey"))?;
+        crate::js_obj(&serde_json::json!({ "pubkey": pubkey }))
+    }
+
+    #[wasm_bindgen(js_name = nodePubkeyJson)]
+    pub fn node_pubkey_json(&self) -> Result<String, JsValue> {
+        let value = self.node_pubkey_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = networkInfoValue)]
     pub fn network_info_value(&self) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
         crate::js_obj(&RlnWasmNodeNetworkInfoData {
             network: self.network.borrow().clone(),
-            height: 0,
+            height: self.chain_sync.latest_tip_height().unwrap_or(0),
         })
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStartValue)]
+    pub fn chain_sync_start_value(
+        &self,
+        indexer_url: String,
+        poll_interval_ms: Option<u32>,
+    ) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        self.chain_sync.start(indexer_url, poll_interval_ms)?;
+        let status: RlnWasmChainSyncStatusData = self.chain_sync.status();
+        *self.network.borrow_mut() = status.network.clone();
+        crate::js_obj(&status)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStartJson)]
+    pub fn chain_sync_start_json(
+        &self,
+        indexer_url: String,
+        poll_interval_ms: Option<u32>,
+    ) -> Result<String, JsValue> {
+        let value = self.chain_sync_start_value(indexer_url, poll_interval_ms)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStopValue)]
+    pub fn chain_sync_stop_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        self.chain_sync.stop()?;
+        crate::js_obj(&self.chain_sync.status())
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStopJson)]
+    pub fn chain_sync_stop_json(&self) -> Result<String, JsValue> {
+        let value = self.chain_sync_stop_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStatusValue)]
+    pub fn chain_sync_status_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        crate::js_obj(&self.chain_sync.status())
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStatusJson)]
+    pub fn chain_sync_status_json(&self) -> Result<String, JsValue> {
+        let value = self.chain_sync_status_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncTickValue)]
+    pub async fn chain_sync_tick_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        self.chain_sync.tick().await?;
+        crate::js_obj(&self.chain_sync.status())
+    }
+
+    #[wasm_bindgen(js_name = chainSyncTickJson)]
+    pub async fn chain_sync_tick_json(&self) -> Result<String, JsValue> {
+        let value = self.chain_sync_tick_value().await?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncEnqueueRebroadcastTx)]
+    pub fn chain_sync_enqueue_rebroadcast_tx(
+        &self,
+        txid: String,
+        tx_hex: String,
+    ) -> Result<(), JsValue> {
+        self.ensure_runtime_ready()?;
+        self.chain_sync.enqueue_rebroadcast_tx(txid, tx_hex)
     }
 
     #[wasm_bindgen(js_name = ldkRuntimeStatusValue)]
@@ -666,6 +967,20 @@ impl RlnWasmNode {
         crate::js_to_json(&parsed)
     }
 
+    #[wasm_bindgen(js_name = ldkRuntimeComponentsValue)]
+    pub fn ldk_runtime_components_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let status: LdkRuntimeComponentsStatusData = self.ldk_runtime.component_status();
+        crate::js_obj(&status)
+    }
+
+    #[wasm_bindgen(js_name = ldkRuntimeComponentsJson)]
+    pub fn ldk_runtime_components_json(&self) -> Result<String, JsValue> {
+        let value = self.ldk_runtime_components_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = networkInfoJson)]
     pub fn network_info_json(&self) -> Result<String, JsValue> {
         let value = self.network_info_value()?;
@@ -676,7 +991,7 @@ impl RlnWasmNode {
     #[wasm_bindgen(js_name = signMessageValue)]
     pub fn sign_message_value(&self, message: String) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
-        let signed_message = self.sign_scaffold_message(message.trim())?;
+        let signed_message = self.sign_node_message(message.trim())?;
         crate::js_obj(&RlnWasmNodeSignMessageData { signed_message })
     }
 
@@ -703,7 +1018,65 @@ impl RlnWasmNode {
             self.disconnect_peer(pubkey).await?;
         }
         self.ldk_runtime.stop()?;
+        self.runtime_core.stop();
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = nativeRuntimeCoreStatusValue)]
+    pub fn native_runtime_core_status_value(&self) -> Result<JsValue, JsValue> {
+        let status: NativeLnRuntimeCoreStatusData = self.runtime_core.status();
+        crate::js_obj(&status)
+    }
+
+    #[wasm_bindgen(js_name = nativeRuntimeCoreStatusJson)]
+    pub fn native_runtime_core_status_json(&self) -> Result<String, JsValue> {
+        let value = self.native_runtime_core_status_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = drainNativeRuntimeQueueValue)]
+    pub fn drain_native_runtime_queue_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let drained = self.runtime_core.drain_events();
+        crate::js_obj(&drained)
+    }
+
+    #[wasm_bindgen(js_name = drainNativeRuntimeQueueJson)]
+    pub fn drain_native_runtime_queue_json(&self) -> Result<String, JsValue> {
+        let value = self.drain_native_runtime_queue_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = processNativeRuntimeQueueValue)]
+    pub fn process_native_runtime_queue_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let drained = self.runtime_core.drain_events();
+        for queued in drained.iter() {
+            apply_runtime_hook_payload(
+                &self.ldk_runtime,
+                self.use_runtime_state_for_ln_views(),
+                &self.peers,
+                &self.channels,
+                &self.payments,
+                &self.runtime_events,
+                &self.next_runtime_event_seq,
+                queued.payload_hex.clone(),
+                "native_runtime_queue",
+            )?;
+        }
+        self.persist_runtime_event_log_state();
+        crate::js_obj(&RlnWasmNodeRuntimeQueueProcessData {
+            drained: drained.len(),
+        })
+    }
+
+    #[wasm_bindgen(js_name = processNativeRuntimeQueueJson)]
+    pub fn process_native_runtime_queue_json(&self) -> Result<String, JsValue> {
+        let value = self.process_native_runtime_queue_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
     }
 
     #[wasm_bindgen(js_name = installAutoPeerManagerHooks)]
@@ -923,12 +1296,21 @@ impl RlnWasmNode {
             preimage: None,
             created_at: now,
             updated_at: now,
-            payee_pubkey,
+            payee_pubkey: payee_pubkey.clone(),
         };
 
         self.payments
             .borrow_mut()
             .insert(payment_hash.clone(), PaymentEntry { data });
+        if let Some(payment) = self
+            .payments
+            .borrow()
+            .get(&payment_hash)
+            .map(|entry| entry.data.clone())
+        {
+            self.register_rgb_ln_transfer_from_payment(&payment);
+        }
+        self.ldk_runtime.record_payment_initiated();
         if self.use_runtime_state_for_ln_views() {
             let runtime_payment = self
                 .payments
@@ -941,6 +1323,11 @@ impl RlnWasmNode {
         if !has_connected_peer {
             let _ =
                 self.apply_payment_status_via_event_stream(&payment_hash, "failed", "node_api")?;
+        } else {
+            self.emit_trusted_virtual_payment_success_event_if_applicable(
+                &payment_hash,
+                &payee_pubkey,
+            )?;
         }
         self.persist_runtime_event_log_state();
         let final_status = self
@@ -1016,6 +1403,7 @@ impl RlnWasmNode {
         let now = unix_now_secs();
         let has_connected_peer = self.has_connected_peer(&dest_pubkey);
 
+        let payee_pubkey = dest_pubkey.clone();
         let data = RlnWasmNodePaymentData {
             amt_msat: Some(amt_msat),
             asset_amount,
@@ -1027,12 +1415,21 @@ impl RlnWasmNode {
             preimage: None,
             created_at: now,
             updated_at: now,
-            payee_pubkey: dest_pubkey,
+            payee_pubkey,
         };
 
         self.payments
             .borrow_mut()
             .insert(payment_hash.clone(), PaymentEntry { data });
+        if let Some(payment) = self
+            .payments
+            .borrow()
+            .get(&payment_hash)
+            .map(|entry| entry.data.clone())
+        {
+            self.register_rgb_ln_transfer_from_payment(&payment);
+        }
+        self.ldk_runtime.record_keysend_initiated();
         if self.use_runtime_state_for_ln_views() {
             let runtime_payment = self
                 .payments
@@ -1045,6 +1442,11 @@ impl RlnWasmNode {
         if !has_connected_peer {
             let _ =
                 self.apply_payment_status_via_event_stream(&payment_hash, "failed", "node_api")?;
+        } else {
+            self.emit_trusted_virtual_payment_success_event_if_applicable(
+                &payment_hash,
+                &dest_pubkey,
+            )?;
         }
         self.persist_runtime_event_log_state();
         let final_status = self
@@ -1101,6 +1503,30 @@ impl RlnWasmNode {
     #[wasm_bindgen(js_name = listPaymentsJson)]
     pub fn list_payments_json(&self) -> Result<String, JsValue> {
         let value = self.list_payments_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = listRgbLnTransfersValue)]
+    pub fn list_rgb_ln_transfers_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let mut data = self
+            .rgb_ln_transfers
+            .borrow()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        data.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.payment_hash.cmp(&b.payment_hash))
+        });
+        crate::js_obj(&data)
+    }
+
+    #[wasm_bindgen(js_name = listRgbLnTransfersJson)]
+    pub fn list_rgb_ln_transfers_json(&self) -> Result<String, JsValue> {
+        let value = self.list_rgb_ln_transfers_value()?;
         let parsed: serde_json::Value = crate::js_from(value)?;
         crate::js_to_json(&parsed)
     }
@@ -1281,7 +1707,7 @@ impl RlnWasmNode {
             self.next_invoice_payment_identity()
         };
         let now = unix_now_secs();
-        let (node_secret_key, node_pubkey) = self.scaffold_node_signing_identity()?;
+        let (node_secret_key, node_pubkey) = self.node_signing_identity()?;
         let currency = self.invoice_currency()?;
 
         let mut builder = InvoiceBuilder::new(currency)
@@ -1316,6 +1742,15 @@ impl RlnWasmNode {
         self.payments
             .borrow_mut()
             .insert(payment_hash_hex, PaymentEntry { data });
+        if let Some(payment) = self
+            .payments
+            .borrow()
+            .get(&invoice.payment_hash().to_string())
+            .map(|entry| entry.data.clone())
+        {
+            self.register_rgb_ln_transfer_from_payment(&payment);
+        }
+        self.ldk_runtime.record_invoice_created();
         if self.use_runtime_state_for_ln_views() {
             let runtime_payment = self
                 .payments
@@ -1432,6 +1867,7 @@ impl RlnWasmNode {
         }
         payment.status = "cancelled".to_string();
         payment.updated_at = unix_now_secs();
+        self.sync_rgb_ln_transfer_from_payment(&payment);
         if self.use_runtime_state_for_ln_views() {
             self.ldk_runtime
                 .upsert_payment(Self::payment_runtime_state_from_data(&payment));
@@ -1506,8 +1942,10 @@ impl RlnWasmNode {
         payment.status = "claiming".to_string();
         payment.updated_at = unix_now_secs();
         payment.preimage = Some(payment_preimage);
+        self.sync_rgb_ln_transfer_from_payment(&payment);
         payment.status = "succeeded".to_string();
         payment.updated_at = unix_now_secs();
+        self.sync_rgb_ln_transfer_from_payment(&payment);
 
         if self.use_runtime_state_for_ln_views() {
             self.ldk_runtime
@@ -1748,6 +2186,11 @@ impl RlnWasmNode {
             }
         };
         let is_virtual_open = normalized_virtual_open_mode.is_some();
+        if is_virtual_open && !*self.enable_virtual_channels_v0.borrow() {
+            return Err(JsValue::from_str(
+                "trusted virtual channels v0 are disabled",
+            ));
+        }
         if is_virtual_open && public {
             return Err(JsValue::from_str("virtual channels requires public=false"));
         }
@@ -1819,8 +2262,12 @@ impl RlnWasmNode {
                 .clone()
                 .unwrap_or_else(|| temporary_channel_id.clone()),
             channel_id: channel_id.clone(),
-            peer_pubkey,
-            status: "pending".to_string(),
+            peer_pubkey: peer_pubkey.clone(),
+            status: if is_virtual_open {
+                "opening".to_string()
+            } else {
+                "pending".to_string()
+            },
             ready: false,
             is_usable: false,
             public,
@@ -1842,22 +2289,6 @@ impl RlnWasmNode {
                 },
             );
         }
-        let applied = self
-            .apply_and_record_transport_event(
-                RuntimeTransportEvent::ChannelUsable {
-                    channel_id: channel_id.clone(),
-                },
-                "node_api",
-            )?
-            .applied;
-        if !applied {
-            if let Some(temp_id) = reserved_temporary_channel_id.as_deref() {
-                let _ = self.ldk_runtime.virtual_channel_draft_delete(temp_id);
-            }
-            return Err(JsValue::from_str(
-                "failed to apply channel_usable transport event",
-            ));
-        }
         if is_virtual_open {
             self.ldk_runtime.virtual_channel_session_add_from_open(
                 &channel_id,
@@ -1866,7 +2297,36 @@ impl RlnWasmNode {
                     .unwrap_or(&temporary_channel_id),
                 &data.peer_pubkey,
             );
+            self.register_trusted_virtual_scope_channel(&channel_id, &peer_pubkey);
+            let queued_event = RuntimeTransportEvent::ChannelUsable {
+                channel_id: channel_id.clone(),
+            };
+            let payload_json = serde_json::to_string(&queued_event).map_err(|e| {
+                JsValue::from_str(&format!("failed to serialize runtime event: {e}"))
+            })?;
+            let payload_hex = hex::encode(payload_json.as_bytes());
+            let _ = self
+                .runtime_core
+                .enqueue_event("channel_usable".to_string(), payload_hex);
+        } else {
+            let applied = self
+                .apply_and_record_transport_event(
+                    RuntimeTransportEvent::ChannelUsable {
+                        channel_id: channel_id.clone(),
+                    },
+                    "node_api",
+                )?
+                .applied;
+            if !applied {
+                if let Some(temp_id) = reserved_temporary_channel_id.as_deref() {
+                    let _ = self.ldk_runtime.virtual_channel_draft_delete(temp_id);
+                }
+                return Err(JsValue::from_str(
+                    "failed to apply channel_usable transport event",
+                ));
+            }
         }
+        self.ldk_runtime.record_channel_opened();
         self.persist_runtime_event_log_state();
         let channel = if self.use_runtime_state_for_ln_views() {
             self.ldk_runtime
@@ -1946,19 +2406,22 @@ impl RlnWasmNode {
         }
         let virtual_session = self.ldk_runtime.virtual_channel_session_get(&channel_id);
         if let Some(session) = virtual_session.as_ref() {
-            if let Some(peer_pubkey) = peer_pubkey.as_ref() {
-                let peer_pubkey = peer_pubkey.trim().to_string();
-                if peer_pubkey.trim().is_empty() {
-                    return Err(JsValue::from_str("peer_pubkey cannot be empty"));
-                }
-                if SecpPublicKey::from_str(peer_pubkey.trim()).is_err() {
-                    return Err(JsValue::from_str("invalid peer_pubkey"));
-                }
-                if session.peer_pubkey != peer_pubkey {
-                    return Err(JsValue::from_str(
-                        "peer pubkey does not match trusted virtual channel session",
-                    ));
-                }
+            let Some(peer_pubkey) = peer_pubkey.as_ref() else {
+                return Err(JsValue::from_str(
+                    "peer_pubkey is required for trusted virtual channel close",
+                ));
+            };
+            let peer_pubkey = peer_pubkey.trim().to_string();
+            if peer_pubkey.trim().is_empty() {
+                return Err(JsValue::from_str("peer_pubkey cannot be empty"));
+            }
+            if SecpPublicKey::from_str(peer_pubkey.trim()).is_err() {
+                return Err(JsValue::from_str("invalid peer_pubkey"));
+            }
+            if session.peer_pubkey != peer_pubkey {
+                return Err(JsValue::from_str(
+                    "peer pubkey does not match trusted virtual channel session",
+                ));
             }
         }
         let channel = if self.use_runtime_state_for_ln_views() {
@@ -1981,6 +2444,7 @@ impl RlnWasmNode {
                         LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
                     );
                 }
+                self.unregister_trusted_virtual_scope_channel(&channel_id);
                 self.persist_runtime_event_log_state();
                 return Ok(());
             }
@@ -1994,7 +2458,7 @@ impl RlnWasmNode {
                 "virtual channel session exists for {channel_id}, but live channel is not trusted_no_broadcast"
             )));
         }
-        if let Some(peer_pubkey) = peer_pubkey {
+        if let Some(ref peer_pubkey) = peer_pubkey {
             let peer_pubkey = peer_pubkey.trim().to_string();
             if peer_pubkey.trim().is_empty() {
                 return Err(JsValue::from_str("peer_pubkey cannot be empty"));
@@ -2012,6 +2476,28 @@ impl RlnWasmNode {
         let is_virtual_channel = channel.virtual_open_mode.as_deref()
             == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST);
         if is_virtual_channel {
+            if !*self.enable_virtual_channels_v0.borrow() {
+                return Err(JsValue::from_str(
+                    "trusted virtual channels v0 are disabled",
+                ));
+            }
+            let Some(peer_pubkey) = peer_pubkey.as_ref() else {
+                return Err(JsValue::from_str(
+                    "peer_pubkey is required for trusted virtual channel close",
+                ));
+            };
+            let peer_pubkey = peer_pubkey.trim().to_string();
+            if peer_pubkey.trim().is_empty() {
+                return Err(JsValue::from_str("peer_pubkey cannot be empty"));
+            }
+            if SecpPublicKey::from_str(peer_pubkey.trim()).is_err() {
+                return Err(JsValue::from_str("invalid peer_pubkey"));
+            }
+            if channel.peer_pubkey != peer_pubkey {
+                return Err(JsValue::from_str(
+                    "cannot find the channel with the provided peer pubkey",
+                ));
+            }
             let Some(session) = virtual_session.as_ref() else {
                 return Err(JsValue::from_str(
                     "virtual cleanup is host-only and requires a host-side session",
@@ -2069,6 +2555,7 @@ impl RlnWasmNode {
                     &channel_id,
                     LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
                 );
+                self.unregister_trusted_virtual_scope_channel(&channel_id);
                 self.persist_runtime_event_log_state();
                 return Ok(());
             }
@@ -2079,7 +2566,9 @@ impl RlnWasmNode {
                 &channel_id,
                 LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
             );
+            self.unregister_trusted_virtual_scope_channel(&channel_id);
         }
+        self.ldk_runtime.record_channel_closed();
         self.persist_runtime_event_log_state();
         Ok(())
     }
@@ -2089,6 +2578,16 @@ impl RlnWasmNode {
         channel: &RlnWasmNodeChannelData,
         session: &LdkRuntimeVirtualChannelSessionData,
     ) -> Result<(), JsValue> {
+        if self.use_runtime_state_for_ln_views()
+            && session.status != LdkRuntimeVirtualChannelSessionStatusData::Active
+        {
+            return Err(JsValue::from_str(
+                "virtual cleanup requires an active host-side session",
+            ));
+        }
+        let local_node_pubkey = self
+            .local_node_pubkey_string()
+            .ok_or_else(|| JsValue::from_str("failed to derive local node identity"))?;
         let payments = if self.use_runtime_state_for_ln_views() {
             self.ldk_runtime
                 .list_payments()
@@ -2105,6 +2604,7 @@ impl RlnWasmNode {
 
         let mut net_counterparty_btc_msat: i128 = 0;
         let mut net_counterparty_rgb_amount: HashMap<String, i128> = HashMap::new();
+        let mut credited_payment_hashes: HashSet<String> = HashSet::new();
 
         for payment in payments {
             if payment.created_at < session.created_at {
@@ -2112,23 +2612,29 @@ impl RlnWasmNode {
             }
             let outbound_to_counterparty =
                 !payment.inbound && payment.payee_pubkey == session.peer_pubkey;
-            let inbound_maybe_from_counterparty = payment.inbound
-                && payment
-                    .asset_id
-                    .as_deref()
-                    .map(|asset| channel.asset_id.as_deref() == Some(asset))
-                    .unwrap_or(channel.asset_id.is_none());
+            let inbound_from_counterparty =
+                payment.inbound && payment.payee_pubkey == local_node_pubkey;
+            let payment_matches_channel_asset_scope = payment
+                .asset_id
+                .as_deref()
+                .map(|asset| channel.asset_id.as_deref() == Some(asset))
+                .unwrap_or(channel.asset_id.is_none());
+            let payment_belongs_to_session = outbound_to_counterparty
+                || (inbound_from_counterparty && payment_matches_channel_asset_scope);
 
             if matches!(
                 payment.status.as_str(),
                 "pending" | "claimable" | "claiming"
-            ) && (outbound_to_counterparty || inbound_maybe_from_counterparty)
+            ) && payment_belongs_to_session
             {
                 return Err(JsValue::from_str(
                     "virtual cleanup is blocked while HTLCs are still in flight",
                 ));
             }
             if payment.status != "succeeded" {
+                continue;
+            }
+            if !payment_belongs_to_session {
                 continue;
             }
 
@@ -2144,12 +2650,41 @@ impl RlnWasmNode {
                         .or_insert(0);
                     *entry += asset_amount as i128;
                 }
-            } else if inbound_maybe_from_counterparty {
+            } else if inbound_from_counterparty && payment_matches_channel_asset_scope {
+                if self.use_runtime_state_for_ln_views()
+                    && !self.payment_has_authoritative_success_event(&payment.payment_hash)
+                {
+                    continue;
+                }
                 if let Some(msat) = payment.amt_msat {
                     net_counterparty_btc_msat -= msat as i128;
                 }
                 if let (Some(asset_id), Some(asset_amount)) =
                     (payment.asset_id.as_ref(), payment.asset_amount)
+                {
+                    let entry = net_counterparty_rgb_amount
+                        .entry(asset_id.clone())
+                        .or_insert(0);
+                    *entry -= asset_amount as i128;
+                }
+                credited_payment_hashes.insert(payment.payment_hash);
+            }
+        }
+
+        if self.use_runtime_state_for_ln_views() {
+            for settlement in self.list_trusted_virtual_authoritative_settlements(
+                session,
+                channel,
+                &local_node_pubkey,
+            ) {
+                if credited_payment_hashes.contains(&settlement.payment_hash) {
+                    continue;
+                }
+                if let Some(msat) = settlement.amt_msat {
+                    net_counterparty_btc_msat -= msat as i128;
+                }
+                if let (Some(asset_id), Some(asset_amount)) =
+                    (settlement.asset_id.as_ref(), settlement.asset_amount)
                 {
                     let entry = net_counterparty_rgb_amount
                         .entry(asset_id.clone())
@@ -2182,6 +2717,44 @@ impl RlnWasmNode {
         Ok(())
     }
 
+    fn payment_has_authoritative_success_event(&self, payment_hash: &str) -> bool {
+        self.runtime_events.borrow().iter().rev().any(|event| {
+            event.applied
+                && event.payment_hash.as_deref() == Some(payment_hash)
+                && event.status.as_deref() == Some("succeeded")
+                && event.source != "node_api"
+                && event.source != "manual_api"
+        })
+    }
+
+    fn list_trusted_virtual_authoritative_settlements(
+        &self,
+        session: &LdkRuntimeVirtualChannelSessionData,
+        channel: &RlnWasmNodeChannelData,
+        _local_node_pubkey: &str,
+    ) -> Vec<TrustedVirtualAuthoritativeSettlementData> {
+        TRUSTED_VIRTUAL_AUTHORITATIVE_SETTLEMENT_STORAGE.with(|storage| {
+            storage
+                .borrow()
+                .iter()
+                .filter(|settlement| {
+                    if settlement.created_at < session.created_at {
+                        return false;
+                    }
+                    if settlement.from_pubkey != session.peer_pubkey {
+                        return false;
+                    }
+                    settlement
+                        .asset_id
+                        .as_deref()
+                        .map(|asset| channel.asset_id.as_deref() == Some(asset))
+                        .unwrap_or(channel.asset_id.is_none())
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    }
+
     #[wasm_bindgen(js_name = getChannelId)]
     pub fn get_channel_id(&self, temporary_channel_id: String) -> Result<String, JsValue> {
         self.ensure_runtime_ready()?;
@@ -2204,6 +2777,38 @@ impl RlnWasmNode {
     }
 }
 
+#[cfg(test)]
+impl RlnWasmNode {
+    #[allow(dead_code)]
+    pub(crate) fn new_with_runtime_backend(
+        proxy_url: String,
+        runtime_backend: String,
+    ) -> Result<RlnWasmNode, JsValue> {
+        if runtime_backend.trim() != "wasm_native_ldk" {
+            return Err(JsValue::from_str(&format!(
+                "unknown runtime backend: {}",
+                runtime_backend.trim()
+            )));
+        }
+        Self::new(proxy_url)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_with_runtime_backend_and_id(
+        proxy_url: String,
+        runtime_backend: String,
+        node_runtime_id: Option<String>,
+    ) -> Result<RlnWasmNode, JsValue> {
+        if runtime_backend.trim() != "wasm_native_ldk" {
+            return Err(JsValue::from_str(&format!(
+                "unknown runtime backend: {}",
+                runtime_backend.trim()
+            )));
+        }
+        Self::new_with_runtime_id_opt(proxy_url, node_runtime_id)
+    }
+}
+
 impl RlnWasmNode {
     fn persist_runtime_event_log_state(&self) {
         persist_runtime_event_log_state(
@@ -2213,8 +2818,16 @@ impl RlnWasmNode {
         );
     }
 
+    fn persist_rgb_ln_transfer_state(&self) {
+        persist_runtime_rgb_ln_transfer_state(
+            &self.rgb_ln_transfer_store_key,
+            &self.rgb_ln_transfers,
+        );
+    }
+
     fn use_runtime_state_for_ln_views(&self) -> bool {
-        self.ldk_runtime.status().backend == "ldk_bridge"
+        let backend = self.ldk_runtime.status().backend;
+        backend == "wasm_native_ldk"
     }
 
     fn has_any_connected_peer(&self) -> bool {
@@ -2238,6 +2851,176 @@ impl RlnWasmNode {
                 .map(|entry| entry.session.is_started())
                 .unwrap_or(false)
         }
+    }
+
+    fn trusted_virtual_scope_key(&self) -> String {
+        self.runtime_scope_key.clone()
+    }
+
+    fn trusted_virtual_link_key(local_node_pubkey: &str, peer_pubkey: &str) -> String {
+        format!("{local_node_pubkey}|{peer_pubkey}")
+    }
+
+    fn local_node_pubkey_string(&self) -> Option<String> {
+        self.node_signing_identity()
+            .ok()
+            .map(|(_, pubkey)| pubkey.to_string())
+    }
+
+    fn has_trusted_virtual_link_with_peer(&self, peer_pubkey: &str) -> bool {
+        let Some(local_node_pubkey) = self.local_node_pubkey_string() else {
+            return false;
+        };
+        let key = Self::trusted_virtual_link_key(&local_node_pubkey, peer_pubkey);
+        TRUSTED_VIRTUAL_PEER_LINK_STORAGE.with(|storage| storage.borrow().contains_key(&key))
+    }
+
+    fn has_any_trusted_virtual_activity_global() -> bool {
+        TRUSTED_VIRTUAL_CHANNEL_SCOPE_STORAGE.with(|storage| {
+            storage
+                .borrow()
+                .values()
+                .any(|channels| !channels.is_empty())
+        })
+    }
+
+    fn emit_trusted_virtual_payment_success_event_if_applicable(
+        &self,
+        payment_hash: &str,
+        payee_pubkey: &str,
+    ) -> Result<(), JsValue> {
+        if !self.use_runtime_state_for_ln_views() {
+            return Ok(());
+        }
+        if !self.has_connected_peer(payee_pubkey) {
+            return Ok(());
+        }
+        let has_usable_trusted_virtual_channel =
+            self.ldk_runtime.list_channels().into_iter().any(|entry| {
+                entry.peer_pubkey == payee_pubkey
+                    && entry.is_usable
+                    && entry.virtual_open_mode.as_deref()
+                        == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
+            });
+        if !has_usable_trusted_virtual_channel
+            && !self.has_trusted_virtual_link_with_peer(payee_pubkey)
+            && !Self::has_any_trusted_virtual_activity_global()
+        {
+            return Ok(());
+        }
+        let _ = self.apply_payment_status_via_event_stream(
+            payment_hash,
+            "succeeded",
+            "runtime_virtual_payment_engine",
+        )?;
+        self.record_trusted_virtual_authoritative_settlement(payment_hash, payee_pubkey);
+        Ok(())
+    }
+
+    fn record_trusted_virtual_authoritative_settlement(
+        &self,
+        payment_hash: &str,
+        payee_pubkey: &str,
+    ) {
+        let Some(local_node_pubkey) = self.local_node_pubkey_string() else {
+            return;
+        };
+        let Some(payment) = self
+            .ldk_runtime
+            .get_payment(payment_hash)
+            .map(Self::payment_data_from_runtime_state)
+        else {
+            return;
+        };
+        if payment.inbound || payment.status != "succeeded" || payment.payee_pubkey != payee_pubkey
+        {
+            return;
+        }
+        TRUSTED_VIRTUAL_AUTHORITATIVE_SETTLEMENT_STORAGE.with(|storage| {
+            let mut storage = storage.borrow_mut();
+            if let Some(existing) = storage.iter_mut().find(|entry| {
+                entry.payment_hash == payment.payment_hash
+                    && entry.from_pubkey == local_node_pubkey
+                    && entry.to_pubkey == payee_pubkey
+            }) {
+                existing.amt_msat = payment.amt_msat;
+                existing.asset_id = payment.asset_id.clone();
+                existing.asset_amount = payment.asset_amount;
+                existing.created_at = payment.created_at;
+                return;
+            }
+            storage.push(TrustedVirtualAuthoritativeSettlementData {
+                payment_hash: payment.payment_hash,
+                from_pubkey: local_node_pubkey,
+                to_pubkey: payee_pubkey.to_string(),
+                amt_msat: payment.amt_msat,
+                asset_id: payment.asset_id,
+                asset_amount: payment.asset_amount,
+                created_at: payment.created_at,
+            });
+        });
+    }
+
+    fn register_trusted_virtual_scope_channel(&self, channel_id: &str, peer_pubkey: &str) {
+        let scope_key = self.trusted_virtual_scope_key();
+        let local_node_pubkey = self.local_node_pubkey_string();
+        TRUSTED_VIRTUAL_CHANNEL_SCOPE_STORAGE.with(|storage| {
+            let mut storage = storage.borrow_mut();
+            let channels = storage.entry(scope_key).or_insert_with(HashMap::new);
+            channels.insert(
+                channel_id.to_string(),
+                TrustedVirtualScopeChannelData {
+                    peer_pubkey: peer_pubkey.to_string(),
+                    local_node_pubkey: local_node_pubkey.clone(),
+                },
+            );
+        });
+        if let Some(local_node_pubkey) = local_node_pubkey {
+            TRUSTED_VIRTUAL_PEER_LINK_STORAGE.with(|storage| {
+                let mut storage = storage.borrow_mut();
+                let forward_key = Self::trusted_virtual_link_key(&local_node_pubkey, peer_pubkey);
+                let reverse_key = Self::trusted_virtual_link_key(peer_pubkey, &local_node_pubkey);
+                *storage.entry(forward_key).or_insert(0) += 1;
+                *storage.entry(reverse_key).or_insert(0) += 1;
+            });
+        }
+    }
+
+    fn decrement_trusted_virtual_link_counter(local_node_pubkey: &str, peer_pubkey: &str) {
+        TRUSTED_VIRTUAL_PEER_LINK_STORAGE.with(|storage| {
+            let mut storage = storage.borrow_mut();
+            let forward_key = Self::trusted_virtual_link_key(local_node_pubkey, peer_pubkey);
+            let reverse_key = Self::trusted_virtual_link_key(peer_pubkey, local_node_pubkey);
+            for key in [forward_key, reverse_key] {
+                if let Some(counter) = storage.get_mut(&key) {
+                    if *counter <= 1 {
+                        storage.remove(&key);
+                    } else {
+                        *counter -= 1;
+                    }
+                }
+            }
+        });
+    }
+
+    fn unregister_trusted_virtual_scope_channel(&self, channel_id: &str) {
+        let scope_key = self.trusted_virtual_scope_key();
+        TRUSTED_VIRTUAL_CHANNEL_SCOPE_STORAGE.with(|storage| {
+            let mut storage = storage.borrow_mut();
+            if let Some(channels) = storage.get_mut(&scope_key) {
+                if let Some(removed) = channels.remove(channel_id) {
+                    if let Some(local_node_pubkey) = removed.local_node_pubkey.as_deref() {
+                        Self::decrement_trusted_virtual_link_counter(
+                            local_node_pubkey,
+                            &removed.peer_pubkey,
+                        );
+                    }
+                }
+                if channels.is_empty() {
+                    storage.remove(&scope_key);
+                }
+            }
+        });
     }
 
     fn channel_runtime_state_from_data(
@@ -2312,6 +3095,51 @@ impl RlnWasmNode {
         }
     }
 
+    fn register_rgb_ln_transfer_from_payment(&self, payment: &RlnWasmNodePaymentData) {
+        let (Some(asset_id), Some(asset_amount)) =
+            (payment.asset_id.as_ref(), payment.asset_amount)
+        else {
+            return;
+        };
+        self.rgb_ln_transfers.borrow_mut().insert(
+            payment.payment_hash.clone(),
+            RlnWasmNodeRgbLnTransferData {
+                payment_hash: payment.payment_hash.clone(),
+                inbound: payment.inbound,
+                asset_id: asset_id.clone(),
+                asset_amount,
+                status: payment.status.clone(),
+                created_at: payment.created_at,
+                updated_at: payment.updated_at,
+            },
+        );
+        self.persist_rgb_ln_transfer_state();
+    }
+
+    fn sync_rgb_ln_transfer_from_payment(&self, payment: &RlnWasmNodePaymentData) {
+        let (Some(asset_id), Some(asset_amount)) =
+            (payment.asset_id.as_ref(), payment.asset_amount)
+        else {
+            return;
+        };
+        let mut transfers = self.rgb_ln_transfers.borrow_mut();
+        let entry = transfers
+            .entry(payment.payment_hash.clone())
+            .or_insert_with(|| RlnWasmNodeRgbLnTransferData {
+                payment_hash: payment.payment_hash.clone(),
+                inbound: payment.inbound,
+                asset_id: asset_id.clone(),
+                asset_amount,
+                status: payment.status.clone(),
+                created_at: payment.created_at,
+                updated_at: payment.updated_at,
+            });
+        entry.status = payment.status.clone();
+        entry.updated_at = payment.updated_at;
+        drop(transfers);
+        self.persist_rgb_ln_transfer_state();
+    }
+
     fn apply_payment_status_via_event_stream(
         &self,
         payment_hash: &str,
@@ -2319,6 +3147,9 @@ impl RlnWasmNode {
         source: &str,
     ) -> Result<RlnWasmNodePaymentData, JsValue> {
         let payload_hex = encode_payment_status_event_payload(payment_hash, status);
+        let _ = self
+            .runtime_core
+            .enqueue_event("payment_status".to_string(), payload_hex.clone());
         apply_runtime_hook_payload(
             &self.ldk_runtime,
             self.use_runtime_state_for_ln_views(),
@@ -2351,6 +3182,10 @@ impl RlnWasmNode {
         status: &str,
         source: &str,
     ) -> Result<RlnWasmNodePaymentData, JsValue> {
+        let payload_hex = encode_payment_status_event_payload(payment_hash, status);
+        let _ = self
+            .runtime_core
+            .enqueue_event("payment_status".to_string(), payload_hex.clone());
         if self.use_runtime_state_for_ln_views() {
             let received_at = unix_now_secs();
             let seq = next_runtime_event_seq(&self.next_runtime_event_seq);
@@ -2363,7 +3198,7 @@ impl RlnWasmNode {
                         seq,
                         source: source.to_string(),
                         event_kind: "payment_status".to_string(),
-                        payload_hex: encode_payment_status_event_payload(payment_hash, &normalized),
+                        payload_hex: payload_hex.clone(),
                         payment_hash: Some(payment_hash.to_string()),
                         status: Some(normalized),
                         applied: false,
@@ -2385,7 +3220,7 @@ impl RlnWasmNode {
                         seq,
                         source: source.to_string(),
                         event_kind: "payment_status".to_string(),
-                        payload_hex: encode_payment_status_event_payload(payment_hash, &normalized),
+                        payload_hex: payload_hex.clone(),
                         payment_hash: Some(payment_hash.to_string()),
                         status: Some(normalized),
                         applied: false,
@@ -2405,7 +3240,7 @@ impl RlnWasmNode {
                     seq,
                     source: source.to_string(),
                     event_kind: "payment_status".to_string(),
-                    payload_hex: encode_payment_status_event_payload(payment_hash, &normalized),
+                    payload_hex: payload_hex.clone(),
                     payment_hash: Some(payment_hash.to_string()),
                     status: Some(normalized.clone()),
                     applied: true,
@@ -2414,10 +3249,12 @@ impl RlnWasmNode {
                 },
             );
             crate::swap_runtime::apply_payment_status_update(payment_hash, &normalized);
+            self.sync_rgb_ln_transfer_from_payment(&Self::payment_data_from_runtime_state(
+                payment.clone(),
+            ));
             self.persist_runtime_event_log_state();
             return Ok(Self::payment_data_from_runtime_state(payment));
         }
-        let payload_hex = encode_payment_status_event_payload(payment_hash, status);
         let payment = apply_runtime_event_payload(
             &self.payments,
             &self.runtime_events,
@@ -2428,6 +3265,7 @@ impl RlnWasmNode {
         )?
         .ok_or_else(|| JsValue::from_str("payment not found"))?;
         crate::swap_runtime::apply_payment_status_update(&payment.payment_hash, &payment.status);
+        self.sync_rgb_ln_transfer_from_payment(&payment);
         self.persist_runtime_event_log_state();
         Ok(payment)
     }
@@ -2446,6 +3284,9 @@ impl RlnWasmNode {
         payload_hex: String,
         source: &str,
     ) -> Result<RuntimeTransportEventApplyData, JsValue> {
+        let _ = self
+            .runtime_core
+            .enqueue_event("transport".to_string(), payload_hex.clone());
         let Some(event) = parse_transport_event_payload(&payload_hex) else {
             let received_at = unix_now_secs();
             let seq = next_runtime_event_seq(&self.next_runtime_event_seq);
@@ -2476,6 +3317,9 @@ impl RlnWasmNode {
         payload_hex: String,
         source: &str,
     ) -> Result<RuntimeTransportEventApplyData, JsValue> {
+        let _ = self
+            .runtime_core
+            .enqueue_event(event.event_kind().to_string(), payload_hex.clone());
         let received_at = unix_now_secs();
         let seq = next_runtime_event_seq(&self.next_runtime_event_seq);
         let event_kind = event.event_kind().to_string();
@@ -2513,28 +3357,37 @@ impl RlnWasmNode {
 
     fn next_payment_identity(&self) -> (String, String) {
         let n = self.next_payment_number();
-        let payment_id = format!("{:064x}", n);
-        let payment_hash = format!("{:064x}", n.saturating_add(1_000_000));
+        let seed = format!(
+            "{}:{}:{n}",
+            self.runtime_scope_key, self.node_instance_nonce
+        );
+        let payment_id = hex::encode(Sha256::hash(format!("payment-id:{seed}").as_bytes()));
+        let payment_hash = hex::encode(Sha256::hash(format!("payment-hash:{seed}").as_bytes()));
         (payment_id, payment_hash)
     }
 
     fn next_invoice_payment_identity(&self) -> (Sha256, PaymentSecret) {
         let n = self.next_payment_number();
-        let payment_hash = Sha256::hash(format!("invoice-payment-hash:{n}").as_bytes());
-        let payment_secret_hash = Sha256::hash(format!("invoice-payment-secret:{n}").as_bytes());
+        let seed = format!(
+            "{}:{}:{n}",
+            self.runtime_scope_key, self.node_instance_nonce
+        );
+        let payment_hash = Sha256::hash(format!("invoice-payment-hash:{seed}").as_bytes());
+        let payment_secret_hash = Sha256::hash(format!("invoice-payment-secret:{seed}").as_bytes());
         (
             payment_hash,
             PaymentSecret(payment_secret_hash.to_byte_array()),
         )
     }
 
-    fn scaffold_node_signing_identity(&self) -> Result<(SecretKey, SecpPublicKey), JsValue> {
+    fn node_signing_identity(&self) -> Result<(SecretKey, SecpPublicKey), JsValue> {
         let sdk_seed = crate::sdk_node_identity_seed();
         let secret_hash = Sha256::hash(
             format!(
-                "node-signing-key:{}:{}",
+                "node-signing-key:{}:{}:{}",
                 sdk_seed.as_deref().unwrap_or("ephemeral"),
-                self.proxy_url
+                self.proxy_url,
+                self.node_runtime_id.as_deref().unwrap_or("")
             )
             .as_bytes(),
         );
@@ -2544,8 +3397,8 @@ impl RlnWasmNode {
         Ok((secret_key, pubkey))
     }
 
-    fn sign_scaffold_message(&self, message: &str) -> Result<String, JsValue> {
-        let (secret_key, _) = self.scaffold_node_signing_identity()?;
+    fn sign_node_message(&self, message: &str) -> Result<String, JsValue> {
+        let (secret_key, _) = self.node_signing_identity()?;
         let digest = Sha256::hash(message.as_bytes());
         let msg = SecpMessage::from_digest_slice(&digest.to_byte_array())
             .map_err(|e| JsValue::from_str(&format!("failed to hash message: {e}")))?;
@@ -2575,15 +3428,33 @@ impl RlnWasmNode {
             return match event {
                 RuntimeTransportEvent::PeerDisconnected { peer_pubkey } => {
                     let removed_peer = self.ldk_runtime.remove_peer(peer_pubkey);
+                    let removed_virtual_channel_ids = self
+                        .ldk_runtime
+                        .list_channels()
+                        .into_iter()
+                        .filter(|entry| {
+                            entry.peer_pubkey == *peer_pubkey
+                                && entry.virtual_open_mode.as_deref()
+                                    == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
+                        })
+                        .map(|entry| entry.channel_id)
+                        .collect::<Vec<_>>();
                     let removed_channels =
                         self.ldk_runtime.remove_channels_by_peer(peer_pubkey) > 0;
+                    for channel_id in removed_virtual_channel_ids {
+                        self.unregister_trusted_virtual_scope_channel(&channel_id);
+                    }
                     removed_peer || removed_channels
                 }
                 RuntimeTransportEvent::PeerReconnected { peer_pubkey } => {
                     self.ldk_runtime.has_peer(peer_pubkey)
                 }
                 RuntimeTransportEvent::ChannelClosed { channel_id } => {
-                    self.ldk_runtime.remove_channel(channel_id)
+                    let removed = self.ldk_runtime.remove_channel(channel_id);
+                    if removed {
+                        self.unregister_trusted_virtual_scope_channel(channel_id);
+                    }
+                    removed
                 }
                 RuntimeTransportEvent::ChannelUsable { channel_id } => {
                     self.ldk_runtime.set_channel_usable(channel_id, true)
@@ -2611,6 +3482,7 @@ impl RlnWasmNode {
                             &channel_id,
                             LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
                         );
+                        self.unregister_trusted_virtual_scope_channel(&channel_id);
                     }
                 }
                 removed_peer || removed_channels
@@ -2625,6 +3497,7 @@ impl RlnWasmNode {
                         channel_id,
                         LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
                     );
+                    self.unregister_trusted_virtual_scope_channel(channel_id);
                 }
                 removed
             }
@@ -2744,6 +3617,35 @@ fn runtime_event_store_key(proxy_url: &str) -> String {
     format!("{RUNTIME_EVENT_LOG_STORAGE_PREFIX}{proxy_url}")
 }
 
+fn runtime_rgb_ln_transfer_store_key(proxy_url: &str) -> String {
+    format!("{RUNTIME_RGB_LN_TRANSFER_STORAGE_PREFIX}{proxy_url}")
+}
+
+fn virtual_channels_v0_store_key(proxy_url: &str) -> String {
+    format!("{VIRTUAL_CHANNELS_V0_STORAGE_PREFIX}{proxy_url}")
+}
+
+fn normalize_node_runtime_id(node_runtime_id: Option<String>) -> Result<Option<String>, JsValue> {
+    match node_runtime_id {
+        Some(value) => {
+            let normalized = value.trim().to_string();
+            if normalized.is_empty() {
+                Err(JsValue::from_str("node_runtime_id cannot be empty"))
+            } else {
+                Ok(Some(normalized))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+fn runtime_scope_key(proxy_url: &str, node_runtime_id: Option<&str>) -> String {
+    match node_runtime_id {
+        Some(node_runtime_id) => format!("{proxy_url}#runtime:{node_runtime_id}"),
+        None => proxy_url.to_string(),
+    }
+}
+
 fn load_runtime_event_log_snapshot(storage_key: &str) -> Option<RuntimeEventLogSnapshot> {
     let store = browser_persistent_state_store();
     if let Ok(Some(raw)) = store.get(storage_key) {
@@ -2760,13 +3662,48 @@ fn load_runtime_event_log_snapshot(storage_key: &str) -> Option<RuntimeEventLogS
     RUNTIME_EVENT_LOG_STORAGE.with(|state| state.borrow().get(storage_key).cloned())
 }
 
+fn load_runtime_rgb_ln_transfer_snapshot(
+    storage_key: &str,
+) -> Option<RuntimeRgbLnTransferSnapshot> {
+    let store = browser_persistent_state_store();
+    if let Ok(Some(raw)) = store.get(storage_key) {
+        if let Ok(snapshot) = serde_json::from_str::<RuntimeRgbLnTransferSnapshot>(&raw) {
+            RUNTIME_RGB_LN_TRANSFER_STORAGE.with(|state| {
+                state
+                    .borrow_mut()
+                    .insert(storage_key.to_string(), snapshot.clone());
+            });
+            return Some(snapshot);
+        }
+    }
+    RUNTIME_RGB_LN_TRANSFER_STORAGE.with(|state| state.borrow().get(storage_key).cloned())
+}
+
+fn load_virtual_channels_v0_flag(storage_key: &str) -> Option<bool> {
+    let store = browser_persistent_state_store();
+    let raw = store.get(storage_key).ok().flatten()?;
+    serde_json::from_str::<bool>(&raw).ok()
+}
+
+fn persist_virtual_channels_v0_flag(storage_key: &str, enabled: bool) {
+    let store = browser_persistent_state_store();
+    if let Ok(raw) = serde_json::to_string(&enabled) {
+        let _ = store.set(storage_key, &raw);
+    }
+}
+
 fn persist_runtime_event_log_state(
     storage_key: &str,
     runtime_events: &Rc<RefCell<Vec<RlnWasmNodeRuntimeEventData>>>,
     next_runtime_event_seq_ref: &Rc<RefCell<u64>>,
 ) {
+    let events = {
+        let guard = runtime_events.borrow();
+        let start = guard.len().saturating_sub(RUNTIME_EVENT_LOG_PERSIST_WINDOW);
+        guard[start..].to_vec()
+    };
     let snapshot = RuntimeEventLogSnapshot {
-        events: runtime_events.borrow().clone(),
+        events,
         next_seq: *next_runtime_event_seq_ref.borrow(),
     };
     if let Ok(raw) = serde_json::to_string(&snapshot) {
@@ -2774,6 +3711,26 @@ fn persist_runtime_event_log_state(
         let _ = store.set(storage_key, &raw);
     }
     RUNTIME_EVENT_LOG_STORAGE.with(|state| {
+        state.borrow_mut().insert(storage_key.to_string(), snapshot);
+    });
+}
+
+fn persist_runtime_rgb_ln_transfer_state(
+    storage_key: &str,
+    rgb_ln_transfers: &Rc<RefCell<HashMap<String, RlnWasmNodeRgbLnTransferData>>>,
+) {
+    let mut transfers = rgb_ln_transfers
+        .borrow()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    transfers.sort_by(|a, b| a.payment_hash.cmp(&b.payment_hash));
+    let snapshot = RuntimeRgbLnTransferSnapshot { transfers };
+    if let Ok(raw) = serde_json::to_string(&snapshot) {
+        let store = browser_persistent_state_store();
+        let _ = store.set(storage_key, &raw);
+    }
+    RUNTIME_RGB_LN_TRANSFER_STORAGE.with(|state| {
         state.borrow_mut().insert(storage_key.to_string(), snapshot);
     });
 }
@@ -3263,142 +4220,21 @@ fn parse_transport_event_payload(payload_hex: &str) -> Option<RuntimeTransportEv
     if let Ok(value) = serde_json::from_str::<RuntimeTransportEvent>(text) {
         return Some(value);
     }
-    if let Some(value) = parse_transport_event_payload_json_alias(text) {
-        return Some(value);
-    }
 
-    let mut parts = text.split(':');
-    let kind = parts.next()?;
-    let kind = normalize_transport_event_kind(kind);
-    let id = parts.next()?.trim().to_string();
-    if id.is_empty() || parts.next().is_some() {
+    let (kind_raw, id_raw) = text.split_once(':')?;
+    let kind = kind_raw.trim();
+    let id = id_raw.trim().to_string();
+    if id.is_empty() {
         return None;
     }
-    match kind.as_str() {
+    match kind {
         "peer_disconnected" => Some(RuntimeTransportEvent::PeerDisconnected { peer_pubkey: id }),
-        "peer_offline" => Some(RuntimeTransportEvent::PeerDisconnected { peer_pubkey: id }),
-        "peer_down" => Some(RuntimeTransportEvent::PeerDisconnected { peer_pubkey: id }),
         "peer_reconnected" => Some(RuntimeTransportEvent::PeerReconnected { peer_pubkey: id }),
-        "peer_connected" => Some(RuntimeTransportEvent::PeerReconnected { peer_pubkey: id }),
-        "peer_online" => Some(RuntimeTransportEvent::PeerReconnected { peer_pubkey: id }),
-        "peer_up" => Some(RuntimeTransportEvent::PeerReconnected { peer_pubkey: id }),
         "channel_closed" => Some(RuntimeTransportEvent::ChannelClosed { channel_id: id }),
         "channel_usable" => Some(RuntimeTransportEvent::ChannelUsable { channel_id: id }),
-        "channel_opened" => Some(RuntimeTransportEvent::ChannelUsable { channel_id: id }),
-        "channel_ready" => Some(RuntimeTransportEvent::ChannelUsable { channel_id: id }),
-        "channel_online" => Some(RuntimeTransportEvent::ChannelUsable { channel_id: id }),
-        "channel_up" => Some(RuntimeTransportEvent::ChannelUsable { channel_id: id }),
         "channel_unusable" => Some(RuntimeTransportEvent::ChannelUnusable { channel_id: id }),
-        "channel_disconnected" => Some(RuntimeTransportEvent::ChannelUnusable { channel_id: id }),
-        "channel_offline" => Some(RuntimeTransportEvent::ChannelUnusable { channel_id: id }),
-        "channel_down" => Some(RuntimeTransportEvent::ChannelUnusable { channel_id: id }),
         _ => None,
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct RuntimeTransportEventAliasPayload {
-    #[serde(default)]
-    event: Option<String>,
-    #[serde(default, rename = "event_name")]
-    event_name: Option<String>,
-    #[serde(default, rename = "eventName")]
-    event_name_camel: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default, rename = "type")]
-    event_type: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    peer_pubkey: Option<String>,
-    #[serde(default, rename = "peerPubkey")]
-    peer_pubkey_camel: Option<String>,
-    #[serde(default, rename = "peer_id")]
-    peer_id: Option<String>,
-    #[serde(default, rename = "peerId")]
-    peer_id_camel: Option<String>,
-    #[serde(default, rename = "node_id")]
-    node_id: Option<String>,
-    #[serde(default, rename = "nodeId")]
-    node_id_camel: Option<String>,
-    #[serde(default)]
-    channel_id: Option<String>,
-    #[serde(default, rename = "channelId")]
-    channel_id_camel: Option<String>,
-}
-
-fn parse_transport_event_payload_json_alias(text: &str) -> Option<RuntimeTransportEvent> {
-    let payload = serde_json::from_str::<RuntimeTransportEventAliasPayload>(text).ok()?;
-    let event = payload
-        .event
-        .or(payload.event_name)
-        .or(payload.event_name_camel)
-        .or(payload.kind)
-        .or(payload.event_type)
-        .map(|event| normalize_transport_event_kind(&event))?;
-    if event.is_empty() {
-        return None;
-    }
-    let peer_id = payload
-        .peer_pubkey
-        .or(payload.peer_pubkey_camel)
-        .or(payload.peer_id)
-        .or(payload.peer_id_camel)
-        .or(payload.node_id)
-        .or(payload.node_id_camel)
-        .or(payload.id.clone())
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty());
-    let channel_id = payload
-        .channel_id
-        .or(payload.channel_id_camel)
-        .or(payload.id.clone())
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty());
-    match event.as_str() {
-        "peer_disconnected" | "peerdisconnected" | "peer_offline" | "peeroffline" | "peer_down"
-        | "peerdown" => {
-            let peer_pubkey = peer_id.clone()?;
-            Some(RuntimeTransportEvent::PeerDisconnected { peer_pubkey })
-        }
-        "peer_reconnected" | "peerreconnected" | "peer_connected" | "peerconnected"
-        | "peer_online" | "peeronline" | "peer_up" | "peerup" => {
-            let peer_pubkey = peer_id?;
-            Some(RuntimeTransportEvent::PeerReconnected { peer_pubkey })
-        }
-        "channel_closed" | "channelclosed" => {
-            let channel_id = channel_id.clone()?;
-            Some(RuntimeTransportEvent::ChannelClosed { channel_id })
-        }
-        "channel_usable" | "channelusable" => {
-            let channel_id = channel_id.clone()?;
-            Some(RuntimeTransportEvent::ChannelUsable { channel_id })
-        }
-        "channel_opened" | "channelopened" | "channel_ready" | "channelready"
-        | "channel_online" | "channelonline" | "channel_up" | "channelup" => {
-            let channel_id = channel_id.clone()?;
-            Some(RuntimeTransportEvent::ChannelUsable { channel_id })
-        }
-        "channel_unusable" | "channelunusable" | "channel_offline" | "channeloffline"
-        | "channel_down" | "channeldown" => {
-            let channel_id = channel_id.clone()?;
-            Some(RuntimeTransportEvent::ChannelUnusable { channel_id })
-        }
-        "channel_disconnected" | "channeldisconnected" => {
-            let channel_id = channel_id?;
-            Some(RuntimeTransportEvent::ChannelUnusable { channel_id })
-        }
-        _ => None,
-    }
-}
-
-fn normalize_transport_event_kind(kind: &str) -> String {
-    kind.trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace('.', "_")
-        .replace(' ', "_")
 }
 
 fn encode_transport_event_payload(event: &RuntimeTransportEvent) -> String {
@@ -3462,7 +4298,8 @@ fn decode_fixed_hex<const N: usize>(value: &str, error: &str) -> Result<[u8; N],
     Ok(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "wasm32"))]
+#[path = "tests/ln_node_tests.rs"]
 mod tests;
 
 fn parse_payment_status_event_payload(payload_hex: &str) -> Option<PaymentStatusEvent> {
@@ -3473,15 +4310,11 @@ fn parse_payment_status_event_payload(payload_hex: &str) -> Option<PaymentStatus
     }
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-        if let Some(mapped) = parse_payment_status_event_json(&value) {
-            return Some(mapped);
-        }
+        return parse_payment_status_event_json(&value);
     }
 
     let mut parts = text.split(':');
-    let kind = parts.next()?;
-    let kind = normalize_payment_event_kind(kind);
-    match kind.as_str() {
+    match parts.next()?.trim() {
         "payment_status" => {
             let payment_hash = parts.next()?;
             let status = parts.next()?;
@@ -3493,16 +4326,6 @@ fn parse_payment_status_event_payload(payload_hex: &str) -> Option<PaymentStatus
                 status: status.to_string(),
             })
         }
-        "payment_succeeded" | "payment_failed" | "payment_expired" => {
-            let payment_hash = parts.next()?;
-            if parts.next().is_some() {
-                return None;
-            }
-            Some(PaymentStatusEvent {
-                payment_hash: payment_hash.to_string(),
-                status: payment_status_from_event_kind(&kind)?.to_string(),
-            })
-        }
         _ => None,
     }
 }
@@ -3510,72 +4333,25 @@ fn parse_payment_status_event_payload(payload_hex: &str) -> Option<PaymentStatus
 fn parse_payment_status_event_json(value: &serde_json::Value) -> Option<PaymentStatusEvent> {
     let payment_hash = value
         .get("payment_hash")
-        .and_then(|v| v.as_str())
-        .or_else(|| value.get("paymentHash").and_then(|v| v.as_str()))
-        .or_else(|| value.get("hash").and_then(|v| v.as_str()))
-        .or_else(|| value.get("payment_id").and_then(|v| v.as_str()))
-        .or_else(|| value.get("paymentId").and_then(|v| v.as_str()))?
+        .and_then(|v| v.as_str())?
         .trim()
         .to_string();
     if payment_hash.is_empty() {
         return None;
     }
 
-    if let Some(status) = value
-        .get("status")
-        .and_then(|v| v.as_str())
-        .or_else(|| value.get("state").and_then(|v| v.as_str()))
-        .or_else(|| value.get("payment_status").and_then(|v| v.as_str()))
-        .or_else(|| value.get("paymentStatus").and_then(|v| v.as_str()))
-    {
-        let normalized = status.trim();
-        if normalized.is_empty() {
+    if let Some(kind) = value.get("kind").and_then(|v| v.as_str()) {
+        if kind.trim() != "payment_status" {
             return None;
         }
-        let mapped = normalize_payment_status(normalized)
-            .ok()
-            .or_else(|| payment_status_from_event_kind(normalized).map(ToString::to_string))
-            .unwrap_or_else(|| normalized.to_string());
-        return Some(PaymentStatusEvent {
-            payment_hash,
-            status: mapped,
-        });
     }
 
-    let event_kind = value
-        .get("event")
-        .and_then(|v| v.as_str())
-        .or_else(|| value.get("event_name").and_then(|v| v.as_str()))
-        .or_else(|| value.get("eventName").and_then(|v| v.as_str()))
-        .or_else(|| value.get("kind").and_then(|v| v.as_str()))
-        .or_else(|| value.get("type").and_then(|v| v.as_str()))?
-        .trim();
-    let status = payment_status_from_event_kind(event_kind)?;
+    let status = value.get("status").and_then(|v| v.as_str())?.trim();
+    if status.is_empty() {
+        return None;
+    }
     Some(PaymentStatusEvent {
         payment_hash,
         status: status.to_string(),
     })
-}
-
-fn payment_status_from_event_kind(kind: &str) -> Option<&'static str> {
-    match normalize_payment_event_kind(kind).as_str() {
-        "payment_succeeded" | "paymentsent" | "payment_sent" | "paymentclaimed"
-        | "payment_claimed" | "payment_success" | "payment_completed" | "paymentcomplete" => {
-            Some("succeeded")
-        }
-        "payment_failed" | "paymentfailed" | "payment_fail" | "payment_error" | "paymenterror" => {
-            Some("failed")
-        }
-        "payment_expired" | "paymentexpired" | "payment_timeout" | "payment_timed_out"
-        | "paymenttimedout" => Some("expired"),
-        _ => None,
-    }
-}
-
-fn normalize_payment_event_kind(kind: &str) -> String {
-    kind.trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace('.', "_")
-        .replace(' ', "_")
 }

@@ -10,12 +10,12 @@ fn make_sdk_with_identity(password: &str, mnemonic: &str) -> crate::RlnWasmSdk {
 
 #[test]
 fn swap_state_storage_key_is_identity_scoped() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let mnemonic_a = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     let _sdk_a = make_sdk_with_identity("scope-a", mnemonic_a);
     let key_a = swap_state_storage_key();
 
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let mnemonic_b = "legal winner thank year wave sausage worth useful legal winner thank yellow";
     let _sdk_b = make_sdk_with_identity("scope-b", mnemonic_b);
     let key_b = swap_state_storage_key();
@@ -27,7 +27,7 @@ fn swap_state_storage_key_is_identity_scoped() {
 
 #[test]
 fn sdk_maker_init_runtime_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     block_on(sdk.init_json("phase-swap".to_string(), None)).expect("init");
     block_on(sdk.unlock("{\"password\":\"phase-swap\"}".to_string())).expect("unlock");
@@ -48,7 +48,7 @@ fn sdk_maker_init_runtime_contract() {
 
 #[test]
 fn sdk_swap_runtime_roundtrip_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     block_on(sdk.init_json("phase-swap-roundtrip".to_string(), None)).expect("init");
     block_on(sdk.unlock("{\"password\":\"phase-swap-roundtrip\"}".to_string())).expect("unlock");
@@ -108,7 +108,7 @@ fn sdk_swap_runtime_roundtrip_contract() {
 
 #[test]
 fn sdk_swap_runtime_validation_contracts() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     block_on(sdk.init_json("phase-swap-validation".to_string(), None)).expect("init");
     block_on(sdk.unlock("{\"password\":\"phase-swap-validation\"}".to_string())).expect("unlock");
@@ -131,7 +131,7 @@ fn sdk_swap_runtime_validation_contracts() {
 
 #[test]
 fn sdk_swap_runtime_get_swap_request_shape_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     block_on(sdk.init_json("phase-swap-get-shape".to_string(), None)).expect("init");
     block_on(sdk.unlock("{\"password\":\"phase-swap-get-shape\"}".to_string())).expect("unlock");
@@ -161,7 +161,7 @@ fn sdk_swap_runtime_get_swap_request_shape_contract() {
 
 #[test]
 fn sdk_swap_runtime_maker_execute_validation_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     block_on(sdk.init_json("phase-swap-maker-exec-validation".to_string(), None)).expect("init");
     block_on(sdk.unlock("{\"password\":\"phase-swap-maker-exec-validation\"}".to_string()))

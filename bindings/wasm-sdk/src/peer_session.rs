@@ -1,12 +1,18 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::str::FromStr;
 
 use js_sys::Function;
+use secp256k1::PublicKey as SecpPublicKey;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::ln_transport::{ln_socket_connect, RlnWasmLnSocket};
+use crate::ln_transport::{ln_socket_connect, ln_socket_connect_with_options, RlnWasmLnSocket};
+
+#[cfg(test)]
+#[path = "tests/peer_session_tests.rs"]
+mod tests;
 
 trait PeerManagerAdapter {
     fn new_outbound_connection(&self, peer_pubkey: &str) -> Result<String, JsValue>;
@@ -305,6 +311,35 @@ pub async fn peer_session_connect(
     .await
 }
 
+#[wasm_bindgen(js_name = peerSessionConnectWithOptions)]
+pub async fn peer_session_connect_with_options(
+    proxy_url: String,
+    peer_addr: String,
+    peer_pubkey: String,
+    options_js: JsValue,
+    new_outbound_connection_cb: Function,
+    read_event_cb: Function,
+    process_events_cb: Function,
+    socket_disconnected_cb: Function,
+) -> Result<RlnWasmPeerSession, JsValue> {
+    let report_error_cb = Function::new_with_args(
+        "message",
+        "console.error('[rln-wasm-sdk peer-session]', message);",
+    );
+    peer_session_connect_with_options_and_error_cb(
+        proxy_url,
+        peer_addr,
+        peer_pubkey,
+        options_js,
+        new_outbound_connection_cb,
+        read_event_cb,
+        process_events_cb,
+        socket_disconnected_cb,
+        report_error_cb,
+    )
+    .await
+}
+
 #[wasm_bindgen(js_name = peerSessionConnectWithErrorCb)]
 pub async fn peer_session_connect_with_error_cb(
     proxy_url: String,
@@ -323,7 +358,30 @@ pub async fn peer_session_connect_with_error_cb(
         socket_disconnected_cb,
         report_error_cb,
     });
-    peer_session_connect_with_adapter(proxy_url, peer_addr, peer_pubkey, adapter).await
+    peer_session_connect_with_adapter(proxy_url, peer_addr, peer_pubkey, JsValue::NULL, adapter)
+        .await
+}
+
+#[wasm_bindgen(js_name = peerSessionConnectWithOptionsAndErrorCb)]
+pub async fn peer_session_connect_with_options_and_error_cb(
+    proxy_url: String,
+    peer_addr: String,
+    peer_pubkey: String,
+    options_js: JsValue,
+    new_outbound_connection_cb: Function,
+    read_event_cb: Function,
+    process_events_cb: Function,
+    socket_disconnected_cb: Function,
+    report_error_cb: Function,
+) -> Result<RlnWasmPeerSession, JsValue> {
+    let adapter = Rc::new(JsPeerManagerAdapter {
+        new_outbound_connection_cb,
+        read_event_cb,
+        process_events_cb,
+        socket_disconnected_cb,
+        report_error_cb,
+    });
+    peer_session_connect_with_adapter(proxy_url, peer_addr, peer_pubkey, options_js, adapter).await
 }
 
 pub async fn peer_session_connect_rust_callbacks(
@@ -333,7 +391,8 @@ pub async fn peer_session_connect_rust_callbacks(
     callbacks: RustPeerManagerCallbacks,
 ) -> Result<RlnWasmPeerSession, JsValue> {
     let adapter = Rc::new(RustPeerManagerAdapter { callbacks });
-    peer_session_connect_with_adapter(proxy_url, peer_addr, peer_pubkey, adapter).await
+    peer_session_connect_with_adapter(proxy_url, peer_addr, peer_pubkey, JsValue::NULL, adapter)
+        .await
 }
 
 #[derive(Default)]
@@ -470,19 +529,96 @@ impl RlnWasmRustPeerManagerBridge {
 
         peer_session_connect_rust_callbacks(proxy_url, peer_addr, peer_pubkey, callbacks).await
     }
+
+    #[wasm_bindgen(js_name = connectSessionWithOptions)]
+    pub async fn connect_session_with_options(
+        &self,
+        proxy_url: String,
+        peer_addr: String,
+        peer_pubkey: String,
+        options_js: JsValue,
+    ) -> Result<RlnWasmPeerSession, JsValue> {
+        if let Some(hooks) = get_rln_ldk_peer_manager_hooks() {
+            let callbacks = callbacks_from_hooks(hooks);
+            return peer_session_connect_with_adapter_rust_callbacks(
+                proxy_url,
+                peer_addr,
+                peer_pubkey,
+                options_js,
+                callbacks,
+            )
+            .await;
+        }
+
+        let state = self.inner.clone();
+        let callbacks = RustPeerManagerCallbacks {
+            new_outbound_connection: Box::new(move |_peer_pubkey| {
+                let hex = state.borrow().initial_outbound_hex.clone();
+                Ok(hex)
+            }),
+            read_event: Box::new({
+                let state = self.inner.clone();
+                move |payload_hex| {
+                    let _ = hex::decode(payload_hex)
+                        .map_err(|e| JsValue::from_str(&format!("invalid payload_hex: {e}")))?;
+                    state.borrow_mut().received_frames += 1;
+                    Ok(())
+                }
+            }),
+            process_events: Box::new({
+                let state = self.inner.clone();
+                move || {
+                    state.borrow_mut().processed_events += 1;
+                    Ok(())
+                }
+            }),
+            socket_disconnected: Box::new({
+                let state = self.inner.clone();
+                move || {
+                    state.borrow_mut().disconnected = true;
+                    Ok(())
+                }
+            }),
+            report_error: Box::new({
+                let state = self.inner.clone();
+                move |msg| {
+                    state.borrow_mut().last_error = Some(msg.to_string());
+                    Ok(())
+                }
+            }),
+        };
+
+        peer_session_connect_with_adapter_rust_callbacks(
+            proxy_url,
+            peer_addr,
+            peer_pubkey,
+            options_js,
+            callbacks,
+        )
+        .await
+    }
 }
 
 async fn peer_session_connect_with_adapter(
     proxy_url: String,
     peer_addr: String,
     peer_pubkey: String,
+    options_js: JsValue,
     adapter: Rc<dyn PeerManagerAdapter>,
 ) -> Result<RlnWasmPeerSession, JsValue> {
-    if peer_pubkey.trim().is_empty() {
+    let peer_pubkey = peer_pubkey.trim().to_string();
+    if peer_pubkey.is_empty() {
         return Err(JsValue::from_str("peer_pubkey cannot be empty"));
     }
+    if SecpPublicKey::from_str(&peer_pubkey).is_err() {
+        return Err(JsValue::from_str("invalid peer_pubkey"));
+    }
 
-    let socket = ln_socket_connect(proxy_url, peer_addr).await?;
+    let socket = if options_js.is_null() || options_js.is_undefined() {
+        ln_socket_connect(proxy_url, peer_addr).await?
+    } else {
+        ln_socket_connect_with_options(proxy_url, peer_addr, options_js).await?
+    };
     Ok(RlnWasmPeerSession {
         socket,
         peer_pubkey,
@@ -490,4 +626,15 @@ async fn peer_session_connect_with_adapter(
         started: Cell::new(false),
         read_loop_closure: RefCell::new(None),
     })
+}
+
+async fn peer_session_connect_with_adapter_rust_callbacks(
+    proxy_url: String,
+    peer_addr: String,
+    peer_pubkey: String,
+    options_js: JsValue,
+    callbacks: RustPeerManagerCallbacks,
+) -> Result<RlnWasmPeerSession, JsValue> {
+    let adapter = Rc::new(RustPeerManagerAdapter { callbacks });
+    peer_session_connect_with_adapter(proxy_url, peer_addr, peer_pubkey, options_js, adapter).await
 }

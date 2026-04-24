@@ -11,6 +11,16 @@ import init, {
   RlnWasmNode,
 } from "../../pkg/rln_wasm_sdk.js";
 
+const DEFAULT_PROXY_URL = "ws://127.0.0.1:3001";
+const DEFAULT_PEER_ADDR = "127.0.0.1:9746";
+const DEFAULT_PEER_PUBKEY =
+  "02399514a480a9b9d041651fd408c1483a2a3dff33a74a158dc948d120930fa011";
+const DEMO_KEYSEND_MSAT = 3_000_000n;
+const DEMO_PAYEE_PUBKEY_A =
+  "03d860e19dac1741d2353d3953cd9f9d07f39c922cde0ca810f0aa33437bb81e23";
+const DEMO_PAYEE_PUBKEY_B =
+  "02399514a480a9b9d041651fd408c1483a2a3dff33a74a158dc948d120930fa011";
+
 function log(message, data = undefined) {
   const out = document.getElementById("out");
   if (!out) return;
@@ -20,17 +30,6 @@ function log(message, data = undefined) {
       ? String(message)
       : `${message}: ${JSON.stringify(data, null, 2)}`;
   out.appendChild(line);
-}
-
-function utf8ToHex(value) {
-  const bytes = new TextEncoder().encode(value);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function applyReadEventPayload(node, payload, label) {
-  const payloadHex = utf8ToHex(payload);
-  const updated = node.ingestReadEventPayloadHex(payloadHex);
-  log(label, { payload, updated });
 }
 
 async function run() {
@@ -62,15 +61,21 @@ async function run() {
   }
 
   const proxyInput = document.getElementById("proxyUrl");
-  const proxyUrl = proxyInput && proxyInput.value ? proxyInput.value.trim() : "";
+  const proxyUrl =
+    proxyInput && proxyInput.value
+      ? proxyInput.value.trim()
+      : DEFAULT_PROXY_URL;
   const peerAddrInput = document.getElementById("peerAddr");
   const peerAddr =
-    peerAddrInput && peerAddrInput.value ? peerAddrInput.value.trim() : "";
+    peerAddrInput && peerAddrInput.value
+      ? peerAddrInput.value.trim()
+      : DEFAULT_PEER_ADDR;
   const peerPubkeyInput = document.getElementById("peerPubkey");
   const peerPubkey =
     peerPubkeyInput && peerPubkeyInput.value
       ? peerPubkeyInput.value.trim()
-      : "";
+      : DEFAULT_PEER_PUBKEY;
+  log("Using defaults/runtime values", { proxyUrl, peerAddr, peerPubkey });
 
   clearPeerManagerHooks();
   installPeerManagerHooksFromJs(
@@ -94,103 +99,92 @@ async function run() {
   );
   log("Peer manager hooks installed", { hasPeerManagerHooks: hasPeerManagerHooks() });
 
-  if (proxyUrl.length > 0) {
-    try {
-      await checkProxyUrl(proxyUrl);
-      log("Proxy check", { ok: true, proxyUrl });
-    } catch (err) {
-      log("Proxy check failed", String(err));
-    }
-  } else {
-    log(
-      "Proxy check skipped",
-      "Set proxy URL in the input field to test checkProxyUrl"
-    );
+  try {
+    await checkProxyUrl(proxyUrl);
+    log("Proxy check", { ok: true, proxyUrl });
+  } catch (err) {
+    log("Proxy check failed", String(err));
   }
 
-  if (proxyUrl.length > 0 && peerAddr.length > 0 && peerPubkey.length > 0) {
+  try {
+    const bridge = new RlnWasmRustPeerManagerBridge();
+    const session = await bridge.connectSession(proxyUrl, peerAddr, peerPubkey);
+    log("Bridge session created", { websocketUrl: session.websocketUrl() });
+    log("Bridge stats (before start)", bridge.statsValue());
+
     try {
-      const bridge = new RlnWasmRustPeerManagerBridge();
-      const session = await bridge.connectSession(proxyUrl, peerAddr, peerPubkey);
-      log("Bridge session created", { websocketUrl: session.websocketUrl() });
-      log("Bridge stats (before start)", bridge.statsValue());
-
-      try {
-        await session.start();
-        log("Bridge session started", { isStarted: session.isStarted() });
-      } catch (err) {
-        // expected if proxy or peer is unreachable
-        log("Bridge session start failed (non-fatal)", String(err));
-      }
-
-      log("Bridge stats (after start attempt)", bridge.statsValue());
-      await session.close().catch((err) => {
-        log("Bridge session close warning", String(err));
-      });
-      log("Bridge session closed", { isStarted: session.isStarted() });
-      log("Bridge stats (after close)", bridge.statsValue());
+      await session.start();
+      log("Bridge session started", { isStarted: session.isStarted() });
     } catch (err) {
-      log("Bridge connect failed (non-fatal)", String(err));
+      // expected if proxy or peer is unreachable
+      log("Bridge session start failed (non-fatal)", String(err));
     }
-  } else {
-    log(
-      "Bridge peer-session skipped",
-      "Set proxy URL + peerAddr + peerPubkey to run the peer-session bootstrap path"
-    );
-  }
 
-  const nodeProxyUrl = proxyUrl.length > 0 ? proxyUrl : "ws://127.0.0.1:3001";
-  const node = new RlnWasmNode(nodeProxyUrl);
-  log("Node created", { proxyUrl: nodeProxyUrl });
+    log("Bridge stats (after start attempt)", bridge.statsValue());
+    await session.close().catch((err) => {
+      log("Bridge session close warning", String(err));
+    });
+    log("Bridge session closed", { isStarted: session.isStarted() });
+    log("Bridge stats (after close)", bridge.statsValue());
+  } catch (err) {
+    log("Bridge connect failed (non-fatal)", String(err));
+  }
+  const node = new RlnWasmNode(proxyUrl);
+  log("Node created", { proxyUrl });
+  const runtimeStatus = node.ldkRuntimeStatusValue();
+  log("Runtime status", runtimeStatus);
+  log("Runtime components (initial)", node.ldkRuntimeComponentsValue());
+
+  try {
+    node.chainSyncStartValue("http://127.0.0.1:3002", 5000);
+    log("Chain sync started", node.chainSyncStatusValue());
+    node.chainSyncStopValue();
+    log("Chain sync stopped", node.chainSyncStatusValue());
+  } catch (err) {
+    log("Chain sync demo failed (non-fatal)", String(err));
+  }
 
   const keysend = node.keysendValue(
-    "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    3_000_000,
+    DEMO_PAYEE_PUBKEY_A,
+    DEMO_KEYSEND_MSAT,
     undefined,
     undefined
   );
   log("Node keysend #1 (creates payment record)", keysend);
 
   const keysend2 = node.keysendValue(
-    "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    3_000_000,
+    DEMO_PAYEE_PUBKEY_B,
+    DEMO_KEYSEND_MSAT,
     undefined,
     undefined
   );
   log("Node keysend #2 (creates payment record)", keysend2);
 
   const keysend3 = node.keysendValue(
-    "02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    3_000_000,
+    DEMO_PAYEE_PUBKEY_A,
+    DEMO_KEYSEND_MSAT,
     undefined,
     undefined
   );
   log("Node keysend #3 (creates payment record)", keysend3);
-  log("Node payments (before callback payloads)", node.listPaymentsValue());
-
-  applyReadEventPayload(
-    node,
-    JSON.stringify({
-      payment_hash: keysend.payment_hash,
-      status: "succeeded",
-    }),
-    "Callback payload applied (explicit status JSON)"
+  const rgbKeysend = node.keysendValue(
+    DEMO_PAYEE_PUBKEY_B,
+    DEMO_KEYSEND_MSAT,
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    5n
   );
-  applyReadEventPayload(
-    node,
-    JSON.stringify({
-      event: "PaymentFailed",
-      payment_hash: keysend2.payment_hash,
-    }),
-    "Callback payload applied (event alias JSON)"
-  );
-  applyReadEventPayload(
-    node,
-    `payment_expired:${keysend3.payment_hash}`,
-    "Callback payload applied (text alias)"
-  );
-  log("Node payments (after callback payloads)", node.listPaymentsValue());
-  log("Runtime events (after callback payloads)", node.listRuntimeEventsValue());
+  log("Node keysend #4 RGB (creates RGB-LN transfer record)", rgbKeysend);
+  log("Node payments (runtime-driven)", node.listPaymentsValue());
+  log("RGB-LN transfers (runtime-driven)", node.listRgbLnTransfersValue());
+  log("Manual status updates skipped", {
+    reason:
+      "wasm_native_ldk owns payment state transitions; statuses come from runtime event stream",
+    backend: runtimeStatus && typeof runtimeStatus.backend === "string"
+      ? runtimeStatus.backend
+      : "unknown",
+  });
+  log("Runtime events (runtime-driven)", node.listRuntimeEventsValue());
+  log("Runtime components (final)", node.ldkRuntimeComponentsValue());
 
   log("Example finished", { ok: true });
 }

@@ -182,8 +182,8 @@ fn sdk_wallet_handle_get_asset_media_invalid_digest_contract() {
 }
 
 #[wasm_bindgen_test(async)]
-async fn sdk_wallet_handle_get_asset_media_scaffold_contract() {
-    reset_wasm_runtime_state_for_tests();
+async fn sdk_wallet_handle_get_asset_media_wasm_runtime_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let wallet_json = test_wallet_data_json();
     let wallet = sdk
@@ -203,8 +203,8 @@ async fn sdk_wallet_handle_get_asset_media_scaffold_contract() {
 }
 
 #[wasm_bindgen_test(async)]
-async fn sdk_facade_wallet_get_asset_media_scaffold_contract() {
-    reset_wasm_runtime_state_for_tests();
+async fn sdk_facade_wallet_get_asset_media_wasm_runtime_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let wallet_json = test_wallet_data_json();
     let wallet = sdk.new_wallet(&wallet_json).expect("wallet");
@@ -223,7 +223,7 @@ async fn sdk_facade_wallet_get_asset_media_scaffold_contract() {
 
 #[wasm_bindgen_test(async)]
 async fn sdk_wallet_get_asset_media_persists_across_memory_reset_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let wallet_json = test_wallet_data_json();
     let wallet = sdk.new_wallet(&wallet_json).expect("wallet");
@@ -272,4 +272,160 @@ async fn sdk_create_wallet_handle_async_list_transactions_empty_contract() {
     let txs: serde_json::Value = serde_wasm_bindgen::from_value(txs_js).expect("parse txs");
     let arr = txs.as_array().expect("txs array");
     assert!(arr.is_empty(), "fresh wallet should have no txs");
+}
+
+#[wasm_bindgen_test]
+fn sdk_wallet_handle_rgb_proxy_transport_set_get_clear_contract() {
+    let sdk = RlnWasmSdk::new();
+    let wallet_json = test_wallet_data_json();
+    let wallet = sdk
+        .create_wallet_handle(&wallet_json)
+        .expect("wallet handle");
+
+    wallet
+        .set_rgb_proxy_transport("http://127.0.0.1:3000/json-rpc".to_string(), None, None)
+        .expect("set proxy transport");
+
+    let value = wallet
+        .rgb_proxy_transport_value()
+        .expect("proxy transport value");
+    let parsed: RlnWasmRgbProxyTransportConfigData =
+        serde_wasm_bindgen::from_value(value).expect("parse proxy transport");
+    assert_eq!(parsed.endpoint, "http://127.0.0.1:3000/json-rpc");
+    assert_eq!(parsed.auth_token, None);
+    assert_eq!(parsed.node_id, None);
+
+    wallet.clear_rgb_proxy_transport();
+    let cleared = wallet
+        .rgb_proxy_transport_value()
+        .expect("cleared proxy transport value");
+    assert!(cleared.is_null(), "expected null after clear");
+}
+
+#[wasm_bindgen_test]
+fn sdk_wallet_handle_rgb_proxy_transport_pair_validation_contract() {
+    let sdk = RlnWasmSdk::new();
+    let wallet_json = test_wallet_data_json();
+    let wallet = sdk
+        .create_wallet_handle(&wallet_json)
+        .expect("wallet handle");
+
+    let err = wallet
+        .set_rgb_proxy_transport(
+            "http://127.0.0.1:3000/json-rpc".to_string(),
+            Some("token".to_string()),
+            None,
+        )
+        .expect_err("should require node_id with auth token");
+    let msg = err.as_string().expect("error string");
+    assert_eq!(
+        msg,
+        "rgb_proxy_auth_token and rgb_proxy_node_id must be provided together"
+    );
+}
+
+#[wasm_bindgen_test]
+fn sdk_wallet_handle_blind_receive_requires_endpoints_or_proxy_config_contract() {
+    let sdk = RlnWasmSdk::new();
+    let wallet_json = test_wallet_data_json();
+    let wallet = sdk
+        .create_wallet_handle(&wallet_json)
+        .expect("wallet handle");
+
+    let assignment_js =
+        serde_wasm_bindgen::to_value(&rgb_lib_wasm::Assignment::Any).expect("assignment");
+    let err = wallet
+        .blind_receive_value(None, assignment_js, None, JsValue::NULL, 1)
+        .expect_err("should require endpoints or configured proxy");
+    let msg = err.as_string().expect("error string");
+    assert_eq!(
+        msg,
+        "transport_endpoints must be provided or setRgbProxyTransport must be configured"
+    );
+}
+
+#[wasm_bindgen_test]
+fn sdk_wallet_facade_rgb_proxy_transport_contract() {
+    let sdk = RlnWasmSdk::new();
+    let wallet_json = test_wallet_data_json();
+    let wallet = sdk.new_wallet(&wallet_json).expect("wallet");
+
+    sdk.wallet_set_rgb_proxy_transport(
+        &wallet,
+        "https://proxy.example.com/json-rpc".to_string(),
+        Some("auth-token".to_string()),
+        Some("0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string()),
+    )
+    .expect("set proxy transport via facade");
+
+    let value = sdk
+        .wallet_rgb_proxy_transport_value(&wallet)
+        .expect("value via facade");
+    let parsed: RlnWasmRgbProxyTransportConfigData =
+        serde_wasm_bindgen::from_value(value).expect("parse");
+    assert_eq!(parsed.endpoint, "https://proxy.example.com/json-rpc");
+    assert_eq!(parsed.auth_token.as_deref(), Some("auth-token"));
+    assert_eq!(
+        parsed.node_id.as_deref(),
+        Some("0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0")
+    );
+
+    sdk.wallet_clear_rgb_proxy_transport(&wallet);
+    let cleared = sdk
+        .wallet_rgb_proxy_transport_value(&wallet)
+        .expect("cleared value via facade");
+    assert!(cleared.is_null(), "expected null after facade clear");
+}
+
+#[wasm_bindgen_test]
+fn wallet_rgb_proxy_transport_persists_across_wrappers_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = RlnWasmSdk::new();
+    let wallet_json = test_wallet_data_json();
+
+    let wallet_a = sdk.new_wallet(&wallet_json).expect("wallet a");
+    wallet_a
+        .set_rgb_proxy_transport("http://127.0.0.1:3000/rgb/json-rpc".to_string(), None, None)
+        .expect("set transport on wallet a");
+
+    let wallet_b = sdk.new_wallet(&wallet_json).expect("wallet b");
+    let value_b = wallet_b
+        .rgb_proxy_transport_value()
+        .expect("read transport from wallet b");
+    let parsed_b: RlnWasmRgbProxyTransportConfigData =
+        serde_wasm_bindgen::from_value(value_b).expect("parse wallet b transport");
+    assert_eq!(parsed_b.endpoint, "http://127.0.0.1:3000/rgb/json-rpc");
+
+    wallet_b.clear_rgb_proxy_transport();
+    let value_a = wallet_a
+        .rgb_proxy_transport_value()
+        .expect("read transport from wallet a after clear");
+    assert!(
+        value_a.is_null(),
+        "expected clear on wallet b to affect shared wallet config"
+    );
+}
+
+#[wasm_bindgen_test]
+fn wallet_rgb_proxy_transport_restores_from_local_storage_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = RlnWasmSdk::new();
+    let wallet_json = test_wallet_data_json();
+
+    let wallet_a = sdk.new_wallet(&wallet_json).expect("wallet a");
+    wallet_a
+        .set_rgb_proxy_transport("http://127.0.0.1:3000/rgb/json-rpc".to_string(), None, None)
+        .expect("set transport on wallet a");
+
+    WASM_WALLET_RGB_PROXY_TRANSPORTS.with(|store| {
+        store.borrow_mut().clear();
+    });
+
+    let wallet_b = sdk.new_wallet(&wallet_json).expect("wallet b");
+    let value_b = wallet_b
+        .rgb_proxy_transport_value()
+        .expect("read transport from wallet b");
+    let parsed_b: RlnWasmRgbProxyTransportConfigData =
+        serde_wasm_bindgen::from_value(value_b).expect("parse wallet b transport");
+    assert_eq!(parsed_b.endpoint, "http://127.0.0.1:3000/rgb/json-rpc");
 }

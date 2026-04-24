@@ -18,14 +18,49 @@ fn reset_wasm_media_store_for_tests() {
     WASM_SDK_DEFAULT_WALLET.with(|slot| {
         *slot.borrow_mut() = None;
     });
+    WASM_SDK_DEFAULT_RGB_PROXY_TRANSPORT.with(|slot| {
+        slot.borrow_mut().take();
+    });
+    WASM_WALLET_RGB_PROXY_TRANSPORTS.with(|store| {
+        store.borrow_mut().clear();
+    });
 }
+
+#[cfg(target_arch = "wasm32")]
+fn clear_wasm_media_storage() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(Some(storage)) = window.local_storage() else {
+        return;
+    };
+    let mut keys = Vec::new();
+    let len = storage.length().unwrap_or(0);
+    for idx in 0..len {
+        if let Ok(Some(key)) = storage.key(idx) {
+            if key.starts_with(MEDIA_STORAGE_PREFIX)
+                || key.starts_with(WALLET_RGB_PROXY_STORAGE_PREFIX)
+            {
+                keys.push(key);
+            }
+        }
+    }
+    for key in keys {
+        let _ = storage.remove_item(&key);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn clear_wasm_media_storage() {}
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn reset_wasm_runtime_state_for_tests() {
     reset_wasm_sdk_lifecycle_state_for_tests();
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
-    crate::ln_node::reset_runtime_event_log_storage_for_tests();
-    crate::swap_runtime::reset_swap_runtime_state_for_tests();
+    crate::set_sdk_default_enable_virtual_channels_v0(false);
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::reset_runtime_event_log_storage_for_tests();
+    crate::chain_sync::test_utils::reset_chain_sync_storage_for_tests();
+    crate::swap_runtime::test_utils::reset_swap_runtime_state_for_tests();
     reset_wasm_media_store_for_tests();
 }
 

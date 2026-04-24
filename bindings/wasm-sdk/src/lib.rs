@@ -1,29 +1,33 @@
 use bitcoin_hashes::sha256::Hash as Sha256;
 use bitcoin_hashes::Hash as _;
 use gloo_net::websocket::futures::WebSocket;
+use secp256k1::PublicKey as SecpPublicKey;
 use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::to_value as to_js_value;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::str::FromStr;
 use wasm_bindgen::prelude::*;
 
+mod chain_sync;
 mod ldk_event_applier;
 mod ldk_runtime;
 mod ln_node;
+mod ln_runtime_native;
 mod ln_transport;
 mod onion_runtime;
 mod peer_session;
 mod runtime_store;
 mod swap_runtime;
 #[cfg(test)]
+#[path = "tests/test_utils.rs"]
 mod test_utils;
 pub use ldk_runtime::*;
 pub use ln_node::*;
+pub use ln_runtime_native::*;
 pub use ln_transport::*;
 pub use peer_session::*;
-#[cfg(test)]
-pub(crate) use test_utils::reset_wasm_runtime_state_for_tests;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RlnWasmSdkRuntimeCapabilitiesData {
@@ -100,9 +104,16 @@ thread_local! {
         RefCell::new(HashMap::new());
     static WASM_SDK_DEFAULT_WALLET: RefCell<Option<Rc<RefCell<rgb_lib_wasm::Wallet>>>> =
         RefCell::new(None);
+    static WASM_SDK_DEFAULT_RGB_PROXY_TRANSPORT: RefCell<Option<RlnWasmRgbProxyTransportConfigData>> =
+        RefCell::new(None);
+    static WASM_WALLET_RGB_PROXY_TRANSPORTS: RefCell<HashMap<String, RlnWasmRgbProxyTransportConfigData>> =
+        RefCell::new(HashMap::new());
+    static WASM_SDK_DEFAULT_ENABLE_VIRTUAL_CHANNELS_V0: RefCell<bool> =
+        const { RefCell::new(false) };
 }
 
 const MEDIA_STORAGE_PREFIX: &str = "rln:wasm:media:";
+const WALLET_RGB_PROXY_STORAGE_PREFIX: &str = "rln:wasm:wallet-rgb-proxy:";
 
 pub(crate) fn ensure_sdk_node_runtime_allowed() -> Result<(), JsValue> {
     WASM_SDK_LIFECYCLE_STATE.with(|state| {
@@ -124,6 +135,16 @@ pub(crate) fn sdk_node_identity_seed() -> Option<String> {
         }
         state.mnemonic.clone()
     })
+}
+
+pub(crate) fn sdk_default_enable_virtual_channels_v0() -> bool {
+    WASM_SDK_DEFAULT_ENABLE_VIRTUAL_CHANNELS_V0.with(|value| *value.borrow())
+}
+
+pub(crate) fn set_sdk_default_enable_virtual_channels_v0(enabled: bool) {
+    WASM_SDK_DEFAULT_ENABLE_VIRTUAL_CHANNELS_V0.with(|value| {
+        *value.borrow_mut() = enabled;
+    });
 }
 
 fn sync_runtime_session_authority_from_lifecycle(state: &WasmSdkLifecycleState) {
@@ -168,6 +189,7 @@ async fn bootstrap_default_wallet_from_lifecycle() -> Result<(), JsValue> {
     })?;
     let wallet_data_json = build_auto_wallet_data_json_from_mnemonic(&mnemonic)?;
     let wallet = RlnWasmWallet::create(&wallet_data_json).await?;
+    apply_default_rgb_proxy_transport_to_wallet(&wallet)?;
     WASM_SDK_DEFAULT_WALLET.with(|slot| {
         *slot.borrow_mut() = Some(Rc::clone(&wallet.inner));
     });
@@ -184,6 +206,17 @@ fn maybe_attach_default_wallet_to_node(node: &RlnWasmNode) {
 
 pub(crate) fn try_attach_default_wallet_to_node(node: &RlnWasmNode) {
     maybe_attach_default_wallet_to_node(node);
+}
+
+fn sdk_default_rgb_proxy_transport() -> Option<RlnWasmRgbProxyTransportConfigData> {
+    WASM_SDK_DEFAULT_RGB_PROXY_TRANSPORT.with(|slot| slot.borrow().as_ref().cloned())
+}
+
+fn apply_default_rgb_proxy_transport_to_wallet(wallet: &RlnWasmWallet) -> Result<(), JsValue> {
+    let Some(config) = sdk_default_rgb_proxy_transport() else {
+        return Ok(());
+    };
+    wallet.set_rgb_proxy_transport(config.endpoint, config.auth_token, config.node_id)
 }
 
 impl From<rgb_lib_wasm::keys::Keys> for RlnRgbKeysData {
@@ -292,6 +325,13 @@ pub struct WasmSendRgbFromGroupsData {
     pub unsigned_psbt: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RlnWasmRgbProxyTransportConfigData {
+    pub endpoint: String,
+    pub auth_token: Option<String>,
+    pub node_id: Option<String>,
+}
+
 fn recipient_map_from_groups(
     recipient_groups: Vec<WasmSendRgbAssetRecipientsInput>,
 ) -> Result<HashMap<String, Vec<rgb_lib_wasm::wallet::Recipient>>, JsValue> {
@@ -348,6 +388,10 @@ fn media_storage_key(digest: &str) -> String {
     format!("{MEDIA_STORAGE_PREFIX}{digest}")
 }
 
+fn wallet_rgb_proxy_storage_key(idb_key: &str) -> String {
+    format!("{WALLET_RGB_PROXY_STORAGE_PREFIX}{idb_key}")
+}
+
 fn media_store_insert(digest: &str, entry: &WasmMediaStoreEntry) {
     WASM_MEDIA_STORE.with(|store| {
         store.borrow_mut().insert(digest.to_string(), entry.clone());
@@ -369,6 +413,45 @@ fn media_store_get(digest: &str) -> Option<WasmMediaStoreEntry> {
         store.borrow_mut().insert(digest.to_string(), entry.clone());
     });
     Some(entry)
+}
+
+fn wallet_rgb_proxy_transport_insert(
+    idb_key: &str,
+    config: &RlnWasmRgbProxyTransportConfigData,
+) -> Result<(), JsValue> {
+    WASM_WALLET_RGB_PROXY_TRANSPORTS.with(|store| {
+        store
+            .borrow_mut()
+            .insert(idb_key.to_string(), config.clone());
+    });
+    let raw = serde_json::to_string(config).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    local_storage_set_item(&wallet_rgb_proxy_storage_key(idb_key), &raw)
+}
+
+fn wallet_rgb_proxy_transport_remove(idb_key: &str) {
+    WASM_WALLET_RGB_PROXY_TRANSPORTS.with(|store| {
+        store.borrow_mut().remove(idb_key);
+    });
+    let _ = local_storage_remove_item(&wallet_rgb_proxy_storage_key(idb_key));
+}
+
+fn wallet_rgb_proxy_transport_get(idb_key: &str) -> Option<RlnWasmRgbProxyTransportConfigData> {
+    if let Some(config) =
+        WASM_WALLET_RGB_PROXY_TRANSPORTS.with(|store| store.borrow().get(idb_key).cloned())
+    {
+        return Some(config);
+    }
+
+    let raw = local_storage_get_item(&wallet_rgb_proxy_storage_key(idb_key))
+        .ok()
+        .flatten()?;
+    let config = serde_json::from_str::<RlnWasmRgbProxyTransportConfigData>(&raw).ok()?;
+    WASM_WALLET_RGB_PROXY_TRANSPORTS.with(|store| {
+        store
+            .borrow_mut()
+            .insert(idb_key.to_string(), config.clone());
+    });
+    Some(config)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -403,33 +486,21 @@ fn local_storage_set_item(_key: &str, _value: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
-#[cfg(test)]
 #[cfg(target_arch = "wasm32")]
-fn clear_wasm_media_storage() {
+fn local_storage_remove_item(key: &str) -> Result<(), JsValue> {
     let Some(window) = web_sys::window() else {
-        return;
+        return Ok(());
     };
-    let Ok(Some(storage)) = window.local_storage() else {
-        return;
+    let Some(storage) = window.local_storage()? else {
+        return Ok(());
     };
-    let mut keys = Vec::new();
-    let len = storage.length().unwrap_or(0);
-    for idx in 0..len {
-        if let Ok(Some(key)) = storage.key(idx) {
-            if key.starts_with(MEDIA_STORAGE_PREFIX) {
-                keys.push(key);
-            }
-        }
-    }
-    for key in keys {
-        let _ = storage.remove_item(&key);
-    }
+    storage.remove_item(key)
 }
 
-#[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn clear_wasm_media_storage() {}
+fn local_storage_remove_item(_key: &str) -> Result<(), JsValue> {
+    Ok(())
+}
 
 fn normalize_media_digest(input: &str) -> Result<String, JsValue> {
     let digest = input.trim().to_ascii_lowercase();
@@ -592,6 +663,20 @@ pub struct RlnWasmSdkWalletHandle {
     inner: RlnWasmWallet,
 }
 
+impl std::fmt::Debug for RlnWasmSdkNodeHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RlnWasmSdkNodeHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RlnWasmSdkWalletHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RlnWasmSdkWalletHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 #[wasm_bindgen]
 impl RlnWasmSdk {
     #[wasm_bindgen(constructor)]
@@ -607,6 +692,11 @@ impl RlnWasmSdk {
     #[wasm_bindgen(js_name = version)]
     pub fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    #[wasm_bindgen(js_name = preloadPersistentRuntimeState)]
+    pub async fn preload_persistent_runtime_state(&self) -> Result<(), JsValue> {
+        runtime_store::preload_runtime_state_from_persistent_store().await
     }
 
     #[wasm_bindgen(js_name = initValue)]
@@ -719,7 +809,7 @@ impl RlnWasmSdk {
         _request_json: String,
     ) -> Result<JsValue, JsValue> {
         Err(JsValue::from_str(
-            "send_rgb_from_groups is not supported in wasm scaffold: grouped SDK transfer adapter is unavailable",
+            "send_rgb_from_groups is not supported in wasm runtime: grouped SDK transfer adapter is unavailable",
         ))
     }
 
@@ -832,7 +922,7 @@ impl RlnWasmSdk {
     #[wasm_bindgen(js_name = issueAssetUdaValue)]
     pub async fn issue_asset_uda_value(&self, _request_json: String) -> Result<JsValue, JsValue> {
         Err(JsValue::from_str(
-            "issue_asset_uda is not supported in wasm scaffold: RLN issuance adapter is unavailable",
+            "issue_asset_uda is not supported in wasm runtime: RLN issuance adapter is unavailable",
         ))
     }
 
@@ -891,7 +981,7 @@ impl RlnWasmSdk {
         js_obj(&RlnWasmSdkRuntimeCapabilitiesData {
             wallet_runtime: true,
             node_runtime: true,
-            ldk_runtime_scaffold: true,
+            ldk_runtime_scaffold: false,
             callback_status_updates: true,
         })
     }
@@ -903,14 +993,37 @@ impl RlnWasmSdk {
         js_to_json(&parsed)
     }
 
+    #[wasm_bindgen(js_name = setDefaultEnableVirtualChannelsV0)]
+    pub fn set_default_enable_virtual_channels_v0_api(&self, enabled: bool) {
+        set_sdk_default_enable_virtual_channels_v0(enabled);
+    }
+
+    #[wasm_bindgen(js_name = defaultEnableVirtualChannelsV0Value)]
+    pub fn default_enable_virtual_channels_v0_value(&self) -> Result<JsValue, JsValue> {
+        js_obj(&serde_json::json!({
+            "enabled": sdk_default_enable_virtual_channels_v0()
+        }))
+    }
+
+    #[wasm_bindgen(js_name = defaultEnableVirtualChannelsV0Json)]
+    pub fn default_enable_virtual_channels_v0_json(&self) -> Result<String, JsValue> {
+        let value = self.default_enable_virtual_channels_v0_value()?;
+        let parsed: serde_json::Value = js_from(value)?;
+        js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = newWallet)]
     pub fn new_wallet(&self, wallet_data_json: &str) -> Result<RlnWasmWallet, JsValue> {
-        RlnWasmWallet::new(wallet_data_json)
+        let wallet = RlnWasmWallet::new(wallet_data_json)?;
+        apply_default_rgb_proxy_transport_to_wallet(&wallet)?;
+        Ok(wallet)
     }
 
     #[wasm_bindgen(js_name = createWallet)]
     pub async fn create_wallet(&self, wallet_data_json: &str) -> Result<RlnWasmWallet, JsValue> {
-        RlnWasmWallet::create(wallet_data_json).await
+        let wallet = RlnWasmWallet::create(wallet_data_json).await?;
+        apply_default_rgb_proxy_transport_to_wallet(&wallet)?;
+        Ok(wallet)
     }
 
     #[wasm_bindgen(js_name = newNode)]
@@ -921,14 +1034,14 @@ impl RlnWasmSdk {
         Ok(node)
     }
 
-    #[wasm_bindgen(js_name = newNodeWithRuntimeBackend)]
-    pub fn new_node_with_runtime_backend(
+    #[wasm_bindgen(js_name = newNodeWithRuntimeId)]
+    pub fn new_node_with_runtime_id(
         &self,
         proxy_url: String,
-        runtime_backend: String,
+        node_runtime_id: String,
     ) -> Result<RlnWasmNode, JsValue> {
         ensure_sdk_node_runtime_allowed()?;
-        let node = RlnWasmNode::new_with_runtime_backend(proxy_url, runtime_backend)?;
+        let node = RlnWasmNode::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id))?;
         maybe_attach_default_wallet_to_node(&node);
         Ok(node)
     }
@@ -941,14 +1054,14 @@ impl RlnWasmSdk {
         Ok(RlnWasmSdkNodeHandle { inner: node })
     }
 
-    #[wasm_bindgen(js_name = createNodeHandleWithRuntimeBackend)]
-    pub fn create_node_handle_with_runtime_backend(
+    #[wasm_bindgen(js_name = createNodeHandleWithRuntimeId)]
+    pub fn create_node_handle_with_runtime_id(
         &self,
         proxy_url: String,
-        runtime_backend: String,
+        node_runtime_id: String,
     ) -> Result<RlnWasmSdkNodeHandle, JsValue> {
         ensure_sdk_node_runtime_allowed()?;
-        let node = RlnWasmNode::new_with_runtime_backend(proxy_url, runtime_backend)?;
+        let node = RlnWasmNode::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id))?;
         maybe_attach_default_wallet_to_node(&node);
         Ok(RlnWasmSdkNodeHandle { inner: node })
     }
@@ -958,9 +1071,9 @@ impl RlnWasmSdk {
         &self,
         wallet_data_json: &str,
     ) -> Result<RlnWasmSdkWalletHandle, JsValue> {
-        Ok(RlnWasmSdkWalletHandle {
-            inner: RlnWasmWallet::new(wallet_data_json)?,
-        })
+        let wallet = RlnWasmWallet::new(wallet_data_json)?;
+        apply_default_rgb_proxy_transport_to_wallet(&wallet)?;
+        Ok(RlnWasmSdkWalletHandle { inner: wallet })
     }
 
     #[wasm_bindgen(js_name = createWalletHandleAsync)]
@@ -968,9 +1081,50 @@ impl RlnWasmSdk {
         &self,
         wallet_data_json: &str,
     ) -> Result<RlnWasmSdkWalletHandle, JsValue> {
-        Ok(RlnWasmSdkWalletHandle {
-            inner: RlnWasmWallet::create(wallet_data_json).await?,
-        })
+        let wallet = RlnWasmWallet::create(wallet_data_json).await?;
+        apply_default_rgb_proxy_transport_to_wallet(&wallet)?;
+        Ok(RlnWasmSdkWalletHandle { inner: wallet })
+    }
+
+    #[wasm_bindgen(js_name = setDefaultRgbProxyTransport)]
+    pub fn set_default_rgb_proxy_transport(
+        &self,
+        endpoint: String,
+        auth_token: Option<String>,
+        node_id: Option<String>,
+    ) -> Result<(), JsValue> {
+        let config =
+            RlnWasmWallet::validate_rgb_proxy_transport_config(endpoint, auth_token, node_id)?;
+        WASM_SDK_DEFAULT_RGB_PROXY_TRANSPORT.with(|slot| {
+            *slot.borrow_mut() = Some(config);
+        });
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = clearDefaultRgbProxyTransport)]
+    pub fn clear_default_rgb_proxy_transport(&self) {
+        WASM_SDK_DEFAULT_RGB_PROXY_TRANSPORT.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+
+    #[wasm_bindgen(js_name = defaultRgbProxyTransportValue)]
+    pub fn default_rgb_proxy_transport_value(&self) -> Result<JsValue, JsValue> {
+        let config = sdk_default_rgb_proxy_transport();
+        match config {
+            Some(cfg) => js_obj(&cfg),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    #[wasm_bindgen(js_name = defaultRgbProxyTransportJson)]
+    pub fn default_rgb_proxy_transport_json(&self) -> Result<String, JsValue> {
+        let value = self.default_rgb_proxy_transport_value()?;
+        if value.is_null() {
+            return Ok("null".to_string());
+        }
+        let parsed: RlnWasmRgbProxyTransportConfigData = js_from(value)?;
+        js_to_json(&parsed)
     }
 
     #[wasm_bindgen(js_name = nodeInfoValue)]
@@ -983,6 +1137,51 @@ impl RlnWasmSdk {
         node.node_info_json()
     }
 
+    #[wasm_bindgen(js_name = nodePubkeyValue)]
+    pub fn node_pubkey_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.node_pubkey_value()
+    }
+
+    #[wasm_bindgen(js_name = nodePubkeyJson)]
+    pub fn node_pubkey_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.node_pubkey_json()
+    }
+
+    #[wasm_bindgen(js_name = setRelaySessionAuth)]
+    pub fn set_relay_session_auth(
+        &self,
+        node: &RlnWasmNode,
+        relay_auth_token: Option<String>,
+        relay_node_id: Option<String>,
+    ) -> Result<(), JsValue> {
+        node.set_relay_session_auth(relay_auth_token, relay_node_id)
+    }
+
+    #[wasm_bindgen(js_name = relaySessionAuthValue)]
+    pub fn relay_session_auth_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.relay_session_auth_value()
+    }
+
+    #[wasm_bindgen(js_name = relaySessionAuthJson)]
+    pub fn relay_session_auth_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.relay_session_auth_json()
+    }
+
+    #[wasm_bindgen(js_name = setEnableVirtualChannelsV0)]
+    pub fn set_enable_virtual_channels_v0(&self, node: &RlnWasmNode, enabled: bool) {
+        node.set_enable_virtual_channels_v0(enabled);
+    }
+
+    #[wasm_bindgen(js_name = enableVirtualChannelsV0Value)]
+    pub fn enable_virtual_channels_v0_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.enable_virtual_channels_v0_value()
+    }
+
+    #[wasm_bindgen(js_name = enableVirtualChannelsV0Json)]
+    pub fn enable_virtual_channels_v0_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.enable_virtual_channels_v0_json()
+    }
+
     #[wasm_bindgen(js_name = ldkRuntimeStatusValue)]
     pub fn ldk_runtime_status_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
         node.ldk_runtime_status_value()
@@ -993,6 +1192,49 @@ impl RlnWasmSdk {
         node.ldk_runtime_status_json()
     }
 
+    #[wasm_bindgen(js_name = ldkRuntimeComponentsValue)]
+    pub fn ldk_runtime_components_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.ldk_runtime_components_value()
+    }
+
+    #[wasm_bindgen(js_name = ldkRuntimeComponentsJson)]
+    pub fn ldk_runtime_components_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.ldk_runtime_components_json()
+    }
+
+    #[wasm_bindgen(js_name = nativeRuntimeCoreStatusValue)]
+    pub fn native_runtime_core_status_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.native_runtime_core_status_value()
+    }
+
+    #[wasm_bindgen(js_name = nativeRuntimeCoreStatusJson)]
+    pub fn native_runtime_core_status_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.native_runtime_core_status_json()
+    }
+
+    #[wasm_bindgen(js_name = drainNativeRuntimeQueueValue)]
+    pub fn drain_native_runtime_queue_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.drain_native_runtime_queue_value()
+    }
+
+    #[wasm_bindgen(js_name = drainNativeRuntimeQueueJson)]
+    pub fn drain_native_runtime_queue_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.drain_native_runtime_queue_json()
+    }
+
+    #[wasm_bindgen(js_name = processNativeRuntimeQueueValue)]
+    pub fn process_native_runtime_queue_value(
+        &self,
+        node: &RlnWasmNode,
+    ) -> Result<JsValue, JsValue> {
+        node.process_native_runtime_queue_value()
+    }
+
+    #[wasm_bindgen(js_name = processNativeRuntimeQueueJson)]
+    pub fn process_native_runtime_queue_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.process_native_runtime_queue_json()
+    }
+
     #[wasm_bindgen(js_name = networkInfoValue)]
     pub fn network_info_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
         node.network_info_value()
@@ -1001,6 +1243,66 @@ impl RlnWasmSdk {
     #[wasm_bindgen(js_name = networkInfoJson)]
     pub fn network_info_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
         node.network_info_json()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStartValue)]
+    pub fn chain_sync_start_value(
+        &self,
+        node: &RlnWasmNode,
+        indexer_url: String,
+        poll_interval_ms: Option<u32>,
+    ) -> Result<JsValue, JsValue> {
+        node.chain_sync_start_value(indexer_url, poll_interval_ms)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStartJson)]
+    pub fn chain_sync_start_json(
+        &self,
+        node: &RlnWasmNode,
+        indexer_url: String,
+        poll_interval_ms: Option<u32>,
+    ) -> Result<String, JsValue> {
+        node.chain_sync_start_json(indexer_url, poll_interval_ms)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStopValue)]
+    pub fn chain_sync_stop_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.chain_sync_stop_value()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStopJson)]
+    pub fn chain_sync_stop_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.chain_sync_stop_json()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStatusValue)]
+    pub fn chain_sync_status_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.chain_sync_status_value()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStatusJson)]
+    pub fn chain_sync_status_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.chain_sync_status_json()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncTickValue)]
+    pub async fn chain_sync_tick_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.chain_sync_tick_value().await
+    }
+
+    #[wasm_bindgen(js_name = chainSyncTickJson)]
+    pub async fn chain_sync_tick_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.chain_sync_tick_json().await
+    }
+
+    #[wasm_bindgen(js_name = chainSyncEnqueueRebroadcastTx)]
+    pub fn chain_sync_enqueue_rebroadcast_tx(
+        &self,
+        node: &RlnWasmNode,
+        txid: String,
+        tx_hex: String,
+    ) -> Result<(), JsValue> {
+        node.chain_sync_enqueue_rebroadcast_tx(txid, tx_hex)
     }
 
     #[wasm_bindgen(js_name = signMessageValue)]
@@ -1029,6 +1331,16 @@ impl RlnWasmSdk {
     #[wasm_bindgen(js_name = listPaymentsJson)]
     pub fn list_payments_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
         node.list_payments_json()
+    }
+
+    #[wasm_bindgen(js_name = listRgbLnTransfersValue)]
+    pub fn list_rgb_ln_transfers_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.list_rgb_ln_transfers_value()
+    }
+
+    #[wasm_bindgen(js_name = listRgbLnTransfersJson)]
+    pub fn list_rgb_ln_transfers_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.list_rgb_ln_transfers_json()
     }
 
     #[wasm_bindgen(js_name = getPaymentValue)]
@@ -1182,6 +1494,56 @@ impl RlnWasmSdk {
     #[wasm_bindgen(js_name = walletGetAddress)]
     pub fn wallet_get_address(&self, wallet: &RlnWasmWallet) -> Result<String, JsValue> {
         wallet.get_address()
+    }
+
+    #[wasm_bindgen(js_name = walletSignPsbtValue)]
+    pub fn wallet_sign_psbt_value(
+        &self,
+        wallet: &RlnWasmWallet,
+        unsigned_psbt: String,
+    ) -> Result<String, JsValue> {
+        wallet.sign_psbt_value(unsigned_psbt)
+    }
+
+    #[wasm_bindgen(js_name = walletSignPsbtJson)]
+    pub fn wallet_sign_psbt_json(
+        &self,
+        wallet: &RlnWasmWallet,
+        unsigned_psbt: String,
+    ) -> Result<String, JsValue> {
+        wallet.sign_psbt_json(unsigned_psbt)
+    }
+
+    #[wasm_bindgen(js_name = walletSetRgbProxyTransport)]
+    pub fn wallet_set_rgb_proxy_transport(
+        &self,
+        wallet: &RlnWasmWallet,
+        endpoint: String,
+        auth_token: Option<String>,
+        node_id: Option<String>,
+    ) -> Result<(), JsValue> {
+        wallet.set_rgb_proxy_transport(endpoint, auth_token, node_id)
+    }
+
+    #[wasm_bindgen(js_name = walletClearRgbProxyTransport)]
+    pub fn wallet_clear_rgb_proxy_transport(&self, wallet: &RlnWasmWallet) {
+        wallet.clear_rgb_proxy_transport();
+    }
+
+    #[wasm_bindgen(js_name = walletRgbProxyTransportValue)]
+    pub fn wallet_rgb_proxy_transport_value(
+        &self,
+        wallet: &RlnWasmWallet,
+    ) -> Result<JsValue, JsValue> {
+        wallet.rgb_proxy_transport_value()
+    }
+
+    #[wasm_bindgen(js_name = walletRgbProxyTransportJson)]
+    pub fn wallet_rgb_proxy_transport_json(
+        &self,
+        wallet: &RlnWasmWallet,
+    ) -> Result<String, JsValue> {
+        wallet.rgb_proxy_transport_json()
     }
 
     #[wasm_bindgen(js_name = walletGetBtcBalanceValue)]
@@ -1538,6 +1900,67 @@ impl RlnWasmSdk {
     }
 }
 
+#[cfg(test)]
+impl RlnWasmSdk {
+    pub fn new_node_with_runtime_backend(
+        &self,
+        proxy_url: String,
+        runtime_backend: String,
+    ) -> Result<RlnWasmNode, JsValue> {
+        if runtime_backend.trim() != "wasm_native_ldk" {
+            return Err(JsValue::from_str(&format!(
+                "unknown runtime backend: {}",
+                runtime_backend.trim()
+            )));
+        }
+        self.new_node(proxy_url)
+    }
+
+    pub fn new_node_with_runtime_backend_and_runtime_id(
+        &self,
+        proxy_url: String,
+        runtime_backend: String,
+        node_runtime_id: String,
+    ) -> Result<RlnWasmNode, JsValue> {
+        if runtime_backend.trim() != "wasm_native_ldk" {
+            return Err(JsValue::from_str(&format!(
+                "unknown runtime backend: {}",
+                runtime_backend.trim()
+            )));
+        }
+        self.new_node_with_runtime_id(proxy_url, node_runtime_id)
+    }
+
+    pub fn create_node_handle_with_runtime_backend(
+        &self,
+        proxy_url: String,
+        runtime_backend: String,
+    ) -> Result<RlnWasmSdkNodeHandle, JsValue> {
+        if runtime_backend.trim() != "wasm_native_ldk" {
+            return Err(JsValue::from_str(&format!(
+                "unknown runtime backend: {}",
+                runtime_backend.trim()
+            )));
+        }
+        self.create_node_handle(proxy_url)
+    }
+
+    pub fn create_node_handle_with_runtime_backend_and_runtime_id(
+        &self,
+        proxy_url: String,
+        runtime_backend: String,
+        node_runtime_id: String,
+    ) -> Result<RlnWasmSdkNodeHandle, JsValue> {
+        if runtime_backend.trim() != "wasm_native_ldk" {
+            return Err(JsValue::from_str(&format!(
+                "unknown runtime backend: {}",
+                runtime_backend.trim()
+            )));
+        }
+        self.create_node_handle_with_runtime_id(proxy_url, node_runtime_id)
+    }
+}
+
 #[wasm_bindgen]
 impl RlnWasmSdkNodeHandle {
     #[wasm_bindgen(js_name = nodeInfoValue)]
@@ -1550,6 +1973,51 @@ impl RlnWasmSdkNodeHandle {
         self.inner.node_info_json()
     }
 
+    #[wasm_bindgen(js_name = nodePubkeyValue)]
+    pub fn node_pubkey_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.node_pubkey_value()
+    }
+
+    #[wasm_bindgen(js_name = nodePubkeyJson)]
+    pub fn node_pubkey_json(&self) -> Result<String, JsValue> {
+        self.inner.node_pubkey_json()
+    }
+
+    #[wasm_bindgen(js_name = setRelaySessionAuth)]
+    pub fn set_relay_session_auth(
+        &self,
+        relay_auth_token: Option<String>,
+        relay_node_id: Option<String>,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .set_relay_session_auth(relay_auth_token, relay_node_id)
+    }
+
+    #[wasm_bindgen(js_name = relaySessionAuthValue)]
+    pub fn relay_session_auth_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.relay_session_auth_value()
+    }
+
+    #[wasm_bindgen(js_name = relaySessionAuthJson)]
+    pub fn relay_session_auth_json(&self) -> Result<String, JsValue> {
+        self.inner.relay_session_auth_json()
+    }
+
+    #[wasm_bindgen(js_name = setEnableVirtualChannelsV0)]
+    pub fn set_enable_virtual_channels_v0(&self, enabled: bool) {
+        self.inner.set_enable_virtual_channels_v0(enabled);
+    }
+
+    #[wasm_bindgen(js_name = enableVirtualChannelsV0Value)]
+    pub fn enable_virtual_channels_v0_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.enable_virtual_channels_v0_value()
+    }
+
+    #[wasm_bindgen(js_name = enableVirtualChannelsV0Json)]
+    pub fn enable_virtual_channels_v0_json(&self) -> Result<String, JsValue> {
+        self.inner.enable_virtual_channels_v0_json()
+    }
+
     #[wasm_bindgen(js_name = ldkRuntimeStatusValue)]
     pub fn ldk_runtime_status_value(&self) -> Result<JsValue, JsValue> {
         self.inner.ldk_runtime_status_value()
@@ -1560,6 +2028,46 @@ impl RlnWasmSdkNodeHandle {
         self.inner.ldk_runtime_status_json()
     }
 
+    #[wasm_bindgen(js_name = ldkRuntimeComponentsValue)]
+    pub fn ldk_runtime_components_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.ldk_runtime_components_value()
+    }
+
+    #[wasm_bindgen(js_name = ldkRuntimeComponentsJson)]
+    pub fn ldk_runtime_components_json(&self) -> Result<String, JsValue> {
+        self.inner.ldk_runtime_components_json()
+    }
+
+    #[wasm_bindgen(js_name = nativeRuntimeCoreStatusValue)]
+    pub fn native_runtime_core_status_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.native_runtime_core_status_value()
+    }
+
+    #[wasm_bindgen(js_name = nativeRuntimeCoreStatusJson)]
+    pub fn native_runtime_core_status_json(&self) -> Result<String, JsValue> {
+        self.inner.native_runtime_core_status_json()
+    }
+
+    #[wasm_bindgen(js_name = drainNativeRuntimeQueueValue)]
+    pub fn drain_native_runtime_queue_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.drain_native_runtime_queue_value()
+    }
+
+    #[wasm_bindgen(js_name = drainNativeRuntimeQueueJson)]
+    pub fn drain_native_runtime_queue_json(&self) -> Result<String, JsValue> {
+        self.inner.drain_native_runtime_queue_json()
+    }
+
+    #[wasm_bindgen(js_name = processNativeRuntimeQueueValue)]
+    pub fn process_native_runtime_queue_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.process_native_runtime_queue_value()
+    }
+
+    #[wasm_bindgen(js_name = processNativeRuntimeQueueJson)]
+    pub fn process_native_runtime_queue_json(&self) -> Result<String, JsValue> {
+        self.inner.process_native_runtime_queue_json()
+    }
+
     #[wasm_bindgen(js_name = networkInfoValue)]
     pub fn network_info_value(&self) -> Result<JsValue, JsValue> {
         self.inner.network_info_value()
@@ -1568,6 +2076,65 @@ impl RlnWasmSdkNodeHandle {
     #[wasm_bindgen(js_name = networkInfoJson)]
     pub fn network_info_json(&self) -> Result<String, JsValue> {
         self.inner.network_info_json()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStartValue)]
+    pub fn chain_sync_start_value(
+        &self,
+        indexer_url: String,
+        poll_interval_ms: Option<u32>,
+    ) -> Result<JsValue, JsValue> {
+        self.inner
+            .chain_sync_start_value(indexer_url, poll_interval_ms)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStartJson)]
+    pub fn chain_sync_start_json(
+        &self,
+        indexer_url: String,
+        poll_interval_ms: Option<u32>,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .chain_sync_start_json(indexer_url, poll_interval_ms)
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStopValue)]
+    pub fn chain_sync_stop_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.chain_sync_stop_value()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStopJson)]
+    pub fn chain_sync_stop_json(&self) -> Result<String, JsValue> {
+        self.inner.chain_sync_stop_json()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStatusValue)]
+    pub fn chain_sync_status_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.chain_sync_status_value()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncStatusJson)]
+    pub fn chain_sync_status_json(&self) -> Result<String, JsValue> {
+        self.inner.chain_sync_status_json()
+    }
+
+    #[wasm_bindgen(js_name = chainSyncTickValue)]
+    pub async fn chain_sync_tick_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.chain_sync_tick_value().await
+    }
+
+    #[wasm_bindgen(js_name = chainSyncTickJson)]
+    pub async fn chain_sync_tick_json(&self) -> Result<String, JsValue> {
+        self.inner.chain_sync_tick_json().await
+    }
+
+    #[wasm_bindgen(js_name = chainSyncEnqueueRebroadcastTx)]
+    pub fn chain_sync_enqueue_rebroadcast_tx(
+        &self,
+        txid: String,
+        tx_hex: String,
+    ) -> Result<(), JsValue> {
+        self.inner.chain_sync_enqueue_rebroadcast_tx(txid, tx_hex)
     }
 
     #[wasm_bindgen(js_name = signMessageValue)]
@@ -1588,6 +2155,16 @@ impl RlnWasmSdkNodeHandle {
     #[wasm_bindgen(js_name = listPaymentsJson)]
     pub fn list_payments_json(&self) -> Result<String, JsValue> {
         self.inner.list_payments_json()
+    }
+
+    #[wasm_bindgen(js_name = listRgbLnTransfersValue)]
+    pub fn list_rgb_ln_transfers_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.list_rgb_ln_transfers_value()
+    }
+
+    #[wasm_bindgen(js_name = listRgbLnTransfersJson)]
+    pub fn list_rgb_ln_transfers_json(&self) -> Result<String, JsValue> {
+        self.inner.list_rgb_ln_transfers_json()
     }
 
     #[wasm_bindgen(js_name = getPaymentValue)]
@@ -1725,9 +2302,60 @@ impl RlnWasmSdkNodeHandle {
         )
     }
 
+    #[wasm_bindgen(js_name = openChannelValueWithOptions)]
+    pub fn open_channel_value_with_options(
+        &self,
+        peer_pubkey: String,
+        capacity_sat: u64,
+        public: bool,
+        asset_id: Option<String>,
+        asset_local_amount: Option<u64>,
+        virtual_open_mode: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        self.inner.open_channel_value_with_options(
+            peer_pubkey,
+            capacity_sat,
+            public,
+            asset_id,
+            asset_local_amount,
+            virtual_open_mode,
+        )
+    }
+
+    #[wasm_bindgen(js_name = openChannelJsonWithOptions)]
+    pub fn open_channel_json_with_options(
+        &self,
+        peer_pubkey: String,
+        capacity_sat: u64,
+        public: bool,
+        asset_id: Option<String>,
+        asset_local_amount: Option<u64>,
+        virtual_open_mode: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.inner.open_channel_json_with_options(
+            peer_pubkey,
+            capacity_sat,
+            public,
+            asset_id,
+            asset_local_amount,
+            virtual_open_mode,
+        )
+    }
+
     #[wasm_bindgen(js_name = closeChannel)]
     pub fn close_channel(&self, channel_id: String) -> Result<(), JsValue> {
         self.inner.close_channel(channel_id)
+    }
+
+    #[wasm_bindgen(js_name = closeChannelWithOptions)]
+    pub fn close_channel_with_options(
+        &self,
+        channel_id: String,
+        peer_pubkey: Option<String>,
+        force: bool,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .close_channel_with_options(channel_id, peer_pubkey, force)
     }
 
     #[wasm_bindgen(js_name = getChannelId)]
@@ -1974,6 +2602,42 @@ impl RlnWasmSdkWalletHandle {
         self.inner.get_address()
     }
 
+    #[wasm_bindgen(js_name = signPsbtValue)]
+    pub fn sign_psbt_value(&self, unsigned_psbt: String) -> Result<String, JsValue> {
+        self.inner.sign_psbt_value(unsigned_psbt)
+    }
+
+    #[wasm_bindgen(js_name = signPsbtJson)]
+    pub fn sign_psbt_json(&self, unsigned_psbt: String) -> Result<String, JsValue> {
+        self.inner.sign_psbt_json(unsigned_psbt)
+    }
+
+    #[wasm_bindgen(js_name = setRgbProxyTransport)]
+    pub fn set_rgb_proxy_transport(
+        &self,
+        endpoint: String,
+        auth_token: Option<String>,
+        node_id: Option<String>,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .set_rgb_proxy_transport(endpoint, auth_token, node_id)
+    }
+
+    #[wasm_bindgen(js_name = clearRgbProxyTransport)]
+    pub fn clear_rgb_proxy_transport(&self) {
+        self.inner.clear_rgb_proxy_transport();
+    }
+
+    #[wasm_bindgen(js_name = rgbProxyTransportValue)]
+    pub fn rgb_proxy_transport_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.rgb_proxy_transport_value()
+    }
+
+    #[wasm_bindgen(js_name = rgbProxyTransportJson)]
+    pub fn rgb_proxy_transport_json(&self) -> Result<String, JsValue> {
+        self.inner.rgb_proxy_transport_json()
+    }
+
     #[wasm_bindgen(js_name = getBtcBalanceValue)]
     pub fn get_btc_balance_value(&self) -> Result<JsValue, JsValue> {
         self.inner.get_btc_balance_value()
@@ -2022,6 +2686,42 @@ impl RlnWasmSdkWalletHandle {
     #[wasm_bindgen(js_name = issueAssetUdaJson)]
     pub fn issue_asset_uda_json(&self, request_js: JsValue) -> Result<String, JsValue> {
         self.inner.issue_asset_uda_json(request_js)
+    }
+
+    #[wasm_bindgen(js_name = blindReceiveValue)]
+    pub fn blind_receive_value(
+        &self,
+        asset_id: Option<String>,
+        assignment_js: JsValue,
+        duration_seconds: Option<u32>,
+        transport_endpoints_js: JsValue,
+        min_confirmations: u8,
+    ) -> Result<JsValue, JsValue> {
+        self.inner.blind_receive_value(
+            asset_id,
+            assignment_js,
+            duration_seconds,
+            transport_endpoints_js,
+            min_confirmations,
+        )
+    }
+
+    #[wasm_bindgen(js_name = blindReceiveJson)]
+    pub fn blind_receive_json(
+        &self,
+        asset_id: Option<String>,
+        assignment_js: JsValue,
+        duration_seconds: Option<u32>,
+        transport_endpoints_js: JsValue,
+        min_confirmations: u8,
+    ) -> Result<String, JsValue> {
+        self.inner.blind_receive_json(
+            asset_id,
+            assignment_js,
+            duration_seconds,
+            transport_endpoints_js,
+            min_confirmations,
+        )
     }
 
     #[wasm_bindgen(js_name = sendRgbFromGroupsValue)]
@@ -2440,12 +3140,165 @@ impl RlnWasmWallet {
         js_to_json(&data)
     }
 
+    fn validate_rgb_proxy_transport_config(
+        endpoint: String,
+        auth_token: Option<String>,
+        node_id: Option<String>,
+    ) -> Result<RlnWasmRgbProxyTransportConfigData, JsValue> {
+        let endpoint = endpoint.trim().to_string();
+        if endpoint.is_empty() {
+            return Err(JsValue::from_str("rgb_proxy_endpoint cannot be empty"));
+        }
+        let lower = endpoint.to_ascii_lowercase();
+        if !lower.starts_with("http://") && !lower.starts_with("https://") {
+            return Err(JsValue::from_str(
+                "rgb_proxy_endpoint must use http:// or https://",
+            ));
+        }
+        match (auth_token, node_id) {
+            (None, None) => Ok(RlnWasmRgbProxyTransportConfigData {
+                endpoint,
+                auth_token: None,
+                node_id: None,
+            }),
+            (Some(token), Some(node_id)) => {
+                let token = token.trim().to_string();
+                let node_id = node_id.trim().to_string();
+                if token.is_empty() {
+                    return Err(JsValue::from_str("rgb_proxy_auth_token cannot be empty"));
+                }
+                if node_id.is_empty() {
+                    return Err(JsValue::from_str("rgb_proxy_node_id cannot be empty"));
+                }
+                if SecpPublicKey::from_str(&node_id).is_err() {
+                    return Err(JsValue::from_str("invalid rgb_proxy_node_id"));
+                }
+                Ok(RlnWasmRgbProxyTransportConfigData {
+                    endpoint,
+                    auth_token: Some(token),
+                    node_id: Some(node_id),
+                })
+            }
+            _ => Err(JsValue::from_str(
+                "rgb_proxy_auth_token and rgb_proxy_node_id must be provided together",
+            )),
+        }
+    }
+
+    fn effective_rgb_proxy_endpoint(
+        config: &RlnWasmRgbProxyTransportConfigData,
+    ) -> Result<String, JsValue> {
+        match (&config.auth_token, &config.node_id) {
+            (Some(token), Some(node_id)) => {
+                let separator = if config.endpoint.contains('?') {
+                    '&'
+                } else {
+                    '?'
+                };
+                Ok(format!(
+                    "{}{}auth_token={}&node_id={}",
+                    config.endpoint,
+                    separator,
+                    urlencoding::encode(token),
+                    urlencoding::encode(node_id),
+                ))
+            }
+            (None, None) => Ok(config.endpoint.clone()),
+            _ => Err(JsValue::from_str(
+                "rgb_proxy_auth_token and rgb_proxy_node_id must be provided together",
+            )),
+        }
+    }
+
+    fn rgb_proxy_transport_key(&self) -> String {
+        self.inner.borrow().idb_key()
+    }
+
+    fn current_rgb_proxy_transport(&self) -> Option<RlnWasmRgbProxyTransportConfigData> {
+        let key = self.rgb_proxy_transport_key();
+        if let Some(config) = wallet_rgb_proxy_transport_get(&key) {
+            return Some(config);
+        }
+        let default = sdk_default_rgb_proxy_transport()?;
+        let _ = wallet_rgb_proxy_transport_insert(&key, &default);
+        Some(default)
+    }
+
+    fn resolve_transport_endpoints(
+        &self,
+        transport_endpoints_js: JsValue,
+    ) -> Result<Vec<String>, JsValue> {
+        if transport_endpoints_js.is_null() || transport_endpoints_js.is_undefined() {
+            let Some(config) = self.current_rgb_proxy_transport() else {
+                return Err(JsValue::from_str(
+                    "transport_endpoints must be provided or setRgbProxyTransport must be configured",
+                ));
+            };
+            let endpoint = Self::effective_rgb_proxy_endpoint(&config)?;
+            return Ok(vec![endpoint]);
+        }
+        serde_wasm_bindgen::from_value(transport_endpoints_js)
+            .map_err(|e| JsValue::from_str(&format!("Invalid transport endpoints: {e}")))
+    }
+
+    #[wasm_bindgen(js_name = setRgbProxyTransport)]
+    pub fn set_rgb_proxy_transport(
+        &self,
+        endpoint: String,
+        auth_token: Option<String>,
+        node_id: Option<String>,
+    ) -> Result<(), JsValue> {
+        let config = Self::validate_rgb_proxy_transport_config(endpoint, auth_token, node_id)?;
+        let key = self.rgb_proxy_transport_key();
+        wallet_rgb_proxy_transport_insert(&key, &config)
+    }
+
+    #[wasm_bindgen(js_name = clearRgbProxyTransport)]
+    pub fn clear_rgb_proxy_transport(&self) {
+        let key = self.rgb_proxy_transport_key();
+        wallet_rgb_proxy_transport_remove(&key);
+    }
+
+    #[wasm_bindgen(js_name = rgbProxyTransportValue)]
+    pub fn rgb_proxy_transport_value(&self) -> Result<JsValue, JsValue> {
+        match self.current_rgb_proxy_transport() {
+            Some(config) => js_obj(&config),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    #[wasm_bindgen(js_name = rgbProxyTransportJson)]
+    pub fn rgb_proxy_transport_json(&self) -> Result<String, JsValue> {
+        let value = self.rgb_proxy_transport_value()?;
+        if value.is_null() {
+            return Ok("null".to_string());
+        }
+        let parsed: RlnWasmRgbProxyTransportConfigData = js_from(value)?;
+        js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = getAddress)]
     pub fn get_address(&self) -> Result<String, JsValue> {
         self.inner
             .borrow_mut()
             .get_address()
             .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = signPsbtValue)]
+    pub fn sign_psbt_value(&self, unsigned_psbt: String) -> Result<String, JsValue> {
+        if unsigned_psbt.trim().is_empty() {
+            return Err(JsValue::from_str("unsigned_psbt cannot be empty"));
+        }
+        self.inner
+            .borrow()
+            .sign_psbt(unsigned_psbt, None)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = signPsbtJson)]
+    pub fn sign_psbt_json(&self, unsigned_psbt: String) -> Result<String, JsValue> {
+        self.sign_psbt_value(unsigned_psbt)
     }
 
     #[wasm_bindgen(js_name = getBtcBalanceValue)]
@@ -2554,7 +3407,7 @@ impl RlnWasmWallet {
             return Err(JsValue::from_str("name cannot be empty"));
         }
         Err(JsValue::from_str(
-            "issue_asset_uda is not supported in wasm scaffold: rgb-lib-wasm does not expose a UDA issuance primitive",
+            "issue_asset_uda is not supported in wasm runtime: rgb-lib-wasm does not expose a UDA issuance primitive",
         ))
     }
 
@@ -2673,9 +3526,7 @@ impl RlnWasmWallet {
         }
         let assignment: rgb_lib_wasm::Assignment = serde_wasm_bindgen::from_value(assignment_js)
             .map_err(|e| JsValue::from_str(&format!("Invalid assignment: {e}")))?;
-        let transport_endpoints: Vec<String> =
-            serde_wasm_bindgen::from_value(transport_endpoints_js)
-                .map_err(|e| JsValue::from_str(&format!("Invalid transport endpoints: {e}")))?;
+        let transport_endpoints = self.resolve_transport_endpoints(transport_endpoints_js)?;
         let data = self
             .inner
             .borrow()
@@ -2726,9 +3577,7 @@ impl RlnWasmWallet {
         }
         let assignment: rgb_lib_wasm::Assignment = serde_wasm_bindgen::from_value(assignment_js)
             .map_err(|e| JsValue::from_str(&format!("Invalid assignment: {e}")))?;
-        let transport_endpoints: Vec<String> =
-            serde_wasm_bindgen::from_value(transport_endpoints_js)
-                .map_err(|e| JsValue::from_str(&format!("Invalid transport endpoints: {e}")))?;
+        let transport_endpoints = self.resolve_transport_endpoints(transport_endpoints_js)?;
         let data = self
             .inner
             .borrow_mut()
@@ -3355,8 +4204,11 @@ pub async fn check_ln_peer_websocket_json(
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
+#[path = "tests/sdk_contract_tests.rs"]
 mod sdk_contract_tests;
 #[cfg(all(test, target_arch = "wasm32"))]
+#[path = "tests/wallet_contract_tests.rs"]
 mod wallet_contract_tests;
 #[cfg(all(test, target_arch = "wasm32"))]
+#[path = "tests/wasm_contract_tests.rs"]
 mod wasm_contract_tests;

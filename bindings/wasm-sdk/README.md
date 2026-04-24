@@ -2,8 +2,7 @@
 
 Browser-facing WASM SDK for `rgb-lightning-node`.
 
-This crate provides a JS/WASM API for SDK-level operations and keeps the
-runtime abstraction explicit (`scaffold` vs runtime-backed bridge).
+This crate provides a JS/WASM API for SDK-level operations.
 
 ## Scope
 
@@ -32,8 +31,9 @@ wasm-pack build --target web --out-dir pkg
 
 ## Runtime model
 
-- `RuntimeBackend::Scaffold`: deterministic/testing backend with modeled behavior.
-- `RuntimeBackend::LdkBridge`: bridge-backed runtime path for LN/SDK flows in WASM.
+- Public API: `wasm_native_ldk` runtime only.
+- Boundary: no implicit dependency on a local runtime service endpoint
+  (for example `ws://127.0.0.1:3001`) in production paths.
 
 The SDK surface is object-handle based (same direction as UniFFI SDK instance
 model) and avoids REST coupling.
@@ -49,11 +49,16 @@ WASM checks are wired into CI in `.github/workflows/test.yaml`:
 
 - `wasm-sdk` (native host checks for crate)
 - `wasm-sdk-wasm32` (target compatibility check)
+- `wasm-sdk-browser` (headless browser wasm-bindgen test execution via `wasm-pack test`)
 
 ## Additional docs
 
 - [ERROR_CONTRACT.md](ERROR_CONTRACT.md)
 - [SDK_WASM_ENDPOINT_MATRIX.md](SDK_WASM_ENDPOINT_MATRIX.md)
+- [SDK_WASM_UML_COMPARE.md](SDK_WASM_UML_COMPARE.md)
+- [SDK_WASM_FLOWS_PORTING.md](SDK_WASM_FLOWS_PORTING.md)
+- [LN_WASM_NATIVE_PARITY_SPEC.md](LN_WASM_NATIVE_PARITY_SPEC.md)
+- [RGB_WASM_PROXY_TRANSPORT_SPEC.md](RGB_WASM_PROXY_TRANSPORT_SPEC.md)
 
 ## Related
 

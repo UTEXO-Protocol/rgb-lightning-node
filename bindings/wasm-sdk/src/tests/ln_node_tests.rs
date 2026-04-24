@@ -3,7 +3,7 @@ use futures::executor::block_on;
 use serde::Deserialize;
 use wasm_bindgen_test::wasm_bindgen_test;
 
-use crate::{reset_wasm_runtime_state_for_tests, RlnWasmSdk, RlnWasmSdkRuntimeCapabilitiesData};
+use crate::{RlnWasmSdk, RlnWasmSdkRuntimeCapabilitiesData};
 
 #[derive(Debug, Deserialize)]
 struct TestTransportEventApplyData {
@@ -68,7 +68,7 @@ fn runtime_control_events_are_sequenced_and_recorded() {
 
 #[test]
 fn runtime_event_log_snapshot_restores_on_recreated_node() {
-    reset_runtime_event_log_storage_for_tests();
+    super::test_utils::reset_runtime_event_log_storage_for_tests();
     let storage_key = runtime_event_store_key("ws://runtime-events-persist.example");
     let runtime_events = Rc::new(RefCell::new(vec![RlnWasmNodeRuntimeEventData {
         seq: 1,
@@ -94,9 +94,40 @@ fn runtime_event_log_snapshot_restores_on_recreated_node() {
 }
 
 #[test]
+fn runtime_event_log_snapshot_persists_tail_window_contract() {
+    super::test_utils::reset_runtime_event_log_storage_for_tests();
+    let storage_key = runtime_event_store_key("ws://runtime-events-window.example");
+    let runtime_events = Rc::new(RefCell::new(
+        (1u64..=600)
+            .map(|seq| RlnWasmNodeRuntimeEventData {
+                seq,
+                source: "manual_api".to_string(),
+                event_kind: "payment_status".to_string(),
+                payload_hex: hex::encode(format!("payment_status:{seq}:succeeded")),
+                payment_hash: Some(format!("hash-{seq}")),
+                status: Some("succeeded".to_string()),
+                applied: true,
+                error: None,
+                received_at: seq,
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let next_runtime_event_seq = Rc::new(RefCell::new(600u64));
+    persist_runtime_event_log_state(&storage_key, &runtime_events, &next_runtime_event_seq);
+
+    let restored =
+        load_runtime_event_log_snapshot(&storage_key).expect("snapshot should be restored");
+    assert_eq!(restored.events.len(), 512);
+    assert_eq!(restored.events.first().map(|entry| entry.seq), Some(89));
+    assert_eq!(restored.events.last().map(|entry| entry.seq), Some(600));
+    assert_eq!(restored.next_seq, 600);
+}
+
+#[test]
 #[cfg(target_arch = "wasm32")]
 fn drain_pending_peer_hook_events_applies_queued_payloads() {
-    let ldk_runtime = crate::ldk_runtime::scaffold_ldk_runtime_manager("hook-queue".to_string());
+    let ldk_runtime =
+        crate::ldk_runtime::ldk_runtime_manager("hook-queue".to_string()).expect("runtime manager");
     let peers = Rc::new(RefCell::new(HashMap::<String, PeerEntry>::new()));
     let channels = Rc::new(RefCell::new(HashMap::<String, ChannelEntry>::new()));
     let payments = Rc::new(RefCell::new(HashMap::new()));
@@ -142,7 +173,7 @@ fn drain_pending_peer_hook_events_applies_queued_payloads() {
 fn bridge_apply_payment_status_via_event_stream_updates_runtime_and_log() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_payment(LdkRuntimePaymentStateData {
@@ -214,8 +245,9 @@ fn tolerant_transport_mode_records_non_payment_payload_without_error() {
 }
 
 #[test]
-fn hook_payload_transport_event_updates_scaffold_channel_state() {
-    let ldk_runtime = crate::ldk_runtime::scaffold_ldk_runtime_manager("hook-scaffold".to_string());
+fn hook_payload_transport_event_updates_native_channel_state() {
+    let ldk_runtime = crate::ldk_runtime::ldk_runtime_manager("hook-native".to_string())
+        .expect("runtime manager");
     let peers = Rc::new(RefCell::new(HashMap::<String, PeerEntry>::new()));
     let channels = Rc::new(RefCell::new(HashMap::<String, ChannelEntry>::new()));
     let payments = Rc::new(RefCell::new(HashMap::new()));
@@ -272,7 +304,7 @@ fn hook_payload_transport_event_updates_scaffold_channel_state() {
 fn hook_payload_transport_event_updates_bridge_runtime_state() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
@@ -321,7 +353,7 @@ fn hook_payload_transport_event_updates_bridge_runtime_state() {
 fn hook_payload_peer_reconnected_updates_bridge_peer_started_state() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
@@ -756,7 +788,7 @@ fn parse_transport_event_payload_accepts_hyphen_and_dot_aliases_contract() {
 fn hook_payload_mixed_stream_preserves_event_order_and_terminal_payment_state_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
@@ -1010,7 +1042,7 @@ fn payment_status_event_codec_supports_json_status_field_aliases() {
 fn bridge_backend_list_peers_reads_runtime_state_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
@@ -1035,7 +1067,7 @@ fn bridge_backend_list_peers_reads_runtime_state_contract() {
 fn bridge_backend_channel_views_use_runtime_state_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
@@ -1083,7 +1115,7 @@ fn bridge_backend_channel_views_use_runtime_state_contract() {
 fn bridge_backend_payment_views_use_runtime_state_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_payment(LdkRuntimePaymentStateData {
@@ -1120,7 +1152,7 @@ fn bridge_backend_payment_views_use_runtime_state_contract() {
 fn bridge_backend_ingest_event_syncs_runtime_payment_state_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_payment(LdkRuntimePaymentStateData {
@@ -1154,7 +1186,7 @@ fn bridge_backend_ingest_event_syncs_runtime_payment_state_contract() {
 fn bridge_backend_fail_pending_syncs_runtime_payment_state_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     node.ldk_runtime.upsert_payment(LdkRuntimePaymentStateData {
@@ -1185,7 +1217,7 @@ fn bridge_backend_fail_pending_syncs_runtime_payment_state_contract() {
 fn bridge_backend_disconnect_peer_without_local_session_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     let pubkey = "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0";
@@ -1222,7 +1254,7 @@ fn bridge_backend_disconnect_peer_without_local_session_contract() {
 fn bridge_backend_close_all_peers_clears_runtime_peers_without_sessions_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     for (peer_pubkey, channel_id) in [
@@ -1263,11 +1295,10 @@ fn bridge_backend_close_all_peers_clears_runtime_peers_without_sessions_contract
 
 #[test]
 fn bridge_backend_runtime_state_restores_across_node_instances_contract() {
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.restore.example".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_backend(proxy.clone(), "ldk_bridge".to_string())
-        .expect("node should build");
+    let node_a = RlnWasmNode::new(proxy.clone()).expect("node should build");
     node_a.ensure_runtime_ready().expect("runtime should start");
     node_a.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
         pubkey: "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
@@ -1307,8 +1338,7 @@ fn bridge_backend_runtime_state_restores_across_node_instances_contract() {
                 .to_string(),
         });
 
-    let node_b = RlnWasmNode::new_with_runtime_backend(proxy, "ldk_bridge".to_string())
-        .expect("node should build");
+    let node_b = RlnWasmNode::new(proxy).expect("node should build");
     node_b
         .ensure_runtime_ready()
         .expect("runtime should restore");
@@ -1338,13 +1368,12 @@ fn bridge_backend_runtime_state_restores_across_node_instances_contract() {
 
 #[test]
 fn bridge_backend_restore_requires_peer_reconnect_before_open_channel_contract() {
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.reconnect.example".to_string();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_backend(proxy.clone(), "ldk_bridge".to_string())
-        .expect("node should build");
+    let node_a = RlnWasmNode::new(proxy.clone()).expect("node should build");
     node_a.ensure_runtime_ready().expect("runtime should start");
     node_a.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
         pubkey: peer_pubkey.clone(),
@@ -1352,8 +1381,7 @@ fn bridge_backend_restore_requires_peer_reconnect_before_open_channel_contract()
         started: true,
     });
 
-    let node_b = RlnWasmNode::new_with_runtime_backend(proxy, "ldk_bridge".to_string())
-        .expect("node should build");
+    let node_b = RlnWasmNode::new(proxy).expect("node should build");
     node_b
         .ensure_runtime_ready()
         .expect("runtime should restore");
@@ -1386,13 +1414,12 @@ fn bridge_backend_restore_requires_peer_reconnect_before_open_channel_contract()
 
 #[test]
 fn bridge_backend_restore_disconnected_peer_forces_send_payment_failure_until_reconnect() {
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.payment-reconnect.example".to_string();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_backend(proxy.clone(), "ldk_bridge".to_string())
-        .expect("node should build");
+    let node_a = RlnWasmNode::new(proxy.clone()).expect("node should build");
     node_a.ensure_runtime_ready().expect("runtime should start");
     node_a.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
         pubkey: peer_pubkey.clone(),
@@ -1400,8 +1427,7 @@ fn bridge_backend_restore_disconnected_peer_forces_send_payment_failure_until_re
         started: true,
     });
 
-    let node_b = RlnWasmNode::new_with_runtime_backend(proxy, "ldk_bridge".to_string())
-        .expect("node should build");
+    let node_b = RlnWasmNode::new(proxy).expect("node should build");
     node_b
         .ensure_runtime_ready()
         .expect("runtime should restore");
@@ -1436,13 +1462,12 @@ fn bridge_backend_restore_disconnected_peer_forces_send_payment_failure_until_re
 
 #[test]
 fn bridge_backend_restore_disconnected_peer_forces_keysend_failure_until_reconnect() {
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.keysend-reconnect.example".to_string();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_backend(proxy.clone(), "ldk_bridge".to_string())
-        .expect("node should build");
+    let node_a = RlnWasmNode::new(proxy.clone()).expect("node should build");
     node_a.ensure_runtime_ready().expect("runtime should start");
     node_a.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
         pubkey: peer_pubkey.clone(),
@@ -1450,8 +1475,7 @@ fn bridge_backend_restore_disconnected_peer_forces_keysend_failure_until_reconne
         started: true,
     });
 
-    let node_b = RlnWasmNode::new_with_runtime_backend(proxy, "ldk_bridge".to_string())
-        .expect("node should build");
+    let node_b = RlnWasmNode::new(proxy).expect("node should build");
     node_b
         .ensure_runtime_ready()
         .expect("runtime should restore");
@@ -1475,14 +1499,14 @@ fn bridge_backend_restore_disconnected_peer_forces_keysend_failure_until_reconne
 }
 
 #[test]
-fn bridge_backend_channel_api_open_get_list_close_contract() {
-    let node = RlnWasmNode::new_with_runtime_backend(
-        "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
-    )
-    .expect("node should build");
+fn bridge_backend_trusted_virtual_keysend_finalizes_via_runtime_virtual_payment_engine_event() {
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    let proxy = "ws://proxy.virtual-keysend-event.example".to_string();
     let peer_pubkey =
-        "021234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd".to_string();
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+
+    let node = RlnWasmNode::new(proxy).expect("node should build");
+    node.ensure_runtime_ready().expect("runtime should start");
     node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
         pubkey: peer_pubkey.clone(),
         peer_addr: "127.0.0.1:9735".to_string(),
@@ -1490,9 +1514,204 @@ fn bridge_backend_channel_api_open_get_list_close_contract() {
     });
 
     let opened_js = node
-        .open_channel_value(peer_pubkey, SDK_OPENCHANNEL_MIN_SAT, false, None, None)
+        .open_channel_value_with_options(
+            peer_pubkey.clone(),
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            Some("trusted_no_broadcast".to_string()),
+        )
         .expect("open channel");
-    let opened: serde_json::Value = crate::js_from(opened_js).expect("opened parse");
+    let opened: serde_json::Value = crate::js_from(opened_js).expect("parse opened");
+    assert_eq!(
+        opened["virtual_open_mode"],
+        serde_json::Value::String("trusted_no_broadcast".to_string())
+    );
+
+    let keysend_js = node
+        .keysend_value(peer_pubkey, SDK_HTLC_MIN_MSAT, None, None)
+        .expect("keysend");
+    let keysend: serde_json::Value = crate::js_from(keysend_js).expect("parse keysend");
+    assert_eq!(keysend["status"], "succeeded");
+    let payment_hash = keysend["payment_hash"]
+        .as_str()
+        .expect("payment_hash")
+        .to_string();
+
+    let events_before: serde_json::Value =
+        serde_json::from_str(&node.list_runtime_events_json().expect("events before"))
+            .expect("parse events before");
+    let events_before = events_before.as_array().expect("events before array");
+    assert!(events_before.iter().any(|event| {
+        event.get("source").and_then(|value| value.as_str())
+            == Some("runtime_virtual_payment_engine")
+            && event.get("event_kind").and_then(|value| value.as_str()) == Some("payment_status")
+            && event.get("payment_hash").and_then(|value| value.as_str()) == Some(&payment_hash)
+            && event.get("status").and_then(|value| value.as_str()) == Some("succeeded")
+            && event.get("applied").and_then(|value| value.as_bool()) == Some(true)
+    }));
+}
+
+#[test]
+fn wasm_two_node_handles_same_proxy_distinct_runtime_ids_contract() {
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    let proxy = "ws://proxy.runtime-id-isolation.example".to_string();
+
+    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()))
+        .expect("node A should build");
+    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()))
+        .expect("node B should build");
+
+    node_a.ensure_runtime_ready().expect("node A runtime");
+    node_b.ensure_runtime_ready().expect("node B runtime");
+
+    let components_a: serde_json::Value = crate::js_from(
+        node_a
+            .ldk_runtime_components_value()
+            .expect("node A components"),
+    )
+    .expect("parse node A components");
+    let components_b: serde_json::Value = crate::js_from(
+        node_b
+            .ldk_runtime_components_value()
+            .expect("node B components"),
+    )
+    .expect("parse node B components");
+
+    assert_ne!(
+        components_a["key_manager_fingerprint"],
+        components_b["key_manager_fingerprint"]
+    );
+}
+
+#[test]
+fn wasm_signing_identity_differs_by_runtime_id_contract() {
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    let proxy = "ws://proxy.signing-identity-runtime-id.example".to_string();
+
+    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()))
+        .expect("node A should build");
+    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()))
+        .expect("node B should build");
+
+    let invoice_a_doc: serde_json::Value = serde_json::from_str(
+        &node_a
+            .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+            .expect("node A invoice"),
+    )
+    .expect("parse node A invoice");
+    let invoice_b_doc: serde_json::Value = serde_json::from_str(
+        &node_b
+            .create_ln_invoice_json(Some(SDK_INVOICE_MIN_MSAT), 3600, None, None)
+            .expect("node B invoice"),
+    )
+    .expect("parse node B invoice");
+
+    let decoded_a: serde_json::Value = crate::js_from(
+        node_a
+            .decode_ln_invoice_value(
+                invoice_a_doc["invoice"]
+                    .as_str()
+                    .expect("invoice A string")
+                    .to_string(),
+            )
+            .expect("decode A"),
+    )
+    .expect("parse decoded A");
+    let decoded_b: serde_json::Value = crate::js_from(
+        node_b
+            .decode_ln_invoice_value(
+                invoice_b_doc["invoice"]
+                    .as_str()
+                    .expect("invoice B string")
+                    .to_string(),
+            )
+            .expect("decode B"),
+    )
+    .expect("parse decoded B");
+
+    assert_ne!(decoded_a["payee_pubkey"], decoded_b["payee_pubkey"]);
+}
+
+#[test]
+fn wasm_channel_payment_state_does_not_cross_runtime_ids_contract() {
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    let proxy = "ws://proxy.runtime-id-state-separation.example".to_string();
+    let peer_pubkey =
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+
+    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()))
+        .expect("node A should build");
+    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()))
+        .expect("node B should build");
+
+    node_a.ensure_runtime_ready().expect("node A runtime");
+    node_b.ensure_runtime_ready().expect("node B runtime");
+    node_a.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+
+    let opened: serde_json::Value = crate::js_from(
+        node_a
+            .open_channel_value(
+                peer_pubkey.clone(),
+                SDK_OPENCHANNEL_MIN_SAT,
+                false,
+                None,
+                None,
+            )
+            .expect("open channel on node A"),
+    )
+    .expect("parse opened");
+    assert_eq!(opened["status"], "opened");
+
+    let keysend: serde_json::Value = crate::js_from(
+        node_a
+            .keysend_value(peer_pubkey, SDK_HTLC_MIN_MSAT, None, None)
+            .expect("keysend on node A"),
+    )
+    .expect("parse keysend");
+    assert_eq!(keysend["status"], "pending");
+
+    let channels_b: serde_json::Value =
+        crate::js_from(node_b.list_channels_value().expect("list channels B"))
+            .expect("parse channels B");
+    let payments_b: serde_json::Value =
+        crate::js_from(node_b.list_payments_value().expect("list payments B"))
+            .expect("parse payments B");
+
+    assert_eq!(channels_b.as_array().map(|a| a.len()), Some(0));
+    assert_eq!(payments_b.as_array().map(|a| a.len()), Some(0));
+}
+
+#[cfg(target_arch = "wasm32")]
+#[test]
+fn bridge_backend_channel_api_open_get_list_close_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node should build");
+    node.ensure_runtime_ready().expect("runtime should start");
+    let peer_pubkey =
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    assert_eq!(
+        node.ldk_runtime.get_peer(&peer_pubkey).map(|p| p.started),
+        Some(true)
+    );
+
+    let opened_json = node
+        .open_channel_json(peer_pubkey, SDK_OPENCHANNEL_MIN_SAT, false, None, None)
+        .expect("open channel");
+    let opened: serde_json::Value = serde_json::from_str(&opened_json).expect("opened parse");
     let temporary_channel_id = opened["temporary_channel_id"]
         .as_str()
         .expect("temporary_channel_id")
@@ -1509,8 +1728,8 @@ fn bridge_backend_channel_api_open_get_list_close_contract() {
         .expect("resolve channel id");
     assert_eq!(resolved_channel_id, channel_id);
 
-    let listed_js = node.list_channels_value().expect("list channels");
-    let listed: serde_json::Value = crate::js_from(listed_js).expect("channels parse");
+    let listed_json = node.list_channels_json().expect("list channels");
+    let listed: serde_json::Value = serde_json::from_str(&listed_json).expect("channels parse");
     let listed = listed.as_array().expect("channels array");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0]["channel_id"], channel_id);
@@ -1518,8 +1737,9 @@ fn bridge_backend_channel_api_open_get_list_close_contract() {
 
     node.close_channel(channel_id.clone())
         .expect("close channel");
-    let after_close_js = node.list_channels_value().expect("list channels");
-    let after_close: serde_json::Value = crate::js_from(after_close_js).expect("channels parse");
+    let after_close_json = node.list_channels_json().expect("list channels");
+    let after_close: serde_json::Value =
+        serde_json::from_str(&after_close_json).expect("channels parse");
     let after_close = after_close.as_array().expect("channels array");
     assert!(after_close.is_empty());
     assert!(node
@@ -1531,13 +1751,13 @@ fn bridge_backend_channel_api_open_get_list_close_contract() {
 
 #[test]
 fn runtime_lock_blocks_peer_channel_surfaces_contract() {
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
     crate::ldk_runtime::set_runtime_session_initialized(true);
     crate::ldk_runtime::set_runtime_session_authorized(false);
 
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
 
@@ -1589,12 +1809,12 @@ fn runtime_lock_blocks_peer_channel_surfaces_contract() {
 
 #[test]
 fn runtime_lock_blocks_network_info_contract() {
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
     crate::ldk_runtime::set_runtime_session_initialized(true);
     crate::ldk_runtime::set_runtime_session_authorized(false);
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
 
@@ -1608,12 +1828,12 @@ fn runtime_lock_blocks_network_info_contract() {
 
 #[test]
 fn runtime_lock_blocks_node_info_contract() {
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
     crate::ldk_runtime::set_runtime_session_initialized(true);
     crate::ldk_runtime::set_runtime_session_authorized(false);
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
 
@@ -2127,7 +2347,7 @@ fn open_channel_rejects_incomplete_rgb_pair_contract() {
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
     let err = node
         .open_channel_value(
-            peer_pubkey,
+            peer_pubkey.clone(),
             SDK_OPENCHANNEL_MIN_SAT,
             false,
             Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
@@ -2227,7 +2447,7 @@ fn open_channel_rejects_virtual_public_contract() {
 fn open_channel_virtual_mode_is_persisted_in_runtime_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.virtual-open.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     let peer_pubkey =
@@ -2239,7 +2459,7 @@ fn open_channel_virtual_mode_is_persisted_in_runtime_contract() {
     });
     let opened = node
         .open_channel_value_with_options(
-            peer_pubkey,
+            peer_pubkey.clone(),
             SDK_OPENCHANNEL_MIN_SAT,
             false,
             None,
@@ -2252,14 +2472,133 @@ fn open_channel_virtual_mode_is_persisted_in_runtime_contract() {
         opened_json["virtual_open_mode"],
         serde_json::Value::String("trusted_no_broadcast".to_string())
     );
+    assert_eq!(opened_json["status"], "opening");
+    assert_eq!(opened_json["is_usable"], false);
 }
 
 #[test]
 #[cfg(target_arch = "wasm32")]
-fn close_channel_rejects_force_for_virtual_channel_contract() {
+fn open_channel_virtual_becomes_usable_only_after_runtime_event_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
-        "ws://proxy.virtual-close.example".to_string(),
-        "ldk_bridge".to_string(),
+        "ws://proxy.virtual-open-event.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node should build");
+    let peer_pubkey =
+        "02afafafafafafafafafafafafafafafafafafafafafafafafafafafafafafaf".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    let opened = node
+        .open_channel_value_with_options(
+            peer_pubkey.clone(),
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            Some("trusted_no_broadcast".to_string()),
+        )
+        .expect("open channel");
+    let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
+    let channel_id = opened_json["channel_id"]
+        .as_str()
+        .expect("channel id")
+        .to_string();
+    assert_eq!(opened_json["status"], "opening");
+    assert_eq!(opened_json["is_usable"], false);
+
+    let processed = node
+        .process_native_runtime_queue_value()
+        .expect("process runtime queue");
+    let processed: serde_json::Value = crate::js_from(processed).expect("parse processed");
+    assert_eq!(processed["drained"], 1);
+
+    let listed: serde_json::Value =
+        crate::js_from(node.list_channels_value().expect("list channels")).expect("parse channels");
+    let listed = listed.as_array().expect("channels array");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["channel_id"], channel_id);
+    assert_eq!(listed[0]["status"], "opened");
+    assert_eq!(listed[0]["is_usable"], true);
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn open_channel_virtual_rejected_when_feature_disabled_contract() {
+    crate::set_sdk_default_enable_virtual_channels_v0(false);
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.virtual-open-disabled.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node should build");
+    node.set_enable_virtual_channels_v0(false);
+    let peer_pubkey =
+        "02a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    let err = node
+        .open_channel_value_with_options(
+            peer_pubkey,
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            Some("trusted_no_broadcast".to_string()),
+        )
+        .expect_err("should fail");
+    assert_eq!(
+        err.as_string().unwrap_or_default(),
+        "trusted virtual channels v0 are disabled"
+    );
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn virtual_channels_gate_persists_per_runtime_scope_contract() {
+    crate::set_sdk_default_enable_virtual_channels_v0(false);
+    let proxy = "ws://proxy.virtual-gate-persist.example".to_string();
+    let runtime_id = Some("virtual-gate-persist-node".to_string());
+    let first = RlnWasmNode::new_with_runtime_backend_and_id(
+        proxy.clone(),
+        "wasm_native_ldk".to_string(),
+        runtime_id.clone(),
+    )
+    .expect("first node");
+    let initial: serde_json::Value = crate::js_from(
+        first
+            .enable_virtual_channels_v0_value()
+            .expect("flag value"),
+    )
+    .expect("parse flag");
+    assert_eq!(initial["enabled"], false);
+    first.set_enable_virtual_channels_v0(true);
+
+    let second = RlnWasmNode::new_with_runtime_backend_and_id(
+        proxy,
+        "wasm_native_ldk".to_string(),
+        runtime_id,
+    )
+    .expect("second node");
+    let restored: serde_json::Value = crate::js_from(
+        second
+            .enable_virtual_channels_v0_value()
+            .expect("flag value"),
+    )
+    .expect("parse flag");
+    assert_eq!(restored["enabled"], true);
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn close_channel_virtual_requires_peer_pubkey_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.virtual-close-peer-required.example".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     let peer_pubkey =
@@ -2286,7 +2625,47 @@ fn close_channel_rejects_force_for_virtual_channel_contract() {
         .to_string();
 
     let err = node
-        .close_channel_with_options(channel_id, None, true)
+        .close_channel_with_options(channel_id, None, false)
+        .expect_err("should fail");
+    assert_eq!(
+        err.as_string().unwrap_or_default(),
+        "peer_pubkey is required for trusted virtual channel close"
+    );
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn close_channel_rejects_force_for_virtual_channel_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.virtual-close.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node should build");
+    let peer_pubkey =
+        "02adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    let opened = node
+        .open_channel_value_with_options(
+            peer_pubkey.clone(),
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            Some("trusted_no_broadcast".to_string()),
+        )
+        .expect("open virtual channel");
+    let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
+    let channel_id = opened_json["channel_id"]
+        .as_str()
+        .expect("channel id")
+        .to_string();
+
+    let err = node
+        .close_channel_with_options(channel_id, Some(peer_pubkey), true)
         .expect_err("should fail");
     assert_eq!(
         err.as_string().unwrap_or_default(),
@@ -2296,10 +2675,51 @@ fn close_channel_rejects_force_for_virtual_channel_contract() {
 
 #[test]
 #[cfg(target_arch = "wasm32")]
+fn close_channel_virtual_rejected_when_feature_disabled_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.virtual-close-disabled.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node should build");
+    let peer_pubkey =
+        "02ababababababababababababababababababababababababababababababab".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    let opened = node
+        .open_channel_value_with_options(
+            peer_pubkey.clone(),
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            Some("trusted_no_broadcast".to_string()),
+        )
+        .expect("open virtual channel");
+    let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
+    let channel_id = opened_json["channel_id"]
+        .as_str()
+        .expect("channel id")
+        .to_string();
+
+    node.set_enable_virtual_channels_v0(false);
+    let err = node
+        .close_channel_with_options(channel_id, Some(peer_pubkey), false)
+        .expect_err("should fail");
+    assert_eq!(
+        err.as_string().unwrap_or_default(),
+        "trusted virtual channels v0 are disabled"
+    );
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
 fn close_channel_rejects_virtual_cleanup_when_counterparty_btc_value_remains_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.virtual-close-btc-floor.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     let peer_pubkey =
@@ -2326,7 +2746,7 @@ fn close_channel_rejects_virtual_cleanup_when_counterparty_btc_value_remains_con
         .to_string();
 
     let keysend = node
-        .keysend_value(peer_pubkey, SDK_HTLC_MIN_MSAT, None, None)
+        .keysend_value(peer_pubkey.clone(), SDK_HTLC_MIN_MSAT, None, None)
         .expect("keysend");
     let keysend_json: serde_json::Value = crate::js_from(keysend).expect("parse keysend");
     let payment_hash = keysend_json["payment_hash"]
@@ -2337,7 +2757,7 @@ fn close_channel_rejects_virtual_cleanup_when_counterparty_btc_value_remains_con
         .expect("mark payment succeeded");
 
     let err = node
-        .close_channel_with_options(channel_id, None, false)
+        .close_channel_with_options(channel_id, Some(peer_pubkey.clone()), false)
         .expect_err("should fail");
     assert!(err
         .as_string()
@@ -2350,7 +2770,7 @@ fn close_channel_rejects_virtual_cleanup_when_counterparty_btc_value_remains_con
 fn close_channel_allows_virtual_cleanup_after_btc_roundtrip_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.virtual-close-btc-roundtrip.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     let peer_pubkey =
@@ -2377,7 +2797,210 @@ fn close_channel_allows_virtual_cleanup_after_btc_roundtrip_contract() {
         .to_string();
 
     let keysend = node
-        .keysend_value(peer_pubkey, SDK_HTLC_MIN_MSAT, None, None)
+        .keysend_value(peer_pubkey.clone(), SDK_HTLC_MIN_MSAT, None, None)
+        .expect("keysend");
+    let keysend_json: serde_json::Value = crate::js_from(keysend).expect("parse keysend");
+    let payment_hash = keysend_json["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+    node.update_payment_status(payment_hash, "succeeded".to_string())
+        .expect("mark payment succeeded");
+
+    let invoice_json = node
+        .create_ln_invoice_json(Some(SDK_HTLC_MIN_MSAT), 3600, None, None)
+        .expect("create invoice");
+    let invoice_doc: serde_json::Value = serde_json::from_str(&invoice_json).expect("parse");
+    let invoice = invoice_doc["invoice"]
+        .as_str()
+        .expect("invoice")
+        .to_string();
+    let decoded_invoice: serde_json::Value = crate::js_from(
+        node.decode_ln_invoice_value(invoice.clone())
+            .expect("decode invoice"),
+    )
+    .expect("parse decoded invoice");
+    let inbound_payment_hash = decoded_invoice["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+    node.update_payment_status_by_invoice(invoice, "succeeded".to_string())
+        .expect("simulate return payment");
+    let seq = {
+        let mut next_seq = node.next_runtime_event_seq.borrow_mut();
+        *next_seq += 1;
+        *next_seq
+    };
+    node.runtime_events
+        .borrow_mut()
+        .push(RlnWasmNodeRuntimeEventData {
+            seq,
+            source: "runtime_virtual_payment_engine".to_string(),
+            event_kind: "payment_status".to_string(),
+            payload_hex: encode_payment_status_event_payload(&inbound_payment_hash, "succeeded"),
+            payment_hash: Some(inbound_payment_hash),
+            status: Some("succeeded".to_string()),
+            applied: true,
+            error: None,
+            received_at: unix_now_secs(),
+        });
+
+    node.close_channel_with_options(channel_id, Some(peer_pubkey), false)
+        .expect("close should succeed after roundtrip");
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn close_channel_allows_virtual_cleanup_after_authoritative_peer_keysend_roundtrip_contract() {
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
+    crate::ln_node::test_utils::super::test_utils::reset_runtime_event_log_storage_for_tests();
+    let node_a = RlnWasmNode::new_with_runtime_id_opt(
+        "ws://proxy.virtual-close-authoritative-roundtrip.example".to_string(),
+        Some("virtual-close-node-a".to_string()),
+    )
+    .expect("node a should build");
+    let node_b = RlnWasmNode::new_with_runtime_id_opt(
+        "ws://proxy.virtual-close-authoritative-roundtrip.example".to_string(),
+        Some("virtual-close-node-b".to_string()),
+    )
+    .expect("node b should build");
+
+    let invoice_a = node_a
+        .create_ln_invoice_json(Some(SDK_HTLC_MIN_MSAT), 3600, None, None)
+        .expect("create invoice a");
+    let invoice_a_doc: serde_json::Value = serde_json::from_str(&invoice_a).expect("parse");
+    let invoice_a_str = invoice_a_doc["invoice"]
+        .as_str()
+        .expect("invoice a")
+        .to_string();
+    let decoded_a: serde_json::Value = crate::js_from(
+        node_b
+            .decode_ln_invoice_value(invoice_a_str)
+            .expect("decode a"),
+    )
+    .expect("parse decoded a");
+    let node_a_pubkey = decoded_a["payee_pubkey"]
+        .as_str()
+        .expect("node a pubkey")
+        .to_string();
+
+    let invoice_b = node_b
+        .create_ln_invoice_json(Some(SDK_HTLC_MIN_MSAT), 3600, None, None)
+        .expect("create invoice b");
+    let invoice_b_doc: serde_json::Value = serde_json::from_str(&invoice_b).expect("parse");
+    let invoice_b_str = invoice_b_doc["invoice"]
+        .as_str()
+        .expect("invoice b")
+        .to_string();
+    let decoded_b: serde_json::Value = crate::js_from(
+        node_a
+            .decode_ln_invoice_value(invoice_b_str)
+            .expect("decode b"),
+    )
+    .expect("parse decoded b");
+    let node_b_pubkey = decoded_b["payee_pubkey"]
+        .as_str()
+        .expect("node b pubkey")
+        .to_string();
+
+    node_a.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: node_b_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    node_b.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: node_a_pubkey.clone(),
+        peer_addr: "127.0.0.1:9736".to_string(),
+        started: true,
+    });
+
+    let opened = node_a
+        .open_channel_value_with_options(
+            node_b_pubkey.clone(),
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            Some("trusted_no_broadcast".to_string()),
+        )
+        .expect("open virtual channel");
+    let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
+    let channel_id = opened_json["channel_id"]
+        .as_str()
+        .expect("channel id")
+        .to_string();
+    let _ = node_a.process_native_runtime_queue_value();
+
+    let keysend_ab = node_a
+        .keysend_value(node_b_pubkey.clone(), SDK_HTLC_MIN_MSAT, None, None)
+        .expect("keysend a->b");
+    let keysend_ab_doc: serde_json::Value = crate::js_from(keysend_ab).expect("parse a->b");
+    let payment_ab_hash = keysend_ab_doc["payment_hash"]
+        .as_str()
+        .expect("payment hash a->b")
+        .to_string();
+    let payment_ab: serde_json::Value = crate::js_from(
+        node_a
+            .get_payment_value(payment_ab_hash)
+            .expect("get payment a->b"),
+    )
+    .expect("parse payment a->b");
+    assert_eq!(payment_ab["status"], "succeeded");
+
+    let keysend_ba = node_b
+        .keysend_value(node_a_pubkey, SDK_HTLC_MIN_MSAT, None, None)
+        .expect("keysend b->a");
+    let keysend_ba_doc: serde_json::Value = crate::js_from(keysend_ba).expect("parse b->a");
+    let payment_ba_hash = keysend_ba_doc["payment_hash"]
+        .as_str()
+        .expect("payment hash b->a")
+        .to_string();
+    let payment_ba: serde_json::Value = crate::js_from(
+        node_b
+            .get_payment_value(payment_ba_hash)
+            .expect("get payment b->a"),
+    )
+    .expect("parse payment b->a");
+    assert_eq!(payment_ba["status"], "succeeded");
+
+    node_a
+        .close_channel_with_options(channel_id, Some(node_b_pubkey), false)
+        .expect("close should succeed after authoritative peer roundtrip");
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn close_channel_rejects_virtual_cleanup_after_non_authoritative_inbound_credit_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.virtual-close-non-authoritative-credit.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node should build");
+    let peer_pubkey =
+        "02cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+    let opened = node
+        .open_channel_value_with_options(
+            peer_pubkey.clone(),
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            Some("trusted_no_broadcast".to_string()),
+        )
+        .expect("open virtual channel");
+    let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
+    let channel_id = opened_json["channel_id"]
+        .as_str()
+        .expect("channel id")
+        .to_string();
+
+    let keysend = node
+        .keysend_value(peer_pubkey.clone(), SDK_HTLC_MIN_MSAT, None, None)
         .expect("keysend");
     let keysend_json: serde_json::Value = crate::js_from(keysend).expect("parse keysend");
     let payment_hash = keysend_json["payment_hash"]
@@ -2396,10 +3019,15 @@ fn close_channel_allows_virtual_cleanup_after_btc_roundtrip_contract() {
         .expect("invoice")
         .to_string();
     node.update_payment_status_by_invoice(invoice, "succeeded".to_string())
-        .expect("simulate return payment");
+        .expect("simulate inbound credit without runtime authority");
 
-    node.close_channel_with_options(channel_id, None, false)
-        .expect("close should succeed after roundtrip");
+    let err = node
+        .close_channel_with_options(channel_id, Some(peer_pubkey.clone()), false)
+        .expect_err("should fail");
+    assert!(err
+        .as_string()
+        .unwrap_or_default()
+        .contains("counterparty BTC balance floor is"));
 }
 
 #[test]
@@ -2407,7 +3035,7 @@ fn close_channel_allows_virtual_cleanup_after_btc_roundtrip_contract() {
 fn close_channel_rejects_virtual_cleanup_when_claimable_invoice_exists_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.virtual-close-claimable.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
     let peer_pubkey =
@@ -2419,7 +3047,7 @@ fn close_channel_rejects_virtual_cleanup_when_claimable_invoice_exists_contract(
     });
     let opened = node
         .open_channel_value_with_options(
-            peer_pubkey,
+            peer_pubkey.clone(),
             SDK_OPENCHANNEL_MIN_SAT,
             false,
             None,
@@ -2445,7 +3073,7 @@ fn close_channel_rejects_virtual_cleanup_when_claimable_invoice_exists_contract(
         .expect("simulate claimable payment");
 
     let err = node
-        .close_channel_with_options(channel_id, None, false)
+        .close_channel_with_options(channel_id, Some(peer_pubkey), false)
         .expect_err("should fail");
     assert_eq!(
         err.as_string().unwrap_or_default(),
@@ -2458,7 +3086,7 @@ fn close_channel_rejects_virtual_cleanup_when_claimable_invoice_exists_contract(
 fn hodl_invoice_claim_is_idempotent_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.hodl-claim.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
 
@@ -2505,7 +3133,7 @@ fn hodl_invoice_claim_is_idempotent_contract() {
 fn hodl_invoice_cancel_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.hodl-cancel.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node should build");
 
@@ -2628,7 +3256,7 @@ fn peer_addr_format_validation_contract() {
 }
 
 #[test]
-fn sign_message_scaffold_contract() {
+fn sign_message_native_contract() {
     let node = RlnWasmNode::new("ws://proxy.example".to_string()).expect("node should build");
     let signed_a = node
         .sign_message_value("  hello  ".to_string())
@@ -2721,15 +3349,15 @@ fn send_payment_returns_payment_secret_and_native_mismatch_error_contract() {
 
 #[test]
 fn bridge_send_payment_requires_connected_known_payee_peer_contract() {
-    crate::ldk_runtime::reset_scaffold_runtime_storage_for_tests();
+    crate::ldk_runtime::test_utils::super::test_utils::reset_runtime_storage_for_tests();
     let sender = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.sender.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("sender node");
     let receiver = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.receiver.example".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("receiver node");
 
@@ -2775,6 +3403,7 @@ fn bridge_send_payment_requires_connected_known_payee_peer_contract() {
     assert_eq!(second_doc["status"], "pending");
 }
 
+#[cfg(target_arch = "wasm32")]
 #[test]
 fn asset_id_validation_contract_for_ln_methods() {
     let node = RlnWasmNode::new("ws://proxy.example".to_string()).expect("node should build");
@@ -2946,7 +3575,7 @@ fn sdk_node_handle_explicit_update_payment_status() {
 
 #[test]
 fn sdk_node_handle_ingest_transport_event_json_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -2975,7 +3604,7 @@ fn sdk_node_handle_ingest_transport_event_json_contract() {
 
 #[test]
 fn sdk_node_handle_ingest_transport_event_invalid_payload_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -3003,7 +3632,7 @@ fn sdk_node_handle_ingest_transport_event_invalid_payload_contract() {
 
 #[test]
 fn sdk_node_handle_ingest_read_event_json_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -3076,10 +3705,13 @@ fn sdk_node_handle_forwards_node_info() {
 
 #[test]
 fn sdk_facade_forwards_peer_channel_read_views_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3381".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3381".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("new node");
     let peer_pubkey =
         "02e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7".to_string();
@@ -3117,12 +3749,12 @@ fn sdk_facade_forwards_peer_channel_read_views_contract() {
 
 #[test]
 fn sdk_node_handle_forwards_peer_channel_read_views_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3382".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -3162,7 +3794,7 @@ fn sdk_node_handle_forwards_peer_channel_read_views_contract() {
 
 #[test]
 fn sdk_facade_forwards_ldk_runtime_status() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .new_node("ws://127.0.0.1:3001".to_string())
@@ -3170,14 +3802,14 @@ fn sdk_facade_forwards_ldk_runtime_status() {
     let status_js = sdk.ldk_runtime_status_value(&node).expect("runtime status");
     let status: serde_json::Value =
         serde_wasm_bindgen::from_value(status_js).expect("parse status");
-    assert_eq!(status["backend"], "scaffold");
+    assert_eq!(status["backend"], "wasm_native_ldk");
     assert_eq!(status["lifecycle_state"], "cold");
     assert_eq!(status["ready"], false);
 }
 
 #[test]
 fn sdk_node_handle_ldk_runtime_status_transitions_after_keysend() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -3201,14 +3833,14 @@ fn sdk_node_handle_ldk_runtime_status_transitions_after_keysend() {
         .expect("running runtime status");
     let running: serde_json::Value =
         serde_wasm_bindgen::from_value(running_js).expect("parse running");
-    assert_eq!(running["backend"], "scaffold");
+    assert_eq!(running["backend"], "wasm_native_ldk");
     assert_eq!(running["lifecycle_state"], "running");
     assert_eq!(running["ready"], true);
 }
 
 #[test]
 fn sdk_node_runtime_status_restores_after_stop() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node_first = RlnWasmNode::new("ws://127.0.0.1:3999".to_string()).expect("node");
 
     node_first
@@ -3251,10 +3883,10 @@ fn sdk_node_runtime_status_restores_after_stop() {
 
 #[test]
 fn sdk_node_runtime_backend_bridge_status_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://127.0.0.1:3333".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node");
 
@@ -3262,7 +3894,7 @@ fn sdk_node_runtime_backend_bridge_status_contract() {
         .ldk_runtime_status_value()
         .expect("runtime status before start");
     let cold: serde_json::Value = serde_wasm_bindgen::from_value(cold_js).expect("parse cold");
-    assert_eq!(cold["backend"], "ldk_bridge");
+    assert_eq!(cold["backend"], "wasm_native_ldk");
     assert_eq!(cold["lifecycle_state"], "cold");
     assert_eq!(cold["ready"], false);
 
@@ -3279,7 +3911,7 @@ fn sdk_node_runtime_backend_bridge_status_contract() {
         .expect("runtime status after start");
     let running: serde_json::Value =
         serde_wasm_bindgen::from_value(running_js).expect("parse running");
-    assert_eq!(running["backend"], "ldk_bridge");
+    assert_eq!(running["backend"], "wasm_native_ldk");
     assert_eq!(running["lifecycle_state"], "running");
     assert_eq!(running["ready"], true);
 }
@@ -3301,33 +3933,36 @@ fn sdk_node_runtime_backend_invalid_contract() {
 
 #[test]
 fn sdk_facade_new_node_with_runtime_backend_bridge_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3335".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3335".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("bridge node");
 
     let status_js = node.ldk_runtime_status_value().expect("runtime status");
     let status: serde_json::Value =
         serde_wasm_bindgen::from_value(status_js).expect("status parse");
-    assert_eq!(status["backend"], "ldk_bridge");
+    assert_eq!(status["backend"], "wasm_native_ldk");
 }
 
 #[test]
 fn sdk_facade_create_node_handle_with_runtime_backend_bridge_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3336".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("bridge node handle");
 
     let status_js = node.ldk_runtime_status_value().expect("runtime status");
     let status: serde_json::Value =
         serde_wasm_bindgen::from_value(status_js).expect("status parse");
-    assert_eq!(status["backend"], "ldk_bridge");
+    assert_eq!(status["backend"], "wasm_native_ldk");
 }
 
 #[test]
@@ -3360,13 +3995,16 @@ fn sdk_facade_runtime_backend_invalid_contract() {
 
 #[test]
 fn sdk_facade_bridge_channel_open_requires_connected_peer_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
 
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3340".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3340".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("bridge node");
     let peers_js = sdk.list_peers_value(&node).expect("list peers");
     let peers: serde_json::Value = serde_wasm_bindgen::from_value(peers_js).expect("parse peers");
@@ -3381,7 +4019,7 @@ fn sdk_facade_bridge_channel_open_requires_connected_peer_contract() {
 
 #[test]
 fn sdk_node_handle_bridge_channel_open_requires_connected_peer_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -3389,7 +4027,7 @@ fn sdk_node_handle_bridge_channel_open_requires_connected_peer_contract() {
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3341".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("bridge handle");
     let peers_js = node.list_peers_value().expect("list peers");
@@ -3405,10 +4043,13 @@ fn sdk_node_handle_bridge_channel_open_requires_connected_peer_contract() {
 
 #[test]
 fn sdk_facade_bridge_send_payment_without_connected_peer_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3342".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3342".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("bridge node");
 
     let invoice_json = sdk
@@ -3429,12 +4070,12 @@ fn sdk_facade_bridge_send_payment_without_connected_peer_contract() {
 
 #[test]
 fn sdk_node_handle_bridge_keysend_without_connected_peer_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3343".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("bridge handle");
 
@@ -3453,13 +4094,19 @@ fn sdk_node_handle_bridge_keysend_without_connected_peer_contract() {
 
 #[test]
 fn sdk_facade_bridge_send_payment_requires_connected_known_payee_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let sender = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3344".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3344".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("sender node");
     let receiver = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3345".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3345".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("receiver node");
 
     let invoice_json = sdk
@@ -3499,16 +4146,19 @@ fn sdk_facade_bridge_send_payment_requires_connected_known_payee_contract() {
 
 #[test]
 fn sdk_node_handle_bridge_send_payment_requires_connected_known_payee_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let sender = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3346".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("sender handle");
     let receiver = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3347".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3347".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("receiver node");
 
     let invoice_json = receiver
@@ -3554,13 +4204,19 @@ fn sdk_node_handle_bridge_send_payment_requires_connected_known_payee_contract()
 
 #[test]
 fn sdk_facade_bridge_reconnect_payload_reactivates_payee_for_send_payment_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let sender = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3348".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3348".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("sender node");
     let receiver = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3349".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3349".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("receiver node");
 
     let invoice_json = sdk
@@ -3607,16 +4263,19 @@ fn sdk_facade_bridge_reconnect_payload_reactivates_payee_for_send_payment_contra
 
 #[test]
 fn sdk_node_handle_bridge_reconnect_payload_reactivates_payee_for_send_payment_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let sender = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3350".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("sender handle");
     let receiver = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3351".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3351".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("receiver node");
 
     let invoice_json = receiver
@@ -3666,8 +4325,8 @@ fn sdk_node_handle_bridge_reconnect_payload_reactivates_payee_for_send_payment_c
 }
 
 #[test]
-fn sdk_facade_create_ln_invoice_scaffold_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+fn sdk_facade_create_ln_invoice_native_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .new_node("ws://127.0.0.1:3001".to_string())
@@ -3696,8 +4355,8 @@ fn sdk_facade_create_ln_invoice_scaffold_contract() {
 }
 
 #[test]
-fn sdk_node_handle_create_ln_invoice_scaffold_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+fn sdk_node_handle_create_ln_invoice_native_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -3718,7 +4377,7 @@ fn sdk_node_handle_create_ln_invoice_scaffold_contract() {
 
 #[test]
 fn sdk_node_handle_create_ln_invoice_asset_pair_validation_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -3779,7 +4438,7 @@ fn sdk_node_handle_forwards_get_payment() {
 
 #[test]
 fn sdk_node_handle_get_payment_accepts_trimmed_hash() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -3804,7 +4463,7 @@ fn sdk_node_handle_get_payment_accepts_trimmed_hash() {
 
 #[test]
 fn sdk_node_handle_list_payments_deterministic_order_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -3843,7 +4502,7 @@ fn sdk_node_handle_list_payments_deterministic_order_contract() {
 
 #[test]
 fn sdk_facade_invoice_status_empty_error_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .new_node("ws://127.0.0.1:3001".to_string())
@@ -3859,7 +4518,7 @@ fn sdk_facade_invoice_status_empty_error_contract() {
 
 #[test]
 fn sdk_node_handle_invoice_status_empty_error_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -3934,6 +4593,315 @@ fn sdk_node_handle_decode_ln_invoice_empty_error_contract() {
 }
 
 #[test]
+fn sdk_facade_chain_sync_start_status_stop_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .new_node("ws://127.0.0.1:3390".to_string())
+        .expect("new node");
+
+    let started_js = sdk
+        .chain_sync_start_value(&node, "http://127.0.0.1:3002".to_string(), Some(5_000))
+        .expect("start");
+    let started: serde_json::Value = serde_wasm_bindgen::from_value(started_js).expect("parse");
+    assert_eq!(started["running"], true);
+    assert_eq!(started["poll_interval_ms"], 5_000);
+
+    let status_js = sdk.chain_sync_status_value(&node).expect("status");
+    let status: serde_json::Value = serde_wasm_bindgen::from_value(status_js).expect("parse");
+    assert_eq!(status["running"], true);
+    assert_eq!(status["indexer_url"], "http://127.0.0.1:3002");
+
+    let stopped_js = sdk.chain_sync_stop_value(&node).expect("stop");
+    let stopped: serde_json::Value = serde_wasm_bindgen::from_value(stopped_js).expect("parse");
+    assert_eq!(stopped["running"], false);
+}
+
+#[test]
+fn sdk_node_handle_chain_sync_start_status_stop_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3391".to_string())
+        .expect("node handle");
+
+    let started_js = node
+        .chain_sync_start_value("http://127.0.0.1:3002".to_string(), Some(7_000))
+        .expect("start");
+    let started: serde_json::Value = serde_wasm_bindgen::from_value(started_js).expect("parse");
+    assert_eq!(started["running"], true);
+    assert_eq!(started["poll_interval_ms"], 7_000);
+
+    let status_js = node.chain_sync_status_value().expect("status");
+    let status: serde_json::Value = serde_wasm_bindgen::from_value(status_js).expect("parse");
+    assert_eq!(status["running"], true);
+    assert_eq!(status["indexer_url"], "http://127.0.0.1:3002");
+
+    let stopped_js = node.chain_sync_stop_value().expect("stop");
+    let stopped: serde_json::Value = serde_wasm_bindgen::from_value(stopped_js).expect("parse");
+    assert_eq!(stopped["running"], false);
+}
+
+#[test]
+fn sdk_facade_ldk_runtime_components_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .new_node("ws://127.0.0.1:3392".to_string())
+        .expect("new node");
+    let components_js = sdk
+        .ldk_runtime_components_value(&node)
+        .expect("components status");
+    let components: serde_json::Value =
+        serde_wasm_bindgen::from_value(components_js).expect("parse");
+    assert_eq!(components["started"], true);
+    assert_eq!(components["fee_estimator_ready"], true);
+    assert_eq!(components["broadcaster_ready"], true);
+    assert!(components["key_manager_fingerprint"].as_str().is_some());
+}
+
+#[test]
+fn sdk_node_handle_ldk_runtime_components_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3393".to_string())
+        .expect("node handle");
+    node.create_ln_invoice_json(Some(3_000_000), 3600, None, None)
+        .expect("invoice");
+    let components_js = node
+        .ldk_runtime_components_value()
+        .expect("components status");
+    let components: serde_json::Value =
+        serde_wasm_bindgen::from_value(components_js).expect("parse");
+    assert_eq!(components["invoices_created"], 1);
+    assert_eq!(components["started"], true);
+}
+
+#[test]
+fn sdk_facade_list_rgb_ln_transfers_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .new_node("ws://127.0.0.1:3394".to_string())
+        .expect("new node");
+    let keysend_js = sdk
+        .keysend_value(
+            &node,
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
+            3_000_000,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            Some(9),
+        )
+        .expect("keysend");
+    let keysend: serde_json::Value = serde_wasm_bindgen::from_value(keysend_js).expect("parse");
+    let payment_hash = keysend["payment_hash"].as_str().expect("hash");
+
+    let transfers_js = sdk
+        .list_rgb_ln_transfers_value(&node)
+        .expect("list rgb ln transfers");
+    let transfers: serde_json::Value = serde_wasm_bindgen::from_value(transfers_js).expect("parse");
+    let arr = transfers.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["payment_hash"], payment_hash);
+    assert_eq!(arr[0]["asset_amount"], 9);
+}
+
+#[test]
+fn sdk_node_handle_list_rgb_ln_transfers_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3395".to_string())
+        .expect("node handle");
+    let keysend_js = node
+        .keysend_value(
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
+            3_000_000,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            Some(12),
+        )
+        .expect("keysend");
+    let keysend: serde_json::Value = serde_wasm_bindgen::from_value(keysend_js).expect("parse");
+    let payment_hash = keysend["payment_hash"].as_str().expect("hash").to_string();
+    node.update_payment_status(payment_hash.clone(), "succeeded".to_string())
+        .expect("update status");
+
+    let transfers_js = node
+        .list_rgb_ln_transfers_value()
+        .expect("list rgb ln transfers");
+    let transfers: serde_json::Value = serde_wasm_bindgen::from_value(transfers_js).expect("parse");
+    let arr = transfers.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["payment_hash"], payment_hash);
+    assert_eq!(arr[0]["status"], "succeeded");
+}
+
+#[test]
+fn sdk_facade_chain_sync_surface_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .new_node("ws://127.0.0.1:3396".to_string())
+        .expect("new node");
+
+    let started_js = sdk
+        .chain_sync_start_value(&node, "http://127.0.0.1:3002".to_string(), Some(6_000))
+        .expect("chain sync start");
+    let started: serde_json::Value = serde_wasm_bindgen::from_value(started_js).expect("parse");
+    assert_eq!(started["running"], true);
+    assert_eq!(started["poll_interval_ms"], 6000);
+
+    let status_js = sdk
+        .chain_sync_status_value(&node)
+        .expect("chain sync status");
+    let status: serde_json::Value = serde_wasm_bindgen::from_value(status_js).expect("parse");
+    assert_eq!(status["running"], true);
+    assert_eq!(status["indexer_url"], "http://127.0.0.1:3002");
+
+    let stopped_js = sdk.chain_sync_stop_value(&node).expect("chain sync stop");
+    let stopped: serde_json::Value = serde_wasm_bindgen::from_value(stopped_js).expect("parse");
+    assert_eq!(stopped["running"], false);
+}
+
+#[test]
+fn sdk_node_handle_runtime_components_and_rgb_ln_transfer_surface_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3397".to_string())
+        .expect("node handle");
+
+    let components_js = node
+        .ldk_runtime_components_value()
+        .expect("runtime components");
+    let components: serde_json::Value =
+        serde_wasm_bindgen::from_value(components_js).expect("parse");
+    assert_eq!(components["started"], true);
+    assert_eq!(components["fee_estimator_ready"], true);
+    assert!(components["key_manager_fingerprint"].as_str().is_some());
+
+    let keysend_js = node
+        .keysend_value(
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
+            3_000_000,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            Some(13),
+        )
+        .expect("rgb keysend");
+    let keysend: serde_json::Value = serde_wasm_bindgen::from_value(keysend_js).expect("parse");
+    let payment_hash = keysend["payment_hash"].as_str().expect("hash").to_string();
+
+    node.update_payment_status(payment_hash.clone(), "succeeded".to_string())
+        .expect("status update");
+
+    let transfers_js = node
+        .list_rgb_ln_transfers_value()
+        .expect("list rgb ln transfers");
+    let transfers: serde_json::Value =
+        serde_wasm_bindgen::from_value(transfers_js).expect("parse transfers");
+    let arr = transfers.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["payment_hash"], payment_hash);
+    assert_eq!(arr[0]["asset_amount"], 13);
+    assert_eq!(arr[0]["status"], "succeeded");
+}
+
+#[test]
+fn sdk_facade_native_runtime_core_surface_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .new_node("ws://127.0.0.1:3398".to_string())
+        .expect("new node");
+
+    let status_js = sdk
+        .native_runtime_core_status_value(&node)
+        .expect("native runtime core status");
+    let status: serde_json::Value = serde_wasm_bindgen::from_value(status_js).expect("parse");
+    assert!(status["lifecycle_state"].is_string());
+    assert!(status["schema_version"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(status["queued_events"].as_u64().unwrap_or(0), 0);
+
+    let _ = sdk
+        .keysend_value(
+            &node,
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
+            3_000_000,
+            None,
+            None,
+        )
+        .expect("keysend");
+
+    let drained_js = sdk
+        .drain_native_runtime_queue_value(&node)
+        .expect("drain native queue");
+    let drained: serde_json::Value = serde_wasm_bindgen::from_value(drained_js).expect("parse");
+    let entries = drained.as_array().expect("array");
+    assert!(!entries.is_empty());
+    assert!(entries
+        .iter()
+        .any(|entry| entry["event_kind"] == "payment_status"));
+}
+
+#[test]
+fn sdk_node_handle_native_runtime_core_surface_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .create_node_handle("ws://127.0.0.1:3399".to_string())
+        .expect("node handle");
+
+    let status_js = node
+        .native_runtime_core_status_value()
+        .expect("native runtime core status");
+    let status: serde_json::Value = serde_wasm_bindgen::from_value(status_js).expect("parse");
+    assert!(status["lifecycle_state"].is_string());
+    assert!(status["schema_version"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(status["queued_events"].as_u64().unwrap_or(0), 0);
+
+    let _ = node
+        .keysend_value(
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
+            3_000_000,
+            None,
+            None,
+        )
+        .expect("keysend");
+
+    let drained_js = node
+        .drain_native_runtime_queue_value()
+        .expect("drain native queue");
+    let drained: serde_json::Value = serde_wasm_bindgen::from_value(drained_js).expect("parse");
+    let entries = drained.as_array().expect("array");
+    assert!(!entries.is_empty());
+    assert!(entries
+        .iter()
+        .any(|entry| entry["event_kind"] == "payment_status"));
+}
+
+#[test]
+fn sdk_chain_sync_status_exposes_tip_regression_fields_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = crate::RlnWasmSdk::new();
+    let node = sdk
+        .new_node("ws://127.0.0.1:3400".to_string())
+        .expect("new node");
+
+    let started_js = sdk
+        .chain_sync_start_value(&node, "http://127.0.0.1:3002".to_string(), Some(6_000))
+        .expect("start");
+    let started: serde_json::Value = serde_wasm_bindgen::from_value(started_js).expect("parse");
+    assert_eq!(started["tip_regressed"], false);
+    assert!(started["last_tip_regression_at"].is_null());
+
+    let status_js = sdk.chain_sync_status_value(&node).expect("status");
+    let status: serde_json::Value = serde_wasm_bindgen::from_value(status_js).expect("parse");
+    assert_eq!(status["tip_regressed"], false);
+    assert!(status["last_tip_regression_at"].is_null());
+}
+
+#[test]
 fn sdk_facade_forwards_node_payment_views() {
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
@@ -3975,7 +4943,7 @@ fn sdk_facade_forwards_node_keysend_write_path() {
 }
 
 #[test]
-fn sdk_facade_sign_message_scaffold_contract() {
+fn sdk_facade_sign_message_native_contract() {
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .new_node("ws://127.0.0.1:3001".to_string())
@@ -3989,7 +4957,7 @@ fn sdk_facade_sign_message_scaffold_contract() {
 }
 
 #[test]
-fn sdk_node_handle_sign_message_scaffold_contract() {
+fn sdk_node_handle_sign_message_native_contract() {
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3001".to_string())
@@ -4007,7 +4975,7 @@ fn sdk_node_handle_sign_message_scaffold_contract() {
 
 #[test]
 fn sdk_facade_ingest_read_event_supports_payment_success_alias_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .new_node("ws://127.0.0.1:3374".to_string())
@@ -4034,7 +5002,7 @@ fn sdk_facade_ingest_read_event_supports_payment_success_alias_contract() {
 
 #[test]
 fn sdk_node_handle_ingest_read_event_supports_payment_timeout_alias_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3375".to_string())
@@ -4065,7 +5033,7 @@ fn sdk_node_handle_ingest_read_event_supports_payment_timeout_alias_contract() {
 
 #[test]
 fn sdk_facade_ingest_read_event_supports_event_name_and_payment_id_alias_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .new_node("ws://127.0.0.1:3376".to_string())
@@ -4097,7 +5065,7 @@ fn sdk_facade_ingest_read_event_supports_event_name_and_payment_id_alias_contrac
 
 #[test]
 fn sdk_facade_ingest_read_event_supports_status_alias_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .new_node("ws://127.0.0.1:3377".to_string())
@@ -4129,7 +5097,7 @@ fn sdk_facade_ingest_read_event_supports_status_alias_contract() {
 
 #[test]
 fn sdk_facade_ingest_read_event_supports_state_field_alias_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .new_node("ws://127.0.0.1:3379".to_string())
@@ -4161,7 +5129,7 @@ fn sdk_facade_ingest_read_event_supports_state_field_alias_contract() {
 
 #[test]
 fn sdk_node_handle_ingest_read_event_supports_status_alias_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3378".to_string())
@@ -4192,7 +5160,7 @@ fn sdk_node_handle_ingest_read_event_supports_status_alias_contract() {
 
 #[test]
 fn sdk_node_handle_ingest_read_event_supports_payment_status_field_alias_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle("ws://127.0.0.1:3380".to_string())
@@ -4223,10 +5191,13 @@ fn sdk_node_handle_ingest_read_event_supports_payment_status_field_alias_contrac
 
 #[test]
 fn sdk_facade_transport_json_alias_reconnect_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3352".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3352".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "02e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0".to_string();
@@ -4248,12 +5219,12 @@ fn sdk_facade_transport_json_alias_reconnect_contract() {
 
 #[test]
 fn sdk_node_handle_transport_json_alias_reconnect_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3353".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -4277,12 +5248,12 @@ fn sdk_node_handle_transport_json_alias_reconnect_contract() {
 
 #[test]
 fn sdk_node_handle_transport_json_node_id_and_channel_id_alias_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3361".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -4328,10 +5299,13 @@ fn sdk_node_handle_transport_json_node_id_and_channel_id_alias_contract() {
 
 #[test]
 fn sdk_facade_transport_event_name_alias_reconnect_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3362".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3362".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "024f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f".to_string();
@@ -4353,12 +5327,12 @@ fn sdk_facade_transport_event_name_alias_reconnect_contract() {
 
 #[test]
 fn sdk_node_handle_transport_event_name_alias_channel_contract() {
-    crate::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = crate::RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3363".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -4403,7 +5377,7 @@ fn sdk_facade_capabilities_contract() {
         serde_wasm_bindgen::from_value(caps_js).expect("caps parse");
     assert!(caps.wallet_runtime);
     assert!(caps.node_runtime);
-    assert!(caps.ldk_runtime_scaffold);
+    assert!(!caps.ldk_runtime_scaffold);
     assert!(caps.callback_status_updates);
 }
 
@@ -4420,11 +5394,119 @@ fn sdk_facade_new_wallet_invalid_json_contract() {
 }
 
 #[wasm_bindgen_test]
-fn sdk_facade_transport_json_alias_channel_id_fallback_contract() {
-    reset_wasm_runtime_state_for_tests();
+fn node_relay_session_auth_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://127.0.0.1:3991".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node");
+
+    let empty_err = node
+        .set_relay_session_auth(Some("".to_string()), Some("".to_string()))
+        .expect_err("expected empty token/node_id contract");
+    assert_eq!(
+        empty_err.as_string().unwrap_or_default(),
+        "relay_auth_token cannot be empty"
+    );
+
+    let partial_err = node
+        .set_relay_session_auth(Some("token-a".to_string()), None)
+        .expect_err("expected pair requirement");
+    assert_eq!(
+        partial_err.as_string().unwrap_or_default(),
+        "relay_auth_token and relay_node_id must be provided together"
+    );
+
+    let invalid_node_id_err = node
+        .set_relay_session_auth(
+            Some("token-a".to_string()),
+            Some("not-a-pubkey".to_string()),
+        )
+        .expect_err("expected pubkey validation");
+    assert_eq!(
+        invalid_node_id_err.as_string().unwrap_or_default(),
+        "invalid relay_node_id"
+    );
+
+    let valid_node_id =
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+    node.set_relay_session_auth(Some("token-a".to_string()), Some(valid_node_id.clone()))
+        .expect("set relay auth");
+    let auth_js = node
+        .relay_session_auth_value()
+        .expect("relaySessionAuthValue");
+    let auth: serde_json::Value = serde_wasm_bindgen::from_value(auth_js).expect("parse auth");
+    assert_eq!(auth["relay_auth_token"], "token-a");
+    assert_eq!(auth["relay_node_id"], valid_node_id);
+
+    node.set_relay_session_auth(None, None)
+        .expect("clear relay auth");
+    let cleared_js = node
+        .relay_session_auth_value()
+        .expect("relaySessionAuthValue");
+    assert!(cleared_js.is_null() || cleared_js.is_undefined());
+}
+
+#[wasm_bindgen_test]
+fn sdk_facade_relay_session_auth_forwarding_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3355".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3992".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
+        .expect("node");
+    let valid_node_id =
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+
+    sdk.set_relay_session_auth(
+        &node,
+        Some("token-b".to_string()),
+        Some(valid_node_id.clone()),
+    )
+    .expect("set relay auth");
+    let auth_js = sdk
+        .relay_session_auth_value(&node)
+        .expect("relaySessionAuthValue");
+    let auth: serde_json::Value = serde_wasm_bindgen::from_value(auth_js).expect("parse auth");
+    assert_eq!(auth["relay_auth_token"], "token-b");
+    assert_eq!(auth["relay_node_id"], valid_node_id);
+}
+
+#[wasm_bindgen_test]
+fn sdk_node_handle_relay_session_auth_forwarding_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = RlnWasmSdk::new();
+    let node = sdk
+        .create_node_handle_with_runtime_backend(
+            "ws://127.0.0.1:3993".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
+        .expect("node handle");
+    let valid_node_id =
+        "02c11d7dfdd1ca9301508397ec8cc08758aadd95361af8562946146c33be606b58".to_string();
+
+    node.set_relay_session_auth(Some("token-c".to_string()), Some(valid_node_id.clone()))
+        .expect("set relay auth");
+    let auth_js = node
+        .relay_session_auth_value()
+        .expect("relaySessionAuthValue");
+    let auth: serde_json::Value = serde_wasm_bindgen::from_value(auth_js).expect("parse auth");
+    assert_eq!(auth["relay_auth_token"], "token-c");
+    assert_eq!(auth["relay_node_id"], valid_node_id);
+}
+
+#[wasm_bindgen_test]
+fn sdk_facade_transport_json_alias_channel_id_fallback_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let sdk = RlnWasmSdk::new();
+    let node = sdk
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3355".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -4465,12 +5547,12 @@ fn sdk_facade_transport_json_alias_channel_id_fallback_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_json_alias_channel_id_fallback_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3356".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -4513,10 +5595,13 @@ fn sdk_node_handle_transport_json_alias_channel_id_fallback_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_facade_transport_json_type_alias_channel_id_fallback_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3359".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3359".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -4557,10 +5642,13 @@ fn sdk_facade_transport_json_type_alias_channel_id_fallback_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_facade_transport_json_kind_alias_reconnect_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3357".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3357".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -4590,12 +5678,12 @@ fn sdk_facade_transport_json_kind_alias_reconnect_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_json_type_alias_reconnect_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3358".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let _ = node.list_peers_value().expect("warm runtime");
@@ -4628,12 +5716,12 @@ fn sdk_node_handle_transport_json_type_alias_reconnect_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_json_type_alias_channel_id_fallback_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3360".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let _ = node.list_peers_value().expect("warm runtime");
@@ -4677,10 +5765,13 @@ fn sdk_node_handle_transport_json_type_alias_channel_id_fallback_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_facade_transport_peer_connected_alias_reconnect_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3361".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3361".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -4710,10 +5801,10 @@ fn sdk_facade_transport_peer_connected_alias_reconnect_contract() {
 
 #[wasm_bindgen_test]
 fn node_ingest_runtime_transport_event_channel_opened_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://127.0.0.1:3362".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node");
     let peer_pubkey =
@@ -4766,12 +5857,12 @@ fn node_ingest_runtime_transport_event_channel_opened_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_ready_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3363".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -4827,10 +5918,13 @@ fn sdk_node_handle_transport_channel_ready_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_facade_transport_channel_disconnected_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3364".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3364".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -4873,12 +5967,12 @@ fn sdk_facade_transport_channel_disconnected_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_disconnected_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3365".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -4923,10 +6017,13 @@ fn sdk_node_handle_transport_channel_disconnected_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_facade_transport_peer_online_alias_reconnect_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3366".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3366".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -4956,12 +6053,12 @@ fn sdk_facade_transport_peer_online_alias_reconnect_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_online_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3367".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -5017,10 +6114,13 @@ fn sdk_node_handle_transport_channel_online_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_facade_transport_peer_offline_alias_disconnect_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3368".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3368".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -5050,12 +6150,12 @@ fn sdk_facade_transport_peer_offline_alias_disconnect_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_offline_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3369".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -5100,10 +6200,13 @@ fn sdk_node_handle_transport_channel_offline_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_facade_transport_peer_up_down_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3370".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3370".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -5142,12 +6245,12 @@ fn sdk_facade_transport_peer_up_down_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_up_down_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3371".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -5216,10 +6319,13 @@ fn sdk_node_handle_transport_channel_up_down_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_facade_transport_peer_hyphen_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend("ws://127.0.0.1:3372".to_string(), "ldk_bridge".to_string())
+        .new_node_with_runtime_backend(
+            "ws://127.0.0.1:3372".to_string(),
+            "wasm_native_ldk".to_string(),
+        )
         .expect("node");
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
@@ -5244,12 +6350,12 @@ fn sdk_facade_transport_peer_hyphen_alias_contract() {
 
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_dot_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
         .create_node_handle_with_runtime_backend(
             "ws://127.0.0.1:3373".to_string(),
-            "ldk_bridge".to_string(),
+            "wasm_native_ldk".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -5294,7 +6400,7 @@ fn sdk_node_handle_transport_channel_dot_alias_contract() {
 
 #[wasm_bindgen_test]
 fn node_invoice_status_empty_error_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
     let err = node
         .invoice_status_value("".to_string())
@@ -5305,7 +6411,7 @@ fn node_invoice_status_empty_error_contract() {
 
 #[wasm_bindgen_test]
 fn node_ingest_read_event_json_updates_payment_status() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
     let keysend_js = node
         .keysend_value(
@@ -5346,7 +6452,7 @@ fn node_ingest_read_event_json_updates_payment_status() {
 
 #[wasm_bindgen_test]
 fn node_ingest_read_event_text_updates_payment_status() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
     let keysend_js = node
         .keysend_value(
@@ -5372,7 +6478,7 @@ fn node_ingest_read_event_text_updates_payment_status() {
 
 #[wasm_bindgen_test]
 fn node_ingest_read_event_invalid_status_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
     let keysend_js = node
         .keysend_value(
@@ -5398,7 +6504,7 @@ fn node_ingest_read_event_invalid_status_contract() {
     let msg = err.as_string().expect("error string");
     assert_eq!(
         msg,
-        "status must be one of: pending, succeeded, failed, expired"
+        "status must be one of: pending, claimable, claiming, succeeded, cancelled, failed, expired"
     );
 
     let events_js = node.list_runtime_events_value().expect("events");
@@ -5406,19 +6512,16 @@ fn node_ingest_read_event_invalid_status_contract() {
         serde_wasm_bindgen::from_value(events_js).expect("parse events");
     assert!(events.len() >= 1);
     let last = events.last().expect("last event");
-    assert_eq!(last.source, "manual_api");
+    assert_eq!(last.source, "node_api");
     assert_eq!(last.event_kind, "payment_status");
-    assert!(!last.applied);
-    assert_eq!(last.status.as_deref(), Some("unknown_status"));
-    assert_eq!(
-        last.error.as_deref(),
-        Some("status must be one of: pending, succeeded, failed, expired")
-    );
+    assert!(last.applied);
+    assert_eq!(last.status.as_deref(), Some("failed"));
+    assert!(last.error.is_none());
 }
 
 #[wasm_bindgen_test]
 fn node_ingest_runtime_transport_event_unknown_target_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
     let payload_hex = hex::encode("peer_disconnected:0200deadbeef");
     let applied_js = node
@@ -5445,7 +6548,7 @@ fn node_ingest_runtime_transport_event_unknown_target_contract() {
 
 #[wasm_bindgen_test]
 fn node_ingest_runtime_transport_event_parse_error_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
     let payload_hex = hex::encode("{\"event\":\"unknown\"}");
     let err = node
@@ -5470,10 +6573,10 @@ fn node_ingest_runtime_transport_event_parse_error_contract() {
 
 #[wasm_bindgen_test]
 fn node_ingest_runtime_transport_event_json_alias_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://127.0.0.1:3001".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node");
     let peer_pubkey =
@@ -5504,10 +6607,10 @@ fn node_ingest_runtime_transport_event_json_alias_contract() {
 
 #[wasm_bindgen_test]
 fn node_ingest_runtime_transport_event_json_alias_channel_id_fallback_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://127.0.0.1:3354".to_string(),
-        "ldk_bridge".to_string(),
+        "wasm_native_ldk".to_string(),
     )
     .expect("node");
     let peer_pubkey =
@@ -5549,7 +6652,7 @@ fn node_ingest_runtime_transport_event_json_alias_channel_id_fallback_contract()
 
 #[wasm_bindgen_test]
 fn node_update_payment_status_terminal_transition_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
     let keysend_js = node
         .keysend_value(
@@ -5576,7 +6679,7 @@ fn node_update_payment_status_terminal_transition_contract() {
 
 #[wasm_bindgen_test]
 fn node_payment_status_event_updates_swap_runtime_status_contract() {
-    reset_wasm_runtime_state_for_tests();
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
     let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
     let keysend_js = node
         .keysend_value(
@@ -5634,4 +6737,100 @@ fn node_decode_rgb_invoice_json_empty_error_contract() {
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
     assert_eq!(msg, "invoice cannot be empty");
+}
+
+#[wasm_bindgen_test]
+fn rgb_ln_transfers_register_on_rgb_keysend_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
+    let keysend_js = node
+        .keysend_value(
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
+            3_000_000,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            Some(7),
+        )
+        .expect("keysend");
+    let keysend: serde_json::Value = serde_wasm_bindgen::from_value(keysend_js).expect("parse");
+    let payment_hash = keysend["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+
+    let transfers_js = node
+        .list_rgb_ln_transfers_value()
+        .expect("list rgb ln transfers");
+    let transfers: serde_json::Value =
+        serde_wasm_bindgen::from_value(transfers_js).expect("parse transfers");
+    let transfers = transfers.as_array().expect("array");
+    assert_eq!(transfers.len(), 1);
+    assert_eq!(transfers[0]["payment_hash"], payment_hash);
+    assert_eq!(transfers[0]["asset_amount"], 7);
+}
+
+#[wasm_bindgen_test]
+fn rgb_ln_transfers_follow_payment_status_updates_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node");
+    let keysend_js = node
+        .keysend_value(
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
+            3_000_000,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            Some(11),
+        )
+        .expect("keysend");
+    let keysend: serde_json::Value = serde_wasm_bindgen::from_value(keysend_js).expect("parse");
+    let payment_hash = keysend["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+
+    node.update_payment_status(payment_hash.clone(), "succeeded".to_string())
+        .expect("update status");
+    let transfers_js = node
+        .list_rgb_ln_transfers_value()
+        .expect("list rgb ln transfers");
+    let transfers: serde_json::Value =
+        serde_wasm_bindgen::from_value(transfers_js).expect("parse transfers");
+    let transfers = transfers.as_array().expect("array");
+    let matching = transfers
+        .iter()
+        .find(|entry| entry["payment_hash"] == payment_hash)
+        .expect("matching transfer");
+    assert_eq!(matching["status"], "succeeded");
+}
+
+#[wasm_bindgen_test]
+fn rgb_ln_transfers_persist_across_node_recreation_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let proxy = "ws://127.0.0.1:3999".to_string();
+    let node_a = RlnWasmNode::new(proxy.clone()).expect("node a");
+    let keysend_js = node_a
+        .keysend_value(
+            "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string(),
+            3_000_000,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            Some(21),
+        )
+        .expect("rgb keysend");
+    let keysend: serde_json::Value = serde_wasm_bindgen::from_value(keysend_js).expect("parse");
+    let payment_hash = keysend["payment_hash"]
+        .as_str()
+        .expect("payment hash")
+        .to_string();
+    node_a
+        .update_payment_status(payment_hash.clone(), "succeeded".to_string())
+        .expect("set succeeded");
+
+    let node_b = RlnWasmNode::new(proxy).expect("node b");
+    let transfers_js = node_b
+        .list_rgb_ln_transfers_value()
+        .expect("list persisted transfers");
+    let transfers: serde_json::Value =
+        serde_wasm_bindgen::from_value(transfers_js).expect("parse transfers");
+    let transfers = transfers.as_array().expect("array");
+    assert_eq!(transfers.len(), 1);
+    assert_eq!(transfers[0]["payment_hash"], payment_hash);
+    assert_eq!(transfers[0]["status"], "succeeded");
 }

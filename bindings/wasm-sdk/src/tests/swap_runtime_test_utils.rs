@@ -7,6 +7,7 @@ pub(crate) fn reset_swap_runtime_state_for_tests() {
     });
 }
 
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn test_insert_swap_with_payment_hash(payment_hash: &str, taker: bool) {
     let now = now_secs();
@@ -35,3 +36,7 @@ pub(crate) fn test_insert_swap_with_payment_hash(payment_hash: &str, taker: bool
         persist_swap_runtime_state(&state);
     });
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn test_insert_swap_with_payment_hash(_payment_hash: &str, _taker: bool) {}

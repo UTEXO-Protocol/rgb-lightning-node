@@ -110,7 +110,6 @@ thread_local! {
 
 const SWAP_STRING_PREFIX: &str = "rln-wasm-swap:";
 const SWAP_STATE_STORAGE_KEY_PREFIX: &str = "rln:wasm:swap-runtime:v1:";
-const SWAP_STATE_LEGACY_STORAGE_KEY: &str = "rln:wasm:swap-runtime:v1";
 
 fn swap_state_storage_key() -> String {
     let identity = crate::sdk_node_identity_seed().unwrap_or_else(|| "ephemeral".to_string());
@@ -119,11 +118,8 @@ fn swap_state_storage_key() -> String {
 }
 
 #[cfg(test)]
-mod test_utils;
-#[cfg(test)]
-pub(crate) use test_utils::{
-    reset_swap_runtime_state_for_tests, test_insert_swap_with_payment_hash,
-};
+#[path = "tests/swap_runtime_test_utils.rs"]
+pub(crate) mod test_utils;
 
 fn now_secs() -> u64 {
     (js_sys::Date::now() as u64) / 1000
@@ -156,11 +152,6 @@ fn ensure_swap_runtime_loaded(state: &mut SwapRuntimeState) {
     let storage_key = swap_state_storage_key();
     let store = browser_persistent_state_store();
     if let Ok(Some(raw)) = store.get(&storage_key) {
-        if let Ok(snapshot) = serde_json::from_str::<SwapRuntimeSnapshot>(&raw) {
-            hydrate_state(state, snapshot);
-        }
-    } else if let Ok(Some(raw)) = store.get(SWAP_STATE_LEGACY_STORAGE_KEY) {
-        // One-way read compatibility for previously persisted global swap state snapshots.
         if let Ok(snapshot) = serde_json::from_str::<SwapRuntimeSnapshot>(&raw) {
             hydrate_state(state, snapshot);
         }
@@ -560,5 +551,6 @@ pub(crate) fn apply_payment_status_update(payment_hash: &str, status: &str) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "wasm32"))]
+#[path = "tests/swap_runtime_tests.rs"]
 mod tests;

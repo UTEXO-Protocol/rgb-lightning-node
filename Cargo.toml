@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88.0"
 
+[workspace]
+members = [".", "tools/wasm-proxy-gateway"]
+exclude = ["bindings/wasm-sdk", "bindings/uniffi-bindgen"]
+
+[workspace.lints.rust]
+unexpected_cfgs = "allow"
+
 [lib]
 name = "rgb_lightning_node"
 crate-type = ["lib", "staticlib", "cdylib"]
@@ -46,7 +53,7 @@ uniffi = { version = "0.28.3", features = ["build"], optional = true }
 zip = { version = "2.2.0", default-features = false, features = ["time", "zstd"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-axum = { version = "0.7.7", features = ["multipart"] }
+axum = { version = "0.7.7", features = ["multipart", "ws"] }
 axum-extra = "0.9.4"
 biscuit-auth = "6.0.0"
 lightning = { version = "0.2.0", path = "./rust-lightning/lightning", features = ["dnssec"] }
@@ -62,7 +69,8 @@ rgb-lib = { version = "0.3.0-beta.5", features = [
     "electrum",
     "esplora",
 ] }
-tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "signal", "sync", "net", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread", "signal", "sync", "net", "time"] }
 tokio-util = { version = "0.7.12", features = ["codec"] }
 tower-http = { version = "0.6.1", features = ["cors", "limit", "trace"] }
 tracing-appender = "0.2.3"

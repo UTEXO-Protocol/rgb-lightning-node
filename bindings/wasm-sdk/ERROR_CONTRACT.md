@@ -31,6 +31,18 @@ This document defines stable error behavior for `bindings/wasm-sdk`.
 18. `Invalid filter: <serde_error>`
 19. `Invalid schemas: <serde_error>`
 20. `Invalid inflation_amounts array: <serde_error>`
+21. `relay_auth_token and relay_node_id must be provided together`
+22. `relay_auth_token cannot be empty`
+23. `relay_node_id cannot be empty`
+24. `invalid relay_node_id`
+25. `invalid peer_pubkey`
+26. `rgb_proxy_endpoint cannot be empty`
+27. `rgb_proxy_endpoint must use http:// or https://`
+28. `rgb_proxy_auth_token and rgb_proxy_node_id must be provided together`
+29. `rgb_proxy_auth_token cannot be empty`
+30. `rgb_proxy_node_id cannot be empty`
+31. `invalid rgb_proxy_node_id`
+32. `transport_endpoints must be provided or setRgbProxyTransport must be configured`
 
 ## Unsupported Surface (not exposed by design)
 

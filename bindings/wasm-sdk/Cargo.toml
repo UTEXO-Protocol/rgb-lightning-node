@@ -22,11 +22,12 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 futures = "0.3"
 hex = "0.4"
-gloo-net = { version = "0.5", features = ["websocket"] }
+gloo-net = { version = "0.5", features = ["websocket", "http"] }
 web-sys = { version = "0.3", features = ["console", "Window", "Storage"] }
 lightning-invoice = { version = "0.34.0", features = ["std"] }
 bitcoin_hashes = "0.14"
 secp256k1 = "0.29"
+urlencoding = "2.1"
 
 [profile.reldebug]
 inherits = "release"
@@ -40,3 +41,5 @@ rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encodi
 rgb-consensus = { git = "https://github.com/rgb-protocol/rgb-consensus", rev = "d0e157ae6a19edc08829cf4b52bbda2f10b4301e" }
 rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "b9d44825a95593429dfd6a2bd059d3d83749a063" }
 rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", rev = "b9d44825a95593429dfd6a2bd059d3d83749a063" }
+
+[workspace]

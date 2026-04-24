@@ -41,31 +41,31 @@
     </p>
 
     <div class="row">
-      <label for="proxyUrl">Proxy URL (optional)</label>
+      <label for="proxyUrl">Proxy URL</label>
       <input
         id="proxyUrl"
         type="text"
-        placeholder="https://your-rgb-proxy.example"
+        value="ws://127.0.0.1:3001"
       />
     </div>
 
     <div class="row">
-      <label for="peerAddr">Peer Addr (optional)</label>
-      <input id="peerAddr" type="text" placeholder="127.0.0.1:9735" />
+      <label for="peerAddr">Peer Addr</label>
+      <input id="peerAddr" type="text" value="127.0.0.1:9746" />
     </div>
 
     <div class="row">
-      <label for="peerPubkey">Peer Pubkey (optional)</label>
+      <label for="peerPubkey">Peer Pubkey</label>
       <input
         id="peerPubkey"
         type="text"
-        placeholder="02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        value="02399514a480a9b9d041651fd408c1483a2a3dff33a74a158dc948d120930fa011"
       />
       <button id="run">Run Example</button>
     </div>
 
     <div id="out"></div>
 
-    <script type="module" src="./manual_js_wasm_interop.js"></script>
+    <script type="module" src="./manual_js_wasm_interop.js?v=20260422-1"></script>
   </body>
 </html>

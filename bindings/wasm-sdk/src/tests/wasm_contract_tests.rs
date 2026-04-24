@@ -97,7 +97,7 @@ async fn peer_session_empty_pubkey_contract() {
 }
 
 #[wasm_bindgen_test]
-fn rust_bridge_invalid_initial_hex_contract() {
+fn rust_peer_manager_invalid_initial_hex_contract() {
     match RlnWasmRustPeerManagerBridge::new(Some("zz".to_string())) {
         Ok(_) => panic!("should fail"),
         Err(err) => {
