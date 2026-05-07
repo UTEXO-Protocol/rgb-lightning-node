@@ -7,6 +7,8 @@ mod uniffi_smoke_tests {
     use crate::utils::{AppState, StaticState};
     use bitcoin::hex::DisplayHex;
     use rgb_lib::BitcoinNetwork;
+    use sea_orm::{ConnectOptions, Database};
+    use serial_test::serial;
     use std::collections::HashSet;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
@@ -14,6 +16,7 @@ mod uniffi_smoke_tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
+    #[serial(uniffi_state)]
     fn uniffi_entrypoints_require_initialized_state() {
         clear_uniffi_app_state();
         assert!(!uniffi_is_initialized());
@@ -23,7 +26,7 @@ mod uniffi_smoke_tests {
         let channel_id = sdk_get_channel_id(lightning::ln::types::ChannelId([0u8; 32]));
         assert!(matches!(channel_id, Err(RlnError::NotInitialized)));
         let payment_hash = lightning::types::payment::PaymentHash([0u8; 32]);
-        let payment = sdk_get_payment(payment_hash);
+        let payment = sdk_get_payment(payment_hash, PaymentType::Outbound);
         assert!(matches!(payment, Err(RlnError::NotInitialized)));
         let swap = sdk_get_swap(lightning::types::payment::PaymentHash([0u8; 32]), true);
         assert!(matches!(swap, Err(RlnError::NotInitialized)));
@@ -76,6 +79,11 @@ mod uniffi_smoke_tests {
 
     fn mock_locked_state() -> Arc<AppState> {
         let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("rln_db");
+        let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
+        let database =
+            crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
+                .expect("mock database connection");
         Arc::new(AppState {
             static_state: Arc::new(StaticState {
                 ldk_peer_listening_port: 9735,
@@ -86,6 +94,9 @@ mod uniffi_smoke_tests {
                 max_media_upload_size_mb: 1,
                 enable_virtual_channels_v0: false,
                 virtual_peer_pubkeys: vec![],
+                database: Arc::new(database),
+                lsp_base_url: None,
+                lsp_bearer_token: None,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),
@@ -97,6 +108,7 @@ mod uniffi_smoke_tests {
     }
 
     #[test]
+    #[serial(uniffi_state)]
     fn uniffi_entrypoints_use_registered_state() {
         set_uniffi_app_state(mock_locked_state());
         assert!(uniffi_is_initialized());
@@ -128,6 +140,7 @@ mod uniffi_smoke_tests {
     }
 
     #[test]
+    #[serial(uniffi_state)]
     fn uniffi_instance_entrypoints_work_without_global_registration() {
         clear_uniffi_app_state();
         assert!(!uniffi_is_initialized());

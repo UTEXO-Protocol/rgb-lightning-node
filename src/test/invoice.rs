@@ -111,6 +111,41 @@ async fn description_hash_invoice() {
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
+async fn invalid_description_hash_invoice() {
+    initialize();
+
+    let test_dir_node1 = format!("{TEST_DIR_BASE}invalid_description_hash/node1");
+    let (node1_addr, _) = start_node(&test_dir_node1, NODE1_PEER_PORT, false).await;
+
+    fund_and_create_utxos(node1_addr, None).await;
+
+    let payload = LNInvoiceRequest {
+        amt_msat: None,
+        expiry_sec: 900,
+        asset_id: None,
+        asset_amount: None,
+        payment_hash: None,
+        description_hash: Some("not-a-valid-description-hash".to_string()),
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node1_addr}/lninvoice"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    check_response_is_nok(
+        res,
+        reqwest::StatusCode::BAD_REQUEST,
+        "Invalid description hash: not-a-valid-description-hash",
+        "InvalidDescriptionHash",
+    )
+    .await;
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
 async fn zero_amount_invoice() {
     initialize();
 
@@ -192,7 +227,8 @@ async fn zero_amount_invoice() {
     wait_for_ln_payment(node2_addr, &decoded.payment_hash, HTLCStatus::Succeeded).await;
 
     // Verify that both sender and receiver payments record the actual amount
-    let payment_sender = get_payment(node1_addr, &decoded.payment_hash).await;
+    let payment_sender =
+        get_payment(node1_addr, &decoded.payment_hash, PaymentType::Outbound).await;
     assert_eq!(
         payment_sender.amt_msat,
         Some(payment_amount),
@@ -200,7 +236,12 @@ async fn zero_amount_invoice() {
     );
     assert_eq!(payment_sender.status, HTLCStatus::Succeeded);
 
-    let payment_receiver = get_payment(node2_addr, &decoded.payment_hash).await;
+    let payment_receiver = get_payment(
+        node2_addr,
+        &decoded.payment_hash,
+        PaymentType::InboundAutoClaim,
+    )
+    .await;
     assert_eq!(
         payment_receiver.amt_msat,
         Some(payment_amount),
@@ -289,7 +330,12 @@ async fn zero_amount_invoice() {
         HTLCStatus::Succeeded,
     )
     .await;
-    let payment = get_payment(node2_addr, &decoded_with_amount.payment_hash).await;
+    let payment = get_payment(
+        node2_addr,
+        &decoded_with_amount.payment_hash,
+        PaymentType::InboundAutoClaim,
+    )
+    .await;
     assert_eq!(payment.asset_id, Some(asset_id.clone()));
     assert_eq!(payment.asset_amount, Some(50));
 
@@ -382,6 +428,11 @@ async fn zero_amount_invoice() {
         HTLCStatus::Succeeded,
     )
     .await;
-    let payment = get_payment(node2_addr, &decoded_without_amount.payment_hash).await;
+    let payment = get_payment(
+        node2_addr,
+        &decoded_without_amount.payment_hash,
+        PaymentType::InboundAutoClaim,
+    )
+    .await;
     assert_eq!(payment.asset_amount, Some(100));
 }

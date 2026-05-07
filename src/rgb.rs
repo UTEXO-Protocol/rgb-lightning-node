@@ -7,11 +7,10 @@ use bitcoin::{Address, Network, OutPoint, Transaction, TxOut, WPubkeyHash};
 use hex::DisplayHex;
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::types::ChannelId;
-use lightning::rgb_utils::{
-    get_rgb_channel_info_path, is_channel_rgb, parse_rgb_channel_info, RgbInfo,
-};
+use lightning::rgb_utils::{RgbInfo, RgbKvStoreExt};
 use lightning::sign::ChangeDestinationSource;
 use lightning::util::async_poll::AsyncResult;
+use lightning::util::persist::KVStoreSync;
 use rgb_lib::{
     bdk_wallet::SignOptions,
     bitcoin::psbt::Psbt as BitcoinPsbt,
@@ -20,7 +19,8 @@ use rgb_lib::{
         AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, Metadata, Online,
         OperationResult, ReceiveData, Recipient, RefreshResult, RgbWalletOpsOffline,
         RgbWalletOpsOnline, SendBeginResult, SinglesigKeys, Transaction as RgbLibTransaction,
-        Transfer, TransportEndpoint, Unspent, Wallet as RgbLibWallet,
+        SyncKeychain, SyncOptions, SyncStrategy, Transfer, TransportEndpoint, Unspent,
+        Wallet as RgbLibWallet,
     },
     AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, Fascia, RgbTransfer,
     RgbTransport, RgbTxid, UpdateRes, WitnessOrd,
@@ -633,7 +633,7 @@ impl RgbLibWalletWrapper {
         fee_rate: u64,
         min_confirmations: u8,
         expiration_timestamp: Option<u64>,
-        skip_sync: bool,
+        _skip_sync: bool,
     ) -> Result<OperationResult, RgbLibError> {
         self.get_rgb_wallet().send(
             self.online,
@@ -642,7 +642,6 @@ impl RgbLibWalletWrapper {
             fee_rate,
             min_confirmations,
             expiration_timestamp,
-            skip_sync,
         )
     }
 
@@ -684,17 +683,17 @@ impl RgbLibWalletWrapper {
         fee_rate: u64,
     ) -> Result<String, RgbLibError> {
         self.get_rgb_wallet()
-            .send_btc_begin(self.online, address, amount, fee_rate, false)
+            .send_btc_begin(self.online, address, amount, fee_rate, false, false)
     }
 
     pub(crate) fn send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {
         self.get_rgb_wallet()
-            .send_btc_end(self.online, signed_psbt, false)
+            .send_btc_end(self.online, signed_psbt)
     }
 
     pub(crate) fn send_end(&self, signed_psbt: String) -> Result<OperationResult, RgbLibError> {
         self.get_rgb_wallet()
-            .send_end(self.online, signed_psbt, false)
+            .send_end(self.online, signed_psbt)
     }
 
     pub(crate) fn sign_psbt(&self, unsigned_psbt: String) -> Result<String, RgbLibError> {
@@ -702,7 +701,21 @@ impl RgbLibWalletWrapper {
     }
 
     pub(crate) fn sync(&self) -> Result<(), RgbLibError> {
-        self.get_rgb_wallet().sync(self.online)
+        let mut wallet = self.get_rgb_wallet();
+        wallet.sync(
+            self.online,
+            SyncOptions {
+                keychain: SyncKeychain::Colored,
+                strategy: SyncStrategy::FastSync,
+            },
+        )?;
+        wallet.sync(
+            self.online,
+            SyncOptions {
+                keychain: SyncKeychain::Vanilla { lookback: 0 },
+                strategy: SyncStrategy::FastSync,
+            },
+        )
     }
 
     pub(crate) fn update_witnesses(
@@ -831,14 +844,11 @@ pub(crate) async fn check_rgb_proxy_endpoint(proxy_endpoint: &str) -> Result<(),
 
 pub(crate) fn get_rgb_channel_info_optional(
     channel_id: &ChannelId,
-    ldk_data_dir: &Path,
     pending: bool,
-) -> Option<(RgbInfo, PathBuf)> {
-    if !is_channel_rgb(channel_id, ldk_data_dir) {
-        return None;
-    }
-    let info_file_path =
-        get_rgb_channel_info_path(&channel_id.0.as_hex().to_string(), ldk_data_dir, pending);
-    let rgb_info = parse_rgb_channel_info(&info_file_path);
-    Some((rgb_info, info_file_path))
+    kv_store: &dyn KVStoreSync,
+) -> Option<RgbInfo> {
+    let channel_id_str = channel_id.0.as_hex().to_string();
+    kv_store
+        .read_rgb_channel_info(&channel_id_str, pending)
+        .ok()
 }

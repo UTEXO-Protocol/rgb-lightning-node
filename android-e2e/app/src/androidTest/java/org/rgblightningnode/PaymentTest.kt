@@ -18,6 +18,7 @@ import org.utexo.rgblightningnode.InvoiceStatus
 import org.utexo.rgblightningnode.LnInvoiceRequest
 import org.utexo.rgblightningnode.Payment
 import org.utexo.rgblightningnode.PaymentHash
+import org.utexo.rgblightningnode.PaymentType
 import org.utexo.rgblightningnode.RgbRecipient
 import org.utexo.rgblightningnode.RlnException
 import org.utexo.rgblightningnode.SdkCloseChannelRequest
@@ -114,6 +115,8 @@ class PaymentTest {
                 maxMediaUploadSizeMb = 20u,
                 enableVirtualChannelsV0 = false,
                 virtualPeerPubkeys = null,
+                lspBaseUrl = null,
+                lspBearerToken = null,
             )
         )
     }
@@ -202,26 +205,6 @@ class PaymentTest {
             Thread.sleep(1_000L)
         }
         error("spendable balance did not become expected=$expected actual=$lastBalance after ${timeoutSec}s")
-    }
-
-    private fun waitForTransferWithExpiration(
-        node: SdkNode,
-        assetId: ContractId,
-        transferIdx: Int,
-        timeoutSec: Long,
-    ) = run {
-        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
-        while (System.currentTimeMillis() < deadline) {
-            refreshTransfers(node)
-            val transfer = node.listTransfers(assetId).firstOrNull {
-                it.idx == transferIdx && it.expiration != null
-            }
-            if (transfer != null) {
-                return@run transfer
-            }
-            Thread.sleep(1_000L)
-        }
-        error("transfer expiration did not become available: idx=$transferIdx after ${timeoutSec}s")
     }
 
     private fun waitForChannelFundingTx(nodeA: SdkNode, nodeB: SdkNode, assetId: ContractId, timeoutSec: Long): Txid {
@@ -315,37 +298,52 @@ class PaymentTest {
         error("invoice did not finalize after ${timeoutSec}s, last=$last")
     }
 
-    private fun waitForPaymentStatus(node: SdkNode, paymentHash: PaymentHash, timeoutSec: Long): Payment {
+    private fun waitForPaymentStatus(
+        node: SdkNode,
+        paymentHash: PaymentHash,
+        paymentType: PaymentType,
+        timeoutSec: Long,
+    ): Payment {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var last = "not found"
         while (System.currentTimeMillis() < deadline) {
-            try {
-                val payment = node.getPayment(paymentHash)
+            val payment = node.listPayments().firstOrNull {
+                it.paymentHash == paymentHash && it.paymentType == paymentType
+            }
+            if (payment != null) {
                 last = payment.status.name
                 if (payment.status == HtlcStatus.SUCCEEDED) {
                     return payment
                 }
-            } catch (_: RlnException.NotFound) {
-                last = "not found"
             }
             Thread.sleep(1_000L)
         }
-        error("payment did not succeed after ${timeoutSec}s, last=$last")
+        error("payment did not succeed after ${timeoutSec}s, paymentType=$paymentType, last=$last")
     }
 
-    private fun waitForPaymentPresentInList(node: SdkNode, paymentHash: PaymentHash, timeoutSec: Long): Payment {
+    private fun waitForPaymentPresentInList(
+        node: SdkNode,
+        paymentHash: PaymentHash,
+        paymentType: PaymentType,
+        timeoutSec: Long,
+    ): Payment {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var lastCount = 0
         while (System.currentTimeMillis() < deadline) {
             val payments = node.listPayments()
             lastCount = payments.size
-            val payment = payments.firstOrNull { it.paymentHash == paymentHash }
+            val payment = payments.firstOrNull {
+                it.paymentHash == paymentHash && it.paymentType == paymentType
+            }
             if (payment != null) {
                 return payment
             }
             Thread.sleep(1_000L)
         }
-        error("payment not found in listPayments: paymentHash=$paymentHash list_size=$lastCount after ${timeoutSec}s")
+        error(
+            "payment not found in listPayments: paymentHash=$paymentHash paymentType=$paymentType " +
+                "list_size=$lastCount after ${timeoutSec}s"
+        )
     }
 
     private fun sendPaymentWithLnBalance(
@@ -562,23 +560,43 @@ class PaymentTest {
             assertEquals("Regtest", decoded1.network)
             assertEquals(InvoiceStatus.SUCCEEDED, nodeB.invoiceStatus(invoice1))
 
-            val payment1Sender = waitForPaymentStatus(nodeA, decoded1.paymentHash, 60L)
+            val payment1Sender = waitForPaymentStatus(
+                nodeA,
+                decoded1.paymentHash,
+                PaymentType.OUTBOUND,
+                60L,
+            )
             assertEquals(HtlcStatus.SUCCEEDED, payment1Sender.status)
             assertEquals(assetId, payment1Sender.assetId)
             assertEquals(100uL, payment1Sender.assetAmount)
             checkPreimageMatchesHash(payment1Sender, decoded1.paymentHash)
 
-            val payment1Receiver = waitForPaymentStatus(nodeB, decoded1.paymentHash, 60L)
+            val payment1Receiver = waitForPaymentStatus(
+                nodeB,
+                decoded1.paymentHash,
+                PaymentType.INBOUND_AUTO_CLAIM,
+                60L,
+            )
             assertEquals(HtlcStatus.SUCCEEDED, payment1Receiver.status)
             assertEquals(assetId, payment1Receiver.assetId)
             assertEquals(100uL, payment1Receiver.assetAmount)
             checkPreimageMatchesHash(payment1Receiver, decoded1.paymentHash)
 
-            val listedPayment1Sender = waitForPaymentPresentInList(nodeA, decoded1.paymentHash, 60L)
+            val listedPayment1Sender = waitForPaymentPresentInList(
+                nodeA,
+                decoded1.paymentHash,
+                PaymentType.OUTBOUND,
+                60L,
+            )
             assertEquals(decoded1.paymentHash, listedPayment1Sender.paymentHash)
             checkPreimageMatchesHash(listedPayment1Sender, decoded1.paymentHash)
 
-            val listedPayment1Receiver = waitForPaymentPresentInList(nodeB, decoded1.paymentHash, 60L)
+            val listedPayment1Receiver = waitForPaymentPresentInList(
+                nodeB,
+                decoded1.paymentHash,
+                PaymentType.INBOUND_AUTO_CLAIM,
+                60L,
+            )
             assertEquals(decoded1.paymentHash, listedPayment1Receiver.paymentHash)
             checkPreimageMatchesHash(listedPayment1Receiver, decoded1.paymentHash)
 
@@ -595,12 +613,22 @@ class PaymentTest {
             sendPaymentWithLnBalance(nodeB, nodeA, invoice2, assetId, 50u, 100u, 500u)
 
             val decoded2 = nodeA.decodeLnInvoice(invoice2)
-            val payment2Receiver = waitForPaymentStatus(nodeA, decoded2.paymentHash, 60L)
+            val payment2Receiver = waitForPaymentStatus(
+                nodeA,
+                decoded2.paymentHash,
+                PaymentType.INBOUND_AUTO_CLAIM,
+                60L,
+            )
             assertEquals(assetId, payment2Receiver.assetId)
             assertEquals(50uL, payment2Receiver.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment2Receiver.status)
             checkPreimageMatchesHash(payment2Receiver, decoded2.paymentHash)
-            val payment2Sender = waitForPaymentStatus(nodeB, decoded2.paymentHash, 60L)
+            val payment2Sender = waitForPaymentStatus(
+                nodeB,
+                decoded2.paymentHash,
+                PaymentType.OUTBOUND,
+                60L,
+            )
             assertEquals(assetId, payment2Sender.assetId)
             assertEquals(50uL, payment2Sender.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment2Sender.status)
@@ -625,12 +653,22 @@ class PaymentTest {
                 )
             )
             val decoded3 = nodeA.decodeLnInvoice(invoice3)
-            val payment3Sender = waitForPaymentStatus(nodeA, decoded3.paymentHash, 60L)
+            val payment3Sender = waitForPaymentStatus(
+                nodeA,
+                decoded3.paymentHash,
+                PaymentType.OUTBOUND,
+                60L,
+            )
             assertEquals(assetId, payment3Sender.assetId)
             assertEquals(50uL, payment3Sender.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment3Sender.status)
             checkPreimageMatchesHash(payment3Sender, decoded3.paymentHash)
-            val payment3Receiver = waitForPaymentStatus(nodeB, decoded3.paymentHash, 60L)
+            val payment3Receiver = waitForPaymentStatus(
+                nodeB,
+                decoded3.paymentHash,
+                PaymentType.INBOUND_AUTO_CLAIM,
+                60L,
+            )
             assertEquals(assetId, payment3Receiver.assetId)
             assertEquals(50uL, payment3Receiver.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment3Receiver.status)
@@ -655,12 +693,22 @@ class PaymentTest {
                 )
             )
             val decoded4 = nodeA.decodeLnInvoice(invoice4)
-            val payment4Receiver = waitForPaymentStatus(nodeA, decoded4.paymentHash, 60L)
+            val payment4Receiver = waitForPaymentStatus(
+                nodeA,
+                decoded4.paymentHash,
+                PaymentType.INBOUND_AUTO_CLAIM,
+                60L,
+            )
             assertEquals(assetId, payment4Receiver.assetId)
             assertEquals(50uL, payment4Receiver.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment4Receiver.status)
             checkPreimageMatchesHash(payment4Receiver, decoded4.paymentHash)
-            val payment4Sender = waitForPaymentStatus(nodeB, decoded4.paymentHash, 60L)
+            val payment4Sender = waitForPaymentStatus(
+                nodeB,
+                decoded4.paymentHash,
+                PaymentType.OUTBOUND,
+                60L,
+            )
             assertEquals(assetId, payment4Sender.assetId)
             assertEquals(50uL, payment4Sender.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment4Sender.status)
@@ -726,7 +774,7 @@ class PaymentTest {
             assertNull(xfer1.expiration)
             assertTrue(xfer1.transportEndpoints.isEmpty())
 
-            val xfer2 = waitForTransferWithExpiration(nodeA, assetId, 2, 20L)
+            val xfer2 = transfers.first { it.idx == 2 }
             assertEquals("Settled", xfer2.status)
             assertEquals("Send", xfer2.kind)
             assertEquals("Fungible(600)", xfer2.requestedAssignment)
@@ -735,10 +783,10 @@ class PaymentTest {
             assertNotNull(xfer2.recipientId)
             assertNull(xfer2.receiveUtxo)
             assertNotNull(xfer2.changeUtxo)
-            assertNotNull(xfer2.expiration)
+            assertNull(xfer2.expiration)
             assertTrue(xfer2.transportEndpoints.isNotEmpty())
 
-            val xfer3 = waitForTransferWithExpiration(nodeA, assetId, 3, 20L)
+            val xfer3 = transfers.first { it.idx == 3 }
             assertEquals("Settled", xfer3.status)
             assertEquals("ReceiveWitness", xfer3.kind)
             assertEquals(listOf("Fungible(550)"), xfer3.assignments)
@@ -746,7 +794,7 @@ class PaymentTest {
             assertNotNull(xfer3.recipientId)
             assertNotNull(xfer3.receiveUtxo)
             assertNull(xfer3.changeUtxo)
-            assertNotNull(xfer3.expiration)
+            assertNull(xfer3.expiration)
             assertTrue(xfer3.transportEndpoints.isNotEmpty())
 
             log("SUCCESS: Android payment parity flow completed")

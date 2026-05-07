@@ -62,6 +62,8 @@ def make_node(storage: Path, daemon_port: int, peer_port: int) -> rln.SdkNode:
         max_media_upload_size_mb=20,
         enable_virtual_channels_v0=True,
         virtual_peer_pubkeys=None,
+        lsp_base_url=None,
+        lsp_bearer_token=None,
     )
     return rln.SdkNode.create(req)
 
@@ -162,10 +164,14 @@ def wait_payment_final(node: rln.SdkNode, payment_hash, timeout_sec: int = 60):
     last = None
     while time.time() < deadline:
         node.sync()
-        payment = node.get_payment(payment_hash)
-        last = payment.status
-        if payment.status != rln.HtlcStatus.PENDING:
-            return payment.status
+        payment = next(
+            (p for p in node.list_payments() if p.payment_hash == payment_hash),
+            None,
+        )
+        if payment is not None:
+            last = payment.status
+            if payment.status != rln.HtlcStatus.PENDING:
+                return payment.status
         time.sleep(1)
     raise RuntimeError(f"keysend did not finalize in time, last={last}")
 

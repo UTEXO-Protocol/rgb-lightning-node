@@ -1,13 +1,12 @@
 use electrum_client::ElectrumApi;
 use once_cell::sync::Lazy;
 pub(crate) use rgb_lightning_node::{
-    AssetBalanceInfo, AssetRecipients, AssignmentKind, Channel, ContractId,
-    DecodeRgbInvoiceResponse, HtlcStatus, InvoiceStatus, LnInvoiceRequest, Payment, PaymentHash,
-    RecipientId, RgbRecipient, SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkInitRequest,
-    SdkIssueAssetCfaRequest, SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkNode,
-    SdkOpenChannelRequest, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest,
-    SdkSendPaymentRequest, SdkUnlockRequest, SendRgbRequest, TransactionType, Transfer,
-    TransportEndpoint, WitnessData,
+    AssetBalanceInfo, AssetRecipients, AssignmentKind, Channel, ContractId, HtlcStatus,
+    InvoiceStatus, LnInvoiceRequest, Payment, PaymentHash, RecipientId, RgbRecipient,
+    SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkInitRequest, SdkIssueAssetCfaRequest,
+    SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkNode, SdkOpenChannelRequest,
+    SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest, SdkSendPaymentRequest,
+    SdkUnlockRequest, SendRgbRequest, TransactionType, TransportEndpoint, WitnessData,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,6 +28,7 @@ pub(crate) const OPEN_CHANNEL_ASSET_AMOUNT: u64 = 600;
 pub(crate) const OPEN_CHANNEL_PUSH_MSAT: u64 = 3_500_000;
 pub(crate) const HTLC_MIN_MSAT: u64 = 3_000_000;
 pub(crate) const PAYMENT_MSAT: u64 = HTLC_MIN_MSAT;
+pub(crate) const LIQUIDITY_KEYSEND_MSAT: u64 = 10_000_000;
 pub(crate) const CREATE_UTXOS_NUM: u8 = 10;
 pub(crate) const CREATE_UTXOS_FEE_RATE: u64 = 7;
 pub(crate) const PROXY_ENDPOINT_LOCAL: &str = "rpc://127.0.0.1:3000/json-rpc";
@@ -231,6 +231,8 @@ pub(crate) fn make_node(
         max_media_upload_size_mb: 20,
         enable_virtual_channels_v0: Some(false),
         virtual_peer_pubkeys: None,
+        lsp_base_url: None,
+        lsp_bearer_token: None,
     })
     .expect("create SDK node")
 }
@@ -436,6 +438,43 @@ pub(crate) fn wait_for_usable_channel(
     }
 }
 
+pub(crate) fn wait_for_channel_asset_state(
+    label: &str,
+    node: &SdkNode,
+    channel_id: lightning::ln::types::ChannelId,
+    expected_asset_local: Option<u64>,
+    expected_asset_remote: Option<u64>,
+    min_outbound_msat: Option<u64>,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        node.sync()
+            .unwrap_or_else(|_| panic!("{label}: node sync while waiting for channel state"));
+        let channel = node
+            .list_channels()
+            .unwrap_or_else(|_| panic!("{label}: list_channels while waiting for channel state"))
+            .into_iter()
+            .find(|channel| channel.channel_id == channel_id)
+            .unwrap_or_else(|| panic!("{label}: expected channel {channel_id}"));
+        if channel.ready
+            && channel.is_usable
+            && channel.asset_local_amount == expected_asset_local
+            && channel.asset_remote_amount == expected_asset_remote
+            && min_outbound_msat
+                .map(|min_outbound_msat| channel.outbound_balance_msat >= min_outbound_msat)
+                .unwrap_or(true)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label} did not reach expected channel state"
+        );
+        sleep(Duration::from_secs(1));
+    }
+}
+
 pub(crate) fn wait_for_channel_ready(
     node: &SdkNode,
     channel_id: lightning::ln::types::ChannelId,
@@ -542,10 +581,16 @@ pub(crate) fn wait_for_payment_status(
 ) -> Payment {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(payment) = node.get_payment(*payment_hash) {
-            if matches!(payment.status, HtlcStatus::Succeeded) {
-                return payment;
-            }
+        if let Some(payment) = node
+            .list_payments()
+            .expect("list_payments while waiting for payment success")
+            .into_iter()
+            .find(|payment| {
+                payment.payment_hash == *payment_hash
+                    && matches!(payment.status, HtlcStatus::Succeeded)
+            })
+        {
+            return payment;
         }
 
         assert!(
@@ -641,55 +686,6 @@ pub(crate) fn wait_for_succeeded_payment_in_list(
         assert!(
             Instant::now() < deadline,
             "payment did not become succeeded in list_payments"
-        );
-        sleep(Duration::from_secs(1));
-    }
-}
-
-pub(crate) fn wait_for_transfer_with_expiration(
-    node: &SdkNode,
-    asset_id: &ContractId,
-    transfer_idx: i32,
-    timeout: Duration,
-) -> Transfer {
-    let deadline = Instant::now() + timeout;
-    loop {
-        refresh_transfers(node);
-        let transfers = node
-            .list_transfers(asset_id.clone())
-            .expect("list_transfers while waiting for transfer expiration");
-        if let Some(transfer) = transfers
-            .into_iter()
-            .find(|transfer| transfer.idx == transfer_idx && transfer.expiration.is_some())
-        {
-            return transfer;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "transfer expiration did not become available: idx={transfer_idx}"
-        );
-        sleep(Duration::from_secs(1));
-    }
-}
-
-pub(crate) fn wait_for_decoded_rgb_invoice_with_expiration(
-    node: &SdkNode,
-    invoice: &str,
-    timeout: Duration,
-) -> DecodeRgbInvoiceResponse {
-    let deadline = Instant::now() + timeout;
-    loop {
-        node.sync()
-            .expect("node sync while waiting for decoded rgb invoice expiration");
-        let decoded = node
-            .decode_rgb_invoice(invoice.to_string())
-            .expect("decode_rgb_invoice while waiting for expiration");
-        if decoded.expiration_timestamp.is_some() {
-            return decoded;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "decoded rgb invoice expiration did not become available"
         );
         sleep(Duration::from_secs(1));
     }
@@ -792,7 +788,7 @@ pub(crate) fn keysend(
             asset_amount,
         })
         .expect("keysend");
-    wait_for_payment_status(sender, &keysend.payment_hash, Duration::from_secs(60))
+    wait_for_succeeded_payment_in_list(sender, &keysend.payment_hash, Duration::from_secs(60))
 }
 
 pub(crate) fn close_channel(

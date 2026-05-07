@@ -5,26 +5,31 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
+use lightning::rgb_utils::{RgbPaymentInfo, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS};
+use lightning::util::hash_tables::new_hash_map;
+use lightning::util::persist::KVStoreSync;
+use lightning::util::ser::Readable;
 use lightning_invoice::Bolt11Invoice;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use reqwest::{Response, StatusCode};
-use rgb_lib::BitcoinNetwork;
+use rgb_lib::{BitcoinNetwork, ContractId};
+use sea_orm::{ConnectOptions, Database};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Once, RwLock};
+use std::sync::{Arc, Once, RwLock};
 use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing_test::traced_test;
 
 use crate::core_types::{HTLCStatus, SwapStatus, FEE_RATE, HTLC_MIN_MSAT};
-use crate::disk::{read_inbound_payment_info, INBOUND_PAYMENTS_FNAME};
 use crate::error::{APIError, APIErrorResponse};
-use crate::ldk::InvoiceType;
+use crate::kv_store::SeaOrmKvStore;
+use crate::ldk::{InboundPaymentInfoStorage, InvoiceType, INBOUND_PAYMENTS_KEY};
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetIFA, AssetNIA,
     AssetUDA, Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse,
@@ -49,7 +54,7 @@ use crate::routes::{
     Transaction, Transfer, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
-    hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST, LDK_DIR,
+    get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, ELECTRUM_URL_REGTEST,
     LOGS_DIR, PROXY_ENDPOINT_LOCAL,
 };
 
@@ -89,6 +94,8 @@ impl Default for UserArgs {
             root_public_key: None,
             enable_virtual_channels_v0: false,
             virtual_peer_pubkeys: vec![],
+            lsp_base_url: None,
+            lsp_bearer_token: None,
         }
     }
 }
@@ -417,6 +424,28 @@ async fn check_payment_status(
     println!("checking payment {payment_hash} is {expected_status:?} on node {node_address}");
     let payments = list_payments(node_address).await;
     if let Some(payment) = payments.iter().find(|p| p.payment_hash == payment_hash) {
+        if payment.status == expected_status {
+            return Some(payment.clone());
+        }
+        println!("payment found but with status: {:?}", payment.status);
+    }
+    None
+}
+
+async fn check_payment_status_by_type(
+    node_address: SocketAddr,
+    payment_hash: &str,
+    payment_type: PaymentType,
+    expected_status: HTLCStatus,
+) -> Option<Payment> {
+    println!(
+        "checking payment {payment_hash} of type {payment_type:?} is {expected_status:?} on node {node_address}"
+    );
+    let payments = list_payments(node_address).await;
+    if let Some(payment) = payments
+        .iter()
+        .find(|p| p.payment_hash == payment_hash && p.payment_type == payment_type)
+    {
         if payment.status == expected_status {
             return Some(payment.clone());
         }
@@ -760,6 +789,28 @@ async fn issue_asset_nia(node_address: SocketAddr) -> AssetNIA {
         .asset
 }
 
+async fn issue_asset_nia_with_amounts(node_address: SocketAddr, amounts: Vec<u64>) -> AssetNIA {
+    println!("issuing NIA asset on node {node_address}");
+    let payload = IssueAssetNIARequest {
+        amounts,
+        ticker: s!("USDT"),
+        name: s!("Tether"),
+        precision: 0,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/issueassetnia"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<IssueAssetNIAResponse>()
+        .await
+        .unwrap()
+        .asset
+}
+
 async fn issue_asset_uda(node_address: SocketAddr, file_path: Option<&str>) -> AssetUDA {
     println!("issuing UDA asset on node {node_address}");
     let mut media_file_digest = None;
@@ -937,10 +988,15 @@ async fn list_payments(node_address: SocketAddr) -> Vec<Payment> {
         .payments
 }
 
-async fn get_payment(node_address: SocketAddr, payment_hash: &str) -> Payment {
-    println!("getting payment for node {node_address}");
+async fn get_payment(
+    node_address: SocketAddr,
+    payment_hash: &str,
+    payment_type: PaymentType,
+) -> Payment {
+    println!("getting {payment_type:?} payment for node {node_address}");
     let payload = GetPaymentRequest {
         payment_hash: payment_hash.to_string(),
+        payment_type,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/getpayment"))
@@ -1388,10 +1444,20 @@ async fn open_channel_raw(
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let channels = list_channels(node_address).await;
             if let Some(channel) = channels.iter().find(|c| {
+                let asset_amounts_match = if asset_id.is_some() {
+                    let local_amount = asset_amount
+                        .unwrap_or(0)
+                        .saturating_sub(push_asset_amount.unwrap_or(0));
+                    let remote_amount = push_asset_amount.unwrap_or(0);
+                    c.asset_local_amount == Some(local_amount)
+                        && c.asset_remote_amount == Some(remote_amount)
+                } else {
+                    c.asset_local_amount.is_none() && c.asset_remote_amount.is_none()
+                };
                 c.peer_pubkey == dest_peer_pubkey
                     && c.asset_id == expected_asset_id
-                    && c.asset_local_amount == asset_amount
                     && c.virtual_open_mode.as_deref() == virtual_open_mode
+                    && asset_amounts_match
             }) {
                 if channel.ready && channel.is_usable {
                     return Ok(channel.clone());
@@ -1491,6 +1557,7 @@ async fn open_channel_with_custom_data(
     .expect("channel opening should succeed")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn open_virtual_channel(
     node_address: SocketAddr,
     dest_peer_pubkey: &str,
@@ -1499,6 +1566,7 @@ async fn open_virtual_channel(
     push_msat: Option<u64>,
     asset_amount: Option<u64>,
     asset_id: Option<&str>,
+    push_asset_amount: Option<u64>,
 ) -> Channel {
     open_channel_raw(
         node_address,
@@ -1508,7 +1576,7 @@ async fn open_virtual_channel(
         push_msat,
         asset_amount,
         asset_id,
-        None,
+        push_asset_amount,
         None,
         None,
         None,
@@ -1757,10 +1825,11 @@ async fn send_payment_with_status(
     expected_status: HTLCStatus,
 ) -> Payment {
     let send_payment = send_payment_raw(node_address, invoice).await;
-    wait_for_ln_payment(
+    wait_for_ln_payment_by_type(
         node_address,
         // TODO: remove unwrap once RGB offers are enabled
         &send_payment.payment_hash.unwrap(),
+        PaymentType::Outbound,
         expected_status,
     )
     .await
@@ -1945,6 +2014,30 @@ async fn wait_for_ln_payment(
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 40.0 {
             panic!("cannot find payment in status {expected_status}")
+        }
+    }
+}
+
+async fn wait_for_ln_payment_by_type(
+    node_address: SocketAddr,
+    payment_hash: &str,
+    payment_type: PaymentType,
+    expected_status: HTLCStatus,
+) -> Payment {
+    println!(
+        "waiting for LN payment {payment_hash} of type {payment_type:?} to become {expected_status:?} on node {node_address}"
+    );
+    let t_0 = OffsetDateTime::now_utc();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Some(payment) =
+            check_payment_status_by_type(node_address, payment_hash, payment_type, expected_status)
+                .await
+        {
+            return payment;
+        }
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 40.0 {
+            panic!("cannot find payment in status {expected_status} for type {payment_type:?}")
         }
     }
 }
@@ -2135,6 +2228,7 @@ pub fn set_mock_fee(fee: u32) {
     crate::fee_mock::set_mock_fee_for_tests(Some(fee));
 }
 
+mod auth_db_persistence;
 mod authentication;
 mod backup_and_restore;
 mod close_coop_nobtc_acceptor;

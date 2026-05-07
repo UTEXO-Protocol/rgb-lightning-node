@@ -5,6 +5,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod args;
 #[cfg(not(target_arch = "wasm32"))]
+mod async_order;
 mod auth;
 #[cfg(not(target_arch = "wasm32"))]
 mod backup;
@@ -13,6 +14,7 @@ mod bitcoind;
 #[cfg(not(target_arch = "wasm32"))]
 mod core_types;
 #[cfg(not(target_arch = "wasm32"))]
+mod database;
 mod disk;
 #[cfg(not(target_arch = "wasm32"))]
 mod error;
@@ -22,12 +24,16 @@ mod fee_mock;
 #[cfg(all(feature = "uniffi", not(target_arch = "wasm32")))]
 pub mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
+mod kv_store;
 mod ldk;
 #[cfg(not(target_arch = "wasm32"))]
 mod node;
 #[cfg(not(target_arch = "wasm32"))]
 mod rgb;
 #[cfg(not(target_arch = "wasm32"))]
+mod routes;
+#[cfg(not(target_arch = "wasm32"))]
+mod runtime;
 mod sdk;
 #[cfg(target_arch = "wasm32")]
 #[path = "sdk/wasm.rs"]
