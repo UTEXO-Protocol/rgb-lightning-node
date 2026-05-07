@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_refcell_ref)]
+
 //! WASM-bindgen public entrypoints.
 //!
 //! This module intentionally contains the JS-facing surface and keeps `lib.rs` focused on
@@ -1453,6 +1455,48 @@ impl RlnWasmSdkNodeHandle {
         self.inner.node_pubkey_json()
     }
 
+    #[wasm_bindgen(js_name = listRuntimeEventsValue)]
+    pub fn list_runtime_events_value(&self) -> Result<JsValue, JsValue> {
+        self.inner.list_runtime_events_value()
+    }
+
+    #[wasm_bindgen(js_name = listRuntimeEventsJson)]
+    pub fn list_runtime_events_json(&self) -> Result<String, JsValue> {
+        self.inner.list_runtime_events_json()
+    }
+
+    #[wasm_bindgen(js_name = decodeLnInvoiceValue)]
+    pub fn decode_ln_invoice_value(&self, invoice: String) -> Result<JsValue, JsValue> {
+        self.inner.decode_ln_invoice_value(invoice)
+    }
+
+    #[wasm_bindgen(js_name = decodeLnInvoiceJson)]
+    pub fn decode_ln_invoice_json(&self, invoice: String) -> Result<String, JsValue> {
+        self.inner.decode_ln_invoice_json(invoice)
+    }
+
+    #[wasm_bindgen(js_name = decodeRgbInvoiceValue)]
+    pub fn decode_rgb_invoice_value(&self, invoice: String) -> Result<JsValue, JsValue> {
+        self.inner.decode_rgb_invoice_value(invoice)
+    }
+
+    #[wasm_bindgen(js_name = decodeRgbInvoiceJson)]
+    pub fn decode_rgb_invoice_json(&self, invoice: String) -> Result<String, JsValue> {
+        self.inner.decode_rgb_invoice_json(invoice)
+    }
+
+    #[wasm_bindgen(js_name = createLnInvoiceJson)]
+    pub fn create_ln_invoice_json(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .create_ln_invoice_json(amt_msat, expiry_sec, asset_id, asset_amount)
+    }
+
     #[wasm_bindgen(js_name = setRelaySessionAuth)]
     pub fn set_relay_session_auth(
         &self,
@@ -2051,6 +2095,33 @@ impl RlnWasmSdkWalletHandle {
     #[wasm_bindgen(js_name = listTransactionsJson)]
     pub fn list_transactions_json(&self) -> Result<String, JsValue> {
         self.inner.list_transactions_json()
+    }
+
+    #[wasm_bindgen(js_name = refreshValue)]
+    pub async fn refresh_value(
+        &self,
+        online_js: JsValue,
+        asset_id: Option<String>,
+        filter_js: JsValue,
+        skip_sync: bool,
+    ) -> Result<JsValue, JsValue> {
+        self.inner
+            .refresh_value(online_js, asset_id, filter_js, skip_sync)
+            .await
+    }
+
+    #[wasm_bindgen(js_name = sendBtcBegin)]
+    pub async fn send_btc_begin(
+        &self,
+        online_js: JsValue,
+        address: String,
+        amount: u64,
+        fee_rate: u64,
+        skip_sync: bool,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .send_btc_begin(online_js, address, amount, fee_rate, skip_sync)
+            .await
     }
 
     #[wasm_bindgen(js_name = listAssetsValue)]

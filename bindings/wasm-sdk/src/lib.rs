@@ -1,3 +1,12 @@
+#![allow(clippy::missing_const_for_thread_local)]
+#![allow(clippy::await_holding_refcell_ref)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::needless_question_mark)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::question_mark)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+
 use bitcoin_hashes::sha256::Hash as Sha256;
 use bitcoin_hashes::Hash as _;
 use secp256k1::PublicKey as SecpPublicKey;
@@ -7,8 +16,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-
-use crate::ln_node::RlnWasmNode;
 
 mod chain_sync;
 mod ldk_event_applier;
@@ -33,6 +40,15 @@ mod wasm_runtime_paths;
 // Prefer `crate::prelude::*` for downstream imports. Keep module paths stable for now.
 
 pub use sdk_facade::*;
+// Re-export the WASM SDK internals for tests and advanced consumers. The public JS surface is
+// defined by wasm-bindgen annotations, but Rust unit/wasm-bindgen tests expect these symbols
+// to be available via `crate::*`.
+pub use ldk_live_backend::*;
+pub use ldk_runtime::*;
+pub use ln_node::*;
+pub use ln_runtime_native::*;
+pub use ln_transport::*;
+pub use peer_session::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RlnWasmSdkRuntimeCapabilitiesData {
@@ -94,17 +110,12 @@ struct WasmUnlockRequest {
     password: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 enum WasmSdkLifecycleState {
+    #[default]
     Uninitialized,
     InitializedLocked { password: String, mnemonic: String },
     Unlocked { password: String, mnemonic: String },
-}
-
-impl Default for WasmSdkLifecycleState {
-    fn default() -> Self {
-        Self::Uninitialized
-    }
 }
 
 impl WasmSdkLifecycleState {
@@ -137,13 +148,13 @@ impl WasmSdkLifecycleState {
 
 thread_local! {
     static WASM_SDK_LIFECYCLE_STATE: RefCell<WasmSdkLifecycleState> =
-        RefCell::new(WasmSdkLifecycleState::default());
+        const { RefCell::new(WasmSdkLifecycleState::Uninitialized) };
     static WASM_MEDIA_STORE: RefCell<HashMap<String, WasmMediaStoreEntry>> =
         RefCell::new(HashMap::new());
     static WASM_SDK_DEFAULT_WALLET: RefCell<Option<Rc<RefCell<rgb_lib_wasm::Wallet>>>> =
-        RefCell::new(None);
+        const { RefCell::new(None) };
     static WASM_SDK_DEFAULT_RGB_PROXY_TRANSPORT: RefCell<Option<RlnWasmRgbProxyTransportConfigData>> =
-        RefCell::new(None);
+        const { RefCell::new(None) };
     static WASM_WALLET_RGB_PROXY_TRANSPORTS: RefCell<HashMap<String, RlnWasmRgbProxyTransportConfigData>> =
         RefCell::new(HashMap::new());
     static WASM_SDK_DEFAULT_ENABLE_VIRTUAL_CHANNELS_V0: RefCell<bool> =
@@ -586,8 +597,7 @@ pub(crate) fn proxy_url_for_peer(proxy_url: &str, peer_addr: &str) -> Result<Str
         .trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
-        .replace('.', "_")
-        .replace(':', "_");
+        .replace(['.', ':'], "_");
     if host_slug.is_empty() {
         return Err(JsValue::from_str(sdk_contracts::ERR_PEER_ADDR_HOST_EMPTY));
     }
@@ -617,7 +627,7 @@ fn detect_wasm_indexer_protocol(indexer_url: &str) -> Result<&'static str, JsVal
             return Err(JsValue::from_str("invalid indexer_url format"));
         }
         let host_candidate = remainder
-            .split(|c| c == '/' || c == '?' || c == '#')
+            .split(['/', '?', '#'])
             .next()
             .unwrap_or("")
             .trim();

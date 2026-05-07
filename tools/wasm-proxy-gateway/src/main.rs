@@ -445,7 +445,9 @@ async fn main() -> anyhow::Result<()> {
             let Ok(origin_str) = origin.to_str() else {
                 return false;
             };
-            cors_allow_origins_set.iter().any(|allowed| allowed == origin_str)
+            cors_allow_origins_set
+                .iter()
+                .any(|allowed| allowed == origin_str)
         }))
         .allow_methods([
             axum::http::Method::GET,

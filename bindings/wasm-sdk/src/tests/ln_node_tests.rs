@@ -158,11 +158,10 @@ fn runtime_peer_session_key_is_stable_and_normalized_contract() {
     let key = runtime_peer_session_key(
         runtime_scope,
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0",
-        "LOCALHOST:9735",
     );
     assert_eq!(
         key,
-        "ws://localhost:3001#runtime:node-a::0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0::localhost:9735"
+        "ws://localhost:3001#runtime:node-a::0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0"
     );
 }
 
@@ -2630,6 +2629,7 @@ fn open_channel_non_virtual_rgb_rejected_with_explicit_contract_message() {
     );
 }
 
+#[test]
 fn open_channel_virtual_mode_is_persisted_in_runtime_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.virtual-open.example".to_string(),
@@ -7733,7 +7733,7 @@ fn node_ingest_read_event_json_updates_payment_status() {
     let events_js = node.list_runtime_events_value().expect("events");
     let events: Vec<TestRuntimeEventData> =
         serde_wasm_bindgen::from_value(events_js).expect("parse events");
-    assert!(events.len() >= 1);
+    assert!(!events.is_empty());
     let last = events.last().expect("last event");
     assert_eq!(last.source, "manual_api");
     assert_eq!(last.event_kind, "payment_status");
@@ -7802,7 +7802,7 @@ fn node_ingest_read_event_invalid_status_contract() {
     let events_js = node.list_runtime_events_value().expect("events");
     let events: Vec<TestRuntimeEventData> =
         serde_wasm_bindgen::from_value(events_js).expect("parse events");
-    assert!(events.len() >= 1);
+    assert!(!events.is_empty());
     let last = events.last().expect("last event");
     assert_eq!(last.source, "node_api");
     assert_eq!(last.event_kind, "payment_status");
@@ -7827,7 +7827,7 @@ fn node_ingest_runtime_transport_event_unknown_target_contract() {
     let events_js = node.list_runtime_events_value().expect("events");
     let events: Vec<TestRuntimeEventData> =
         serde_wasm_bindgen::from_value(events_js).expect("parse events");
-    assert!(events.len() >= 1);
+    assert!(!events.is_empty());
     let last = events.last().expect("last event");
     assert_eq!(last.source, "runtime_transport_api");
     assert_eq!(last.event_kind, "peer_disconnected");
@@ -7852,7 +7852,7 @@ fn node_ingest_runtime_transport_event_parse_error_contract() {
     let events_js = node.list_runtime_events_value().expect("events");
     let events: Vec<TestRuntimeEventData> =
         serde_wasm_bindgen::from_value(events_js).expect("parse events");
-    assert!(events.len() >= 1);
+    assert!(!events.is_empty());
     let last = events.last().expect("last event");
     assert_eq!(last.source, "runtime_transport_api");
     assert_eq!(last.event_kind, "json_payload");

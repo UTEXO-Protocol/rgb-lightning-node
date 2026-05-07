@@ -244,9 +244,14 @@ private fun waitForChannelFundingTx(
     while (System.currentTimeMillis() < deadline) {
         nodeA.sync()
         nodeB.sync()
-        lastSummary = nodeA.listChannels().joinToString { channel ->
-            "id=${channel.channelId},asset=${channel.assetId},funding=${channel.fundingTxid},usable=${channel.isUsable}"
-        }.ifEmpty { "no channels" }
+        val numA = nodeA.nodeInfo().numChannels
+        val numB = nodeB.nodeInfo().numChannels
+        lastSummary =
+            nodeA.listChannels().joinToString { channel ->
+                    "id=${channel.channelId},asset=${channel.assetId},funding=${channel.fundingTxid},usable=${channel.isUsable}"
+                }
+                .ifEmpty { "no channels" } +
+                "; num_channels_A=$numA num_channels_B=$numB"
         val opening = nodeA.listChannels().firstOrNull {
             channelMatchesAsset(it.assetId, assetId) && it.fundingTxid != null
         }
@@ -1125,23 +1130,27 @@ private fun openchannelOptionalAddrScenario(
 
         val nodeAPubkey = nodeA.nodeInfo().pubkey
         val nodeBPubkey = nodeB.nodeInfo().pubkey
+        val nodeAPubkeyHex = nodeAPubkey.toString()
+        val nodeBPubkeyHex = nodeBPubkey.toString()
 
         if (issueOnNodeA) {
             val assetId = issueAssetNia(nodeA, "node A")
 
             println("opening channel with no addr (peer not connected)")
-            expectOpenchannelWithoutAddrFails(nodeA, nodeBPubkey, assetId)
+            expectOpenchannelWithoutAddrFails(nodeA, nodeBPubkeyHex, assetId)
             check(nodeA.listChannels().isEmpty())
             check(nodeB.listChannels().isEmpty())
 
             println("connecting peer")
-            nodeA.connectpeer("${nodeBPubkey}@127.0.0.1:${(NODE_B_PEER_PORT.toUInt() + portOffset).toInt()}")
-            waitForPeer(nodeA, nodeBPubkey, 20L)
+            nodeA.connectpeer("${nodeBPubkeyHex}@127.0.0.1:${(NODE_B_PEER_PORT.toUInt() + portOffset).toInt()}")
+            waitForPeer(nodeA, nodeBPubkeyHex, 20L)
 
             println("opening channel with no addr (peer connected)")
+            // Allow the Noise handshake / peer bookkeeping to settle after list_peers() shows the peer.
+            Thread.sleep(1_500L)
             nodeA.openchannel(
                 SdkOpenChannelRequest(
-                    peerPubkeyAndOptAddr = nodeBPubkey,
+                    peerPubkeyAndOptAddr = nodeBPubkeyHex,
                     capacitySat = 100_000u,
                     pushMsat = 3_500_000u,
                     `public` = true,
@@ -1165,18 +1174,19 @@ private fun openchannelOptionalAddrScenario(
             val assetId = issueAssetNia(nodeB, "node B")
 
             println("opening channel with no addr (peer not connected)")
-            expectOpenchannelWithoutAddrFails(nodeB, nodeAPubkey, assetId)
+            expectOpenchannelWithoutAddrFails(nodeB, nodeAPubkeyHex, assetId)
             check(nodeA.listChannels().isEmpty())
             check(nodeB.listChannels().isEmpty())
 
             println("connecting peer")
-            nodeA.connectpeer("${nodeBPubkey}@127.0.0.1:${(NODE_B_PEER_PORT.toUInt() + portOffset).toInt()}")
-            waitForPeer(nodeA, nodeBPubkey, 20L)
+            nodeA.connectpeer("${nodeBPubkeyHex}@127.0.0.1:${(NODE_B_PEER_PORT.toUInt() + portOffset).toInt()}")
+            waitForPeer(nodeA, nodeBPubkeyHex, 20L)
 
             println("opening channel with no addr (peer connected)")
+            Thread.sleep(1_500L)
             nodeB.openchannel(
                 SdkOpenChannelRequest(
-                    peerPubkeyAndOptAddr = nodeAPubkey,
+                    peerPubkeyAndOptAddr = nodeAPubkeyHex,
                     capacitySat = 100_000u,
                     pushMsat = 3_500_000u,
                     `public` = true,

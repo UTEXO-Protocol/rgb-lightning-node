@@ -147,12 +147,12 @@ fn reconcile_virtual_channel_state(
         let live_channel = channels.get(&session.channel_id);
         match live_channel {
             Some(channel) => {
-                if channel.virtual_open_mode.is_none() {
-                    if session.status != LdkRuntimeVirtualChannelSessionStatusData::Abandoned {
-                        session.status = LdkRuntimeVirtualChannelSessionStatusData::Abandoned;
-                        session.updated_at = unix_now_secs();
-                        needs_touch = true;
-                    }
+                if channel.virtual_open_mode.is_none()
+                    && session.status != LdkRuntimeVirtualChannelSessionStatusData::Abandoned
+                {
+                    session.status = LdkRuntimeVirtualChannelSessionStatusData::Abandoned;
+                    session.updated_at = unix_now_secs();
+                    needs_touch = true;
                 }
             }
             None => {

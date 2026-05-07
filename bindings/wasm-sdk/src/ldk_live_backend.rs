@@ -1,8 +1,13 @@
+#![allow(clippy::arc_with_non_send_sync)]
+#![allow(clippy::borrow_deref_ref)]
+#![allow(clippy::type_complexity)]
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 
 use bitcoin_hashes::sha256::Hash as Sha256;
 use bitcoin_hashes::Hash as _;
@@ -34,6 +39,7 @@ use lightning::sign::{InMemorySigner, NodeSigner, Recipient};
 use lightning::util::config::UserConfig;
 use lightning::util::errors::APIError;
 use lightning::util::logger::{Logger, Record};
+use lightning::util::persist::KVStoreSync;
 use lightning::util::persist::MonitorName;
 use lightning::util::ser::{ReadableArgs, Writeable};
 use secp256k1::PublicKey as SecpPublicKey;
@@ -48,6 +54,100 @@ use crate::wasm_node_persistence::{
     WASM_LDK_BROADCAST_QUEUE_STORAGE_PREFIX, WASM_LDK_MONITORS_STORAGE_PREFIX,
 };
 use crate::wasm_runtime_paths::ldk_data_dir_for_runtime;
+
+#[derive(Default)]
+struct InMemoryKvStore {
+    inner: Mutex<HashMap<(String, String, String), Vec<u8>>>,
+}
+
+impl KVStoreSync for InMemoryKvStore {
+    fn read(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+    ) -> Result<Vec<u8>, lightning::io::Error> {
+        let guard = self.inner.lock().map_err(|_| {
+            lightning::io::Error::new(
+                lightning::io::ErrorKind::Other,
+                "InMemoryKvStore lock poisoned",
+            )
+        })?;
+        guard
+            .get(&(
+                primary_namespace.to_string(),
+                secondary_namespace.to_string(),
+                key.to_string(),
+            ))
+            .cloned()
+            .ok_or_else(|| {
+                lightning::io::Error::new(lightning::io::ErrorKind::NotFound, "key not found")
+            })
+    }
+
+    fn write(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+        buf: Vec<u8>,
+    ) -> Result<(), lightning::io::Error> {
+        let mut guard = self.inner.lock().map_err(|_| {
+            lightning::io::Error::new(
+                lightning::io::ErrorKind::Other,
+                "InMemoryKvStore lock poisoned",
+            )
+        })?;
+        guard.insert(
+            (
+                primary_namespace.to_string(),
+                secondary_namespace.to_string(),
+                key.to_string(),
+            ),
+            buf,
+        );
+        Ok(())
+    }
+
+    fn remove(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+        _lazy: bool,
+    ) -> Result<(), lightning::io::Error> {
+        let mut guard = self.inner.lock().map_err(|_| {
+            lightning::io::Error::new(
+                lightning::io::ErrorKind::Other,
+                "InMemoryKvStore lock poisoned",
+            )
+        })?;
+        guard.remove(&(
+            primary_namespace.to_string(),
+            secondary_namespace.to_string(),
+            key.to_string(),
+        ));
+        Ok(())
+    }
+
+    fn list(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+    ) -> Result<Vec<String>, lightning::io::Error> {
+        let guard = self.inner.lock().map_err(|_| {
+            lightning::io::Error::new(
+                lightning::io::ErrorKind::Other,
+                "InMemoryKvStore lock poisoned",
+            )
+        })?;
+        Ok(guard
+            .keys()
+            .filter(|(p, s, _k)| p == primary_namespace && s == secondary_namespace)
+            .map(|(_p, _s, k)| k.clone())
+            .collect())
+    }
+}
 
 pub trait LdkLiveBackend {
     fn new_outbound_connection(&self, peer_pubkey: &str) -> Result<String, JsValue>;
@@ -128,11 +228,6 @@ struct LdkObjectGraph {
     chain_monitor: Arc<WasmChainMonitor>,
     channel_manager: Arc<WasmChannelManager>,
     active_descriptor: RefCell<Option<LiveSocketDescriptor>>,
-    // Phase-3.1 bootstrap only: concrete ChannelManager/PeerManager/ChainMonitor
-    // objects are not yet constructed.
-    channel_manager_ready: bool,
-    peer_manager_ready: bool,
-    chain_monitor_ready: bool,
 }
 
 type WasmPeerManager = PeerManager<
@@ -449,12 +544,15 @@ impl WasmLdkLiveBackend {
         });
         let persister = Arc::new(WasmPersister);
         let chain_source = Arc::new(WasmFilter::new());
+        let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(InMemoryKvStore::default());
+        let ldk_data_dir: PathBuf = ldk_data_dir_for_runtime(&self.runtime_key);
         let keys_manager = Arc::new(KeysManager::new(
             &seed,
             unix_now_secs(),
             unix_now_nanos(),
             true,
-            ldk_data_dir_for_runtime(&self.runtime_key),
+            ldk_data_dir.clone(),
+            Arc::clone(&rgb_kv_store),
         ));
         let chain_monitor: Arc<WasmChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
             Some(Arc::clone(&chain_source)),
@@ -505,7 +603,8 @@ impl WasmLdkLiveBackend {
                 user_config,
                 chain_params,
                 unix_now_secs() as u32,
-                ldk_data_dir_for_runtime(&self.runtime_key),
+                ldk_data_dir,
+                Arc::clone(&rgb_kv_store),
             ));
         let pm_rand = self.derive_seed32();
         let fork_custom_wire = crate::rgb_ln_wire::rgb_ln_fork_custom_message_handler();
@@ -532,9 +631,6 @@ impl WasmLdkLiveBackend {
             chain_monitor,
             channel_manager,
             active_descriptor: RefCell::new(None),
-            channel_manager_ready: true,
-            peer_manager_ready: true,
-            chain_monitor_ready: true,
         });
         Ok(())
     }
@@ -583,7 +679,7 @@ impl WasmLdkLiveBackend {
     /// inbound frame).
     fn ingest_funding_generation_ready_events(&self, g: &LdkObjectGraph) {
         let collected_events: RefCell<Vec<Event>> = RefCell::new(Vec::new());
-        let _ = g.channel_manager.process_pending_events(&|event: Event| {
+        g.channel_manager.process_pending_events(&|event: Event| {
             collected_events.borrow_mut().push(event);
             Ok::<(), ReplayEvent>(())
         });
@@ -615,7 +711,7 @@ impl WasmLdkLiveBackend {
         g: &LdkObjectGraph,
         temporary_channel_id_hex: &str,
     ) -> (String, String, bool, bool) {
-        let mut status = "opening".to_string();
+        let mut is_ready = false;
         let mut resolved_channel_id = temporary_channel_id_hex.to_string();
 
         let collected_events: RefCell<Vec<Event>> = RefCell::new(Vec::new());
@@ -632,7 +728,6 @@ impl WasmLdkLiveBackend {
                     output_script,
                     ..
                 } if format!("{ev_temp}") == temporary_channel_id_hex => {
-                    status = "awaiting_funding_tx".to_string();
                     self.pending_funding_requests.borrow_mut().insert(
                         temporary_channel_id_hex.to_string(),
                         LdkRuntimeFundingRequestData {
@@ -653,12 +748,11 @@ impl WasmLdkLiveBackend {
                         .unwrap_or(false);
                     if matches {
                         resolved_channel_id = format!("{channel_id}");
-                        status = "pending".to_string();
                     }
                 }
                 Event::ChannelReady { channel_id, .. } => {
                     if format!("{channel_id}") == temporary_channel_id_hex {
-                        status = "ready".to_string();
+                        is_ready = true;
                     }
                 }
                 _ => {}
@@ -672,11 +766,6 @@ impl WasmLdkLiveBackend {
             .find(|c| format!("{}", c.channel_id) == temporary_channel_id_hex)
         {
             resolved_channel_id = format!("{}", details.channel_id);
-            if details.is_usable {
-                status = "ready".to_string();
-            } else if details.is_channel_ready {
-                status = "pending".to_string();
-            }
             return (
                 temporary_channel_id_hex.to_string(),
                 resolved_channel_id,
@@ -687,7 +776,7 @@ impl WasmLdkLiveBackend {
         (
             temporary_channel_id_hex.to_string(),
             resolved_channel_id,
-            status == "ready",
+            is_ready,
             false,
         )
     }

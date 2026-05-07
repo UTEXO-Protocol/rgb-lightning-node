@@ -18,8 +18,8 @@ use rgb_lib::{
         rust_only::{check_proxy_url, ColoringInfo},
         AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, Metadata, Online,
         OperationResult, ReceiveData, Recipient, RefreshResult, RgbWalletOpsOffline,
-        RgbWalletOpsOnline, SendBeginResult, SinglesigKeys, Transaction as RgbLibTransaction,
-        SyncKeychain, SyncOptions, SyncStrategy, Transfer, TransportEndpoint, Unspent,
+        RgbWalletOpsOnline, SendBeginResult, SinglesigKeys, SyncKeychain, SyncOptions,
+        SyncStrategy, Transaction as RgbLibTransaction, Transfer, TransportEndpoint, Unspent,
         Wallet as RgbLibWallet,
     },
     AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, Fascia, RgbTransfer,
@@ -687,13 +687,11 @@ impl RgbLibWalletWrapper {
     }
 
     pub(crate) fn send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {
-        self.get_rgb_wallet()
-            .send_btc_end(self.online, signed_psbt)
+        self.get_rgb_wallet().send_btc_end(self.online, signed_psbt)
     }
 
     pub(crate) fn send_end(&self, signed_psbt: String) -> Result<OperationResult, RgbLibError> {
-        self.get_rgb_wallet()
-            .send_end(self.online, signed_psbt)
+        self.get_rgb_wallet().send_end(self.online, signed_psbt)
     }
 
     pub(crate) fn sign_psbt(&self, unsigned_psbt: String) -> Result<String, RgbLibError> {
