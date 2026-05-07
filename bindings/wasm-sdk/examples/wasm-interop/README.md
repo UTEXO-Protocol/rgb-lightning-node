@@ -121,6 +121,18 @@ For the Python-equivalent flow page, open:
 http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/virtual_channels_flow.html
 ```
 
+## E2E harness page
+
+For automated E2E tests (and manual DevTools driving with a stable, typed surface),
+use:
+
+```text
+http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/wasm_e2e_harness.html?freshRuntime=1
+```
+
+It exposes `window.__sdk = { node, wallet, online, walletAddress, ... }` and does not
+drive any flows on its own (tests / manual scripts own the flow).
+
 Click `Run Flow`.
 `virtual_channels_flow.html` is prefilled with local defaults for:
 proxy URLs (`ws://127.0.0.1:3001`), peer addrs (`127.0.0.1:9745/9746`),

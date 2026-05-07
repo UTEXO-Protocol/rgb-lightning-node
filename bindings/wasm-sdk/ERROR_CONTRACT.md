@@ -46,10 +46,9 @@ This document defines stable error behavior for `bindings/wasm-sdk`.
 
 ## Unsupported Surface (not exposed by design)
 
-These RLN-native operations are not available in wasm-sdk:
+If an RLN-native operation is intentionally unavailable in WASM, it must return a stable unsupported error string:
 
-1. LDK peer/channel lifecycle management.
-2. Native LN routing/payment manager runtime.
-3. bitcoind RPC transport-dependent operations.
+- `unsupported on wasm: <operation>`
 
-If exposed in future, return `unsupported on wasm: <operation>`.
+Current examples of intentionally unsupported-by-design functionality are documented in
+`SDK_WASM_ENDPOINT_MATRIX.md` (for example UDA issuance).

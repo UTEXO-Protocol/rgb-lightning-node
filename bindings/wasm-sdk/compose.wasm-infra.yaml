@@ -1,0 +1,28 @@
+# Regtest + RGB proxy + Esplora for WASM interop (no wasm-proxy-gateway).
+# Run the gateway on the host after `cargo build -p wasm-proxy-gateway --release`:
+#   WASM_PROXY_REGULAR_RLN_API_BASE=http://127.0.0.1:3101 \
+#     ./target/release/wasm-proxy-gateway
+services:
+  proxy:
+    image: ghcr.io/rgb-tools/rgb-proxy-server:0.3.0
+    # Host 3005 avoids clashing with another RGB proxy on 3000.
+    ports:
+      - "3005:3000"
+
+  esplora:
+    image: bitcoindevkit/esplora:latest
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        /root/bitcoind -regtest -server -daemon -fallbackfee=0.0002 -rpcuser=admin -rpcpassword=passw -rpcallowip=0.0.0.0/0 -rpcbind=0.0.0.0 -blockfilterindex=1 -peerblockfilters=1
+        until /root/bitcoin-cli -regtest -rpcuser=admin -rpcpassword=passw getblockchaininfo; do sleep 1; done
+        /root/bitcoin-cli -regtest -rpcuser=admin -rpcpassword=passw createwallet bdk-test || true
+        ADDR=$$(/root/bitcoin-cli -regtest -rpcuser=admin -rpcpassword=passw -rpcwallet=bdk-test getnewaddress)
+        /root/bitcoin-cli -regtest -rpcuser=admin -rpcpassword=passw generatetoaddress 150 "$$ADDR"
+        exec /root/electrs --network regtest -vvv --cookie admin:passw --jsonrpc-import --electrum-rpc-addr=0.0.0.0:60401 --http-addr=0.0.0.0:3002 --cors '*'
+    ports:
+      - "3002:3002"
+      # Expose the embedded regtest bitcoind RPC to the host so `wasm-proxy-gateway` can use it
+      # for `dev/regtest/*` helpers (same chain as the Esplora indexer).
+      - "19443:18443"

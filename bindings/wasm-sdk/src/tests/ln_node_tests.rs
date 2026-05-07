@@ -3,6 +3,7 @@ use futures::executor::block_on;
 use serde::Deserialize;
 use wasm_bindgen_test::wasm_bindgen_test;
 
+use crate::wasm_node_persistence::RuntimeScopeKeys;
 use crate::{RlnWasmSdk, RlnWasmSdkRuntimeCapabilitiesData};
 
 #[derive(Debug, Deserialize)]
@@ -69,7 +70,9 @@ fn runtime_control_events_are_sequenced_and_recorded() {
 #[test]
 fn runtime_event_log_snapshot_restores_on_recreated_node() {
     super::test_utils::reset_runtime_event_log_storage_for_tests();
-    let storage_key = runtime_event_store_key("ws://runtime-events-persist.example");
+    let storage_key =
+        RuntimeScopeKeys::from_runtime_scope_key("ws://runtime-events-persist.example".to_string())
+            .runtime_events_storage_key;
     let runtime_events = Rc::new(RefCell::new(vec![RlnWasmNodeRuntimeEventData {
         seq: 1,
         source: "manual_api".to_string(),
@@ -96,7 +99,9 @@ fn runtime_event_log_snapshot_restores_on_recreated_node() {
 #[test]
 fn runtime_event_log_snapshot_persists_tail_window_contract() {
     super::test_utils::reset_runtime_event_log_storage_for_tests();
-    let storage_key = runtime_event_store_key("ws://runtime-events-window.example");
+    let storage_key =
+        RuntimeScopeKeys::from_runtime_scope_key("ws://runtime-events-window.example".to_string())
+            .runtime_events_storage_key;
     let runtime_events = Rc::new(RefCell::new(
         (1u64..=600)
             .map(|seq| RlnWasmNodeRuntimeEventData {
@@ -133,6 +138,100 @@ fn runtime_scope_key_canonicalizes_proxy_aliases_contract() {
         runtime_scope_key("ws://LOCALHOST:3001//", Some("  runtime-a  ")),
         "ws://localhost:3001#runtime:runtime-a"
     );
+}
+
+#[test]
+fn node_constructor_installs_auto_peer_manager_hooks_contract() {
+    clear_rln_ldk_peer_manager_hooks();
+    assert!(!has_peer_manager_hooks());
+    assert!(!has_peer_manager_hooks_v2());
+
+    let _node = RlnWasmNode::new("ws://127.0.0.1:3001".to_string()).expect("node should build");
+
+    assert!(has_peer_manager_hooks());
+    assert!(has_peer_manager_hooks_v2());
+}
+
+#[test]
+fn runtime_peer_session_key_is_stable_and_normalized_contract() {
+    let runtime_scope = "ws://localhost:3001#runtime:node-a";
+    let key = runtime_peer_session_key(
+        runtime_scope,
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0",
+        "LOCALHOST:9735",
+    );
+    assert_eq!(
+        key,
+        "ws://localhost:3001#runtime:node-a::0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0::localhost:9735"
+    );
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn reconnect_persisted_peers_reports_session_key_mismatch_without_network_contract() {
+    super::test_utils::reset_runtime_event_log_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+
+    let proxy = "ws://proxy.reconnect-mismatch.example".to_string();
+    let node = RlnWasmNode::new(proxy.clone()).expect("node should build");
+    let runtime_scope = runtime_scope_key(proxy.trim(), None);
+    let store_key =
+        RuntimeScopeKeys::from_runtime_scope_key(runtime_scope.clone()).peer_sessions_storage_key;
+    let snapshot = RuntimePeerSessionSnapshot {
+        sessions: vec![RuntimePeerSessionEntryData {
+            session_key: "bad-key".to_string(),
+            peer_pubkey: "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0"
+                .to_string(),
+            peer_addr: "127.0.0.1:9735".to_string(),
+        }],
+    };
+    let store = browser_persistent_state_store();
+    let raw = serde_json::to_string(&snapshot).expect("encode snapshot");
+    store.set(&store_key, &raw).expect("persist snapshot");
+
+    let result_js =
+        block_on(node.reconnect_persisted_peers_value()).expect("reconnect should return result");
+    let result: serde_json::Value = crate::js_from(result_js).expect("parse reconnect result");
+    assert_eq!(result["attempted"], 1);
+    assert_eq!(result["connected"], 0);
+    let failed = result["failed"].as_array().expect("failed array");
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0]
+        .as_str()
+        .unwrap_or_default()
+        .contains("session key mismatch"));
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn reconnect_manager_start_stop_status_contract() {
+    super::test_utils::reset_runtime_event_log_storage_for_tests();
+    crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
+
+    let node =
+        RlnWasmNode::new("ws://proxy.reconnect-manager.example".to_string()).expect("build node");
+
+    let started_js = node
+        .reconnect_manager_start_value()
+        .expect("start reconnect manager");
+    let started: serde_json::Value = crate::js_from(started_js).expect("parse started status");
+    assert_eq!(started["running"], true);
+    assert_eq!(
+        started["current_backoff_ms"],
+        serde_json::Value::from(RECONNECT_MANAGER_INITIAL_DELAY_MS)
+    );
+
+    let status_js = node
+        .reconnect_manager_status_value()
+        .expect("status reconnect manager");
+    let status: serde_json::Value = crate::js_from(status_js).expect("parse status");
+    assert_eq!(status["running"], true);
+
+    let stopped_js = node
+        .reconnect_manager_stop_value()
+        .expect("stop reconnect manager");
+    let stopped: serde_json::Value = crate::js_from(stopped_js).expect("parse stopped status");
+    assert_eq!(stopped["running"], false);
 }
 
 #[test]
@@ -2457,6 +2556,80 @@ fn open_channel_rejects_virtual_public_contract() {
 
 #[test]
 #[cfg(target_arch = "wasm32")]
+fn open_channel_non_virtual_rejects_without_mutating_state_contract() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.non-virtual-open-reject.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node should build");
+    let peer_pubkey =
+        "029999999999999999999999999999999999999999999999999999999999999999".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+
+    let before_channels: serde_json::Value =
+        crate::js_from(node.list_channels_value().expect("list channels before"))
+            .expect("parse channels before");
+    let before_seq = *node.next_channel_seq.borrow();
+
+    let err = node
+        .open_channel_value_with_options(
+            peer_pubkey,
+            SDK_OPENCHANNEL_MIN_SAT,
+            false,
+            None,
+            None,
+            None,
+        )
+        .expect_err("non-virtual open must be rejected");
+    assert!(
+        !err.as_string().unwrap_or_default().is_empty(),
+        "must return concrete non-virtual open error"
+    );
+
+    let after_channels: serde_json::Value =
+        crate::js_from(node.list_channels_value().expect("list channels after"))
+            .expect("parse channels after");
+    let after_seq = *node.next_channel_seq.borrow();
+    assert_eq!(before_channels, after_channels);
+    assert_eq!(before_seq, after_seq);
+}
+
+#[test]
+#[cfg(target_arch = "wasm32")]
+fn open_channel_non_virtual_rgb_rejected_with_explicit_contract_message() {
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://proxy.non-virtual-open-rgb-reject.example".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node should build");
+    let peer_pubkey =
+        "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
+        pubkey: peer_pubkey.clone(),
+        peer_addr: "127.0.0.1:9735".to_string(),
+        started: true,
+    });
+
+    let err = node
+        .open_channel_value_with_options(
+            peer_pubkey,
+            SDK_OPENRGBCHANNEL_MIN_SAT,
+            false,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            Some(SDK_OPENCHANNEL_MIN_RGB_AMT),
+            None,
+        )
+        .expect_err("RGB non-virtual open must be hard-rejected for now");
+    assert_eq!(
+        err.as_string().unwrap_or_default(),
+        "native non-virtual RGB funding path is not wired yet; BTC-only channel open is currently supported"
+    );
+}
+
 fn open_channel_virtual_mode_is_persisted_in_runtime_contract() {
     let node = RlnWasmNode::new_with_runtime_backend(
         "ws://proxy.virtual-open.example".to_string(),
@@ -3229,7 +3402,7 @@ fn keysend_rejects_invalid_rgb_payload_contract() {
         .expect_err("should fail");
     assert_eq!(
         empty_asset.as_string().unwrap_or_default(),
-        "asset_id cannot be empty if provided"
+        sdk_contracts::ERR_ASSET_ID_EMPTY_IF_PROVIDED
     );
 
     let zero_amount = node
@@ -3453,19 +3626,21 @@ fn bridge_send_payment_on_usable_channel_finalizes_via_runtime_channel_payment_e
         started: true,
     });
     assert!(sender.test_set_runtime_peer_started(&payee_pubkey, true));
-    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-        temporary_channel_id: "tmp-chan-runtime-success".to_string(),
-        channel_id: "chan-runtime-success".to_string(),
-        peer_pubkey: payee_pubkey.clone(),
-        status: "opened".to_string(),
-        ready: true,
-        is_usable: true,
-        public: false,
-        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
-        asset_id: None,
-        asset_local_amount: None,
-        virtual_open_mode: None,
-    });
+    sender
+        .ldk_runtime
+        .upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-chan-runtime-success".to_string(),
+            channel_id: "chan-runtime-success".to_string(),
+            peer_pubkey: payee_pubkey.clone(),
+            status: "opened".to_string(),
+            ready: true,
+            is_usable: true,
+            public: false,
+            capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+            asset_id: None,
+            asset_local_amount: None,
+            virtual_open_mode: None,
+        });
 
     let send_js = sender
         .send_payment_value(invoice, Some(SDK_INVOICE_MIN_MSAT), None, None)
@@ -3483,9 +3658,12 @@ fn bridge_send_payment_on_usable_channel_finalizes_via_runtime_channel_payment_e
     let payment_doc: serde_json::Value = crate::js_from(payment_js).expect("parse payment");
     assert_eq!(payment_doc["status"], "succeeded");
 
-    let events: serde_json::Value =
-        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
-            .expect("parse runtime events");
+    let events: serde_json::Value = serde_json::from_str(
+        &sender
+            .list_runtime_events_json()
+            .expect("runtime events json"),
+    )
+    .expect("parse runtime events");
     let events = events.as_array().expect("events array");
     assert!(events.iter().any(|event| {
         event.get("source").and_then(|value| value.as_str())
@@ -3540,19 +3718,21 @@ fn bridge_send_payment_propagates_receiver_terminal_status_and_rgb_transfer_cont
         peer_addr: "127.0.0.1:9735".to_string(),
         started: true,
     });
-    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-        temporary_channel_id: "tmp-rx-propagation".to_string(),
-        channel_id: "chan-rx-propagation".to_string(),
-        peer_pubkey: payee_pubkey,
-        status: "opened".to_string(),
-        ready: true,
-        is_usable: true,
-        public: false,
-        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
-        asset_id: None,
-        asset_local_amount: None,
-        virtual_open_mode: None,
-    });
+    sender
+        .ldk_runtime
+        .upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-rx-propagation".to_string(),
+            channel_id: "chan-rx-propagation".to_string(),
+            peer_pubkey: payee_pubkey,
+            status: "opened".to_string(),
+            ready: true,
+            is_usable: true,
+            public: false,
+            capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+            asset_id: None,
+            asset_local_amount: None,
+            virtual_open_mode: None,
+        });
 
     let send_js = sender
         .send_payment_value(
@@ -3704,7 +3884,9 @@ fn close_channel_regular_coop_and_force_contracts() {
     )
     .expect("regular coop close");
 
-    let channels_js = node.list_channels_value().expect("list channels after coop");
+    let channels_js = node
+        .list_channels_value()
+        .expect("list channels after coop");
     let channels: serde_json::Value = crate::js_from(channels_js).expect("parse channels");
     assert!(channels.as_array().expect("channels array").is_empty());
 
@@ -3721,14 +3903,12 @@ fn close_channel_regular_coop_and_force_contracts() {
         asset_local_amount: None,
         virtual_open_mode: None,
     });
-    node.close_channel_with_options(
-        "chan-close-regular-2".to_string(),
-        Some(peer_pubkey),
-        true,
-    )
-    .expect("regular force close");
+    node.close_channel_with_options("chan-close-regular-2".to_string(), Some(peer_pubkey), true)
+        .expect("regular force close");
 
-    let channels_js = node.list_channels_value().expect("list channels after force");
+    let channels_js = node
+        .list_channels_value()
+        .expect("list channels after force");
     let channels: serde_json::Value = crate::js_from(channels_js).expect("parse channels");
     assert!(channels.as_array().expect("channels array").is_empty());
 }
@@ -3741,11 +3921,9 @@ fn close_channel_regular_coop_persists_across_node_recreation_contract() {
         "03aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
     let runtime_proxy = "ws://proxy.close-regular-restart.example".to_string();
 
-    let node = RlnWasmNode::new_with_runtime_backend(
-        runtime_proxy.clone(),
-        "wasm_native_ldk".to_string(),
-    )
-    .expect("node");
+    let node =
+        RlnWasmNode::new_with_runtime_backend(runtime_proxy.clone(), "wasm_native_ldk".to_string())
+            .expect("node");
     node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
         pubkey: peer_pubkey.clone(),
         peer_addr: "127.0.0.1:9735".to_string(),
@@ -3765,18 +3943,12 @@ fn close_channel_regular_coop_persists_across_node_recreation_contract() {
         virtual_open_mode: None,
     });
 
-    node.close_channel_with_options(
-        "chan-close-restart-1".to_string(),
-        Some(peer_pubkey),
-        false,
-    )
-    .expect("regular coop close");
+    node.close_channel_with_options("chan-close-restart-1".to_string(), Some(peer_pubkey), false)
+        .expect("regular coop close");
 
-    let recreated = RlnWasmNode::new_with_runtime_backend(
-        runtime_proxy,
-        "wasm_native_ldk".to_string(),
-    )
-    .expect("recreated node");
+    let recreated =
+        RlnWasmNode::new_with_runtime_backend(runtime_proxy, "wasm_native_ldk".to_string())
+            .expect("recreated node");
     let channels_js = recreated
         .list_channels_value()
         .expect("list channels after recreation");
@@ -3839,7 +4011,9 @@ fn close_channel_regular_force_records_channel_closed_sequence_contract() {
         .expect("regular force close");
 
     let events: serde_json::Value = serde_json::from_str(
-        &node.list_runtime_events_json().expect("runtime events json"),
+        &node
+            .list_runtime_events_json()
+            .expect("runtime events json"),
     )
     .expect("parse runtime events");
     let entries = events.as_array().expect("events array");
@@ -3851,13 +4025,11 @@ fn close_channel_regular_force_records_channel_closed_sequence_contract() {
                 && entry["applied"] == true
         })
         .expect("channel_closed event should be recorded");
-    let usable_index = entries
-        .iter()
-        .position(|entry| {
-            entry["event_kind"] == "channel_usable"
-                && entry["source"] == "node_api"
-                && entry["applied"] == true
-        });
+    let usable_index = entries.iter().position(|entry| {
+        entry["event_kind"] == "channel_usable"
+            && entry["source"] == "node_api"
+            && entry["applied"] == true
+    });
     if let Some(usable_index) = usable_index {
         assert!(
             usable_index < closed_index,
@@ -3874,11 +4046,9 @@ fn close_channel_counterparty_event_persists_across_node_recreation_contract() {
         "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string();
     let runtime_proxy = "ws://proxy.close-counterparty-restart.example".to_string();
 
-    let node = RlnWasmNode::new_with_runtime_backend(
-        runtime_proxy.clone(),
-        "wasm_native_ldk".to_string(),
-    )
-    .expect("node");
+    let node =
+        RlnWasmNode::new_with_runtime_backend(runtime_proxy.clone(), "wasm_native_ldk".to_string())
+            .expect("node");
     node.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
         pubkey: peer_pubkey,
         peer_addr: "127.0.0.1:9735".to_string(),
@@ -3907,8 +4077,9 @@ fn close_channel_counterparty_event_persists_across_node_recreation_contract() {
     assert_eq!(applied["event_kind"], "channel_closed");
     assert_eq!(applied["applied"], true);
 
-    let recreated = RlnWasmNode::new_with_runtime_backend(runtime_proxy, "wasm_native_ldk".to_string())
-        .expect("recreated node");
+    let recreated =
+        RlnWasmNode::new_with_runtime_backend(runtime_proxy, "wasm_native_ldk".to_string())
+            .expect("recreated node");
     let channels_js = recreated
         .list_channels_value()
         .expect("list channels after recreation");
@@ -3944,42 +4115,45 @@ fn close_channel_force_after_restart_records_sequence_contract() {
     let runtime_proxy = "ws://proxy.close-force-restart.example".to_string();
     let channel_id = "chan-close-force-restart-1".to_string();
 
-    let first = RlnWasmNode::new_with_runtime_backend(
-        runtime_proxy.clone(),
-        "wasm_native_ldk".to_string(),
-    )
-    .expect("first node");
+    let first =
+        RlnWasmNode::new_with_runtime_backend(runtime_proxy.clone(), "wasm_native_ldk".to_string())
+            .expect("first node");
     first.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
         pubkey: peer_pubkey.clone(),
         peer_addr: "127.0.0.1:9735".to_string(),
         started: true,
     });
-    first.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-        temporary_channel_id: "tmp-close-force-restart-1".to_string(),
-        channel_id: channel_id.clone(),
-        peer_pubkey: peer_pubkey.clone(),
-        status: "opened".to_string(),
-        ready: true,
-        is_usable: true,
-        public: false,
-        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
-        asset_id: None,
-        asset_local_amount: None,
-        virtual_open_mode: None,
-    });
+    first
+        .ldk_runtime
+        .upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-close-force-restart-1".to_string(),
+            channel_id: channel_id.clone(),
+            peer_pubkey: peer_pubkey.clone(),
+            status: "opened".to_string(),
+            ready: true,
+            is_usable: true,
+            public: false,
+            capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+            asset_id: None,
+            asset_local_amount: None,
+            virtual_open_mode: None,
+        });
     let usable_payload_hex = hex::encode(format!("channel_usable:{channel_id}"));
     first
         .ingest_runtime_transport_event_payload_hex_value(usable_payload_hex)
         .expect("ingest usable before restart");
 
-    let second = RlnWasmNode::new_with_runtime_backend(runtime_proxy, "wasm_native_ldk".to_string())
-        .expect("second node");
+    let second =
+        RlnWasmNode::new_with_runtime_backend(runtime_proxy, "wasm_native_ldk".to_string())
+            .expect("second node");
     second
         .close_channel_with_options(channel_id.clone(), Some(peer_pubkey), true)
         .expect("force close after restart");
 
     let events: serde_json::Value = serde_json::from_str(
-        &second.list_runtime_events_json().expect("runtime events json"),
+        &second
+            .list_runtime_events_json()
+            .expect("runtime events json"),
     )
     .expect("parse runtime events");
     let entries = events.as_array().expect("events array");
@@ -4067,19 +4241,21 @@ fn multi_hop_route_without_direct_payee_finalizes_via_runtime_routed_engine_cont
     let _ = receiver.list_peers_value().expect("warm receiver runtime");
     sender.test_upsert_runtime_peer(relay_pubkey.clone(), "127.0.0.1:9735".to_string(), true);
     assert!(sender.test_set_runtime_peer_started(&relay_pubkey, true));
-    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-        temporary_channel_id: "tmp-mh-relay".to_string(),
-        channel_id: "chan-mh-relay".to_string(),
-        peer_pubkey: relay_pubkey,
-        status: "opened".to_string(),
-        ready: true,
-        is_usable: true,
-        public: false,
-        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
-        asset_id: None,
-        asset_local_amount: None,
-        virtual_open_mode: None,
-    });
+    sender
+        .ldk_runtime
+        .upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-mh-relay".to_string(),
+            channel_id: "chan-mh-relay".to_string(),
+            peer_pubkey: relay_pubkey,
+            status: "opened".to_string(),
+            ready: true,
+            is_usable: true,
+            public: false,
+            capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+            asset_id: None,
+            asset_local_amount: None,
+            virtual_open_mode: None,
+        });
 
     let send_js = sender
         .send_payment_value(invoice, Some(SDK_INVOICE_MIN_MSAT), None, None)
@@ -4095,9 +4271,12 @@ fn multi_hop_route_without_direct_payee_finalizes_via_runtime_routed_engine_cont
         crate::js_from(receiver_payment_js).expect("parse receiver payment");
     assert_eq!(receiver_payment["status"], "succeeded");
 
-    let events: serde_json::Value =
-        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
-            .expect("parse runtime events");
+    let events: serde_json::Value = serde_json::from_str(
+        &sender
+            .list_runtime_events_json()
+            .expect("runtime events json"),
+    )
+    .expect("parse runtime events");
     let events = events.as_array().expect("events array");
     assert!(events.iter().any(|event| {
         event.get("source").and_then(|value| value.as_str())
@@ -4170,30 +4349,12 @@ fn multi_hop_route_prefers_direct_usable_channel_over_routed_engine_contract() {
     let _ = receiver.list_peers_value().expect("warm receiver runtime");
     sender.test_upsert_runtime_peer(payee_pubkey.clone(), "127.0.0.1:9735".to_string(), true);
     assert!(sender.test_set_runtime_peer_started(&payee_pubkey, true));
-    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-        temporary_channel_id: "tmp-mh-direct-pref-payee".to_string(),
-        channel_id: "chan-mh-direct-pref-payee".to_string(),
-        peer_pubkey: payee_pubkey.clone(),
-        status: "opened".to_string(),
-        ready: true,
-        is_usable: true,
-        public: false,
-        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
-        asset_id: None,
-        asset_local_amount: None,
-        virtual_open_mode: None,
-    });
-    if recovered_payee_pubkey != payee_pubkey {
-        sender.test_upsert_runtime_peer(
-            recovered_payee_pubkey.clone(),
-            "127.0.0.1:9735".to_string(),
-            true,
-        );
-        assert!(sender.test_set_runtime_peer_started(&recovered_payee_pubkey, true));
-        sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-            temporary_channel_id: "tmp-mh-direct-pref-payee-recovered".to_string(),
-            channel_id: "chan-mh-direct-pref-payee-recovered".to_string(),
-            peer_pubkey: recovered_payee_pubkey,
+    sender
+        .ldk_runtime
+        .upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-mh-direct-pref-payee".to_string(),
+            channel_id: "chan-mh-direct-pref-payee".to_string(),
+            peer_pubkey: payee_pubkey.clone(),
             status: "opened".to_string(),
             ready: true,
             is_usable: true,
@@ -4203,22 +4364,46 @@ fn multi_hop_route_prefers_direct_usable_channel_over_routed_engine_contract() {
             asset_local_amount: None,
             virtual_open_mode: None,
         });
+    if recovered_payee_pubkey != payee_pubkey {
+        sender.test_upsert_runtime_peer(
+            recovered_payee_pubkey.clone(),
+            "127.0.0.1:9735".to_string(),
+            true,
+        );
+        assert!(sender.test_set_runtime_peer_started(&recovered_payee_pubkey, true));
+        sender
+            .ldk_runtime
+            .upsert_channel(LdkRuntimeChannelStateData {
+                temporary_channel_id: "tmp-mh-direct-pref-payee-recovered".to_string(),
+                channel_id: "chan-mh-direct-pref-payee-recovered".to_string(),
+                peer_pubkey: recovered_payee_pubkey,
+                status: "opened".to_string(),
+                ready: true,
+                is_usable: true,
+                public: false,
+                capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+                asset_id: None,
+                asset_local_amount: None,
+                virtual_open_mode: None,
+            });
     }
     sender.test_upsert_runtime_peer(relay_pubkey.clone(), "127.0.0.1:9736".to_string(), true);
     assert!(sender.test_set_runtime_peer_started(&relay_pubkey, true));
-    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-        temporary_channel_id: "tmp-mh-direct-pref-relay".to_string(),
-        channel_id: "chan-mh-direct-pref-relay".to_string(),
-        peer_pubkey: relay_pubkey,
-        status: "opened".to_string(),
-        ready: true,
-        is_usable: true,
-        public: false,
-        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
-        asset_id: None,
-        asset_local_amount: None,
-        virtual_open_mode: None,
-    });
+    sender
+        .ldk_runtime
+        .upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-mh-direct-pref-relay".to_string(),
+            channel_id: "chan-mh-direct-pref-relay".to_string(),
+            peer_pubkey: relay_pubkey,
+            status: "opened".to_string(),
+            ready: true,
+            is_usable: true,
+            public: false,
+            capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+            asset_id: None,
+            asset_local_amount: None,
+            virtual_open_mode: None,
+        });
 
     let send_js = sender
         .send_payment_value(invoice, Some(SDK_INVOICE_MIN_MSAT), None, None)
@@ -4227,9 +4412,12 @@ fn multi_hop_route_prefers_direct_usable_channel_over_routed_engine_contract() {
     assert_eq!(send_doc["status"], "succeeded");
     assert_eq!(send_doc["payment_hash"], payment_hash);
 
-    let events: serde_json::Value =
-        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
-            .expect("parse runtime events");
+    let events: serde_json::Value = serde_json::from_str(
+        &sender
+            .list_runtime_events_json()
+            .expect("runtime events json"),
+    )
+    .expect("parse runtime events");
     let events = events.as_array().expect("events array");
     assert!(events.iter().any(|event| {
         event.get("source").and_then(|value| value.as_str())
@@ -4315,19 +4503,21 @@ fn multi_hop_route_requires_pending_receiver_invoice_contract() {
         peer_addr: "127.0.0.1:9736".to_string(),
         started: true,
     });
-    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-        temporary_channel_id: "tmp-mh-route-gate-relay".to_string(),
-        channel_id: "chan-mh-route-gate-relay".to_string(),
-        peer_pubkey: relay_pubkey,
-        status: "opened".to_string(),
-        ready: true,
-        is_usable: true,
-        public: false,
-        capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
-        asset_id: None,
-        asset_local_amount: None,
-        virtual_open_mode: None,
-    });
+    sender
+        .ldk_runtime
+        .upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-mh-route-gate-relay".to_string(),
+            channel_id: "chan-mh-route-gate-relay".to_string(),
+            peer_pubkey: relay_pubkey,
+            status: "opened".to_string(),
+            ready: true,
+            is_usable: true,
+            public: false,
+            capacity_sat: SDK_OPENCHANNEL_MIN_SAT,
+            asset_id: None,
+            asset_local_amount: None,
+            virtual_open_mode: None,
+        });
     assert!(
         sender.ldk_runtime.get_peer(&payee_pubkey).is_none(),
         "sender should not have direct payee peer for routed scenario"
@@ -4343,9 +4533,12 @@ fn multi_hop_route_requires_pending_receiver_invoice_contract() {
         "without a pending inbound receiver payment, routed simulation must not auto-succeed"
     );
 
-    let events: serde_json::Value =
-        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
-            .expect("parse runtime events");
+    let events: serde_json::Value = serde_json::from_str(
+        &sender
+            .list_runtime_events_json()
+            .expect("runtime events json"),
+    )
+    .expect("parse runtime events");
     let events = events.as_array().expect("events array");
     assert!(!events.iter().any(|event| {
         event.get("source").and_then(|value| value.as_str())
@@ -4419,30 +4612,12 @@ fn vanilla_payment_on_rgb_channel_success_path_contract() {
     let _ = receiver.list_peers_value().expect("warm receiver runtime");
     sender.test_upsert_runtime_peer(payee_pubkey.clone(), "127.0.0.1:9735".to_string(), true);
     assert!(sender.test_set_runtime_peer_started(&payee_pubkey, true));
-    sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-        temporary_channel_id: "tmp-vanilla-rgb-1".to_string(),
-        channel_id: "chan-vanilla-rgb-1".to_string(),
-        peer_pubkey: payee_pubkey.clone(),
-        status: "opened".to_string(),
-        ready: true,
-        is_usable: true,
-        public: false,
-        capacity_sat: SDK_OPENRGBCHANNEL_MIN_SAT,
-        asset_id: Some("rgb:VanillaOverRgbParity-1".to_string()),
-        asset_local_amount: Some(100),
-        virtual_open_mode: None,
-    });
-    if recovered_payee_pubkey != payee_pubkey {
-        sender.test_upsert_runtime_peer(
-            recovered_payee_pubkey.clone(),
-            "127.0.0.1:9735".to_string(),
-            true,
-        );
-        assert!(sender.test_set_runtime_peer_started(&recovered_payee_pubkey, true));
-        sender.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
-            temporary_channel_id: "tmp-vanilla-rgb-1-recovered".to_string(),
-            channel_id: "chan-vanilla-rgb-1-recovered".to_string(),
-            peer_pubkey: recovered_payee_pubkey,
+    sender
+        .ldk_runtime
+        .upsert_channel(LdkRuntimeChannelStateData {
+            temporary_channel_id: "tmp-vanilla-rgb-1".to_string(),
+            channel_id: "chan-vanilla-rgb-1".to_string(),
+            peer_pubkey: payee_pubkey.clone(),
             status: "opened".to_string(),
             ready: true,
             is_usable: true,
@@ -4452,6 +4627,28 @@ fn vanilla_payment_on_rgb_channel_success_path_contract() {
             asset_local_amount: Some(100),
             virtual_open_mode: None,
         });
+    if recovered_payee_pubkey != payee_pubkey {
+        sender.test_upsert_runtime_peer(
+            recovered_payee_pubkey.clone(),
+            "127.0.0.1:9735".to_string(),
+            true,
+        );
+        assert!(sender.test_set_runtime_peer_started(&recovered_payee_pubkey, true));
+        sender
+            .ldk_runtime
+            .upsert_channel(LdkRuntimeChannelStateData {
+                temporary_channel_id: "tmp-vanilla-rgb-1-recovered".to_string(),
+                channel_id: "chan-vanilla-rgb-1-recovered".to_string(),
+                peer_pubkey: recovered_payee_pubkey,
+                status: "opened".to_string(),
+                ready: true,
+                is_usable: true,
+                public: false,
+                capacity_sat: SDK_OPENRGBCHANNEL_MIN_SAT,
+                asset_id: Some("rgb:VanillaOverRgbParity-1".to_string()),
+                asset_local_amount: Some(100),
+                virtual_open_mode: None,
+            });
     }
     let channels_js = sender.list_channels_value().expect("list sender channels");
     let channels: serde_json::Value = crate::js_from(channels_js).expect("parse channels");
@@ -4470,9 +4667,12 @@ fn vanilla_payment_on_rgb_channel_success_path_contract() {
         .expect("payment hash")
         .to_string();
 
-    let events: serde_json::Value =
-        serde_json::from_str(&sender.list_runtime_events_json().expect("runtime events json"))
-            .expect("parse runtime events");
+    let events: serde_json::Value = serde_json::from_str(
+        &sender
+            .list_runtime_events_json()
+            .expect("runtime events json"),
+    )
+    .expect("parse runtime events");
     let events = events.as_array().expect("events array");
     assert!(events.iter().any(|event| {
         event.get("source").and_then(|value| value.as_str())
@@ -6443,7 +6643,7 @@ fn node_relay_session_auth_contract() {
         .expect_err("expected empty token/node_id contract");
     assert_eq!(
         empty_err.as_string().unwrap_or_default(),
-        "relay_auth_token cannot be empty"
+        sdk_contracts::ERR_RELAY_AUTH_TOKEN_EMPTY
     );
 
     let partial_err = node
@@ -6451,7 +6651,7 @@ fn node_relay_session_auth_contract() {
         .expect_err("expected pair requirement");
     assert_eq!(
         partial_err.as_string().unwrap_or_default(),
-        "relay_auth_token and relay_node_id must be provided together"
+        sdk_contracts::ERR_RELAY_AUTH_TOKEN_NODE_ID_TOGETHER
     );
 
     let invalid_node_id_err = node
@@ -6462,7 +6662,7 @@ fn node_relay_session_auth_contract() {
         .expect_err("expected pubkey validation");
     assert_eq!(
         invalid_node_id_err.as_string().unwrap_or_default(),
-        "invalid relay_node_id"
+        sdk_contracts::ERR_RELAY_NODE_ID_INVALID
     );
 
     let valid_node_id =
@@ -6627,6 +6827,62 @@ fn sdk_node_handle_transport_json_alias_channel_id_fallback_contract() {
     assert_eq!(channels.len(), 1);
     assert_eq!(channels[0]["status"], "pending");
     assert_eq!(channels[0]["is_usable"], false);
+}
+
+#[wasm_bindgen_test]
+fn list_channels_merges_runtime_metadata_from_local_cache_contract() {
+    crate::test_utils::reset_wasm_runtime_state_for_tests();
+    let node = RlnWasmNode::new_with_runtime_backend(
+        "ws://127.0.0.1:3365".to_string(),
+        "wasm_native_ldk".to_string(),
+    )
+    .expect("node");
+    let peer_pubkey =
+        "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
+    let channel = RlnWasmNodeChannelData {
+        temporary_channel_id: "tmp-local-rich".to_string(),
+        channel_id: "chan-local-rich".to_string(),
+        peer_pubkey: peer_pubkey.clone(),
+        status: "opening".to_string(),
+        ready: false,
+        is_usable: false,
+        public: false,
+        capacity_sat: 5_506,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    };
+    node.channels.borrow_mut().insert(
+        channel.channel_id.clone(),
+        ChannelEntry {
+            temporary_channel_id: channel.temporary_channel_id.clone(),
+            data: channel,
+        },
+    );
+    node.ldk_runtime.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-local-rich".to_string(),
+        channel_id: "chan-local-rich".to_string(),
+        peer_pubkey: String::new(),
+        status: "pending".to_string(),
+        ready: true,
+        is_usable: false,
+        public: false,
+        capacity_sat: 0,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    let channels_js = node.list_channels_value().expect("list channels");
+    let channels: serde_json::Value =
+        serde_wasm_bindgen::from_value(channels_js).expect("parse channels");
+    let channels = channels.as_array().expect("channels array");
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0]["channel_id"], "chan-local-rich");
+    assert_eq!(channels[0]["peer_pubkey"], peer_pubkey);
+    assert_eq!(channels[0]["capacity_sat"], 5_506);
+    assert_eq!(channels[0]["status"], "pending");
+    assert_eq!(channels[0]["ready"], true);
 }
 
 #[wasm_bindgen_test]
@@ -7727,7 +7983,10 @@ fn node_payment_status_event_updates_swap_runtime_status_contract() {
         .expect("keysend");
     let keysend: TestKeysendData =
         serde_wasm_bindgen::from_value(keysend_js).expect("parse keysend");
-    crate::swap_runtime::test_utils::test_insert_swap_with_payment_hash(&keysend.payment_hash, false);
+    crate::swap_runtime::test_utils::test_insert_swap_with_payment_hash(
+        &keysend.payment_hash,
+        false,
+    );
 
     let before_swap_js =
         crate::swap_runtime::get_swap_value(keysend.payment_hash.clone()).expect("get swap");

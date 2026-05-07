@@ -4,6 +4,10 @@ Browser-facing WASM SDK for `rgb-lightning-node`.
 
 This crate provides a JS/WASM API for SDK-level operations.
 
+## Canonical architecture doc
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the consolidated WASM stack overview (browser runtime + gateway + E2E + contracts).
+
 ## Scope
 
 - Target: browser and Node.js consumers via `wasm-bindgen` output.
@@ -19,8 +23,16 @@ From repository root:
 ```sh
 cargo check --manifest-path bindings/wasm-sdk/Cargo.toml
 cargo test --manifest-path bindings/wasm-sdk/Cargo.toml --no-run
+cargo test --manifest-path bindings/wasm-sdk/Cargo.toml ldk_data_dir
 cargo check --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown
 ```
+
+LDK `KeysManager` / `ChannelManager` RGB scratch paths and rgb-lib **auto-wallet** `data_dir`: on **wasm32** use single-segment names `rln_ldk_<slug>` / `rln_wallet_<slug>` (no POSIX `/tmp`); on native host tests use `/tmp/rln_wasm_ldk_<slug>` and `/tmp/rln_wasm_sdk_wallet_<slug>`. See `src/wasm_runtime_paths.rs`.
+
+RGB **LN peer wire** vs the RGB **HTTP proxy**: channel RGB data is handled inside LDK
+`ChannelManager` / `PeerManager`, plus optional BOLT1 fork custom messages in `src/rgb_ln_wire.rs`
+(must stay aligned with `rgb_ln_fork_custom_wire.rs` in the main crate). The HTTP proxy
+contract in `RGB_WASM_PROXY_TRANSPORT_SPEC.md` is orthogonal transport for JSON-RPC.
 
 Generate package artifacts:
 
@@ -48,11 +60,11 @@ docker compose -f compose.wasm.yaml up -d
 
 This brings up:
 
-- RGB proxy: `127.0.0.1:3000`
+- RGB proxy: `127.0.0.1:3005` (host port mapped from compose `proxy`)
 - WASM proxy gateway: `127.0.0.1:3001`
 - Esplora HTTP: `127.0.0.1:3002`
-- Electrum: `127.0.0.1:50001`
-- Bitcoind RPC: `127.0.0.1:18443`
+- Electrum: `127.0.0.1:50011` (host port mapped from compose `electrs`)
+- Bitcoind RPC: `127.0.0.1:19443` (host port for `compose.wasm-infra.yaml` / `compose.wasm.yaml` bitcoind)
 
 Build WASM package for browser examples:
 

@@ -7,7 +7,9 @@ use bitcoin_hashes::Hash as _;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::JsValue;
 
+use crate::ldk_live_backend::{create_wasm_ldk_live_backend, LdkLiveBackend};
 use crate::runtime_store::{browser_persistent_state_store, RuntimeStateStore};
+use crate::wasm_node_persistence::WASM_LDK_RUNTIME_STORAGE_PREFIX;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -189,6 +191,28 @@ pub struct LdkRuntimeChannelStateData {
     pub virtual_open_mode: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LdkRuntimeOpenChannelRequestData {
+    pub peer_pubkey: String,
+    pub capacity_sat: u64,
+    pub public: bool,
+    pub asset_id: Option<String>,
+    pub asset_local_amount: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LdkRuntimeOpenChannelResultData {
+    pub temporary_channel_id: String,
+    pub channel_id: String,
+    #[serde(default)]
+    pub peer_pubkey: String,
+    #[serde(default)]
+    pub capacity_sat: u64,
+    pub status: String,
+    pub ready: bool,
+    pub is_usable: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LdkRuntimeVirtualChannelSessionStatusData {
@@ -231,6 +255,21 @@ pub struct LdkRuntimePaymentStateData {
     pub payee_pubkey: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LdkRuntimeFundingRequestData {
+    pub temporary_channel_id: String,
+    pub counterparty_node_id: String,
+    pub channel_value_satoshis: u64,
+    pub output_script_hex: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LdkRuntimeFundingTxSubmissionData {
+    pub temporary_channel_id: String,
+    pub counterparty_node_id: String,
+    pub funding_tx_hex: String,
+}
+
 pub trait LdkRuntimeManager {
     fn status(&self) -> LdkRuntimeStatusData;
     fn start(&self) -> Result<(), JsValue>;
@@ -245,12 +284,30 @@ pub trait LdkRuntimeManager {
     fn set_peer_started(&self, peer_pubkey: &str, started: bool) -> bool;
     fn remove_peer(&self, peer_pubkey: &str) -> bool;
     fn list_peers(&self) -> Vec<LdkRuntimePeerStateData>;
+    fn peer_new_outbound_connection(&self, peer_pubkey: &str) -> Result<String, JsValue>;
+    fn peer_read_event(&self, payload_hex: &str) -> Result<(), JsValue>;
+    fn peer_process_events(&self) -> Result<(), JsValue>;
+    fn peer_take_outbound_frames(&self) -> Result<Vec<String>, JsValue>;
+    fn peer_socket_disconnected(&self) -> Result<(), JsValue>;
+    fn peer_is_handshake_complete(&self, peer_pubkey: &str) -> Result<bool, JsValue>;
+    fn set_live_node_seed_hex(&self, seed_hex: String) -> Result<(), JsValue>;
+    fn live_node_pubkey(&self) -> Result<String, JsValue>;
     fn upsert_channel(&self, channel: LdkRuntimeChannelStateData);
     fn remove_channel(&self, channel_id: &str) -> bool;
     fn remove_channels_by_peer(&self, peer_pubkey: &str) -> usize;
     fn set_channel_usable(&self, channel_id: &str, is_usable: bool) -> bool;
     fn find_channel_by_temporary(&self, temporary_channel_id: &str) -> Option<String>;
     fn list_channels(&self) -> Vec<LdkRuntimeChannelStateData>;
+    fn open_channel_non_virtual(
+        &self,
+        request: LdkRuntimeOpenChannelRequestData,
+    ) -> Result<LdkRuntimeOpenChannelResultData, JsValue>;
+    fn list_pending_funding_requests(&self) -> Result<Vec<LdkRuntimeFundingRequestData>, JsValue>;
+    fn submit_funding_transaction(
+        &self,
+        request: LdkRuntimeFundingTxSubmissionData,
+    ) -> Result<(), JsValue>;
+    fn reconcile_channels_from_live(&self) -> Result<usize, JsValue>;
     fn upsert_payment(&self, payment: LdkRuntimePaymentStateData);
     fn get_payment(&self, payment_hash: &str) -> Option<LdkRuntimePaymentStateData>;
     fn list_payments(&self) -> Vec<LdkRuntimePaymentStateData>;
@@ -292,6 +349,28 @@ pub trait LdkRuntimeManager {
     fn record_keysend_initiated(&self);
     fn record_channel_opened(&self);
     fn record_channel_closed(&self);
+
+    fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
+        Ok(Vec::new())
+    }
+
+    fn chain_apply_best_block(&self, _height: u32, _header_hex: &str) -> Result<(), JsValue> {
+        Ok(())
+    }
+
+    fn chain_apply_confirmed_tx(
+        &self,
+        _height: u32,
+        _header_hex: &str,
+        _tx_index: usize,
+        _tx_hex: &str,
+    ) -> Result<(), JsValue> {
+        Ok(())
+    }
+
+    fn chain_apply_unconfirmed_tx(&self, _txid: &str) -> Result<(), JsValue> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -325,7 +404,6 @@ trait LdkRuntimeStorage {
 struct InMemoryLdkRuntimeStorage;
 struct BrowserBackedLdkRuntimeStorage;
 
-const RUNTIME_STORAGE_PREFIX: &str = "rln:wasm:ldk-runtime:";
 const LDK_RUNTIME_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -358,11 +436,11 @@ impl LdkRuntimeStorage for InMemoryLdkRuntimeStorage {
 
 impl BrowserBackedLdkRuntimeStorage {
     fn scoped_key(key: &str) -> String {
-        format!("{RUNTIME_STORAGE_PREFIX}{key}")
+        format!("{WASM_LDK_RUNTIME_STORAGE_PREFIX}{key}")
     }
 
     fn pending_scoped_key(key: &str) -> String {
-        format!("{RUNTIME_STORAGE_PREFIX}{key}:pending")
+        format!("{WASM_LDK_RUNTIME_STORAGE_PREFIX}{key}:pending")
     }
 
     fn encode_checkpoint(snapshot: &LdkRuntimeSnapshot) -> Result<String, JsValue> {
@@ -445,6 +523,8 @@ struct WasmNativeRuntimeManager {
     virtual_channel_sessions: RefCell<HashMap<String, LdkRuntimeVirtualChannelSessionData>>,
     counters: RefCell<LdkRuntimeLifecycleCounters>,
     key_manager_fingerprint: String,
+    live_backend: RefCell<Option<Rc<dyn LdkLiveBackend>>>,
+    live_node_seed: RefCell<Option<[u8; 32]>>,
 }
 
 impl WasmNativeRuntimeManager {
@@ -466,6 +546,8 @@ impl WasmNativeRuntimeManager {
             virtual_channel_sessions: RefCell::new(HashMap::new()),
             counters: RefCell::new(LdkRuntimeLifecycleCounters::default()),
             key_manager_fingerprint,
+            live_backend: RefCell::new(None),
+            live_node_seed: RefCell::new(None),
         }
     }
 
@@ -605,6 +687,11 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
     }
 
     fn has_connected_peer(&self, peer_pubkey: &str) -> bool {
+        if let Some(backend) = self.live_backend.borrow().as_ref() {
+            if let Ok(connected) = backend.is_peer_handshake_complete(peer_pubkey) {
+                return connected;
+            }
+        }
         self.peers
             .borrow()
             .get(peer_pubkey)
@@ -613,6 +700,16 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
     }
 
     fn has_any_connected_peer(&self) -> bool {
+        if let Some(backend) = self.live_backend.borrow().as_ref() {
+            for peer in self.peers.borrow().keys() {
+                if backend
+                    .is_peer_handshake_complete(peer)
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
+        }
         self.peers.borrow().values().any(|peer| peer.started)
     }
 
@@ -648,10 +745,231 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
         self.peers.borrow().values().cloned().collect()
     }
 
+    fn peer_new_outbound_connection(&self, peer_pubkey: &str) -> Result<String, JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.new_outbound_connection(peer_pubkey)
+    }
+
+    fn peer_read_event(&self, payload_hex: &str) -> Result<(), JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.read_event(payload_hex)
+    }
+
+    fn peer_process_events(&self) -> Result<(), JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.process_events()?;
+        let _ = self.reconcile_channels_from_live();
+        Ok(())
+    }
+
+    fn peer_take_outbound_frames(&self) -> Result<Vec<String>, JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.take_outbound_frames()
+    }
+
+    fn peer_socket_disconnected(&self) -> Result<(), JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.socket_disconnected()
+    }
+
+    fn peer_is_handshake_complete(&self, peer_pubkey: &str) -> Result<bool, JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.is_peer_handshake_complete(peer_pubkey)
+    }
+
+    fn set_live_node_seed_hex(&self, seed_hex: String) -> Result<(), JsValue> {
+        let seed_hex = seed_hex.trim();
+        if seed_hex.is_empty() {
+            return Err(JsValue::from_str("seed_hex cannot be empty"));
+        }
+        let bytes = hex::decode(seed_hex).map_err(|_| JsValue::from_str("invalid seed_hex"))?;
+        if bytes.len() != 32 {
+            return Err(JsValue::from_str("seed_hex must be 32 bytes hex"));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&bytes);
+        *self.live_node_seed.borrow_mut() = Some(seed);
+        // Recreate backend with new identity on next operation.
+        self.live_backend.borrow_mut().take();
+        Ok(())
+    }
+
+    fn live_node_pubkey(&self) -> Result<String, JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.local_node_pubkey()
+    }
+
+    fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
+        if self.live_backend.borrow().is_none() {
+            // If there is no live backend yet, there is nothing to sync.
+            return Ok(Vec::new());
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.chain_relevant_txids()
+    }
+
+    fn chain_apply_best_block(&self, height: u32, header_hex: &str) -> Result<(), JsValue> {
+        if self.live_backend.borrow().is_none() {
+            return Ok(());
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.chain_apply_best_block(height, header_hex)
+    }
+
+    fn chain_apply_confirmed_tx(
+        &self,
+        height: u32,
+        header_hex: &str,
+        tx_index: usize,
+        tx_hex: &str,
+    ) -> Result<(), JsValue> {
+        if self.live_backend.borrow().is_none() {
+            return Ok(());
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.chain_apply_confirmed_tx(height, header_hex, tx_index, tx_hex)
+    }
+
+    fn chain_apply_unconfirmed_tx(&self, txid: &str) -> Result<(), JsValue> {
+        if self.live_backend.borrow().is_none() {
+            return Ok(());
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.chain_apply_unconfirmed_tx(txid)
+    }
+
     fn upsert_channel(&self, channel: LdkRuntimeChannelStateData) {
-        self.channels
-            .borrow_mut()
-            .insert(channel.channel_id.clone(), channel);
+        let mut channels = self.channels.borrow_mut();
+        let incoming_id = channel.channel_id.clone();
+        let incoming_temp = channel.temporary_channel_id.clone();
+
+        // If the same temporary channel migrated to a new final channel_id,
+        // remove the stale key first so runtime keeps exactly one canonical entry.
+        let stale_key = channels
+            .iter()
+            .find_map(|(key, ch)| {
+                if ch.temporary_channel_id == incoming_temp && *key != incoming_id {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            });
+        if let Some(stale_key) = stale_key {
+            channels.remove(&stale_key);
+            let mut sessions = self.virtual_channel_sessions.borrow_mut();
+            if let Some(mut session) = sessions.remove(&stale_key) {
+                session.channel_id = incoming_id.clone();
+                session.updated_at = unix_now_secs();
+                sessions.insert(incoming_id.clone(), session);
+            }
+        }
+
+        channels.insert(incoming_id, channel);
+        drop(channels);
         self.persist_state();
     }
 
@@ -698,7 +1016,24 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
 
     fn set_channel_usable(&self, channel_id: &str, is_usable: bool) -> bool {
         let mut channels = self.channels.borrow_mut();
-        let Some(ch) = channels.get_mut(channel_id) else {
+        let resolved_key = if channels.contains_key(channel_id) {
+            channel_id.to_string()
+        } else {
+            channels
+                .iter()
+                .find_map(|(key, ch)| {
+                    if ch.temporary_channel_id == channel_id {
+                        Some(key.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+        };
+        if resolved_key.is_empty() {
+            return false;
+        }
+        let Some(ch) = channels.get_mut(&resolved_key) else {
             return false;
         };
         ch.is_usable = is_usable;
@@ -723,6 +1058,135 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
 
     fn list_channels(&self) -> Vec<LdkRuntimeChannelStateData> {
         self.channels.borrow().values().cloned().collect()
+    }
+
+    fn open_channel_non_virtual(
+        &self,
+        request: LdkRuntimeOpenChannelRequestData,
+    ) -> Result<LdkRuntimeOpenChannelResultData, JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.open_channel_non_virtual(request)
+    }
+
+    fn list_pending_funding_requests(&self) -> Result<Vec<LdkRuntimeFundingRequestData>, JsValue> {
+        self.ensure_started()?;
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("ldk live backend is not initialized"))?
+            .clone();
+        backend.list_pending_funding_requests()
+    }
+
+    fn submit_funding_transaction(
+        &self,
+        request: LdkRuntimeFundingTxSubmissionData,
+    ) -> Result<(), JsValue> {
+        self.ensure_started()?;
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("ldk live backend is not initialized"))?
+            .clone();
+        backend.submit_funding_transaction(request)
+    }
+
+    fn reconcile_channels_from_live(&self) -> Result<usize, JsValue> {
+        self.ensure_started()?;
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+
+        let live_channels = backend.list_live_channels()?;
+        let mut updated = 0usize;
+        for ch in live_channels.into_iter() {
+            // Find the cache entry this live channel should supersede.
+            //
+            // Primary key match: same `channel_id` (covers re-runs of reconcile
+            // after the channel has already migrated to its final id).
+            //
+            // Secondary, peer+temp match: LDK's `ChannelDetails` does *not*
+            // expose the original temporary_channel_id once a channel migrates
+            // to its final id, so `list_live_channels` is forced to set
+            // `temporary_channel_id = channel_id`. Without this fallback, the
+            // pre-migration cache entry (keyed and temp-tagged by the real
+            // temp id) would be invisible to reconcile, leaving two records
+            // for the same logical channel after FundingCreated.
+            let existing = {
+                let channels = self.channels.borrow();
+                channels.get(&ch.channel_id).cloned().or_else(|| {
+                    channels
+                        .values()
+                        .find(|e| {
+                            e.channel_id != ch.channel_id
+                                && !ch.peer_pubkey.trim().is_empty()
+                                && e.peer_pubkey == ch.peer_pubkey
+                                && e.channel_id == e.temporary_channel_id
+                                && matches!(e.status.as_str(), "opening" | "pending" | "")
+                        })
+                        .cloned()
+                })
+            };
+            // Inherit the original temporary id from the pre-migration record
+            // so `upsert_channel`'s temp→final migration cleanup matches and
+            // removes the stale temp-keyed entry.
+            let temporary_channel_id = existing
+                .as_ref()
+                .map(|e| e.temporary_channel_id.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| ch.temporary_channel_id.clone());
+            let state = LdkRuntimeChannelStateData {
+                temporary_channel_id,
+                channel_id: ch.channel_id.clone(),
+                peer_pubkey: if !ch.peer_pubkey.trim().is_empty() {
+                    ch.peer_pubkey.clone()
+                } else {
+                    existing
+                        .as_ref()
+                        .map(|e| e.peer_pubkey.clone())
+                        .unwrap_or_default()
+                },
+                status: ch.status.clone(),
+                ready: ch.ready,
+                is_usable: ch.is_usable,
+                public: existing.as_ref().map(|e| e.public).unwrap_or(false),
+                capacity_sat: if ch.capacity_sat != 0 {
+                    ch.capacity_sat
+                } else {
+                    existing.as_ref().map(|e| e.capacity_sat).unwrap_or(0)
+                },
+                asset_id: existing.as_ref().and_then(|e| e.asset_id.clone()),
+                asset_local_amount: existing.as_ref().and_then(|e| e.asset_local_amount),
+                virtual_open_mode: existing.as_ref().and_then(|e| e.virtual_open_mode.clone()),
+            };
+            self.upsert_channel(state);
+            updated += 1;
+        }
+        Ok(updated)
     }
 
     fn upsert_payment(&self, payment: LdkRuntimePaymentStateData) {

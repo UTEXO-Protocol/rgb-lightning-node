@@ -40,15 +40,18 @@ pub(crate) fn browser_persistent_state_store() -> BrowserPersistentStateStore {
 }
 
 pub(crate) const RUNTIME_STATE_HYDRATE_PREFIXES: &[&str] = &[
-    "rln:wasm:ldk-runtime:",
+    crate::wasm_node_persistence::WASM_LDK_RUNTIME_STORAGE_PREFIX,
     "rln:wasm:swap-runtime:",
     "rln:wasm:media:",
     "rln:wasm:wallet-rgb-proxy:",
-    "rln:wasm:ln-runtime-core:",
-    "rln:wasm:chain-sync:",
-    "rln:wasm:runtime-events:",
-    "rln:wasm:rgb-ln-transfers:",
-    "rln:wasm:virtual-channels-v0:",
+    crate::wasm_node_persistence::WASM_LN_RUNTIME_CORE_STORAGE_PREFIX,
+    crate::wasm_node_persistence::WASM_CHAIN_SYNC_STORAGE_PREFIX,
+    crate::wasm_node_persistence::WASM_LDK_BROADCAST_QUEUE_STORAGE_PREFIX,
+    crate::wasm_node_persistence::WASM_LDK_MONITORS_STORAGE_PREFIX,
+    crate::wasm_node_persistence::WASM_RUNTIME_EVENTS_STORAGE_PREFIX,
+    crate::wasm_node_persistence::WASM_RGB_LN_TRANSFERS_STORAGE_PREFIX,
+    crate::wasm_node_persistence::WASM_VIRTUAL_CHANNELS_V0_STORAGE_PREFIX,
+    crate::wasm_node_persistence::WASM_PEER_SESSIONS_STORAGE_PREFIX,
 ];
 
 pub(crate) async fn preload_runtime_state_from_persistent_store() -> Result<(), JsValue> {

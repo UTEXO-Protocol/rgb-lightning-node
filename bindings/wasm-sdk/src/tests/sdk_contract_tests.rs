@@ -164,7 +164,10 @@ async fn sdk_node_handle_connect_peer_invalid_pubkey_contract() {
         .connect_peer("127.0.0.1:9735".to_string(), "bad-pubkey".to_string())
         .await
         .expect_err("should fail");
-    assert_eq!(err.as_string().unwrap_or_default(), "invalid peer_pubkey");
+    assert_eq!(
+        err.as_string().unwrap_or_default(),
+        sdk_contracts::ERR_PEER_PUBKEY_INVALID
+    );
 }
 
 #[wasm_bindgen_test(async)]
@@ -957,7 +960,7 @@ fn sdk_default_rgb_proxy_transport_empty_endpoint_validation_contract() {
         .expect_err("empty endpoint should fail");
     assert_eq!(
         err.as_string().unwrap_or_default(),
-        "rgb_proxy_endpoint cannot be empty"
+        sdk_contracts::ERR_RGB_PROXY_ENDPOINT_EMPTY
     );
 }
 
@@ -970,7 +973,7 @@ fn sdk_default_rgb_proxy_transport_scheme_validation_contract() {
         .expect_err("invalid scheme should fail");
     assert_eq!(
         err.as_string().unwrap_or_default(),
-        "rgb_proxy_endpoint must use http:// or https://"
+        sdk_contracts::ERR_RGB_PROXY_ENDPOINT_SCHEME
     );
 }
 
@@ -987,7 +990,7 @@ fn sdk_default_rgb_proxy_transport_auth_node_pair_validation_contract() {
         .expect_err("missing node_id should fail");
     assert_eq!(
         err.as_string().unwrap_or_default(),
-        "rgb_proxy_auth_token and rgb_proxy_node_id must be provided together"
+        sdk_contracts::ERR_RGB_PROXY_AUTH_TOKEN_NODE_ID_TOGETHER
     );
 }
 
@@ -1004,6 +1007,6 @@ fn sdk_default_rgb_proxy_transport_invalid_node_id_validation_contract() {
         .expect_err("invalid node_id should fail");
     assert_eq!(
         err.as_string().unwrap_or_default(),
-        "invalid rgb_proxy_node_id"
+        sdk_contracts::ERR_RGB_PROXY_NODE_ID_INVALID
     );
 }

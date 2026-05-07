@@ -74,7 +74,7 @@ pub(crate) fn test_wallet_data_json() -> String {
         .expect("restore keys");
     let suffix = TEST_WALLET_SEQ.fetch_add(1, Ordering::Relaxed);
     let wallet_data = serde_json::json!({
-        "data_dir": format!("/tmp/rln_wasm_contract_wallet_{suffix}"),
+        "data_dir": crate::wasm_runtime_paths::rgb_lib_wallet_data_dir(&format!("contract{suffix}")),
         "bitcoin_network": "Regtest",
         "database_type": "Sqlite",
         "max_allocations_per_utxo": 5,

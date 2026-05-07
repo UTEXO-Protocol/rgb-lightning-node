@@ -1,0 +1,2 @@
+[{"channel_id":"deadbeef","funding_txid":null,"peer_pubkey":"02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","peer_alias":"peer-a","short_channel_id":42,"status":"Opened","ready":true,"capacity_sat":100000,"local_balance_sat":50000,"outbound_balance_msat":60000,"inbound_balance_msat":40000,"next_outbound_htlc_limit_msat":70000,"next_outbound_htlc_minimum_msat":1000,"is_usable":true,"public":false,"asset_id":null,"asset_local_amount":null,"asset_remote_amount":null,"virtual_open_mode":null}]
+

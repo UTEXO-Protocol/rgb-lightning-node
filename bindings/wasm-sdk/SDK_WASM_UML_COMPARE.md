@@ -54,12 +54,15 @@ flowchart LR
 
   subgraph W["WASM diagram"]
     w1["1. App -> RlnWasmNode: connectPeer(peer_addr, peer_pubkey)"]
-    w2["2. Node -> LN Proxy WS: open /proxy?peer=..."]
+    w2["2. Node -> LN Proxy WS: connect to /v1/{host}/{port} (WS↔TCP bridge)"]
     w3["3. App -> Node: openChannel*(peer_pubkey, capacity, ...)"]
-    w4["4. Node -> WASM Runtime: create channel + apply channel_usable"]
-    w5["5. Node -> Browser store: persist runtime event/state"]
-    w6["6. Node -> App: channel data"]
-    w1 --> w2 --> w3 --> w4 --> w5 --> w6
+    w4["4. WASM Runtime: create channel; wait for FundingGenerationReady"]
+    w5["5. App -> Gateway (HTTP dev): request funding tx for output_script + value"]
+    w6["6. App -> Node: submitFundingTransaction*(temporary_channel_id, tx_hex)"]
+    w7["7. WASM Runtime: process events until channel becomes usable"]
+    w8["8. Node -> Browser store: persist runtime event/state (reload-safe)"]
+    w9["9. Node -> App: channel/payment state via runtime-backed reads"]
+    w1 --> w2 --> w3 --> w4 --> w5 --> w6 --> w7 --> w8 --> w9
   end
 ```
 

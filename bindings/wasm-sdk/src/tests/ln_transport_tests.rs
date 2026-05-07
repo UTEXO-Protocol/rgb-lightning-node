@@ -7,6 +7,9 @@ fn default_options() -> RlnWasmLnSocketConnectOptionsData {
         reconnect_max_delay_ms: Some(4_000),
         relay_auth_token: None,
         relay_node_id: None,
+        replay_transport_envelope: Some(false),
+        replay_session_id: None,
+        replay_last_applied_seq: None,
     }
 }
 
@@ -42,7 +45,7 @@ fn validate_connect_options_contract() {
             .unwrap_err()
             .as_string()
             .unwrap_or_default(),
-        "relay_auth_token cannot be empty"
+        sdk_contracts::ERR_RELAY_AUTH_TOKEN_EMPTY
     );
 
     let mut options = default_options();
@@ -52,7 +55,17 @@ fn validate_connect_options_contract() {
             .unwrap_err()
             .as_string()
             .unwrap_or_default(),
-        "relay_node_id cannot be empty"
+        sdk_contracts::ERR_RELAY_NODE_ID_EMPTY
+    );
+
+    let mut options = default_options();
+    options.replay_session_id = Some("   ".to_string());
+    assert_eq!(
+        validate_connect_options(&options)
+            .unwrap_err()
+            .as_string()
+            .unwrap_or_default(),
+        "replay_session_id cannot be empty"
     );
 }
 
@@ -84,4 +97,34 @@ fn websocket_url_encodes_relay_query_values() {
         .expect("url");
     assert!(url.contains("auth_token=token%20with%20spaces"));
     assert!(url.contains("node_id=node%2Fid%2Bvalue"));
+}
+
+#[test]
+fn websocket_url_includes_replay_query_contract() {
+    let options = RlnWasmLnSocketConnectOptionsData {
+        replay_transport_envelope: Some(true),
+        replay_session_id: Some("session-abc".to_string()),
+        replay_last_applied_seq: Some(42),
+        ..default_options()
+    };
+    let url = proxy_url_for_peer_with_options("ws://127.0.0.1:3000", "127.0.0.1:9735", &options)
+        .expect("url");
+    assert!(url.contains("replay=1"));
+    assert!(url.contains("session_id=session-abc"));
+    assert!(url.contains("last_applied_seq=42"));
+}
+
+#[test]
+fn websocket_url_omits_last_seq_when_not_available_contract() {
+    let options = RlnWasmLnSocketConnectOptionsData {
+        replay_transport_envelope: Some(true),
+        replay_session_id: Some("session-no-seq".to_string()),
+        replay_last_applied_seq: None,
+        ..default_options()
+    };
+    let url = proxy_url_for_peer_with_options("ws://127.0.0.1:3000", "127.0.0.1:9735", &options)
+        .expect("url");
+    assert!(url.contains("replay=1"));
+    assert!(url.contains("session_id=session-no-seq"));
+    assert!(!url.contains("last_applied_seq="));
 }

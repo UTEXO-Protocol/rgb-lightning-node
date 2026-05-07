@@ -33,7 +33,7 @@ fn check_indexer_url_value_empty_error_contract() {
     let err =
         check_indexer_url_value("regtest".to_string(), "".to_string()).expect_err("should fail");
     let msg = err.as_string().expect("error string");
-    assert_eq!(msg, "indexer_url cannot be empty");
+    assert_eq!(msg, sdk_contracts::ERR_INDEXER_URL_EMPTY);
 }
 
 #[wasm_bindgen_test]
@@ -78,7 +78,7 @@ async fn sdk_wallet_handle_go_online_empty_indexer_contract() {
         .await
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
-    assert_eq!(msg, "indexer_url cannot be empty");
+    assert_eq!(msg, sdk_contracts::ERR_INDEXER_URL_EMPTY);
 }
 
 #[wasm_bindgen_test(async)]
@@ -93,7 +93,7 @@ async fn sdk_wallet_handle_refresh_empty_asset_id_contract() {
         .await
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
-    assert_eq!(msg, "asset_id cannot be empty if provided");
+    assert_eq!(msg, sdk_contracts::ERR_ASSET_ID_EMPTY_IF_PROVIDED);
 }
 
 #[wasm_bindgen_test(async)]
@@ -108,7 +108,7 @@ async fn sdk_wallet_handle_send_btc_begin_empty_address_contract() {
         .await
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
-    assert_eq!(msg, "address cannot be empty");
+    assert_eq!(msg, sdk_contracts::ERR_ADDRESS_EMPTY);
 }
 
 #[wasm_bindgen_test]
@@ -164,7 +164,7 @@ fn sdk_wallet_handle_get_asset_media_empty_asset_id_contract() {
         .get_asset_media_value("".to_string())
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
-    assert_eq!(msg, "asset_id cannot be empty");
+    assert_eq!(msg, sdk_contracts::ERR_ASSET_ID_EMPTY);
 }
 
 #[wasm_bindgen_test]
@@ -320,7 +320,7 @@ fn sdk_wallet_handle_rgb_proxy_transport_pair_validation_contract() {
     let msg = err.as_string().expect("error string");
     assert_eq!(
         msg,
-        "rgb_proxy_auth_token and rgb_proxy_node_id must be provided together"
+        sdk_contracts::ERR_RGB_PROXY_AUTH_TOKEN_NODE_ID_TOGETHER
     );
 }
 
@@ -338,10 +338,7 @@ fn sdk_wallet_handle_blind_receive_requires_endpoints_or_proxy_config_contract()
         .blind_receive_value(None, assignment_js, None, JsValue::NULL, 1)
         .expect_err("should require endpoints or configured proxy");
     let msg = err.as_string().expect("error string");
-    assert_eq!(
-        msg,
-        "transport_endpoints must be provided or setRgbProxyTransport must be configured"
-    );
+    assert_eq!(msg, sdk_contracts::ERR_TRANSPORT_ENDPOINTS_MISSING);
 }
 
 #[wasm_bindgen_test]

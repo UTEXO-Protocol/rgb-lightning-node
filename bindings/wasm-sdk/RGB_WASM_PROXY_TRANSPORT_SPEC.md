@@ -1,4 +1,4 @@
-# RGB WASM Proxy Transport Spec (Step 1)
+# RGB WASM Proxy Transport Spec
 
 ## Purpose
 
@@ -6,7 +6,7 @@ This document freezes the architecture boundary for porting RGB business logic
 to native wasm runtime while routing RGB network transport through a proxy
 service colocated with LN websocket proxying.
 
-This is the Step 1 scope/contract baseline for the RGB-native migration track.
+This is the scope/contract baseline for the RGB-native migration track.
 
 ## Scope Boundary
 
@@ -23,7 +23,7 @@ This is the Step 1 scope/contract baseline for the RGB-native migration track.
 2. Bitcoin chain source/indexer (Esplora).
 3. Funding/signing provider integration for on-chain tx flows.
 
-## Proxy Contract (Frozen for Step 1)
+## Proxy Contract (Frozen)
 
 Browser-facing routes (example):
 
@@ -38,7 +38,7 @@ Transport contract requirements:
 4. Tenant isolation: requests for one session/node cannot access another session.
 5. Request size/time limits and rate limiting are enforced.
 
-## Wasm Runtime Contract (Frozen for Step 1)
+## Wasm Runtime Contract (Frozen)
 
 1. Wasm runtime is authoritative for RGB transfer state machine.
 2. Proxy is transport-only; business decisions are not delegated to proxy.
@@ -47,14 +47,24 @@ Transport contract requirements:
 4. Error contracts returned by wasm APIs remain deterministic and documented in
    `ERROR_CONTRACT.md`.
 
-## Step 1 Deliverables
+## Deliverables
 
 1. This boundary/spec document.
 2. README reference to this document.
-3. No behavior changes are required in Step 1.
+3. No behavior changes are required by this document.
 
-## Exit Criteria for Step 1
+## Exit Criteria
 
 1. Team agrees on responsibility split (wasm runtime vs proxy).
 2. No ambiguous ownership for transport, state, or auth/session logic.
 3. Follow-up implementation steps can proceed without redefining boundaries.
+
+## RGB on the LN peer link (not the HTTP proxy)
+
+The HTTP/RGB JSON-RPC proxy is **transport-only** for RGB consignment/indexer-style calls.
+
+RGB-aware **LN peer bytes** in this repository are carried inside **channel messages** parsed by
+`ChannelManager` (forked `lightning::ln::msgs` + `rgb_utils`). Both runtimes also share a small
+**BOLT #1 experimental** custom-message handler for fork capability discovery (`type` **45001**;
+see `src/rgb_ln_fork_custom_wire.rs` and `bindings/wasm-sdk/src/rgb_ln_wire.rs`). See
+`src/ldk.rs` next to `PeerManager::new` for native wiring.

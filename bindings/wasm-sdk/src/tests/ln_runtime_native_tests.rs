@@ -1,5 +1,6 @@
 use super::test_utils::{inject_for_test, reset_native_runtime_core_state_for_tests};
 use super::*;
+use crate::wasm_node_persistence::WASM_LN_RUNTIME_CORE_STORAGE_PREFIX;
 
 #[test]
 fn core_lifecycle_and_queue_are_deterministic() {
@@ -36,7 +37,7 @@ fn core_lifecycle_and_queue_are_deterministic() {
 #[test]
 fn recovery_prefers_newest_pending_snapshot() {
     reset_native_runtime_core_state_for_tests();
-    let base = format!("{NATIVE_RUNTIME_CORE_STORAGE_PREFIX}recovery-prefers-pending");
+    let base = format!("{WASM_LN_RUNTIME_CORE_STORAGE_PREFIX}recovery-prefers-pending");
     let committed = NativeLnRuntimeCoreSnapshot {
         revision: 3,
         lifecycle_state: NativeLnRuntimeLifecycleState::Stopped,
@@ -69,7 +70,7 @@ fn recovery_prefers_newest_pending_snapshot() {
 #[test]
 fn recovery_falls_back_to_committed_when_newer() {
     reset_native_runtime_core_state_for_tests();
-    let base = format!("{NATIVE_RUNTIME_CORE_STORAGE_PREFIX}recovery-prefers-committed");
+    let base = format!("{WASM_LN_RUNTIME_CORE_STORAGE_PREFIX}recovery-prefers-committed");
     let committed = NativeLnRuntimeCoreSnapshot {
         revision: 7,
         lifecycle_state: NativeLnRuntimeLifecycleState::Running,

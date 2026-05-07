@@ -8,6 +8,9 @@ pub(crate) fn reset_runtime_event_log_storage_for_tests() {
     RUNTIME_RGB_LN_TRANSFER_STORAGE.with(|state| {
         state.borrow_mut().clear();
     });
+    RUNTIME_PEER_SESSION_STORAGE.with(|state| {
+        state.borrow_mut().clear();
+    });
     TRUSTED_VIRTUAL_CHANNEL_SCOPE_STORAGE.with(|state| {
         state.borrow_mut().clear();
     });

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RLN WASM E2E Harness</title>
+    <style>
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        margin: 2rem;
+      }
+      #status {
+        padding: 0.75rem 1rem;
+        border: 1px solid #bbb;
+      }
+      code {
+        background: #f6f6f6;
+        padding: 0.05rem 0.25rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>RLN WASM E2E Harness</h1>
+    <p>
+      This page is meant for automated E2E tests and manual DevTools driving.
+      It exposes <code>window.__sdk = { node, wallet, online, walletAddress, ... }</code>.
+    </p>
+    <div id="status">loading…</div>
+    <script type="module" src="./wasm_e2e_harness.js"></script>
+  </body>
+</html>
+

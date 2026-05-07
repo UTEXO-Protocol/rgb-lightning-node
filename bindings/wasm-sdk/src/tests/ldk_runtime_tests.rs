@@ -174,6 +174,60 @@ fn virtual_channel_intent_session_and_reconcile_contract() {
 }
 
 #[test]
+fn upsert_channel_preserves_metadata_when_incoming_live_snapshot_is_partial() {
+    super::test_utils::reset_runtime_storage_for_tests();
+    let manager = ldk_runtime_manager("runtime-channel-metadata-merge-test".to_string())
+        .expect("runtime manager");
+    manager
+        .ensure_started()
+        .expect("runtime should start in default unlocked test session");
+
+    manager.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-rich".to_string(),
+        channel_id: "chan-rich".to_string(),
+        peer_pubkey: "peer-rich".to_string(),
+        status: "opening".to_string(),
+        ready: false,
+        is_usable: false,
+        public: false,
+        capacity_sat: 5_506,
+        asset_id: Some("asset-rich".to_string()),
+        asset_local_amount: Some(42),
+        virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+    });
+
+    manager.upsert_channel(LdkRuntimeChannelStateData {
+        temporary_channel_id: "tmp-rich".to_string(),
+        channel_id: "chan-rich".to_string(),
+        peer_pubkey: String::new(),
+        status: "pending".to_string(),
+        ready: true,
+        is_usable: false,
+        public: false,
+        capacity_sat: 0,
+        asset_id: None,
+        asset_local_amount: None,
+        virtual_open_mode: None,
+    });
+
+    let channel = manager
+        .list_channels()
+        .into_iter()
+        .find(|channel| channel.channel_id == "chan-rich")
+        .expect("channel should exist");
+    assert_eq!(channel.peer_pubkey, "peer-rich");
+    assert_eq!(channel.capacity_sat, 5_506);
+    assert_eq!(channel.asset_id.as_deref(), Some("asset-rich"));
+    assert_eq!(channel.asset_local_amount, Some(42));
+    assert_eq!(
+        channel.virtual_open_mode.as_deref(),
+        Some("trusted_no_broadcast")
+    );
+    assert_eq!(channel.status, "pending");
+    assert!(channel.ready);
+}
+
+#[test]
 fn runtime_component_status_tracks_lifecycle_counters_contract() {
     super::test_utils::reset_runtime_storage_for_tests();
     let manager =

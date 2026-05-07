@@ -5,6 +5,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime_store::{browser_persistent_state_store, RuntimeStateStore};
+use crate::wasm_node_persistence::WASM_LN_RUNTIME_CORE_STORAGE_PREFIX;
 
 #[cfg(test)]
 #[path = "tests/ln_runtime_native_test_utils.rs"]
@@ -13,7 +14,6 @@ mod test_utils;
 #[path = "tests/ln_runtime_native_tests.rs"]
 mod tests;
 
-const NATIVE_RUNTIME_CORE_STORAGE_PREFIX: &str = "rln:wasm:ln-runtime-core:";
 const NATIVE_RUNTIME_CORE_PENDING_SUFFIX: &str = ":pending";
 const NATIVE_RUNTIME_CORE_COMMITTED_SUFFIX: &str = ":committed";
 
@@ -95,7 +95,7 @@ pub struct NativeLnRuntimeCore {
 
 impl NativeLnRuntimeCore {
     pub fn new(runtime_key: String) -> Self {
-        let storage_key_base = format!("{NATIVE_RUNTIME_CORE_STORAGE_PREFIX}{runtime_key}");
+        let storage_key_base = format!("{WASM_LN_RUNTIME_CORE_STORAGE_PREFIX}{runtime_key}");
         let snapshot = load_snapshot_with_recovery(&storage_key_base).unwrap_or_default();
         Self {
             storage_key_base,

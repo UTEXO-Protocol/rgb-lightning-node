@@ -80,7 +80,7 @@ Core SDK behavior has been rewritten in wasm where native runtime assumptions do
 | `list_transfers` | `listTransfersValue` / `listTransfersJson` | runtime-backed | Wallet-backed RGB transfer list. |
 | `list_unspents` | `listUnspentsValue/Json` + `listUnspentsVanillaValue/Json` | runtime-backed | Wallet-backed unspent listing. |
 
-## Acceptance Gate Freeze (Step 1)
+## Acceptance Gate Freeze
 
 This section locks target behavior per native endpoint and defines strict acceptance criteria through gate profiles.
 
@@ -153,7 +153,7 @@ Endpoint target freeze:
 | `list_transfers` | runtime-backed | `P_STATEFUL_READ` |
 | `list_unspents` | runtime-backed | `P_STATEFUL_READ` |
 
-## Unsupported Contract Coverage (Step 3)
+## Unsupported Contract Coverage
 
 The endpoints below are intentionally unsupported-by-design and have explicit rationale + deterministic error-contract tests.
 

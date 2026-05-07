@@ -10,6 +10,9 @@ use wasm_bindgen::prelude::JsValue;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::runtime_store::{browser_persistent_state_store, RuntimeStateStore};
+use crate::wasm_node_persistence::{
+    WASM_CHAIN_SYNC_STORAGE_PREFIX, WASM_LDK_BROADCAST_QUEUE_STORAGE_PREFIX,
+};
 
 #[cfg(test)]
 #[path = "tests/chain_sync_test_utils.rs"]
@@ -18,7 +21,6 @@ pub(crate) mod test_utils;
 #[path = "tests/chain_sync_tests.rs"]
 mod tests;
 
-const CHAIN_SYNC_STORAGE_PREFIX: &str = "rln:wasm:chain-sync:";
 const CHAIN_SYNC_SCHEMA_VERSION: u32 = 1;
 const CHAIN_SYNC_DEFAULT_POLL_INTERVAL_MS: u32 = 10_000;
 const CHAIN_SYNC_MIN_POLL_INTERVAL_MS: u32 = 1_000;
@@ -95,14 +97,22 @@ thread_local! {
 #[derive(Clone)]
 pub struct WasmChainSyncDriver {
     storage_key: String,
+    broadcast_queue_key: String,
     state: Rc<RefCell<ChainSyncSnapshot>>,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     loop_active: Rc<Cell<bool>>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PendingBroadcastTx {
+    txid: String,
+    tx_hex: String,
+}
+
 impl WasmChainSyncDriver {
     pub fn new(runtime_key: String, default_network: String) -> Result<Self, JsValue> {
-        let storage_key = format!("{CHAIN_SYNC_STORAGE_PREFIX}{runtime_key}");
+        let storage_key = format!("{WASM_CHAIN_SYNC_STORAGE_PREFIX}{runtime_key}");
+        let broadcast_queue_key = format!("{WASM_LDK_BROADCAST_QUEUE_STORAGE_PREFIX}{runtime_key}");
         let loaded = load_snapshot(&storage_key)?;
         let mut snapshot = loaded
             .unwrap_or_else(|| ChainSyncSnapshot::default_for_network(default_network.clone()));
@@ -116,6 +126,7 @@ impl WasmChainSyncDriver {
         }
         let driver = Self {
             storage_key,
+            broadcast_queue_key,
             state: Rc::new(RefCell::new(snapshot)),
             loop_active: Rc::new(Cell::new(false)),
         };
@@ -266,6 +277,11 @@ impl WasmChainSyncDriver {
 
     async fn tick_with_indexer(&self, indexer_url: String) -> Result<(), JsValue> {
         let now = unix_now_secs();
+
+        // Ingest pending LDK-triggered broadcasts (written by LDK `BroadcasterInterface`)
+        // into our stable rebroadcast queue before we query tip/confirmations.
+        self.ingest_pending_broadcasts()?;
+
         let tip_height = match fetch_tip_height(&indexer_url).await {
             Ok(height) => height,
             Err(err) => {
@@ -333,6 +349,31 @@ impl WasmChainSyncDriver {
         self.persist()
     }
 
+    fn ingest_pending_broadcasts(&self) -> Result<(), JsValue> {
+        let store = browser_persistent_state_store();
+        let Some(raw) = store.get(&self.broadcast_queue_key)? else {
+            return Ok(());
+        };
+        let pending: Vec<PendingBroadcastTx> = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                // If the queue is corrupted, drop it to avoid wedging chain sync forever.
+                store.delete(&self.broadcast_queue_key)?;
+                return Ok(());
+            }
+        };
+        if pending.is_empty() {
+            store.delete(&self.broadcast_queue_key)?;
+            return Ok(());
+        }
+        for entry in pending {
+            // If a single entry is malformed, ignore it; the rest still get ingested.
+            let _ = self.enqueue_rebroadcast_tx(entry.txid, entry.tx_hex);
+        }
+        store.delete(&self.broadcast_queue_key)?;
+        Ok(())
+    }
+
     fn persist(&self) -> Result<(), JsValue> {
         let snapshot = self.state.borrow().clone();
         save_snapshot(&self.storage_key, &snapshot)
@@ -364,7 +405,7 @@ fn normalize_poll_interval_ms(poll_interval_ms: Option<u32>) -> u32 {
 fn normalize_indexer_url(indexer_url: &str) -> Result<String, JsValue> {
     let value = indexer_url.trim().trim_end_matches('/').to_string();
     if value.is_empty() {
-        return Err(JsValue::from_str("indexer_url cannot be empty"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_INDEXER_URL_EMPTY));
     }
     if !(value.starts_with("http://") || value.starts_with("https://")) {
         return Err(JsValue::from_str(

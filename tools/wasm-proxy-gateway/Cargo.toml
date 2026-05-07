@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88.0"
 
+[features]
+# Dev-only HTTP endpoints used by demos/E2E:
+# - /dev/regular-rln/*
+# - /dev/regtest/*
+dev-http = []
+
 [dependencies]
 anyhow = "1.0.93"
 axum = { version = "0.7.7", features = ["ws"] }
@@ -15,3 +21,5 @@ tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-t
 tower-http = { version = "0.6.1", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+bitcoin = "0.30"

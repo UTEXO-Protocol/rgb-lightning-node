@@ -172,10 +172,10 @@ fn parse_optional_asset(asset: Option<String>) -> Result<Option<String>, JsValue
         Some(asset_id) => {
             let normalized = asset_id.trim().to_string();
             if normalized.is_empty() {
-                return Err(JsValue::from_str("asset_id cannot be empty"));
+                return Err(JsValue::from_str(sdk_contracts::ERR_ASSET_ID_EMPTY));
             }
             if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(JsValue::from_str("invalid asset_id"));
+                return Err(JsValue::from_str(sdk_contracts::ERR_ASSET_ID_INVALID));
             }
             Ok(Some(normalized))
         }
@@ -188,10 +188,10 @@ fn validate_swap_pair(
     to_asset: &Option<String>,
 ) -> Result<(), JsValue> {
     if from_asset.is_none() && to_asset.is_none() {
-        return Err(JsValue::from_str("cannot swap BTC for BTC"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAP_BTC_FOR_BTC));
     }
     if from_asset.is_some() && from_asset == to_asset {
-        return Err(JsValue::from_str("cannot swap the same asset"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAP_SAME_ASSET));
     }
     Ok(())
 }
@@ -213,11 +213,11 @@ fn build_swap_string(swap: &SwapData) -> Result<String, JsValue> {
 fn parse_swap_string(swap_string: &str) -> Result<SwapStringData, JsValue> {
     let trimmed = swap_string.trim();
     if trimmed.is_empty() {
-        return Err(JsValue::from_str("swapstring cannot be empty"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAPSTRING_EMPTY));
     }
     let payload = trimmed
         .strip_prefix(SWAP_STRING_PREFIX)
-        .ok_or_else(|| JsValue::from_str("invalid swapstring format"))?;
+        .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_SWAPSTRING_FORMAT_INVALID))?;
     serde_json::from_str(payload)
         .map_err(|e| JsValue::from_str(&format!("invalid swapstring: {e}")))
 }
@@ -232,36 +232,37 @@ fn find_swap_by_payment_hash(state: &SwapRuntimeState, payment_hash: &str) -> Op
 
 fn validate_payment_hash_format(payment_hash: &str) -> Result<(), JsValue> {
     if payment_hash.trim().is_empty() {
-        return Err(JsValue::from_str("payment_hash cannot be empty"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_EMPTY));
     }
     if payment_hash.len() != 64 || !payment_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(JsValue::from_str("invalid payment_hash"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_INVALID));
     }
     Ok(())
 }
 
 fn validate_payment_secret_format(payment_secret: &str) -> Result<(), JsValue> {
     if payment_secret.trim().is_empty() {
-        return Err(JsValue::from_str("payment_secret cannot be empty"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_PAYMENT_SECRET_EMPTY));
     }
     if payment_secret.len() != 64 || !payment_secret.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(JsValue::from_str("invalid payment_secret"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_PAYMENT_SECRET_INVALID));
     }
     Ok(())
 }
 
 fn validate_taker_pubkey_format(taker_pubkey: &str) -> Result<(), JsValue> {
     if taker_pubkey.trim().is_empty() {
-        return Err(JsValue::from_str("taker_pubkey cannot be empty"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_TAKER_PUBKEY_EMPTY));
     }
-    PublicKey::from_str(taker_pubkey).map_err(|_| JsValue::from_str("invalid taker_pubkey"))?;
+    PublicKey::from_str(taker_pubkey)
+        .map_err(|_| JsValue::from_str(sdk_contracts::ERR_TAKER_PUBKEY_INVALID))?;
     Ok(())
 }
 
 fn normalize_maker_execute_input(input: &str) -> Result<String, JsValue> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(JsValue::from_str("swapstring cannot be empty"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAPSTRING_EMPTY));
     }
 
     if trimmed.starts_with('{') {
@@ -270,7 +271,7 @@ fn normalize_maker_execute_input(input: &str) -> Result<String, JsValue> {
         validate_payment_secret_format(&parsed.payment_secret)?;
         validate_taker_pubkey_format(&parsed.taker_pubkey)?;
         if parsed.swapstring.trim().is_empty() {
-            return Err(JsValue::from_str("swapstring cannot be empty"));
+            return Err(JsValue::from_str(sdk_contracts::ERR_SWAPSTRING_EMPTY));
         }
         return Ok(parsed.swapstring);
     }
@@ -290,13 +291,13 @@ pub(crate) fn maker_init_value(request_json: String) -> Result<JsValue, JsValue>
     let request: MakerInitRequestData = serde_json::from_str(&request_json)
         .map_err(|e| JsValue::from_str(&format!("invalid maker_init request JSON: {e}")))?;
     if request.qty_from == 0 {
-        return Err(JsValue::from_str("qty_from must be greater than 0"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAP_QTY_FROM_ZERO));
     }
     if request.qty_to == 0 {
-        return Err(JsValue::from_str("qty_to must be greater than 0"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAP_QTY_TO_ZERO));
     }
     if request.timeout_sec == 0 {
-        return Err(JsValue::from_str("timeout_sec must be greater than 0"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAP_TIMEOUT_ZERO));
     }
     let from_asset = parse_optional_asset(request.from_asset)?;
     let to_asset = parse_optional_asset(request.to_asset)?;
@@ -356,11 +357,11 @@ pub(crate) fn maker_execute_value(swap_string: String) -> Result<JsValue, JsValu
         let swap = state
             .maker
             .get_mut(&parsed.payment_hash)
-            .ok_or_else(|| JsValue::from_str("swap not found"))?;
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_SWAP_NOT_FOUND))?;
         if now > swap.expires_at {
             swap.status = SwapStatus::Expired;
             persist_swap_runtime_state(&state);
-            return Err(JsValue::from_str("swap is expired"));
+            return Err(JsValue::from_str(sdk_contracts::ERR_SWAP_EXPIRED));
         }
         swap.status = SwapStatus::Pending;
         if swap.initiated_at.is_none() {
@@ -388,7 +389,7 @@ pub(crate) fn taker(request_json: String) -> Result<(), JsValue> {
     let parsed = parse_swap_string(&request.swapstring)?;
     let now = now_secs();
     if now > parsed.expires_at {
-        return Err(JsValue::from_str("swap is expired"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAP_EXPIRED));
     }
 
     WASM_SWAP_RUNTIME_STATE.with(|state| {
@@ -433,7 +434,7 @@ pub(crate) fn get_swap_value(swap_ref: String) -> Result<JsValue, JsValue> {
     crate::ensure_sdk_node_runtime_allowed()?;
     let trimmed = swap_ref.trim();
     if trimmed.is_empty() {
-        return Err(JsValue::from_str("swap reference cannot be empty"));
+        return Err(JsValue::from_str(sdk_contracts::ERR_SWAP_REFERENCE_EMPTY));
     }
 
     let maybe_request = serde_json::from_str::<GetSwapRequestData>(trimmed).ok();
@@ -449,19 +450,20 @@ pub(crate) fn get_swap_value(swap_ref: String) -> Result<JsValue, JsValue> {
             } else {
                 state.maker.get(&request.payment_hash).cloned()
             };
-            let swap = selected.ok_or_else(|| JsValue::from_str("swap not found"))?;
+            let swap =
+                selected.ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_SWAP_NOT_FOUND))?;
             return Ok(with_effective_status(swap, now));
         }
 
         if let Ok(parsed) = parse_swap_string(trimmed) {
             let swap = find_swap_by_payment_hash(&state, &parsed.payment_hash)
-                .ok_or_else(|| JsValue::from_str("swap not found"))?;
+                .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_SWAP_NOT_FOUND))?;
             return Ok(with_effective_status(swap, now));
         }
 
         validate_payment_hash_format(trimmed)?;
         let swap = find_swap_by_payment_hash(&state, trimmed)
-            .ok_or_else(|| JsValue::from_str("swap not found"))?;
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_SWAP_NOT_FOUND))?;
         Ok(with_effective_status(swap, now))
     })?;
 

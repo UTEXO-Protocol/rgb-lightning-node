@@ -47,7 +47,7 @@ async fn proxy_empty_error_contract() {
         .await
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
-    assert_eq!(msg, "proxy_url cannot be empty");
+    assert_eq!(msg, sdk_contracts::ERR_PROXY_URL_EMPTY);
 }
 
 #[wasm_bindgen_test(async)]
@@ -56,7 +56,7 @@ async fn ln_peer_websocket_empty_proxy_contract() {
         .await
         .expect_err("should fail");
     let msg = err.as_string().expect("error string");
-    assert_eq!(msg, "proxy_url cannot be empty");
+    assert_eq!(msg, sdk_contracts::ERR_PROXY_URL_EMPTY);
 }
 
 #[wasm_bindgen_test(async)]
@@ -137,7 +137,7 @@ fn invoice_empty_error_contract() {
         Ok(_) => panic!("expected invoice parse error"),
         Err(err) => {
             let msg = err.as_string().expect("error string");
-            assert_eq!(msg, "invoice_string cannot be empty");
+            assert_eq!(msg, sdk_contracts::ERR_INVOICE_STRING_EMPTY);
         }
     }
 }

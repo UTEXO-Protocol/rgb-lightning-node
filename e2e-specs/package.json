@@ -1,0 +1,19 @@
+{
+  "name": "rgb-lightning-node-wasm-regular-rln-e2e",
+  "private": true,
+  "description": "Playwright: browser WASM native channel to regular rgb-lightning-node",
+  "scripts": {
+    "test": "playwright test --config=playwright.wasm_regular_rln.config.js",
+    "pretest:wasm-regular-rln-e2e": "bash -lc 'cd ../bindings/wasm-sdk && timeout \"${E2E_WASM_PACK_TIMEOUT_SEC:-900}s\" wasm-pack build --target web --release --out-dir pkg --mode \"${E2E_WASM_PACK_MODE:-normal}\" ${E2E_WASM_PACK_NO_OPT:+--no-opt}'",
+    "test:wasm-regular-rln-e2e": "playwright test wasm_regular_rln --config=playwright.wasm_regular_rln.config.js",
+    "test:smoke": "playwright test wasm_regular_rln_native_channel.spec.js --config=playwright.wasm_regular_rln.config.js",
+    "test:full": "playwright test --config=playwright.wasm_regular_rln.config.js",
+    "install:browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.59.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

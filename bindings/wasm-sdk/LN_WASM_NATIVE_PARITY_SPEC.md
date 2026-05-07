@@ -1,4 +1,4 @@
-# LN WASM Native Parity Spec (Step 1)
+# LN WASM Native Parity Spec
 
 ## Purpose
 
