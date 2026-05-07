@@ -57,6 +57,8 @@ private val OPEN_CHANNEL_ASSET_AMOUNT: ULong = env("OPEN_CHANNEL_ASSET_AMOUNT", 
 private val PAYMENT_ASSET_AMOUNT: ULong = env("PAYMENT_ASSET_AMOUNT", "50").toULong()
 private const val OPEN_CHANNEL_CONFIRM_BLOCKS: Int = 6
 private val CHANNEL_FUNDING_TX_TIMEOUT_SEC: Long = env("CHANNEL_FUNDING_TX_TIMEOUT_SEC", "100").toLong()
+/** After `list_peers` shows the peer, LDK may still need a beat before `openchannel` (CI flake class: no funding tx). */
+private val POST_PEER_CONNECT_SETTLE_MS: Long = env("POST_PEER_CONNECT_SETTLE_MS", "1500").toLong()
 private val CHANNEL_CONFIRM_TIMEOUT_SEC: Long = env("CHANNEL_CONFIRM_TIMEOUT_SEC", "100").toLong()
 private val CHANNEL_READY_TIMEOUT_SEC: Long = env("CHANNEL_READY_TIMEOUT_SEC", "20").toLong()
 private val CHANNEL_COUNT_TIMEOUT_SEC: Long = env("CHANNEL_COUNT_TIMEOUT_SEC", "20").toLong()
@@ -344,11 +346,19 @@ private fun waitForUsableChannels(node: SdkNode, expected: Int, timeoutSec: Long
     error("usable channel count did not become expected=$expected actual=$lastUsable after ${timeoutSec}s")
 }
 
-private fun waitForPeer(node: SdkNode, peerPubkey: Any, timeoutSec: Long) {
+private fun waitForPeer(
+    node: SdkNode,
+    peerPubkey: Any,
+    timeoutSec: Long,
+    settleAfterConnectedMs: Long = POST_PEER_CONNECT_SETTLE_MS,
+) {
     val expected = peerPubkey.toString()
     val deadline = System.currentTimeMillis() + timeoutSec * 1000L
     while (System.currentTimeMillis() < deadline) {
         if (node.listPeers().any { it.pubkey.toString() == expected }) {
+            if (settleAfterConnectedMs > 0L) {
+                Thread.sleep(settleAfterConnectedMs)
+            }
             return
         }
         println("waiting for peer connection: $expected")
@@ -1146,8 +1156,6 @@ private fun openchannelOptionalAddrScenario(
             waitForPeer(nodeA, nodeBPubkeyHex, 20L)
 
             println("opening channel with no addr (peer connected)")
-            // Allow the Noise handshake / peer bookkeeping to settle after list_peers() shows the peer.
-            Thread.sleep(1_500L)
             nodeA.openchannel(
                 SdkOpenChannelRequest(
                     peerPubkeyAndOptAddr = nodeBPubkeyHex,
@@ -1183,7 +1191,6 @@ private fun openchannelOptionalAddrScenario(
             waitForPeer(nodeA, nodeBPubkeyHex, 20L)
 
             println("opening channel with no addr (peer connected)")
-            Thread.sleep(1_500L)
             nodeB.openchannel(
                 SdkOpenChannelRequest(
                     peerPubkeyAndOptAddr = nodeAPubkeyHex,

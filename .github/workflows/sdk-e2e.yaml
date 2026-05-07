@@ -168,9 +168,7 @@ jobs:
           - close_coop_vanilla_with_anchors
           - close_coop_vanilla_without_anchors
           - openchannel_optional_addr_forward
-          # Temporarily disabled: intermittent CI failure
-          # (`No funding tx after 100s; last_channels=no channels`).
-          # - openchannel_optional_addr_reverse
+          - openchannel_optional_addr_reverse
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
