@@ -44,6 +44,9 @@ pub struct LdkRuntimeStatusData {
     pub backend: String,
     pub lifecycle_state: String,
     pub ready: bool,
+    pub identity_stable: bool,
+    pub channel_manager_restored: bool,
+    pub monitors_restored: bool,
     pub storage_initialized: bool,
     pub schema_version: u32,
 }
@@ -291,7 +294,9 @@ pub trait LdkRuntimeManager {
     fn peer_socket_disconnected(&self) -> Result<(), JsValue>;
     fn peer_is_handshake_complete(&self, peer_pubkey: &str) -> Result<bool, JsValue>;
     fn set_live_node_seed_hex(&self, seed_hex: String) -> Result<(), JsValue>;
+    fn set_identity_stable(&self, stable: bool);
     fn live_node_pubkey(&self) -> Result<String, JsValue>;
+    fn persist_live_state(&self) -> Result<(), JsValue>;
     fn upsert_channel(&self, channel: LdkRuntimeChannelStateData);
     fn remove_channel(&self, channel_id: &str) -> bool;
     fn remove_channels_by_peer(&self, peer_pubkey: &str) -> usize;
@@ -525,6 +530,7 @@ struct WasmNativeRuntimeManager {
     key_manager_fingerprint: String,
     live_backend: RefCell<Option<Rc<dyn LdkLiveBackend>>>,
     live_node_seed: RefCell<Option<[u8; 32]>>,
+    identity_stable: RefCell<bool>,
 }
 
 impl WasmNativeRuntimeManager {
@@ -548,6 +554,7 @@ impl WasmNativeRuntimeManager {
             key_manager_fingerprint,
             live_backend: RefCell::new(None),
             live_node_seed: RefCell::new(None),
+            identity_stable: RefCell::new(false),
         }
     }
 
@@ -580,6 +587,21 @@ impl WasmNativeRuntimeManager {
     fn persist_state(&self) {
         let _ = self.storage.save(&self.runtime_key, &self.snapshot());
     }
+
+    fn ensure_live_backend(&self) -> Result<Rc<dyn LdkLiveBackend>, JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        self.live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))
+    }
 }
 
 impl LdkRuntimeManager for WasmNativeRuntimeManager {
@@ -587,10 +609,19 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
         let storage_initialized = *self.storage_initialized.borrow();
         let transport_session_initialized = *self.transport_session_initialized.borrow();
         let lifecycle_state = *self.lifecycle_state.borrow();
+        let restore_status = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .map(|backend| backend.restore_status())
+            .unwrap_or_default();
         LdkRuntimeStatusData {
             backend: self.backend_label.clone(),
             lifecycle_state: lifecycle_state.as_str().to_string(),
             ready: *self.started.borrow() && transport_session_initialized,
+            identity_stable: *self.identity_stable.borrow(),
+            channel_manager_restored: restore_status.channel_manager_restored,
+            monitors_restored: restore_status.monitors_restored,
             storage_initialized,
             schema_version: 1,
         }
@@ -702,10 +733,7 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
     fn has_any_connected_peer(&self) -> bool {
         if let Some(backend) = self.live_backend.borrow().as_ref() {
             for peer in self.peers.borrow().keys() {
-                if backend
-                    .is_peer_handshake_complete(peer)
-                    .unwrap_or(false)
-                {
+                if backend.is_peer_handshake_complete(peer).unwrap_or(false) {
                     return true;
                 }
             }
@@ -866,6 +894,10 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
         Ok(())
     }
 
+    fn set_identity_stable(&self, stable: bool) {
+        *self.identity_stable.borrow_mut() = stable;
+    }
+
     fn live_node_pubkey(&self) -> Result<String, JsValue> {
         if self.live_backend.borrow().is_none() {
             let backend = create_wasm_ldk_live_backend(
@@ -883,21 +915,7 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
         backend.local_node_pubkey()
     }
 
-    fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
-        if self.live_backend.borrow().is_none() {
-            // If there is no live backend yet, there is nothing to sync.
-            return Ok(Vec::new());
-        }
-        let backend = self
-            .live_backend
-            .borrow()
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
-        backend.chain_relevant_txids()
-    }
-
-    fn chain_apply_best_block(&self, height: u32, header_hex: &str) -> Result<(), JsValue> {
+    fn persist_live_state(&self) -> Result<(), JsValue> {
         if self.live_backend.borrow().is_none() {
             return Ok(());
         }
@@ -907,6 +925,16 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
             .as_ref()
             .cloned()
             .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.persist_state()
+    }
+
+    fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
+        let backend = self.ensure_live_backend()?;
+        backend.chain_relevant_txids()
+    }
+
+    fn chain_apply_best_block(&self, height: u32, header_hex: &str) -> Result<(), JsValue> {
+        let backend = self.ensure_live_backend()?;
         backend.chain_apply_best_block(height, header_hex)
     }
 
@@ -917,28 +945,12 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
         tx_index: usize,
         tx_hex: &str,
     ) -> Result<(), JsValue> {
-        if self.live_backend.borrow().is_none() {
-            return Ok(());
-        }
-        let backend = self
-            .live_backend
-            .borrow()
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        let backend = self.ensure_live_backend()?;
         backend.chain_apply_confirmed_tx(height, header_hex, tx_index, tx_hex)
     }
 
     fn chain_apply_unconfirmed_tx(&self, txid: &str) -> Result<(), JsValue> {
-        if self.live_backend.borrow().is_none() {
-            return Ok(());
-        }
-        let backend = self
-            .live_backend
-            .borrow()
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        let backend = self.ensure_live_backend()?;
         backend.chain_apply_unconfirmed_tx(txid)
     }
 
@@ -949,15 +961,13 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
 
         // If the same temporary channel migrated to a new final channel_id,
         // remove the stale key first so runtime keeps exactly one canonical entry.
-        let stale_key = channels
-            .iter()
-            .find_map(|(key, ch)| {
-                if ch.temporary_channel_id == incoming_temp && *key != incoming_id {
-                    Some(key.clone())
-                } else {
-                    None
-                }
-            });
+        let stale_key = channels.iter().find_map(|(key, ch)| {
+            if ch.temporary_channel_id == incoming_temp && *key != incoming_id {
+                Some(key.clone())
+            } else {
+                None
+            }
+        });
         if let Some(stale_key) = stale_key {
             channels.remove(&stale_key);
             let mut sessions = self.virtual_channel_sessions.borrow_mut();
@@ -1453,10 +1463,7 @@ pub fn ldk_runtime_manager(runtime_key: String) -> Result<Rc<dyn LdkRuntimeManag
     Ok(manager)
 }
 
-pub fn release_runtime_manager_if_last(
-    runtime_key: &str,
-    manager: &Rc<dyn LdkRuntimeManager>,
-) {
+pub fn release_runtime_manager_if_last(runtime_key: &str, manager: &Rc<dyn LdkRuntimeManager>) {
     let runtime_key = canonicalize_runtime_key(runtime_key);
     RUNTIME_MANAGER_REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();

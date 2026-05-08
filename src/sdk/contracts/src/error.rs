@@ -132,6 +132,10 @@ pub const ERR_TEMPORARY_CHANNEL_ID_EMPTY: &str = "temporary_channel_id cannot be
 pub const ERR_TEMPORARY_CHANNEL_ID_UNKNOWN: &str = "unknown temporary channel ID";
 pub const ERR_CHAIN_SYNC_WASM32_ONLY: &str = "chain sync is only available in wasm32 runtime";
 pub const ERR_NODE_RUNTIME_ID_EMPTY: &str = "node_runtime_id cannot be empty";
+pub const ERR_NODE_RUNTIME_ID_REQUIRED: &str =
+    "stable node_runtime_id is required before channel operations";
+pub const ERR_NODE_IDENTITY_SEED_REQUIRED: &str =
+    "stable SDK node seed is required before channel operations";
 pub const ERR_VIRTUAL_OPEN_MODE_EMPTY: &str = "virtual_open_mode cannot be empty";
 pub const ERR_VIRTUAL_CHANNELS_PUBLIC_FALSE: &str = "virtual channels requires public=false";
 pub const ERR_VIRTUAL_CLEANUP_IN_PROGRESS: &str = "virtual cleanup is already in progress";

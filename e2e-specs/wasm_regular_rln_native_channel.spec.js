@@ -44,7 +44,7 @@ test("WASM opens native channel to regular RLN and pays over it", async ({ page 
   });
 
   const sdkReady = await test.step("load harness and wait for SDK ready", async () => {
-    return flow.loadHarness(page, { freshRuntime: true });
+    return flow.loadHarness(page);
   });
   expect(sdkReady && sdkReady.pubkey).toMatch(/^[0-9a-f]{66}$/i);
   const wasmPubkey = sdkReady.pubkey;

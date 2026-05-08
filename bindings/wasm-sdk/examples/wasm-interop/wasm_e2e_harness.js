@@ -8,9 +8,11 @@
 //
 // Wallet model:
 //   - `?freshRuntime=1` → fresh runtime id AND fresh mnemonic (fully isolated per run).
+//   - `?runtimeId=...&mnemonic=...` → explicit stable identity for restart-style tests.
 //   - default → stable runtime id + mnemonic across reloads in the same tab.
 
 import init, {
+  RlnWasmSdk,
   RlnWasmNode,
   RlnWasmWallet,
   rgbGenerateKeysValue,
@@ -57,7 +59,14 @@ function buildWalletData(keys, runtimeId) {
     const wantFresh = getQueryParam("freshRuntime", "") === "1";
     let rid;
     let mnemonic;
-    if (wantFresh) {
+    const explicitRuntimeId = getQueryParam("runtimeId", "");
+    const explicitMnemonic = getQueryParam("mnemonic", "");
+    if (explicitRuntimeId && explicitMnemonic) {
+      rid = explicitRuntimeId;
+      mnemonic = explicitMnemonic;
+      sessionStorage.setItem("rln_wasm_runtime_id", rid);
+      sessionStorage.setItem("rln_wasm_e2e_mnemonic", mnemonic);
+    } else if (wantFresh) {
       rid = Math.random().toString(16).slice(2) + Math.random().toString(16).slice(2);
       mnemonic = rgbGenerateKeysValue("regtest").mnemonic;
     } else {
@@ -73,13 +82,23 @@ function buildWalletData(keys, runtimeId) {
       }
     }
 
+    const sdk = new RlnWasmSdk();
+    const password = "rln-wasm-e2e";
+    await sdk.initValue(password, mnemonic);
+    await sdk.unlock(JSON.stringify({ password }));
+
     const baseProxyUrl = getQueryParam("nodeProxyUrl", DEFAULT_NODE_PROXY_URL);
     const indexerUrl = getQueryParam("indexerUrl", DEFAULT_INDEXER_URL);
-    const nodeProxyUrl = baseProxyUrl.includes("#runtime:") ? baseProxyUrl : `${baseProxyUrl}#runtime:${rid}`;
+    const nodeProxyUrl = baseProxyUrl.split("#runtime:")[0];
 
-    const node = new RlnWasmNode(nodeProxyUrl);
+    const node = RlnWasmNode.newWithNodeRuntimeId(nodeProxyUrl, rid);
     node.installAutoPeerManagerHooks();
     node.chainSyncStartValue(indexerUrl, 5000);
+    try {
+      node.reconnectManagerStartValue();
+    } catch (_e) {
+      /* optional */
+    }
 
     const keys = rgbRestoreKeysValue("regtest", mnemonic);
     const walletData = buildWalletData(keys, rid);
@@ -107,6 +126,16 @@ function buildWalletData(keys, runtimeId) {
       })
     );
 
+    const flushLdkState = () => {
+      try {
+        node.persistLdkRuntimeState();
+      } catch (_e) {
+        /* best-effort */
+      }
+    };
+    window.addEventListener("pagehide", flushLdkState);
+    window.addEventListener("beforeunload", flushLdkState);
+
     const pubkey = (JSON.parse(node.nodePubkeyJson()) || {}).pubkey || "?";
     setStatus(`ready · pubkey=${pubkey} · wallet=${walletAddress.slice(0, 18)}…`);
   } catch (err) {
@@ -115,4 +144,3 @@ function buildWalletData(keys, runtimeId) {
     throw err;
   }
 })();
-

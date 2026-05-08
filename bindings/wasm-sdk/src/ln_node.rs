@@ -394,7 +394,52 @@ impl RlnWasmNode {
         self.runtime_core.ensure_started();
         self.ldk_runtime.ensure_started()?;
         self.ldk_runtime.virtual_channel_reconcile_sessions();
+        self.ldk_runtime
+            .set_identity_stable(self.identity_stable_for_channel_operations());
         Ok(())
+    }
+
+    fn has_stable_runtime_id(&self) -> bool {
+        self.node_runtime_id
+            .as_deref()
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false)
+            || self
+                .persistence_keys
+                .runtime_scope_key
+                .contains("#runtime:")
+    }
+
+    fn has_stable_node_seed(&self) -> bool {
+        crate::sdk_node_identity_seed()
+            .map(|seed| !seed.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    fn identity_stable_for_channel_operations(&self) -> bool {
+        self.has_stable_runtime_id() && self.has_stable_node_seed()
+    }
+
+    fn ensure_stable_identity_for_channel_operations(&self) -> Result<(), JsValue> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            return Ok(());
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !self.has_stable_runtime_id() {
+                return Err(JsValue::from_str(
+                    sdk_contracts::ERR_NODE_RUNTIME_ID_REQUIRED,
+                ));
+            }
+            if !self.has_stable_node_seed() {
+                return Err(JsValue::from_str(
+                    sdk_contracts::ERR_NODE_IDENTITY_SEED_REQUIRED,
+                ));
+            }
+            Ok(())
+        }
     }
 
     #[wasm_bindgen(constructor)]
@@ -488,6 +533,8 @@ impl RlnWasmNode {
         let (node_secret_key, _) = node.node_signing_identity()?;
         node.ldk_runtime
             .set_live_node_seed_hex(hex::encode(node_secret_key.secret_bytes()))?;
+        node.ldk_runtime
+            .set_identity_stable(node.identity_stable_for_channel_operations());
         // Native-only interop default: wire real runtime peer-manager hooks on node creation,
         // so connectPeer/openChannel never depends on scaffold bridge callbacks.
         node.install_auto_peer_manager_hooks();
@@ -685,6 +732,7 @@ impl RlnWasmNode {
         peer_pubkey: String,
     ) -> Result<(), JsValue> {
         self.ensure_runtime_ready()?;
+        self.ensure_stable_identity_for_channel_operations()?;
         let peer_pubkey = peer_pubkey.trim().to_string();
         let peer_addr = peer_addr.trim().to_string();
         wasm_debug(&format!(
@@ -1403,6 +1451,8 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = ldkRuntimeStatusValue)]
     pub fn ldk_runtime_status_value(&self) -> Result<JsValue, JsValue> {
+        self.ldk_runtime
+            .set_identity_stable(self.identity_stable_for_channel_operations());
         let status: LdkRuntimeStatusData = self.ldk_runtime.status();
         crate::js_obj(&status)
     }
@@ -1426,6 +1476,12 @@ impl RlnWasmNode {
         let value = self.ldk_runtime_components_value()?;
         let parsed: serde_json::Value = crate::js_from(value)?;
         crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = persistLdkRuntimeState)]
+    pub fn persist_ldk_runtime_state(&self) -> Result<(), JsValue> {
+        self.ldk_runtime.persist_live_state()?;
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = listPendingFundingRequestsValue)]
@@ -2736,6 +2792,7 @@ impl RlnWasmNode {
         virtual_open_mode: Option<String>,
     ) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
+        self.ensure_stable_identity_for_channel_operations()?;
         let peer_pubkey = peer_pubkey.trim().to_string();
         wasm_debug(&format!(
             "[rln-wasm-sdk openChannel] start peer_pubkey={} capacity_sat={} public={} asset_id={:?} asset_local_amount={:?} virtual_open_mode={:?}",

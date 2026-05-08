@@ -34,8 +34,13 @@ const DEFAULTS = Object.freeze({
   regularRlnLnAddr: process.env.E2E_REGULAR_RLN_LN_ADDR || "127.0.0.1:9802",
 });
 
-function harnessUrl({ freshRuntime = true } = {}) {
-  return freshRuntime ? `${HARNESS_PATH}?freshRuntime=1` : HARNESS_PATH;
+function harnessUrl({ freshRuntime = false, runtimeId, mnemonic } = {}) {
+  const params = new URLSearchParams();
+  if (freshRuntime) params.set("freshRuntime", "1");
+  if (runtimeId) params.set("runtimeId", runtimeId);
+  if (mnemonic) params.set("mnemonic", mnemonic);
+  const qs = params.toString();
+  return qs ? `${HARNESS_PATH}?${qs}` : HARNESS_PATH;
 }
 
 /**
@@ -43,8 +48,8 @@ function harnessUrl({ freshRuntime = true } = {}) {
  * (node + wallet + online). Returns the readiness payload from
  * `waitForSdkReady` (`{ pubkey }`).
  */
-async function loadHarness(page, { freshRuntime = true, timeoutMs } = {}) {
-  await page.goto(harnessUrl({ freshRuntime }));
+async function loadHarness(page, { freshRuntime = false, runtimeId, mnemonic, timeoutMs } = {}) {
+  await page.goto(harnessUrl({ freshRuntime, runtimeId, mnemonic }));
   return sdk.waitForSdkReady(page, timeoutMs ? { timeoutMs } : undefined);
 }
 

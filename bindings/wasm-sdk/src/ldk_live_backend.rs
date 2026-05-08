@@ -5,9 +5,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
 
 use bitcoin_hashes::sha256::Hash as Sha256;
 use bitcoin_hashes::Hash as _;
@@ -24,7 +24,9 @@ use lightning::chain::Watch;
 use lightning::chain::{BestBlock, ChannelMonitorUpdateStatus};
 use lightning::events::Event;
 use lightning::events::{EventsProvider, ReplayEvent};
-use lightning::ln::channelmanager::{ChainParameters, SimpleArcChannelManager};
+use lightning::ln::channelmanager::{
+    ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+};
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerHandleError, PeerManager, SocketDescriptor,
 };
@@ -52,6 +54,7 @@ use crate::ldk_runtime::{
 use crate::runtime_store::{browser_persistent_state_store, RuntimeStateStore};
 use crate::wasm_node_persistence::{
     WASM_LDK_BROADCAST_QUEUE_STORAGE_PREFIX, WASM_LDK_MONITORS_STORAGE_PREFIX,
+    WASM_LDK_RUNTIME_STORAGE_PREFIX,
 };
 use crate::wasm_runtime_paths::ldk_data_dir_for_runtime;
 
@@ -167,6 +170,12 @@ pub trait LdkLiveBackend {
     ) -> Result<(), JsValue>;
     fn list_live_channels(&self) -> Result<Vec<LdkRuntimeOpenChannelResultData>, JsValue>;
     fn local_node_pubkey(&self) -> Result<String, JsValue>;
+    fn persist_state(&self) -> Result<(), JsValue> {
+        Ok(())
+    }
+    fn restore_status(&self) -> LdkLiveRestoreStatus {
+        LdkLiveRestoreStatus::default()
+    }
 
     fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
         Ok(Vec::new())
@@ -189,6 +198,12 @@ pub trait LdkLiveBackend {
     fn chain_apply_unconfirmed_tx(&self, _txid: &str) -> Result<(), JsValue> {
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LdkLiveRestoreStatus {
+    pub channel_manager_restored: bool,
+    pub monitors_restored: bool,
 }
 
 #[inline]
@@ -224,10 +239,14 @@ struct LdkObjectGraph {
     broadcaster: Arc<WasmQueueingBroadcaster>,
     chain_source: Arc<WasmFilter>,
     keys_manager: Arc<KeysManager>,
+    network_graph: Arc<WasmNetworkGraph>,
+    scorer: Arc<std::sync::RwLock<WasmScorer>>,
     peer_manager: RefCell<WasmPeerManager>,
     chain_monitor: Arc<WasmChainMonitor>,
     channel_manager: Arc<WasmChannelManager>,
     active_descriptor: RefCell<Option<LiveSocketDescriptor>>,
+    channel_manager_restored: bool,
+    monitors_restored: bool,
 }
 
 type WasmPeerManager = PeerManager<
@@ -257,6 +276,10 @@ type WasmChannelManager = SimpleArcChannelManager<
     FixedFeeEstimator,
     WasmLdkLogger,
 >;
+
+type WasmChannelMonitor = lightning::chain::channelmonitor::ChannelMonitor<InMemorySigner>;
+type WasmNetworkGraph = NetworkGraph<Arc<WasmLdkLogger>>;
+type WasmScorer = ProbabilisticScorer<Arc<WasmNetworkGraph>, Arc<WasmLdkLogger>>;
 
 #[derive(Clone)]
 struct LiveSocketDescriptor {
@@ -341,10 +364,13 @@ impl BroadcasterInterface for WasmQueueingBroadcaster {
             .unwrap_or_default();
 
         for tx in txs {
-            pending.push(PendingBroadcastTx {
-                txid: tx.compute_txid().to_string(),
-                tx_hex: bitcoin::consensus::encode::serialize_hex(tx),
-            });
+            let txid = tx.compute_txid().to_string();
+            let tx_hex = bitcoin::consensus::encode::serialize_hex(tx);
+            if let Some(existing) = pending.iter_mut().find(|entry| entry.txid == txid) {
+                existing.tx_hex = tx_hex;
+            } else {
+                pending.push(PendingBroadcastTx { txid, tx_hex });
+            }
         }
 
         if let Ok(raw) = serde_json::to_string(&pending) {
@@ -377,14 +403,17 @@ impl lightning::chain::Filter for WasmFilter {
     }
 }
 
-struct WasmPersister;
+struct WasmPersister {
+    runtime_key: String,
+}
+
 impl chainmonitor::Persist<InMemorySigner> for WasmPersister {
     fn persist_new_channel(
         &self,
         monitor_name: MonitorName,
         monitor: &lightning::chain::channelmonitor::ChannelMonitor<InMemorySigner>,
     ) -> ChannelMonitorUpdateStatus {
-        let _ = persist_monitor_snapshot("ldk-live", monitor_name, monitor);
+        let _ = persist_monitor_snapshot(&self.runtime_key, monitor_name, monitor);
         ChannelMonitorUpdateStatus::Completed
     }
 
@@ -394,13 +423,159 @@ impl chainmonitor::Persist<InMemorySigner> for WasmPersister {
         _monitor_update: Option<&lightning::chain::channelmonitor::ChannelMonitorUpdate>,
         monitor: &lightning::chain::channelmonitor::ChannelMonitor<InMemorySigner>,
     ) -> ChannelMonitorUpdateStatus {
-        let _ = persist_monitor_snapshot("ldk-live", monitor_name, monitor);
+        let _ = persist_monitor_snapshot(&self.runtime_key, monitor_name, monitor);
         ChannelMonitorUpdateStatus::Completed
     }
 
     fn archive_persisted_channel(&self, monitor_name: MonitorName) {
-        let _ = delete_monitor_snapshot("ldk-live", monitor_name);
+        let _ = delete_monitor_snapshot(&self.runtime_key, monitor_name);
     }
+}
+
+fn channel_manager_snapshot_key(runtime_key: &str) -> String {
+    format!("{WASM_LDK_RUNTIME_STORAGE_PREFIX}{runtime_key}:channel-manager")
+}
+
+fn channel_manager_snapshot_pending_key(runtime_key: &str) -> String {
+    format!("{WASM_LDK_RUNTIME_STORAGE_PREFIX}{runtime_key}:channel-manager:pending")
+}
+
+fn network_graph_snapshot_key(runtime_key: &str) -> String {
+    format!("{WASM_LDK_RUNTIME_STORAGE_PREFIX}{runtime_key}:network-graph")
+}
+
+fn network_graph_snapshot_pending_key(runtime_key: &str) -> String {
+    format!("{WASM_LDK_RUNTIME_STORAGE_PREFIX}{runtime_key}:network-graph:pending")
+}
+
+fn scorer_snapshot_key(runtime_key: &str) -> String {
+    format!("{WASM_LDK_RUNTIME_STORAGE_PREFIX}{runtime_key}:scorer")
+}
+
+fn scorer_snapshot_pending_key(runtime_key: &str) -> String {
+    format!("{WASM_LDK_RUNTIME_STORAGE_PREFIX}{runtime_key}:scorer:pending")
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct ChannelManagerSnapshotEnvelope {
+    schema_version: u32,
+    bytes_hex: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct LdkBytesSnapshotEnvelope {
+    schema_version: u32,
+    bytes_hex: String,
+}
+
+const CHANNEL_MANAGER_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+const NETWORK_GRAPH_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+const SCORER_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+fn persist_bytes_snapshot(
+    pending_key: String,
+    committed_key: String,
+    schema_version: u32,
+    bytes: Vec<u8>,
+) -> Result<(), JsValue> {
+    let envelope = LdkBytesSnapshotEnvelope {
+        schema_version,
+        bytes_hex: hex::encode(bytes),
+    };
+    let raw = serde_json::to_string(&envelope)
+        .map_err(|e| JsValue::from_str(&format!("ldk snapshot encode: {e}")))?;
+    let store = browser_persistent_state_store();
+    store.set(&pending_key, &raw)?;
+    store.set(&committed_key, &raw)?;
+    store.delete(&pending_key)?;
+    Ok(())
+}
+
+fn load_bytes_snapshot(
+    committed_key: String,
+    pending_key: String,
+    max_schema_version: u32,
+    label: &str,
+) -> Result<Option<Vec<u8>>, JsValue> {
+    let store = browser_persistent_state_store();
+    let committed = store.get(&committed_key)?;
+    let pending = store.get(&pending_key)?;
+    let Some(raw) = committed.or(pending) else {
+        return Ok(None);
+    };
+    let envelope: LdkBytesSnapshotEnvelope = serde_json::from_str(&raw)
+        .map_err(|e| JsValue::from_str(&format!("{label} snapshot decode: {e}")))?;
+    if envelope.schema_version > max_schema_version {
+        return Err(JsValue::from_str(&format!(
+            "{label} snapshot schema is newer than this SDK"
+        )));
+    }
+    let bytes = hex::decode(envelope.bytes_hex)
+        .map_err(|e| JsValue::from_str(&format!("{label} snapshot hex decode: {e}")))?;
+    Ok(Some(bytes))
+}
+
+fn persist_channel_manager_snapshot(
+    runtime_key: &str,
+    channel_manager: &WasmChannelManager,
+) -> Result<(), JsValue> {
+    let mut bytes = Vec::new();
+    channel_manager
+        .write(&mut bytes)
+        .map_err(|e| JsValue::from_str(&format!("channel manager encode: {e}")))?;
+    let envelope = ChannelManagerSnapshotEnvelope {
+        schema_version: CHANNEL_MANAGER_SNAPSHOT_SCHEMA_VERSION,
+        bytes_hex: hex::encode(bytes),
+    };
+    let raw = serde_json::to_string(&envelope)
+        .map_err(|e| JsValue::from_str(&format!("channel manager snapshot encode: {e}")))?;
+    let store = browser_persistent_state_store();
+    let pending_key = channel_manager_snapshot_pending_key(runtime_key);
+    let committed_key = channel_manager_snapshot_key(runtime_key);
+    store.set(&pending_key, &raw)?;
+    store.set(&committed_key, &raw)?;
+    store.delete(&pending_key)?;
+    Ok(())
+}
+
+fn persist_network_graph_snapshot(
+    runtime_key: &str,
+    network_graph: &WasmNetworkGraph,
+) -> Result<(), JsValue> {
+    let mut bytes = Vec::new();
+    network_graph
+        .write(&mut bytes)
+        .map_err(|e| JsValue::from_str(&format!("network graph encode: {e}")))?;
+    persist_bytes_snapshot(
+        network_graph_snapshot_pending_key(runtime_key),
+        network_graph_snapshot_key(runtime_key),
+        NETWORK_GRAPH_SNAPSHOT_SCHEMA_VERSION,
+        bytes,
+    )
+}
+
+fn persist_scorer_snapshot(runtime_key: &str, scorer: &WasmScorer) -> Result<(), JsValue> {
+    let mut bytes = Vec::new();
+    scorer
+        .write(&mut bytes)
+        .map_err(|e| JsValue::from_str(&format!("scorer encode: {e}")))?;
+    persist_bytes_snapshot(
+        scorer_snapshot_pending_key(runtime_key),
+        scorer_snapshot_key(runtime_key),
+        SCORER_SNAPSHOT_SCHEMA_VERSION,
+        bytes,
+    )
+}
+
+fn persist_ldk_runtime_snapshots(runtime_key: &str, g: &LdkObjectGraph) -> Result<(), JsValue> {
+    persist_channel_manager_snapshot(runtime_key, &g.channel_manager)?;
+    persist_network_graph_snapshot(runtime_key, &g.network_graph)?;
+    let scorer = g
+        .scorer
+        .read()
+        .map_err(|_| JsValue::from_str("scorer lock poisoned"))?;
+    persist_scorer_snapshot(runtime_key, &scorer)?;
+    Ok(())
 }
 
 fn monitor_index_key(runtime_key: &str) -> String {
@@ -465,54 +640,99 @@ fn delete_monitor_snapshot(runtime_key: &str, monitor_name: MonitorName) -> Resu
     Ok(())
 }
 
-fn restore_persisted_monitors(
+fn load_persisted_monitors(
     runtime_key: &str,
-    chain_monitor: &chainmonitor::ChainMonitor<
-        InMemorySigner,
-        Arc<WasmFilter>,
-        Arc<WasmQueueingBroadcaster>,
-        Arc<FixedFeeEstimator>,
-        Arc<WasmLdkLogger>,
-        Arc<WasmPersister>,
-        Arc<KeysManager>,
-    >,
     keys_manager: &KeysManager,
-) -> Result<(), JsValue> {
+) -> Result<Vec<(bitcoin::BlockHash, WasmChannelMonitor)>, JsValue> {
     let store = browser_persistent_state_store();
     let idx_key = monitor_index_key(runtime_key);
     let Some(raw_index) = store.get(&idx_key)? else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    let index: Vec<String> = match serde_json::from_str(&raw_index) {
-        Ok(v) => v,
-        Err(_) => {
-            store.delete(&idx_key)?;
-            return Ok(());
-        }
-    };
+    let index: Vec<String> = serde_json::from_str(&raw_index)
+        .map_err(|e| JsValue::from_str(&format!("monitor index decode: {e}")))?;
+    let mut monitors = Vec::new();
     for name in index {
         let monitor_key = format!("{WASM_LDK_MONITORS_STORAGE_PREFIX}{runtime_key}:monitor:{name}");
-        let Some(raw) = store.get(&monitor_key)? else {
-            continue;
-        };
-        let Ok(bytes) = hex::decode(raw) else {
-            let _ = store.delete(&monitor_key);
-            continue;
-        };
+        let raw = store
+            .get(&monitor_key)?
+            .ok_or_else(|| JsValue::from_str(&format!("missing monitor snapshot: {name}")))?;
+        let bytes = hex::decode(raw)
+            .map_err(|e| JsValue::from_str(&format!("monitor snapshot hex decode: {e}")))?;
         let mut cursor = std::io::Cursor::new(bytes);
-        let Ok((_blockhash, monitor)) =
-            <(
-                bitcoin::BlockHash,
-                lightning::chain::channelmonitor::ChannelMonitor<InMemorySigner>,
-            )>::read(&mut cursor, (&*keys_manager, &*keys_manager))
-        else {
-            let _ = store.delete(&monitor_key);
-            continue;
-        };
-        // (Re-)register the monitor with ChainMonitor. If it fails, ignore and continue.
-        let _ = chain_monitor.watch_channel(monitor.channel_id(), monitor);
+        let restored = <(bitcoin::BlockHash, WasmChannelMonitor)>::read(
+            &mut cursor,
+            (&*keys_manager, &*keys_manager),
+        )
+        .map_err(|e| JsValue::from_str(&format!("monitor snapshot decode: {e:?}")))?;
+        monitors.push(restored);
     }
-    Ok(())
+    Ok(monitors)
+}
+
+fn load_channel_manager_snapshot(runtime_key: &str) -> Result<Option<Vec<u8>>, JsValue> {
+    let store = browser_persistent_state_store();
+    let committed = store.get(&channel_manager_snapshot_key(runtime_key))?;
+    let pending = store.get(&channel_manager_snapshot_pending_key(runtime_key))?;
+    let raw = committed.or(pending);
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let envelope: ChannelManagerSnapshotEnvelope = serde_json::from_str(&raw)
+        .map_err(|e| JsValue::from_str(&format!("channel manager snapshot decode: {e}")))?;
+    if envelope.schema_version > CHANNEL_MANAGER_SNAPSHOT_SCHEMA_VERSION {
+        return Err(JsValue::from_str(
+            "channel manager snapshot schema is newer than this SDK",
+        ));
+    }
+    let bytes = hex::decode(envelope.bytes_hex)
+        .map_err(|e| JsValue::from_str(&format!("channel manager snapshot hex decode: {e}")))?;
+    Ok(Some(bytes))
+}
+
+fn load_network_graph_snapshot(
+    runtime_key: &str,
+    logger: Arc<WasmLdkLogger>,
+) -> Result<(Arc<WasmNetworkGraph>, bool), JsValue> {
+    let Some(bytes) = load_bytes_snapshot(
+        network_graph_snapshot_key(runtime_key),
+        network_graph_snapshot_pending_key(runtime_key),
+        NETWORK_GRAPH_SNAPSHOT_SCHEMA_VERSION,
+        "network graph",
+    )?
+    else {
+        return Ok((
+            Arc::new(NetworkGraph::new(bitcoin::Network::Regtest, logger)),
+            false,
+        ));
+    };
+    let mut cursor = std::io::Cursor::new(bytes);
+    let graph = <WasmNetworkGraph>::read(&mut cursor, logger)
+        .map_err(|e| JsValue::from_str(&format!("network graph snapshot decode: {e:?}")))?;
+    Ok((Arc::new(graph), true))
+}
+
+fn load_scorer_snapshot(
+    runtime_key: &str,
+    network_graph: Arc<WasmNetworkGraph>,
+    logger: Arc<WasmLdkLogger>,
+) -> Result<(Arc<std::sync::RwLock<WasmScorer>>, bool), JsValue> {
+    let params = ProbabilisticScoringDecayParameters::default();
+    let scorer = if let Some(bytes) = load_bytes_snapshot(
+        scorer_snapshot_key(runtime_key),
+        scorer_snapshot_pending_key(runtime_key),
+        SCORER_SNAPSHOT_SCHEMA_VERSION,
+        "scorer",
+    )? {
+        let args = (params, Arc::clone(&network_graph), Arc::clone(&logger));
+        let mut cursor = std::io::Cursor::new(bytes);
+        let scorer = <WasmScorer>::read(&mut cursor, args)
+            .map_err(|e| JsValue::from_str(&format!("scorer snapshot decode: {e:?}")))?;
+        return Ok((Arc::new(std::sync::RwLock::new(scorer)), true));
+    } else {
+        ProbabilisticScorer::new(params, network_graph, logger)
+    };
+    Ok((Arc::new(std::sync::RwLock::new(scorer)), false))
 }
 
 impl WasmLdkLiveBackend {
@@ -542,7 +762,9 @@ impl WasmLdkLiveBackend {
         let broadcaster = Arc::new(WasmQueueingBroadcaster {
             runtime_key: self.runtime_key.clone(),
         });
-        let persister = Arc::new(WasmPersister);
+        let persister = Arc::new(WasmPersister {
+            runtime_key: self.runtime_key.clone(),
+        });
         let chain_source = Arc::new(WasmFilter::new());
         let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(InMemoryKvStore::default());
         let ldk_data_dir: PathBuf = ldk_data_dir_for_runtime(&self.runtime_key);
@@ -563,21 +785,20 @@ impl WasmLdkLiveBackend {
             Arc::clone(&keys_manager),
             keys_manager.get_peer_storage_key(),
         ));
-        let _ = restore_persisted_monitors(&self.runtime_key, &chain_monitor, &keys_manager);
-        let network_graph = Arc::new(NetworkGraph::new(
-            bitcoin::Network::Regtest,
-            Arc::clone(&logger),
-        ));
-        let scorer = Arc::new(std::sync::RwLock::new(ProbabilisticScorer::new(
-            ProbabilisticScoringDecayParameters::default(),
+        let restored_monitors = load_persisted_monitors(&self.runtime_key, &keys_manager)?;
+        let has_persisted_monitors = !restored_monitors.is_empty();
+        let (network_graph, _network_graph_restored) =
+            load_network_graph_snapshot(&self.runtime_key, Arc::clone(&logger))?;
+        let (scorer, _scorer_restored) = load_scorer_snapshot(
+            &self.runtime_key,
             Arc::clone(&network_graph),
             Arc::clone(&logger),
-        )));
+        )?;
         let router = Arc::new(DefaultRouter::new(
             Arc::clone(&network_graph),
             Arc::clone(&logger),
             Arc::clone(&keys_manager),
-            scorer,
+            Arc::clone(&scorer),
             ProbabilisticScoringFeeParameters::default(),
         ));
         let message_router = Arc::new(DefaultMessageRouter::new(
@@ -589,7 +810,44 @@ impl WasmLdkLiveBackend {
             network: bitcoin::Network::Regtest,
             best_block: BestBlock::from_network(bitcoin::Network::Regtest),
         };
-        let channel_manager: Arc<WasmChannelManager> =
+        let mut channel_manager_restored = false;
+        let mut monitors_restored = false;
+        let channel_manager: Arc<WasmChannelManager> = if let Some(bytes) =
+            load_channel_manager_snapshot(&self.runtime_key)?
+        {
+            let monitor_refs: Vec<&WasmChannelMonitor> = restored_monitors
+                .iter()
+                .map(|(_, monitor)| monitor)
+                .collect();
+            let read_args = ChannelManagerReadArgs::new(
+                Arc::clone(&keys_manager),
+                Arc::clone(&keys_manager),
+                Arc::clone(&keys_manager),
+                Arc::clone(&fee_estimator),
+                Arc::clone(&chain_monitor),
+                Arc::clone(&broadcaster),
+                router,
+                message_router,
+                Arc::clone(&logger),
+                user_config.clone(),
+                monitor_refs,
+                ldk_data_dir.clone(),
+                Arc::clone(&rgb_kv_store),
+            );
+            let mut cursor = std::io::Cursor::new(bytes);
+            let (_blockhash, channel_manager) =
+                <(bitcoin::BlockHash, Arc<WasmChannelManager>)>::read(&mut cursor, read_args)
+                    .map_err(|e| {
+                        JsValue::from_str(&format!("channel manager snapshot decode: {e:?}"))
+                    })?;
+            channel_manager_restored = true;
+            channel_manager
+        } else {
+            if has_persisted_monitors {
+                return Err(JsValue::from_str(
+                    "refusing to start LDK: ChannelMonitor snapshots exist but ChannelManager snapshot is missing",
+                ));
+            }
             Arc::new(lightning::ln::channelmanager::ChannelManager::new(
                 Arc::clone(&fee_estimator),
                 Arc::clone(&chain_monitor),
@@ -605,7 +863,14 @@ impl WasmLdkLiveBackend {
                 unix_now_secs() as u32,
                 ldk_data_dir,
                 Arc::clone(&rgb_kv_store),
-            ));
+            ))
+        };
+        for (_blockhash, monitor) in restored_monitors {
+            chain_monitor
+                .watch_channel(monitor.channel_id(), monitor)
+                .map_err(|_| JsValue::from_str("failed to register restored ChannelMonitor"))?;
+            monitors_restored = true;
+        }
         let pm_rand = self.derive_seed32();
         let fork_custom_wire = crate::rgb_ln_wire::rgb_ln_fork_custom_message_handler();
         let peer_manager = PeerManager::new(
@@ -627,11 +892,16 @@ impl WasmLdkLiveBackend {
             broadcaster,
             chain_source,
             keys_manager,
+            network_graph,
+            scorer,
             peer_manager: RefCell::new(peer_manager),
             chain_monitor,
             channel_manager,
             active_descriptor: RefCell::new(None),
+            channel_manager_restored,
+            monitors_restored,
         });
+        self.persist_state()?;
         Ok(())
     }
 
@@ -892,6 +1162,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             .map_err(|_e: PeerHandleError| {
                 JsValue::from_str(sdk_contracts::ERR_PEER_MANAGER_READ_EVENT_FAILED)
             })?;
+        persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         Ok(())
     }
 
@@ -910,6 +1181,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         };
         g.peer_manager.borrow().process_events();
         self.ingest_funding_generation_ready_events(g);
+        persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         ldk_live_debug("[rln-wasm-sdk ldk-live] process_events");
         Ok(())
     }
@@ -958,6 +1230,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 g.peer_manager.borrow().socket_disconnected(&desc);
             }
             g.active_descriptor.borrow_mut().take();
+            persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         }
         Ok(())
     }
@@ -1003,6 +1276,25 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         Ok(node_id.to_string())
     }
 
+    fn persist_state(&self) -> Result<(), JsValue> {
+        let graph = self.object_graph.borrow();
+        let Some(g) = graph.as_ref() else {
+            return Ok(());
+        };
+        persist_ldk_runtime_snapshots(&self.runtime_key, g)
+    }
+
+    fn restore_status(&self) -> LdkLiveRestoreStatus {
+        let graph = self.object_graph.borrow();
+        let Some(g) = graph.as_ref() else {
+            return LdkLiveRestoreStatus::default();
+        };
+        LdkLiveRestoreStatus {
+            channel_manager_restored: g.channel_manager_restored,
+            monitors_restored: g.monitors_restored,
+        }
+    }
+
     fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
         self.with_graph(|g| {
             let mut txids: HashSet<Txid> = g
@@ -1033,6 +1325,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         self.with_graph(|g| {
             g.chain_monitor.best_block_updated(&header, height);
             g.channel_manager.best_block_updated(&header, height);
+            persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
             Ok(())
         })
     }
@@ -1060,6 +1353,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 .transactions_confirmed(&header, &txdata, height);
             g.channel_manager
                 .transactions_confirmed(&header, &txdata, height);
+            persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
             Ok(())
         })
     }
@@ -1071,6 +1365,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         self.with_graph(|g| {
             g.chain_monitor.transaction_unconfirmed(&txid);
             g.channel_manager.transaction_unconfirmed(&txid);
+            persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
             Ok(())
         })
     }
@@ -1205,6 +1500,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         g.peer_manager.borrow().process_events();
         let (temporary_channel_id, channel_id, ready, is_usable) =
             self.derive_channel_status_from_live(g, &temp_id);
+        persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         let status = if is_usable {
             "ready".to_string()
         } else if ready {
@@ -1303,6 +1599,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         self.pending_funding_requests.borrow_mut().remove(temp);
         g.peer_manager.borrow().process_events();
         let _ = self.derive_channel_status_from_live(g, temp);
+        persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         Ok(())
     }
 

@@ -74,7 +74,7 @@ test("WASM channel survives proxy WebSocket disconnect after open", async ({ pag
   });
 
   const sdkReady = await test.step("load harness and wait for SDK ready", async () => {
-    return flow.loadHarness(page, { freshRuntime: true });
+    return flow.loadHarness(page);
   });
   expect(sdkReady.pubkey).toMatch(/^[0-9a-f]{66}$/i);
   const wasmPubkey = sdkReady.pubkey;
