@@ -2515,45 +2515,43 @@ pub(crate) async fn open_channel(
 
     // Persist RGB channel_info before create_channel so funding
     // event handlers always observe the metadata.
-    let (temporary_channel_id, rgb_metadata_temp_id_str) = if let Some(
-        (contract_id, asset_amount),
-    ) = &colored_info
-    {
-        let temp_id = match temporary_channel_id {
-            Some(id) => id,
-            None => loop {
-                let mut bytes = [0u8; 32];
-                bytes.copy_from_slice(
-                    &unlocked_state.keys_manager.get_secure_random_bytes()[..32],
-                );
-                let candidate = ChannelId::from_bytes(bytes);
-                if !unlocked_state.channel_ids().contains_key(&candidate)
-                    && !unlocked_state
-                        .virtual_channel_draft_store()
-                        .contains_key(&candidate)
-                {
-                    break candidate;
-                }
-            },
+    let (temporary_channel_id, rgb_metadata_temp_id_str) =
+        if let Some((contract_id, asset_amount)) = &colored_info {
+            let temp_id = match temporary_channel_id {
+                Some(id) => id,
+                None => loop {
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(
+                        &unlocked_state.keys_manager.get_secure_random_bytes()[..32],
+                    );
+                    let candidate = ChannelId::from_bytes(bytes);
+                    if !unlocked_state.channel_ids().contains_key(&candidate)
+                        && !unlocked_state
+                            .virtual_channel_draft_store()
+                            .contains_key(&candidate)
+                    {
+                        break candidate;
+                    }
+                },
+            };
+            let temp_id_str = temp_id.0.as_hex().to_string();
+            let push_amount = request.push_asset_amount.unwrap_or(0);
+            let rgb_info = RgbInfo {
+                contract_id: *contract_id,
+                schema: schema.unwrap(),
+                local_rgb_amount: *asset_amount - push_amount,
+                remote_rgb_amount: push_amount,
+            };
+            unlocked_state
+                .kv_store
+                .write_rgb_channel_info(&temp_id_str, &rgb_info, true);
+            unlocked_state
+                .kv_store
+                .write_rgb_channel_info(&temp_id_str, &rgb_info, false);
+            (Some(temp_id), Some(temp_id_str))
+        } else {
+            (temporary_channel_id, None)
         };
-        let temp_id_str = temp_id.0.as_hex().to_string();
-        let push_amount = request.push_asset_amount.unwrap_or(0);
-        let rgb_info = RgbInfo {
-            contract_id: *contract_id,
-            schema: schema.unwrap(),
-            local_rgb_amount: *asset_amount - push_amount,
-            remote_rgb_amount: push_amount,
-        };
-        unlocked_state
-            .kv_store
-            .write_rgb_channel_info(&temp_id_str, &rgb_info, true);
-        unlocked_state
-            .kv_store
-            .write_rgb_channel_info(&temp_id_str, &rgb_info, false);
-        (Some(temp_id), Some(temp_id_str))
-    } else {
-        (temporary_channel_id, None)
-    };
 
     *unlocked_state.rgb_send_lock.lock().unwrap() = true;
     tracing::debug!("RGB send lock set to true");
