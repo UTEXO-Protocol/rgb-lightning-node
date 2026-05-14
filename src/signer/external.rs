@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
@@ -11,15 +12,19 @@ use bitcoin::secp256k1::{Message, PublicKey, Scalar};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::Address;
 use bitcoin::Psbt;
+use lightning::io;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
 use lightning::offers::invoice::UnsignedBolt12Invoice;
 use lightning::sign::{
-    EntropySource, NodeSigner, OutputSpender, PeerStorageKey, Recipient, SignerProvider,
-    SpendableOutputDescriptor,
+    EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender, PeerStorageKey,
+    Recipient, SignerProvider, SpendableOutputDescriptor,
 };
+use lightning::util::persist::KVStoreSync;
 use lightning::util::ser::Writeable;
 use lightning_invoice::RawBolt11Invoice;
+use lightning_signer::channel::ChannelId as VlsChannelId;
+use lightning_signer::signer::derive::{key_derive as vls_key_derive, KeyDerivationStyle};
 use std::str::FromStr;
 
 use super::channel_signer::ExternalChannelSigner;
@@ -36,6 +41,47 @@ use super::RlnEntropySource;
 use super::RlnKeysInterface;
 
 type LdkAuxiliaryKeysTriple = ([u8; 32], [u8; 32], [u8; 32]);
+
+struct NullKvStore;
+
+impl KVStoreSync for NullKvStore {
+    fn read(
+        &self,
+        _primary_namespace: &str,
+        _secondary_namespace: &str,
+        _key: &str,
+    ) -> Result<Vec<u8>, io::Error> {
+        Err(io::Error::new(io::ErrorKind::NotFound, "noop kv store"))
+    }
+
+    fn write(
+        &self,
+        _primary_namespace: &str,
+        _secondary_namespace: &str,
+        _key: &str,
+        _buf: Vec<u8>,
+    ) -> Result<(), io::Error> {
+        Ok(())
+    }
+
+    fn remove(
+        &self,
+        _primary_namespace: &str,
+        _secondary_namespace: &str,
+        _key: &str,
+        _lazy: bool,
+    ) -> Result<(), io::Error> {
+        Ok(())
+    }
+
+    fn list(
+        &self,
+        _primary_namespace: &str,
+        _secondary_namespace: &str,
+    ) -> Result<Vec<String>, io::Error> {
+        Ok(Vec::new())
+    }
+}
 
 /// Transport-backed external signer: LDK `NodeSigner` / channel / PSBT ops delegate to the host.
 /// Inbound-payment, peer-storage, and receive-auth key material is read from bootstrap hex fields
@@ -334,6 +380,82 @@ impl ExternalSigner {
         ]));
         Ok(())
     }
+
+    fn local_keys_manager(&self) -> KeysManager {
+        KeysManager::new(
+            &self.signer_seed,
+            0,
+            0,
+            true,
+            PathBuf::new(),
+            Arc::new(NullKvStore),
+        )
+    }
+
+    fn local_ldk_channel_keys_id(&self, channel_keys_id: &[u8; 32]) -> [u8; 32] {
+        // The VLS-backed external signer encodes `channel_keys_id` as a dbid envelope:
+        // first 8 bytes are a big-endian dbid, remaining bytes are zero. Convert it to the
+        // actual LDK/VLS keys_id before deriving a local signer for spendable outputs.
+        if channel_keys_id[8..].iter().all(|b| *b == 0) {
+            let mut dbid_bytes = [0u8; 8];
+            dbid_bytes.copy_from_slice(&channel_keys_id[..8]);
+            let dbid = u64::from_be_bytes(dbid_bytes);
+            let channel_id = VlsChannelId::new_from_peer_id_and_oid(&[0u8; 33], dbid);
+            let key_derive = vls_key_derive(KeyDerivationStyle::Ldk, bitcoin::Network::Testnet);
+            let channel_seed_base = key_derive.channels_seed(&self.signer_seed);
+            key_derive.keys_id(channel_id, &channel_seed_base)
+        } else {
+            *channel_keys_id
+        }
+    }
+
+    fn local_channel_signer(&self, channel_keys_id: &[u8; 32]) -> InMemorySigner {
+        let ldk_channel_keys_id = self.local_ldk_channel_keys_id(channel_keys_id);
+        self.local_keys_manager()
+            .derive_channel_keys(&ldk_channel_keys_id)
+    }
+
+    fn find_psbt_input_idx(
+        outpoint: &lightning::chain::transaction::OutPoint,
+        psbt: &Psbt,
+    ) -> Result<usize, ()> {
+        psbt.unsigned_tx
+            .input
+            .iter()
+            .position(|i| {
+                i.previous_output.txid == outpoint.txid
+                    && i.previous_output.vout == outpoint.index as u32
+            })
+            .ok_or(())
+    }
+
+    fn sign_static_payment_output_input(
+        &self,
+        descriptor: &lightning::sign::StaticPaymentOutputDescriptor,
+        psbt: &mut Psbt,
+        secp_ctx: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::All>,
+    ) -> Result<(), ()> {
+        let input_idx = Self::find_psbt_input_idx(&descriptor.outpoint, psbt)?;
+        let witness = self
+            .local_channel_signer(&descriptor.channel_keys_id)
+            .sign_counterparty_payment_input(&psbt.unsigned_tx, input_idx, descriptor, secp_ctx)?;
+        psbt.inputs[input_idx].final_script_witness = Some(witness);
+        Ok(())
+    }
+
+    fn sign_delayed_payment_output_input(
+        &self,
+        descriptor: &lightning::sign::DelayedPaymentOutputDescriptor,
+        psbt: &mut Psbt,
+        secp_ctx: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::All>,
+    ) -> Result<(), ()> {
+        let input_idx = Self::find_psbt_input_idx(&descriptor.outpoint, psbt)?;
+        let witness = self
+            .local_channel_signer(&descriptor.channel_keys_id)
+            .sign_dynamic_p2wsh_input(&psbt.unsigned_tx, input_idx, descriptor, secp_ctx)?;
+        psbt.inputs[input_idx].final_script_witness = Some(witness);
+        Ok(())
+    }
 }
 
 impl EntropySource for ExternalSigner {
@@ -558,8 +680,8 @@ impl RlnKeysInterface for ExternalSigner {
         secp_ctx: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::All>,
     ) -> Result<Psbt, ()> {
         let mut backend_utxos = Vec::new();
-        for descriptor in descriptors {
-            match descriptor {
+        for spendable_descriptor in descriptors {
+            match spendable_descriptor {
                 SpendableOutputDescriptor::StaticOutput {
                     outpoint, output, ..
                 } => {
@@ -575,10 +697,16 @@ impl RlnKeysInterface for ExternalSigner {
                             secp_ctx,
                         )?;
                     } else {
-                        backend_utxos.push(self.spendable_descriptor_to_utxo(descriptor)?);
+                        backend_utxos
+                            .push(self.spendable_descriptor_to_utxo(spendable_descriptor)?);
                     }
                 }
-                _ => backend_utxos.push(self.spendable_descriptor_to_utxo(descriptor)?),
+                SpendableOutputDescriptor::DelayedPaymentOutput(descriptor) => {
+                    self.sign_delayed_payment_output_input(descriptor, &mut psbt, secp_ctx)?;
+                }
+                SpendableOutputDescriptor::StaticPaymentOutput(descriptor) => {
+                    self.sign_static_payment_output_input(descriptor, &mut psbt, secp_ctx)?;
+                }
             }
         }
         if !backend_utxos.is_empty() {

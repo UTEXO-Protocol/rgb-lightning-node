@@ -122,6 +122,25 @@ python3 src/uniffi_api/examples/python-interop/manual_py_external_signer_e2e.py 
    - `PAYMENT_SUCCEEDED_TIMEOUT_SEC` — seconds to wait for `HtlcStatus.SUCCEEDED` after `sendpayment`
      (default `300`; payment wait also syncs the peer and mines a block every 5 polls, like `lib_sdk`).
 
+5. **Mixed RGB cooperative close settlement** (`mixed-asset-channel-coop-close-real`): same mixed
+   internal/external RGB flow, then cooperative close and explicit on-chain balance assertions.
+
+   ```sh
+   RUN_MIXED_ASSET_EXTERNAL_E2E=1 RESET_DATA=1 \
+   python3 src/uniffi_api/examples/python-interop/manual_py_external_signer_e2e.py \
+     --scenario mixed-asset-channel-coop-close-real
+   ```
+
+6. **Mixed RGB force-close settlement** (`mixed-asset-channel-force-close-real`): same mixed
+   internal/external RGB flow, then force close and wait for balances to settle after CSV.
+   Useful as a focused regression scenario for receiver-side sweep and settlement after CSV.
+
+   ```sh
+   RUN_MIXED_ASSET_EXTERNAL_E2E=1 RESET_DATA=1 \
+   python3 src/uniffi_api/examples/python-interop/manual_py_external_signer_e2e.py \
+     --scenario mixed-asset-channel-force-close-real
+   ```
+
 Note:
 - `mixed-asset-channel-real` honors `OPEN_CHANNEL_PUSH_MSAT` and has been validated with a non-zero
   BTC push (`3_500_000 msat`) on the current branch.
@@ -145,6 +164,14 @@ EXTERNAL_SIGNER_SCENARIO=restart-mismatch-real \
 
 START_REGTEST=1 \
 EXTERNAL_SIGNER_SCENARIO=connection-loss-real \
+./scripts/ci/external_signer_real_e2e.sh
+
+START_REGTEST=1 \
+EXTERNAL_SIGNER_SCENARIO=mixed-asset-channel-coop-close-real \
+./scripts/ci/external_signer_real_e2e.sh
+
+START_REGTEST=1 \
+EXTERNAL_SIGNER_SCENARIO=mixed-asset-channel-force-close-real \
 ./scripts/ci/external_signer_real_e2e.sh
 ```
 

@@ -482,6 +482,190 @@ def wait_for_payment_succeeded(
     )
 
 
+def wait_for_channels_gone(
+    nodes: list[rln.SdkNode],
+    *,
+    asset_id: Optional[str] = None,
+    timeout_sec: int = 120,
+) -> None:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        all_gone = True
+        for node in nodes:
+            node.sync()
+            channels = node.list_channels()
+            if asset_id is None:
+                matching = channels
+            else:
+                matching = [c for c in channels if str(c.asset_id) == asset_id]
+            if matching:
+                all_gone = False
+        if all_gone:
+            return
+        time.sleep(1)
+    raise RuntimeError("timeout waiting for channel removal after close")
+
+
+def wait_for_asset_balance(
+    node: rln.SdkNode,
+    asset_id: str,
+    *,
+    settled: Optional[int] = None,
+    future: Optional[int] = None,
+    spendable: Optional[int] = None,
+    offchain_outbound: Optional[int] = None,
+    offchain_inbound: Optional[int] = None,
+    timeout_sec: int = 180,
+) -> None:
+    def _fmt_balance(bal: object) -> str:
+        return (
+            f"settled={bal.settled} future={bal.future} spendable={bal.spendable} "
+            f"offchain_outbound={bal.offchain_outbound} offchain_inbound={bal.offchain_inbound}"
+        )
+
+    deadline = time.time() + timeout_sec
+    last_balance = None
+    while time.time() < deadline:
+        node.sync()
+        node.refreshtransfers(rln.SdkRefreshTransfersRequest(skip_sync=False))
+        bal = node.asset_balance(asset_id)
+        last_balance = bal
+        if (
+            (settled is None or bal.settled == settled)
+            and (future is None or bal.future == future)
+            and (spendable is None or bal.spendable == spendable)
+            and (
+                offchain_outbound is None
+                or bal.offchain_outbound == offchain_outbound
+            )
+            and (offchain_inbound is None or bal.offchain_inbound == offchain_inbound)
+        ):
+            return
+        time.sleep(1)
+    raise RuntimeError(
+        f"asset balance did not reach expected state for {asset_id}: "
+        f"last={_fmt_balance(last_balance)}"
+    )
+
+
+def _setup_mixed_asset_channel_with_payment(
+    scenario_name: str,
+) -> tuple[
+    rln.SdkNode,
+    rln.SdkNode,
+    object,
+    str,
+    object,
+]:
+    ensure_regtest_available()
+    data_root = REPO_ROOT / "target" / "uniffi" / "python-e2e" / scenario_name
+    node_a_dir = data_root / "node_a_internal"
+    node_b_dir = data_root / "node_b_external"
+    signer_dir = data_root / "signer_b"
+    ensure_dir(node_a_dir)
+    ensure_dir(node_b_dir)
+    signer = make_native_signer(signer_dir, reset=True)
+
+    node_a_daemon_port = find_free_port()
+    node_b_daemon_port = find_free_port()
+    node_a_peer_port = find_free_port()
+    node_b_peer_port = find_free_port()
+
+    node_a = make_node(node_a_dir, node_a_daemon_port, node_a_peer_port)
+    node_b = make_node(node_b_dir, node_b_daemon_port, node_b_peer_port)
+
+    node_a.init(NODE_A_PASSWORD, None)
+    node_b.init_with_native_external_signer(signer)
+    node_a.unlock(unlock_request(NODE_A_PASSWORD))
+    node_b.unlock_with_native_external_signer(
+        signer,
+        "user",
+        "password",
+        "localhost",
+        18443,
+        "127.0.0.1:50001",
+        PROXY_ENDPOINT_LOCAL,
+        [],
+        "RLN_external_py",
+    )
+
+    ensure_funded(node_a, OPEN_CHANNEL_CAPACITY_SAT + 250_000)
+    ensure_funded(node_b, 100_000)
+    create_utxos(node_a)
+    create_utxos_if_possible(node_b)
+
+    asset_id = issue_asset_nia(node_a, "node A")
+    peer_uri = f"{node_b.node_info().pubkey}@127.0.0.1:{node_b_peer_port}"
+    try:
+        node_a.connectpeer(peer_uri)
+    except rln.RlnError.Conflict:
+        pass
+
+    open_res = node_a.openchannel(
+        rln.SdkOpenChannelRequest(
+            peer_pubkey_and_opt_addr=peer_uri,
+            capacity_sat=OPEN_CHANNEL_CAPACITY_SAT,
+            push_msat=OPEN_CHANNEL_PUSH_MSAT,
+            public=False,
+            with_anchors=True,
+            fee_base_msat=None,
+            fee_proportional_millionths=None,
+            temporary_channel_id=None,
+            asset_id=asset_id,
+            asset_amount=OPEN_CHANNEL_ASSET_AMOUNT,
+            push_asset_amount=None,
+            virtual_open_mode=None,
+        )
+    )
+    print("opened mixed asset channel temporary id:", open_res.temporary_channel_id)
+
+    txid = wait_for_channel_funding_tx(
+        node_a,
+        timeout_sec=CHANNEL_READY_TIMEOUT_SEC,
+        asset_id=None,
+        node_b=node_b,
+    )
+    mine_until_tx_confirmed(node_a, txid, peer_node=node_b)
+    run_regtest("mine", str(OPEN_CHANNEL_CONFIRM_BLOCKS))
+    wait_for_usable_channels(
+        [(node_a, 1), (node_b, 1)],
+        timeout_sec=CHANNEL_READY_TIMEOUT_SEC,
+        asset_id=asset_id,
+    )
+
+    channel = next(
+        c
+        for c in node_a.list_channels()
+        if c.funding_txid is not None and str(c.asset_id) == asset_id and c.is_usable
+    )
+    print("mixed internal/external RGB channel is usable")
+
+    invoice = node_b.ln_invoice(
+        rln.LnInvoiceRequest(
+            amt_msat=PAYMENT_MSAT,
+            expiry_sec=900,
+            asset_id=asset_id,
+            asset_amount=PAYMENT_ASSET_AMOUNT,
+            payment_hash=None,
+            description_hash=None,
+        )
+    ).invoice
+    send = node_a.sendpayment(
+        rln.SdkSendPaymentRequest(
+            invoice=str(invoice),
+            amt_msat=PAYMENT_MSAT,
+            asset_id=asset_id,
+            asset_amount=PAYMENT_ASSET_AMOUNT,
+        )
+    )
+    if send.payment_hash is None:
+        raise RuntimeError("sendpayment did not return payment_hash for mixed RGB payment")
+    wait_for_payment_succeeded(node_a, send.payment_hash, peer_node=node_b)
+    wait_for_payment_succeeded(node_b, send.payment_hash, peer_node=node_a)
+    print("mixed internal/external RGB payment succeeded")
+    return node_a, node_b, signer, asset_id, channel
+
+
 def run_regular_channel_flow_external_real():
     data_root = REPO_ROOT / "target" / "uniffi" / "python-e2e" / "external-real-flow"
     node_a_dir = data_root / "node_a"
@@ -646,126 +830,108 @@ def run_mixed_asset_channel_internal_external_real():
         return
 
     ensure_regtest_available()
-    data_root = REPO_ROOT / "target" / "uniffi" / "python-e2e" / "mixed-asset-channel-real"
-    node_a_dir = data_root / "node_a_internal"
-    node_b_dir = data_root / "node_b_external"
-    signer_dir = data_root / "signer_b"
-    ensure_dir(node_a_dir)
-    ensure_dir(node_b_dir)
-    signer = make_native_signer(signer_dir, reset=True)
-
-    node_a_daemon_port = find_free_port()
-    node_b_daemon_port = find_free_port()
-    node_a_peer_port = find_free_port()
-    node_b_peer_port = find_free_port()
-
-    node_a = make_node(node_a_dir, node_a_daemon_port, node_a_peer_port)
-    node_b = make_node(node_b_dir, node_b_daemon_port, node_b_peer_port)
+    node_a = node_b = None
     try:
-        node_a.init(NODE_A_PASSWORD, None)
-        node_b.init_with_native_external_signer(signer)
-        node_a.unlock(unlock_request(NODE_A_PASSWORD))
-        node_b.unlock_with_native_external_signer(
-            signer,
-            "user",
-            "password",
-            "localhost",
-            18443,
-            "127.0.0.1:50001",
-            PROXY_ENDPOINT_LOCAL,
-            [],
-            "RLN_external_py",
+        node_a, node_b, _signer, _asset_id, _channel = _setup_mixed_asset_channel_with_payment(
+            "mixed-asset-channel-real"
         )
-
-        ensure_funded(node_a, OPEN_CHANNEL_CAPACITY_SAT + 250_000)
-        ensure_funded(node_b, 100_000)
-        create_utxos(node_a)
-        create_utxos_if_possible(node_b)
-
-        asset_id = issue_asset_nia(node_a, "node A")
-        peer_uri = f"{node_b.node_info().pubkey}@127.0.0.1:{node_b_peer_port}"
-        try:
-            node_a.connectpeer(peer_uri)
-        except rln.RlnError.Conflict:
-            pass
-
-        open_res = node_a.openchannel(
-            rln.SdkOpenChannelRequest(
-                peer_pubkey_and_opt_addr=peer_uri,
-                capacity_sat=OPEN_CHANNEL_CAPACITY_SAT,
-                push_msat=OPEN_CHANNEL_PUSH_MSAT,
-                public=False,
-                with_anchors=True,
-                fee_base_msat=None,
-                fee_proportional_millionths=None,
-                temporary_channel_id=None,
-                asset_id=asset_id,
-                asset_amount=OPEN_CHANNEL_ASSET_AMOUNT,
-                push_asset_amount=None,
-                virtual_open_mode=None,
-            )
-        )
-        print("opened mixed asset channel temporary id:", open_res.temporary_channel_id)
-
-        # While opening, `list_channels` may not yet expose `asset_id` on the row matching the
-        # temp channel; wait on any funding txid + bitcoind visibility, then assert RGB below.
-        txid = wait_for_channel_funding_tx(
-            node_a,
-            timeout_sec=CHANNEL_READY_TIMEOUT_SEC,
-            asset_id=None,
-            node_b=node_b,
-        )
-        mine_until_tx_confirmed(node_a, txid, peer_node=node_b)
-        run_regtest("mine", str(OPEN_CHANNEL_CONFIRM_BLOCKS))
-        wait_for_usable_channels(
-            [(node_a, 1), (node_b, 1)],
-            timeout_sec=CHANNEL_READY_TIMEOUT_SEC,
-            asset_id=asset_id,
-        )
-        chans = [c for c in node_a.list_channels() if c.funding_txid is not None]
-        if not any(str(c.asset_id) == asset_id for c in chans):
-            raise RuntimeError(
-                f"expected asset_id={asset_id} on funded channel after open, got {chans!r}"
-            )
-        print("mixed internal/external RGB channel is usable")
-
-        if PAYMENT_MSAT < RGB_MIN_HTLC_MSAT:
-            raise RuntimeError(
-                f"PAYMENT_MSAT={PAYMENT_MSAT} is too low for RGB invoices, must be >= {RGB_MIN_HTLC_MSAT}"
-            )
-
-        invoice = node_b.ln_invoice(
-            rln.LnInvoiceRequest(
-                amt_msat=PAYMENT_MSAT,
-                expiry_sec=900,
-                asset_id=asset_id,
-                asset_amount=PAYMENT_ASSET_AMOUNT,
-                payment_hash=None,
-                description_hash=None,
-            )
-        ).invoice
-        send = node_a.sendpayment(
-            rln.SdkSendPaymentRequest(
-                invoice=str(invoice),
-                amt_msat=PAYMENT_MSAT,
-                asset_id=asset_id,
-                asset_amount=PAYMENT_ASSET_AMOUNT,
-            )
-        )
-        if send.payment_hash is None:
-            raise RuntimeError("sendpayment did not return payment_hash for mixed RGB payment")
-        wait_for_payment_succeeded(node_a, send.payment_hash, peer_node=node_b)
-        wait_for_payment_succeeded(node_b, send.payment_hash, peer_node=node_a)
-        print("mixed internal/external RGB payment succeeded")
     finally:
-        try:
-            node_a.shutdown()
-        except Exception:
-            pass
-        try:
-            node_b.shutdown()
-        except Exception:
-            pass
+        if node_a is not None:
+            try:
+                node_a.shutdown()
+            except Exception:
+                pass
+        if node_b is not None:
+            try:
+                node_b.shutdown()
+            except Exception:
+                pass
+
+
+def run_mixed_asset_channel_close_settlement_real(force: bool):
+    if os.getenv("RUN_MIXED_ASSET_EXTERNAL_E2E", "").lower() not in ("1", "true", "yes"):
+        print(
+            "SKIP mixed-asset-channel-*-close-real: set RUN_MIXED_ASSET_EXTERNAL_E2E=1 to run "
+            "(requires regtest + ``cargo build --features uniffi,vls`` and generated Python bindings)."
+        )
+        return
+
+    scenario_name = (
+        "mixed-asset-channel-force-close-real"
+        if force
+        else "mixed-asset-channel-coop-close-real"
+    )
+    node_a = node_b = None
+    try:
+        node_a, node_b, _signer, asset_id, channel = _setup_mixed_asset_channel_with_payment(
+            scenario_name
+        )
+        close_req = rln.SdkCloseChannelRequest(
+            channel_id=channel.channel_id,
+            peer_pubkey=node_b.node_info().pubkey,
+            force=force,
+        )
+        node_a.closechannel(close_req)
+        print(f"{'force' if force else 'coop'} close initiated")
+
+        wait_for_channels_gone([node_a, node_b], asset_id=asset_id, timeout_sec=120)
+        if force:
+            for _ in range(16):
+                run_regtest("mine", "10")
+            wait_for_asset_balance(
+                node_a,
+                asset_id,
+                settled=950,
+                future=950,
+                spendable=950,
+                offchain_outbound=0,
+                offchain_inbound=0,
+                timeout_sec=60,
+            )
+            wait_for_asset_balance(
+                node_b,
+                asset_id,
+                settled=50,
+                future=50,
+                spendable=50,
+                offchain_outbound=0,
+                offchain_inbound=0,
+                timeout_sec=60,
+            )
+        else:
+            run_regtest("mine", "12")
+            wait_for_asset_balance(
+                node_a,
+                asset_id,
+                settled=950,
+                future=950,
+                spendable=950,
+                offchain_outbound=0,
+                offchain_inbound=0,
+                timeout_sec=120,
+            )
+            wait_for_asset_balance(
+                node_b,
+                asset_id,
+                settled=50,
+                future=50,
+                spendable=50,
+                offchain_outbound=0,
+                offchain_inbound=0,
+                timeout_sec=120,
+            )
+        print(f"{'force' if force else 'coop'} close RGB settlement succeeded")
+    finally:
+        if node_a is not None:
+            try:
+                node_a.shutdown()
+            except Exception:
+                pass
+        if node_b is not None:
+            try:
+                node_b.shutdown()
+            except Exception:
+                pass
 
 
 def run_connection_loss_restore_real():
@@ -979,6 +1145,8 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "regular-flow-real",
             "mixed-asset-channel-real",
+            "mixed-asset-channel-coop-close-real",
+            "mixed-asset-channel-force-close-real",
             "restart-mismatch-real",
             "connection-loss-real",
         ],
@@ -994,6 +1162,10 @@ def main():
         run_regular_channel_flow_external_real()
     elif args.scenario == "mixed-asset-channel-real":
         run_mixed_asset_channel_internal_external_real()
+    elif args.scenario == "mixed-asset-channel-coop-close-real":
+        run_mixed_asset_channel_close_settlement_real(False)
+    elif args.scenario == "mixed-asset-channel-force-close-real":
+        run_mixed_asset_channel_close_settlement_real(True)
     elif args.scenario == "restart-mismatch-real":
         run_restart_with_mismatched_signer_real()
     elif args.scenario == "connection-loss-real":
