@@ -339,6 +339,45 @@ private fun waitForUsableChannels(node: SdkNode, expected: Int, timeoutSec: Long
     error("usable channel count did not become expected=$expected actual=$lastUsable after ${timeoutSec}s")
 }
 
+private fun waitForChannelAssetState(
+    label: String,
+    node: SdkNode,
+    channelId: String,
+    expectedAssetLocal: ULong?,
+    expectedAssetRemote: ULong?,
+    minOutboundMsat: ULong?,
+    timeoutSec: Long,
+) {
+    val deadline = System.currentTimeMillis() + timeoutSec * 1000L
+    var lastState = "channel not found"
+    while (System.currentTimeMillis() < deadline) {
+        node.sync()
+        val channel = node.listChannels().firstOrNull { it.channelId == channelId }
+        if (channel != null) {
+            lastState =
+                "ready=${channel.ready},usable=${channel.isUsable}," +
+                    "assetLocal=${channel.assetLocalAmount},assetRemote=${channel.assetRemoteAmount}," +
+                    "outMsat=${channel.outboundBalanceMsat},inMsat=${channel.inboundBalanceMsat}"
+            val hasMinOutbound = minOutboundMsat == null || channel.outboundBalanceMsat >= minOutboundMsat
+            if (
+                channel.ready &&
+                channel.isUsable &&
+                channel.assetLocalAmount == expectedAssetLocal &&
+                channel.assetRemoteAmount == expectedAssetRemote &&
+                hasMinOutbound
+            ) {
+                return
+            }
+        }
+        Thread.sleep(1000L)
+    }
+    error(
+        "$label did not reach expected channel state: channelId=$channelId " +
+            "expectedAssetLocal=$expectedAssetLocal expectedAssetRemote=$expectedAssetRemote " +
+            "minOutboundMsat=$minOutboundMsat last_state=$lastState"
+    )
+}
+
 private fun waitForPeer(node: SdkNode, peerPubkey: Any, timeoutSec: Long) {
     val expected = peerPubkey.toString()
     val deadline = System.currentTimeMillis() + timeoutSec * 1000L
@@ -798,6 +837,24 @@ private fun openchannelPushAssetAmountScenario() {
         check(nodeBPartial.assetLocalAmount == 250uL && nodeBPartial.assetRemoteAmount == 350uL)
 
         keysendWithLnBalance(nodeA, nodeB, nodeBPubkey, null, assetId, 100u, 350u, 250u)
+        waitForChannelAssetState(
+            "node A partial push after first RGB keysend",
+            nodeA,
+            partialChannelId,
+            250u,
+            350u,
+            null,
+            30L,
+        )
+        waitForChannelAssetState(
+            "node B partial push after first RGB keysend",
+            nodeB,
+            partialChannelId,
+            350u,
+            250u,
+            null,
+            30L,
+        )
         dumpNodeState("node A after asset keysend", nodeA)
         dumpNodeState("node B after asset keysend", nodeB)
         println("attempting plain BTC keysend on partially pushed RGB channel")
@@ -811,6 +868,15 @@ private fun openchannelPushAssetAmountScenario() {
             dumpNodeState("node B after BTC keysend failure", nodeB)
             throw t
         }
+        waitForChannelAssetState(
+            "node B partial push before reverse RGB keysend",
+            nodeB,
+            partialChannelId,
+            350u,
+            250u,
+            PAYMENT_MSAT,
+            30L,
+        )
         keysendWithLnBalance(nodeB, nodeA, nodeAPubkey, null, assetId, 50u, 350u, 250u)
 
         val nodeAPartialAfter = nodeA.listChannels().first { it.channelId == partialChannelId }
@@ -864,6 +930,24 @@ private fun openchannelPushAssetAmountScenario() {
         check(nodeBFull.assetLocalAmount == 600uL && nodeBFull.assetRemoteAmount == 0uL)
 
         keysend(nodeA, nodeBPubkey, 10_000_000u, null, null)
+        waitForChannelAssetState(
+            "node A full push before reverse RGB keysend",
+            nodeA,
+            fullChannelId,
+            0u,
+            600u,
+            null,
+            30L,
+        )
+        waitForChannelAssetState(
+            "node B full push before reverse RGB keysend",
+            nodeB,
+            fullChannelId,
+            600u,
+            0u,
+            PAYMENT_MSAT,
+            30L,
+        )
         keysendWithLnBalance(nodeB, nodeA, nodeAPubkey, null, assetId, 100u, 600u, 0u)
 
         val nodeAFullAfter = nodeA.listChannels().first { it.channelId == fullChannelId }
