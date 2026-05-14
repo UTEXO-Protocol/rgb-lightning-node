@@ -34,7 +34,8 @@ jobs:
       - name: Resolve version
         id: resolve
         run: |
-          VERSION="${{ inputs.version }}"
+          RAW_VERSION="${{ inputs.version }}"
+          VERSION="${RAW_VERSION#v}"
           TAG="v${VERSION}"
           PUBLISH_TO_MAVEN="${{ inputs.publish_to_maven }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -140,7 +141,7 @@ jobs:
           echo "${{ secrets.GPG_SECRET_KEY }}" | gpg --batch --import
           gpg --list-secret-keys --keyid-format short
 
-          GROUP_ID="${MAVEN_GROUP_ID:-org.utexo}"
+          GROUP_ID="${MAVEN_GROUP_ID:-com.utexo}"
           ARTIFACT_ID="${MAVEN_ARTIFACT_ID:-rgb-lightning-node-android}"
           gradle -p bindings/kotlin-android-sdk \
             publish \
@@ -154,7 +155,19 @@ jobs:
             -PARTIFACT_ID="${ARTIFACT_ID}" \
             -PVERSION_NAME="${{ needs.resolve-version.outputs.version }}" \
             -Pjreleaser.gpg.keyName="${JRELEASER_GPG_KEY_NAME}" \
-            -Pjreleaser.gpg.passphrase="${JRELEASER_GPG_PASSPHRASE}"
+            -Pjreleaser.gpg.passphrase="${JRELEASER_GPG_PASSPHRASE}" \
+            --stacktrace \
+            --info
+
+      - name: Upload JReleaser debug outputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jreleaser-debug
+          if-no-files-found: ignore
+          path: |
+            bindings/kotlin-android-sdk/build/jreleaser/**
+            bindings/kotlin-android-sdk/build/staging-deploy/**
 
       - name: Package Kotlin Android release bundle
         run: |
