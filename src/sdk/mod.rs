@@ -2731,6 +2731,48 @@ pub(crate) async fn open_channel(
         None
     };
 
+    // Persist RGB channel_info before create_channel so funding
+    // event handlers always observe the metadata.
+    let (temporary_channel_id, rgb_metadata_temp_id_str) =
+        if let Some((contract_id, asset_amount)) = &colored_info {
+            let temp_id = match temporary_channel_id {
+                Some(id) => id,
+                None => loop {
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(&unlocked_state.entropy_source.get_secure_random_bytes());
+                    let candidate = ChannelId::from_bytes(bytes);
+                    if !unlocked_state.channel_ids().contains_key(&candidate)
+                        && !unlocked_state
+                            .virtual_channel_draft_store()
+                            .contains_key(&candidate)
+                    {
+                        break candidate;
+                    }
+                },
+            };
+            let temp_id_str = temp_id.0.as_hex().to_string();
+            let push_amount = request.push_asset_amount.unwrap_or(0);
+            let schema_json = serde_json::to_string(schema.as_ref().unwrap())
+                .map_err(|e| APIError::Unexpected(format!("schema serialize failed: {e}")))?;
+            let parsed_schema = serde_json::from_str(&schema_json)
+                .map_err(|e| APIError::Unexpected(format!("schema parse failed: {e}")))?;
+            let rgb_info = RgbInfo {
+                contract_id: *contract_id,
+                schema: parsed_schema,
+                local_rgb_amount: *asset_amount - push_amount,
+                remote_rgb_amount: push_amount,
+            };
+            unlocked_state
+                .kv_store
+                .write_rgb_channel_info(&temp_id_str, &rgb_info, true);
+            unlocked_state
+                .kv_store
+                .write_rgb_channel_info(&temp_id_str, &rgb_info, false);
+            (Some(temp_id), Some(temp_id_str))
+        } else {
+            (temporary_channel_id, None)
+        };
+
     *unlocked_state.rgb_send_lock.lock().unwrap() = true;
     tracing::debug!("RGB send lock set to true");
 
@@ -2749,6 +2791,14 @@ pub(crate) async fn open_channel(
         .map_err(|e| {
             *unlocked_state.rgb_send_lock.lock().unwrap() = false;
             tracing::debug!("RGB send lock set to false (open channel failure: {e:?})");
+            if let Some(temp_id_str) = rgb_metadata_temp_id_str.as_deref() {
+                let _ = unlocked_state
+                    .kv_store
+                    .remove_rgb_channel_info(temp_id_str, true);
+                let _ = unlocked_state
+                    .kv_store
+                    .remove_rgb_channel_info(temp_id_str, false);
+            }
             match e {
                 LDKAPIError::APIMisuseError { err }
                     if err.contains("fee for initial commitment transaction") =>
@@ -2772,34 +2822,6 @@ pub(crate) async fn open_channel(
 
     let temporary_channel_id = temporary_channel_id.0.as_hex().to_string();
     tracing::info!("EVENT: initiated channel with peer {}", peer_pubkey);
-
-    if let Some((contract_id, asset_amount)) = &colored_info {
-        let push_amount = request.push_asset_amount.unwrap_or(0);
-        let schema_value: lightning::rgb_utils::RgbInfo = {
-            let schema_json = serde_json::to_string(&schema.unwrap())
-                .map_err(|e| APIError::Unexpected(format!("schema serialize failed: {e}")))?;
-            let parsed_schema = serde_json::from_str(&schema_json)
-                .map_err(|e| APIError::Unexpected(format!("schema parse failed: {e}")))?;
-            lightning::rgb_utils::RgbInfo {
-                contract_id: *contract_id,
-                schema: parsed_schema,
-                local_rgb_amount: *asset_amount - push_amount,
-                remote_rgb_amount: push_amount,
-            }
-        };
-        let rgb_info = RgbInfo {
-            contract_id: schema_value.contract_id,
-            schema: schema_value.schema,
-            local_rgb_amount: schema_value.local_rgb_amount,
-            remote_rgb_amount: schema_value.remote_rgb_amount,
-        };
-        unlocked_state
-            .kv_store
-            .write_rgb_channel_info(&temporary_channel_id, &rgb_info, true);
-        unlocked_state
-            .kv_store
-            .write_rgb_channel_info(&temporary_channel_id, &rgb_info, false);
-    }
 
     Ok(OpenChannelData {
         temporary_channel_id,
