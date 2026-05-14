@@ -684,4 +684,3 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
         );
     }
 }
-
