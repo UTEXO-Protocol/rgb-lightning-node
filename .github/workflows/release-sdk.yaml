@@ -12,9 +12,9 @@ on:
         required: false
         default: true
         type: boolean
-  push:
-    tags:
-      - "v*"
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,19 +28,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
       publish_to_maven: ${{ steps.resolve.outputs.publish_to_maven }}
     steps:
       - name: Resolve version
         id: resolve
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-            PUBLISH_TO_MAVEN="true"
-          else
-            VERSION="${{ inputs.version }}"
-            PUBLISH_TO_MAVEN="${{ inputs.publish_to_maven }}"
-          fi
+          VERSION="${{ inputs.version }}"
+          TAG="v${VERSION}"
+          PUBLISH_TO_MAVEN="${{ inputs.publish_to_maven }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "publish_to_maven=${PUBLISH_TO_MAVEN}" >> "$GITHUB_OUTPUT"
 
   kotlin-android:
@@ -68,6 +66,8 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -136,18 +136,19 @@ jobs:
           JRELEASER_GPG_KEY_NAME: ${{ secrets.GPG_KEY_NAME }}
           JRELEASER_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
+          gradle --version
           echo "${{ secrets.GPG_SECRET_KEY }}" | gpg --batch --import
           gpg --list-secret-keys --keyid-format short
 
           GROUP_ID="${MAVEN_GROUP_ID:-org.utexo}"
           ARTIFACT_ID="${MAVEN_ARTIFACT_ID:-rgb-lightning-node-android}"
-          ./gradlew -p bindings/kotlin-android-sdk \
+          gradle -p bindings/kotlin-android-sdk \
             publish \
             -PGROUP_ID="${GROUP_ID}" \
             -PARTIFACT_ID="${ARTIFACT_ID}" \
             -PVERSION_NAME="${{ needs.resolve-version.outputs.version }}"
 
-          ./gradlew -p bindings/kotlin-android-sdk \
+          gradle -p bindings/kotlin-android-sdk \
             jreleaserDeploy \
             -PGROUP_ID="${GROUP_ID}" \
             -PARTIFACT_ID="${ARTIFACT_ID}" \
@@ -255,7 +256,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.resolve-version.outputs.version }}
+          tag_name: ${{ needs.resolve-version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: SDK v${{ needs.resolve-version.outputs.version }}
           body: |
             ## RGB Lightning Node SDK
