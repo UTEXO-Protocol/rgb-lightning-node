@@ -1,6 +1,11 @@
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::disk::FilesystemLogger;
+use crate::ldk::{GossipVerifier, NetworkGraph, P2PGossipSync, RapidGossipSync};
 
 pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const RGS_SNAPSHOT_MAX_SIZE: usize = 15 * 1024 * 1024;
@@ -18,6 +23,48 @@ pub(crate) enum GossipSourceConfig {
 impl Default for GossipSourceConfig {
     fn default() -> Self {
         Self::P2PNetwork
+    }
+}
+
+pub(crate) enum GossipSource {
+    P2PNetwork {
+        gossip_sync: Arc<P2PGossipSync>,
+    },
+    RapidGossipSync {
+        gossip_sync: Arc<RapidGossipSync>,
+        server_url: String,
+        latest_sync_timestamp: AtomicU32,
+        logger: Arc<FilesystemLogger>,
+    },
+}
+
+impl GossipSource {
+    pub(crate) fn new_p2p(
+        network_graph: Arc<NetworkGraph>,
+        utxo_lookup: Option<Arc<GossipVerifier>>,
+        logger: Arc<FilesystemLogger>,
+    ) -> Self {
+        let gossip_sync = Arc::new(P2PGossipSync::new(network_graph, utxo_lookup, logger));
+        Self::P2PNetwork { gossip_sync }
+    }
+
+    pub(crate) fn new_rgs(
+        server_url: String,
+        latest_sync_timestamp: u32,
+        network_graph: Arc<NetworkGraph>,
+        logger: Arc<FilesystemLogger>,
+    ) -> Self {
+        let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, Arc::clone(&logger)));
+        Self::RapidGossipSync {
+            gossip_sync,
+            server_url,
+            latest_sync_timestamp: AtomicU32::new(latest_sync_timestamp),
+            logger,
+        }
+    }
+
+    pub(crate) fn is_rgs(&self) -> bool {
+        matches!(self, Self::RapidGossipSync { .. })
     }
 }
 
@@ -71,5 +118,39 @@ mod config_tests {
             GossipSourceConfig::default(),
             GossipSourceConfig::P2PNetwork
         ));
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::disk::FilesystemLogger;
+    use crate::ldk::NetworkGraph;
+    use bitcoin::Network;
+    use std::sync::Arc;
+
+    fn test_logger() -> Arc<FilesystemLogger> {
+        Arc::new(FilesystemLogger::new(tempfile::tempdir().unwrap().keep()))
+    }
+
+    fn test_graph(logger: Arc<FilesystemLogger>) -> Arc<NetworkGraph> {
+        Arc::new(NetworkGraph::new(Network::Regtest, logger))
+    }
+
+    #[test]
+    fn p2p_source_reports_not_rgs() {
+        let logger = test_logger();
+        let graph = test_graph(Arc::clone(&logger));
+        let source = GossipSource::new_p2p(graph, None, logger);
+        assert!(!source.is_rgs());
+    }
+
+    #[test]
+    fn rgs_source_reports_rgs() {
+        let logger = test_logger();
+        let graph = test_graph(Arc::clone(&logger));
+        let source =
+            GossipSource::new_rgs("https://example.invalid/snapshot".into(), 0, graph, logger);
+        assert!(source.is_rgs());
     }
 }
