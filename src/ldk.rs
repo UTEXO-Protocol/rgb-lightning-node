@@ -38,7 +38,7 @@ use lightning::rgb_utils::{
 };
 use lightning::rgb_utils::{RgbPaymentInfo, STATIC_BLINDING};
 use lightning::routing::gossip;
-use lightning::routing::gossip::{NodeId, P2PGossipSync};
+use lightning::routing::gossip::NodeId;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::{KeysManager, NodeSigner, OutputSpender, SpendableOutputDescriptor};
@@ -55,7 +55,7 @@ use lightning::util::persist::{
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning::util::sweep as ldk_sweep;
 use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
-use lightning_background_processor::{process_events_async, GossipSync, NO_LIQUIDITY_MANAGER};
+use lightning_background_processor::{process_events_async, NO_LIQUIDITY_MANAGER};
 use lightning_block_sync::gossip::TokioSpawner;
 use lightning_block_sync::init;
 use lightning_block_sync::poll;
@@ -955,7 +955,7 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
 pub(crate) type PeerManager = LdkPeerManager<
     SocketDescriptor,
     Arc<ChannelManager>,
-    Arc<P2PGossipSync<Arc<NetworkGraph>, Arc<GossipVerifier>, Arc<FilesystemLogger>>>,
+    Arc<P2PGossipSync>,
     Arc<OnionMessenger>,
     Arc<FilesystemLogger>,
     Arc<AsyncOrderMessageHandler>,
@@ -989,6 +989,23 @@ pub(crate) type ChannelManager = channelmanager::ChannelManager<
 >;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
+
+pub(crate) type P2PGossipSync = lightning::routing::gossip::P2PGossipSync<
+    Arc<NetworkGraph>,
+    Arc<GossipVerifier>,
+    Arc<FilesystemLogger>,
+>;
+
+pub(crate) type RapidGossipSync =
+    lightning_rapid_gossip_sync::RapidGossipSync<Arc<NetworkGraph>, Arc<FilesystemLogger>>;
+
+pub(crate) type GossipSync = lightning_background_processor::GossipSync<
+    Arc<P2PGossipSync>,
+    Arc<RapidGossipSync>,
+    Arc<NetworkGraph>,
+    Arc<GossipVerifier>,
+    Arc<FilesystemLogger>,
+>;
 
 pub(crate) type OnionMessenger = LdkOnionMessenger<
     Arc<LightningEntropySource>,
@@ -4058,7 +4075,7 @@ pub(crate) async fn start_ldk(
         chain_monitor.clone(),
         channel_manager.clone(),
         Some(onion_messenger),
-        GossipSync::p2p(gossip_sync),
+        GossipSync::P2P(gossip_sync),
         peer_manager.clone(),
         NO_LIQUIDITY_MANAGER,
         Some(Arc::clone(&output_sweeper)),
