@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,6 +73,61 @@ impl GossipSource {
             Self::RapidGossipSync { gossip_sync, .. } => Lbp::Rapid(Arc::clone(gossip_sync)),
             Self::P2PNetwork { gossip_sync } => Lbp::P2P(Arc::clone(gossip_sync)),
         }
+    }
+
+    pub(crate) async fn update_rgs_snapshot(&self) -> Result<u32, crate::error::APIError> {
+        let (gossip_sync, server_url, latest_sync_timestamp) = match self {
+            Self::P2PNetwork { .. } => return Ok(0),
+            Self::RapidGossipSync {
+                gossip_sync,
+                server_url,
+                latest_sync_timestamp,
+                ..
+            } => (gossip_sync, server_url, latest_sync_timestamp),
+        };
+
+        let ts = latest_sync_timestamp.load(Ordering::Acquire);
+        let url = format!("{}/{}", server_url.trim_end_matches('/'), ts);
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(RGS_SYNC_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| crate::error::APIError::GossipUpdateFailed(e.to_string()))?;
+
+        let response = client.get(&url).send().await.map_err(|e| {
+            if e.is_timeout() {
+                crate::error::APIError::GossipUpdateTimeout
+            } else {
+                crate::error::APIError::GossipUpdateFailed(e.to_string())
+            }
+        })?;
+
+        if !response.status().is_success() {
+            return Err(crate::error::APIError::GossipUpdateFailed(format!(
+                "HTTP {}",
+                response.status()
+            )));
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| crate::error::APIError::GossipUpdateFailed(e.to_string()))?;
+
+        if bytes.len() > RGS_SNAPSHOT_MAX_SIZE {
+            return Err(crate::error::APIError::GossipUpdateFailed(format!(
+                "snapshot too large: {} bytes",
+                bytes.len()
+            )));
+        }
+
+        let new_timestamp = gossip_sync
+            .update_network_graph(&bytes)
+            .map_err(|e| crate::error::APIError::GossipUpdateFailed(format!("{e:?}")))?;
+
+        latest_sync_timestamp.store(new_timestamp, Ordering::Release);
+        tracing::info!("RGS snapshot applied, new timestamp: {new_timestamp}");
+        Ok(new_timestamp)
     }
 }
 
@@ -183,5 +238,37 @@ mod source_tests {
             source.as_gossip_sync(),
             lightning_background_processor::GossipSync::Rapid(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn update_rgs_snapshot_returns_zero_for_p2p() {
+        let logger = test_logger();
+        let graph = test_graph(Arc::clone(&logger));
+        let source = GossipSource::new_p2p(graph, None, logger);
+        assert_eq!(source.update_rgs_snapshot().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn update_rgs_snapshot_fails_on_http_500() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let logger = test_logger();
+        let graph = test_graph(Arc::clone(&logger));
+        let source = GossipSource::new_rgs(format!("http://{addr}/snapshot"), 0, graph, logger);
+        match source.update_rgs_snapshot().await {
+            Err(crate::error::APIError::GossipUpdateFailed(_)) => {}
+            other => panic!("expected GossipUpdateFailed, got {other:?}"),
+        }
     }
 }
