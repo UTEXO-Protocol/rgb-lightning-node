@@ -67,11 +67,12 @@ use rgb_lib::{
         secp256k1::Secp256k1 as Secp256k1_30,
         ScriptBuf,
     },
+    keys::WitnessVersion,
     utils::{get_account_data, recipient_id_from_script_buf, script_buf_from_recipient_id},
     wallet::{
         rust_only::{check_indexer_url, AssetColoringInfo, ColoringInfo},
-        DatabaseType, Recipient, SinglesigKeys, TransportEndpoint, Wallet as RgbLibWallet,
-        WalletData, WitnessData,
+        DatabaseType, OnlineOptions, Recipient, SinglesigKeys, TransportEndpoint,
+        Wallet as RgbLibWallet, WalletData, WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Fascia, FileContent,
     RgbTransfer, RgbTxid, WitnessOrd,
@@ -122,7 +123,7 @@ use crate::rgb::{
 };
 use crate::signer::vls_adapter::{ExternalSignerBackend, VlsSignerAdapter};
 use crate::signer::{
-    read_key_source_file, validate_bootstrap_ldk_auxiliary_keys,
+    read_key_source_file, validate_bootstrap_payload,
     validate_key_source_matches_bootstrap, ExternalSigner, ExternalSignerAttachment,
     ExternalSignerTransport, SUPPORTED_SIGNER_API_LEVEL,
 };
@@ -2879,7 +2880,7 @@ pub(crate) async fn start_ldk(
                 .into_extended_key()
                 .expect("a valid key should have been provided");
             let master_xprv = &xkey
-                .into_xprv(network)
+                .into_xprv(network.into())
                 .expect("should be possible to get an extended private key");
             let xprv: Xpriv = master_xprv
                 .derive_priv(&Secp256k1_30::new(), &ChildNumber::Hardened { index: 535 })
@@ -2913,14 +2914,17 @@ pub(crate) async fn start_ldk(
     ));
 
     // Initialize the ChainMonitor
-    let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
+    let peer_storage_signer = Arc::clone(&keys_manager);
+    let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new_with_peer_storage_encryptor(
         None,
         Arc::clone(&broadcaster),
         Arc::clone(&logger),
         Arc::clone(&fee_estimator),
         Arc::clone(&persister),
         Arc::clone(&keys_manager),
-        keys_manager.get_peer_storage_key(),
+        Arc::new(move |plaintext: Vec<u8>, random_bytes: [u8; 32]| {
+            peer_storage_signer.encrypt_peer_storage_payload(plaintext, random_bytes)
+        }),
     ));
 
     // Read ChannelMonitor state from disk
@@ -3056,10 +3060,20 @@ pub(crate) async fn start_ldk(
                     )
                 })?
                 .to_string();
-            let (_, account_xpub_vanilla, _) =
-                get_account_data(&bitcoin_network, &mnemonic_str, false).unwrap();
-            let (_, account_xpub_colored, master_fingerprint) =
-                get_account_data(&bitcoin_network, &mnemonic_str, true).unwrap();
+            let (_, account_xpub_vanilla, _) = get_account_data(
+                &bitcoin_network,
+                &mnemonic_str,
+                false,
+                WitnessVersion::Taproot,
+            )
+            .unwrap();
+            let (_, account_xpub_colored, master_fingerprint) = get_account_data(
+                &bitcoin_network,
+                &mnemonic_str,
+                true,
+                WitnessVersion::Taproot,
+            )
+            .unwrap();
             (
                 account_xpub_vanilla.to_string(),
                 account_xpub_colored.to_string(),
@@ -3078,6 +3092,7 @@ pub(crate) async fn start_ldk(
         vanilla_keychain: None,
         master_fingerprint: master_fingerprint.clone(),
         mnemonic: rgb_wallet_mnemonic,
+        witness_version: WitnessVersion::Taproot,
     };
     let mut rgb_wallet = tokio::task::spawn_blocking(move || {
         RgbLibWallet::new(
@@ -3100,7 +3115,11 @@ pub(crate) async fn start_ldk(
     })
     .await
     .unwrap();
-    let rgb_online = rgb_wallet.go_online(false, indexer_url.to_string())?;
+    let rgb_online = rgb_wallet.go_online(OnlineOptions {
+        indexer_url: indexer_url.to_string(),
+        skip_consistency_check: false,
+        vanilla_sync_lookback: 0,
+    })?;
     save_config(
         &static_state.database,
         kv_store.as_ref(),
@@ -3315,8 +3334,10 @@ pub(crate) async fn start_ldk(
             ),
             None => {
                 let bootstrap = external_bootstrap.as_ref().expect("external bootstrap");
-                let seed = crate::signer::types::async_payments_root_seed_bytes(bootstrap)
-                    .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
+                let seed =
+                    crate::signer::types::derive_async_payments_compat_seed_from_bootstrap(
+                        bootstrap,
+                    );
                 AsyncPaymentsPreimageRoot::build_from_seed(
                     &seed,
                     network,
@@ -3727,7 +3748,7 @@ pub(crate) fn attach_external_signer_transport(
             APIError::ExternalSignerProtocolError(msg)
         }
     })?;
-    validate_bootstrap_ldk_auxiliary_keys(&bootstrap)
+    validate_bootstrap_payload(&bootstrap)
         .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
     Ok(ExternalSignerAttachment {
         bootstrap,

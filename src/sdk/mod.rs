@@ -12,7 +12,7 @@ use crate::ldk::{start_ldk, InvoiceType, PaymentInfo, VirtualChannelSessionStatu
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
 use crate::rgb_kv_store::{write_rgb_payment_info_file, RgbKvStoreExt};
 use crate::signer::{
-    read_key_source_file, validate_bootstrap_ldk_auxiliary_keys,
+    read_key_source_file, validate_bootstrap_payload,
     validate_key_source_matches_bootstrap, write_key_source_file, BootstrapData, KeySourceFile,
     SUPPORTED_SIGNER_API_LEVEL,
 };
@@ -63,7 +63,11 @@ use rgb_lib::wallet::{
     Invoice as RgbLibInvoice, Recipient as RgbLibRecipient, RecipientInfo,
     WitnessData as RgbLibWitnessData,
 };
-use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, keys::generate_keys, ContractId, RgbTransport};
+use rgb_lib::{
+    bdk_wallet::keys::bip39::Mnemonic,
+    keys::{generate_keys, WitnessVersion},
+    ContractId, RgbTransport,
+};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::str::FromStr;
@@ -390,7 +394,7 @@ fn validate_external_signer_bootstrap(bootstrap: &BootstrapData) -> Result<(), A
             bootstrap.api_level, SUPPORTED_SIGNER_API_LEVEL
         )));
     }
-    validate_bootstrap_ldk_auxiliary_keys(bootstrap)
+    validate_bootstrap_payload(bootstrap)
         .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))
 }
 
@@ -747,7 +751,8 @@ pub(crate) enum TransactionType {
     RgbSend,
     Drain,
     CreateUtxos,
-    User,
+    SendBtc,
+    Incoming,
 }
 
 #[derive(Debug, PartialEq)]
@@ -757,12 +762,14 @@ pub(crate) enum TransferKind {
     ReceiveWitness,
     Send,
     Inflation,
+    Burn,
 }
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum TransferStatus {
     Initiated,
     WaitingCounterparty,
+    WaitingSafeHeight,
     WaitingConfirmations,
     Settled,
     Failed,
@@ -1688,7 +1695,7 @@ pub(crate) async fn init(
         Some(mnemonic) => Mnemonic::from_str(&mnemonic)
             .map_err(|e| APIError::InvalidMnemonic(e.to_string()))?
             .to_string(),
-        None => generate_keys(state.static_state.network).mnemonic,
+        None => generate_keys(state.static_state.network, WitnessVersion::Taproot).mnemonic,
     };
 
     encrypt_and_save_mnemonic(password, mnemonic.clone(), &state.static_state.database)?;
@@ -1784,6 +1791,32 @@ pub(crate) async fn unlock_with_attached_external_signer(
     state: Arc<AppState>,
     request: UnlockRequest,
 ) -> Result<(), APIError> {
+    struct ChangingStateGuard {
+        state: Arc<AppState>,
+        active: bool,
+    }
+
+    impl ChangingStateGuard {
+        fn new(state: Arc<AppState>) -> Self {
+            Self {
+                state,
+                active: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.active = false;
+        }
+    }
+
+    impl Drop for ChangingStateGuard {
+        fn drop(&mut self) {
+            if self.active {
+                update_changing_state(&self.state, false);
+            }
+        }
+    }
+
     tracing::info!("Attached external-signer unlock started");
     match check_locked(&state).await {
         Ok(unlocked_state) => {
@@ -1797,11 +1830,11 @@ pub(crate) async fn unlock_with_attached_external_signer(
             });
         }
     }
+    let mut changing_state_guard = ChangingStateGuard::new(Arc::clone(&state));
 
     let signer_attachment = match state.get_attached_external_signer().clone() {
         Some(attachment) => attachment,
         None => {
-            update_changing_state(&state, false);
             return Err(APIError::ExternalSignerUnavailable(
                 "attached external signer is not registered".to_string(),
             ));
@@ -1812,13 +1845,9 @@ pub(crate) async fn unlock_with_attached_external_signer(
         .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
     {
         Some(key_source) => key_source,
-        None => {
-            update_changing_state(&state, false);
-            return Err(APIError::ExternalSignerRequired);
-        }
+        None => return Err(APIError::ExternalSignerRequired),
     };
     if validate_key_source_matches_bootstrap(&key_source, &signer_attachment.bootstrap).is_err() {
-        update_changing_state(&state, false);
         return Err(APIError::ExternalSignerMismatch);
     }
 
@@ -1843,14 +1872,12 @@ pub(crate) async fn unlock_with_attached_external_signer(
     .await
     {
         Ok((nlbs, nuap)) => (nlbs, nuap),
-        Err(e) => {
-            update_changing_state(&state, false);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     };
 
     update_unlocked_app_state(&state, Some(new_unlocked_app_state)).await;
     update_ldk_background_services(&state, Some(new_ldk_background_services));
+    changing_state_guard.disarm();
     update_changing_state(&state, false);
     Ok(())
 }
@@ -3927,7 +3954,8 @@ pub(crate) async fn list_transactions(
                 rgb_lib::wallet::TransactionType::RgbSend => TransactionType::RgbSend,
                 rgb_lib::wallet::TransactionType::Drain => TransactionType::Drain,
                 rgb_lib::wallet::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
-                rgb_lib::wallet::TransactionType::User => TransactionType::User,
+                rgb_lib::wallet::TransactionType::SendBtc => TransactionType::SendBtc,
+                rgb_lib::wallet::TransactionType::Incoming => TransactionType::Incoming,
             },
             txid: tx.txid,
             received: tx.received,
@@ -3959,6 +3987,7 @@ pub(crate) async fn list_transfers(
             status: match transfer.status {
                 rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
                 rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
+                rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
                 rgb_lib::TransferStatus::WaitingConfirmations => {
                     TransferStatus::WaitingConfirmations
                 }
@@ -3973,6 +4002,7 @@ pub(crate) async fn list_transfers(
                 rgb_lib::wallet::TransferKind::ReceiveWitness => TransferKind::ReceiveWitness,
                 rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
                 rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
+                rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
             },
             txid: transfer.txid,
             recipient_id: transfer.recipient_id,
@@ -4031,7 +4061,7 @@ mod tests {
     use crate::ldk::attach_external_signer_transport;
     use crate::signer::in_process_transport::InProcessExternalSignerTransport;
     use crate::signer::types::{
-        ChannelPublicKeys, ExternalSignerRequest, ExternalSignerResponse, SpendableOutputUtxo,
+        ChannelPublicKeys, ExternalSignerRequest, ExternalSignerResponse, SpendableOutputSignInput,
         WalletInputMetadata,
     };
     use crate::signer::vls_adapter::ExternalSignerBackend;
@@ -4086,12 +4116,6 @@ mod tests {
     }
 
     fn sample_bootstrap() -> BootstrapData {
-        let seed = [5u8; 32];
-        let (inb, peer, recv) =
-            signer_external::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes(
-                &seed,
-            )
-            .expect("derive ldk aux");
         BootstrapData {
             identity: SignerIdentity {
                 node_id: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -4102,10 +4126,6 @@ mod tests {
             },
             protocol_version: "1".to_string(),
             api_level: 1,
-            ldk_inbound_payment_key_hex: crate::signer::types::hex_encode_lower(&inb),
-            ldk_peer_storage_key_hex: crate::signer::types::hex_encode_lower(&peer),
-            ldk_receive_auth_key_hex: crate::signer::types::hex_encode_lower(&recv),
-            async_payments_root_seed_hex: crate::signer::types::hex_encode_lower(&seed),
         }
     }
 
@@ -4171,6 +4191,108 @@ mod tests {
             Self::unsupported()
         }
 
+        fn node_encrypt_peer_storage_payload(
+            &self,
+            _plaintext_hex: String,
+            _random_bytes_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_decrypt_peer_storage_payload(
+            &self,
+            _ciphertext_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_encrypt_blinded_message_payload(
+            &self,
+            _plaintext_hex: String,
+            _rho_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_decrypt_blinded_message_payload(
+            &self,
+            _ciphertext_hex: String,
+            _rho_hex: String,
+        ) -> Result<(String, bool), RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_get_hmac_for_offer_key(&self) -> Result<String, RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_crypt_for_offer(
+            &self,
+            _bytes_hex: String,
+            _nonce_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_create_inbound_payment(
+            &self,
+            _min_value_msat: Option<u64>,
+            _invoice_expiry_delta_secs: u32,
+            _random_bytes_hex: String,
+            _current_time: u64,
+            _min_final_cltv_expiry_delta: Option<u16>,
+        ) -> Result<(String, String), RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_create_inbound_payment_for_hash(
+            &self,
+            _payment_hash_hex: String,
+            _min_value_msat: Option<u64>,
+            _invoice_expiry_delta_secs: u32,
+            _current_time: u64,
+            _min_final_cltv_expiry_delta: Option<u16>,
+        ) -> Result<String, RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_create_spontaneous_payment_secret(
+            &self,
+            _min_value_msat: Option<u64>,
+            _invoice_expiry_delta_secs: u32,
+            _current_time: u64,
+            _min_final_cltv_expiry_delta: Option<u16>,
+        ) -> Result<String, RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_verify_inbound_payment(
+            &self,
+            _payment_hash_hex: String,
+            _payment_secret_hex: String,
+            _total_msat: u64,
+            _highest_seen_timestamp: u64,
+        ) -> Result<(Option<String>, Option<u16>), RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn node_get_payment_preimage(
+            &self,
+            _payment_hash_hex: String,
+            _payment_secret_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Self::unsupported()
+        }
+
+        fn prepare_async_payments_hashes(
+            &self,
+            _host_node_id_hex: String,
+            _start_index: u64,
+            _batch_size: u32,
+        ) -> Result<Vec<crate::signer::types::AsyncPaymentsHashEntry>, RlnSignerError> {
+            Self::unsupported()
+        }
+
         fn generate_channel_keys_id(
             &self,
             _inbound: bool,
@@ -4190,7 +4312,7 @@ mod tests {
 
         fn sign_spendable_outputs_psbt(
             &self,
-            _utxos: Vec<SpendableOutputUtxo>,
+            _inputs: Vec<SpendableOutputSignInput>,
             _psbt: String,
         ) -> Result<String, RlnSignerError> {
             Self::unsupported()
@@ -4314,6 +4436,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attached_external_unlock_without_registered_signer_resets_changing_state() {
+        let state = mock_locked_state();
+        let res =
+            unlock_with_attached_external_signer(Arc::clone(&state), sample_unlock_request()).await;
+        assert!(matches!(res, Err(APIError::ExternalSignerUnavailable(_))));
+        assert!(!*state.get_changing_state());
+    }
+
+    #[tokio::test]
     async fn attached_external_unlock_with_mismatched_bootstrap_fails() {
         let state = mock_locked_state();
         let bootstrap_a = sample_bootstrap();
@@ -4330,6 +4461,26 @@ mod tests {
             res,
             Err(APIError::ExternalSignerProtocolError(_)) | Err(APIError::ExternalSignerMismatch)
         ));
+    }
+
+    #[tokio::test]
+    async fn attached_external_unlock_with_mismatched_bootstrap_resets_changing_state() {
+        let state = mock_locked_state();
+        let bootstrap_a = sample_bootstrap();
+        init_with_external_signer(state.clone(), KeySourceFile::from_bootstrap(&bootstrap_a))
+            .await
+            .expect("external init");
+
+        let mut bootstrap_b = sample_bootstrap();
+        bootstrap_b.identity.master_fingerprint = "ffffffff".to_string();
+        attach_test_external_signer(&state, bootstrap_b).expect("attach mismatched signer");
+        let res =
+            unlock_with_attached_external_signer(Arc::clone(&state), sample_unlock_request()).await;
+        assert!(matches!(
+            res,
+            Err(APIError::ExternalSignerProtocolError(_)) | Err(APIError::ExternalSignerMismatch)
+        ));
+        assert!(!*state.get_changing_state());
     }
 
     #[tokio::test]

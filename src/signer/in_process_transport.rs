@@ -34,8 +34,9 @@ mod tests {
     use super::*;
     use crate::signer::proto::{decode_signer_response, encode_signer_request};
     use crate::signer::types::{
-        BootstrapData, DerivedAddressMatch, ExternalChannelRequest, ExternalNodeRequest,
-        ExternalNodeResponse, ExternalSignerResponse, SignerIdentity, WalletInputMetadata,
+        AsyncPaymentsHashEntry, BootstrapData, DerivedAddressMatch, ExternalChannelRequest,
+        ExternalNodeRequest, ExternalNodeResponse, ExternalSignerResponse, SignerIdentity,
+        WalletInputMetadata,
     };
     use crate::signer::vls_adapter::ExternalSignerBackend;
 
@@ -49,12 +50,6 @@ mod tests {
         ) -> Result<ExternalSignerResponse, RlnSignerError> {
             match request {
                 ExternalSignerRequest::Bootstrap => {
-                    let seed = [8u8; 32];
-                    let (inb, peer, recv) =
-                        signer_external::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes(
-                            &seed,
-                        )
-                        .expect("derive");
                     Ok(ExternalSignerResponse::Bootstrap(BootstrapData {
                         identity: SignerIdentity {
                             node_id: "node".to_string(),
@@ -64,10 +59,6 @@ mod tests {
                         },
                         protocol_version: "1".to_string(),
                         api_level: 1,
-                        ldk_inbound_payment_key_hex: crate::signer::types::hex_encode_lower(&inb),
-                        ldk_peer_storage_key_hex: crate::signer::types::hex_encode_lower(&peer),
-                        ldk_receive_auth_key_hex: crate::signer::types::hex_encode_lower(&recv),
-                        async_payments_root_seed_hex: crate::signer::types::hex_encode_lower(&seed),
                     }))
                 }
                 ExternalSignerRequest::Node(ExternalNodeRequest::GetNodeId { .. }) => {
@@ -106,6 +97,108 @@ mod tests {
             Err(RlnSignerError::Unsupported("unused".to_string()))
         }
 
+        fn node_encrypt_peer_storage_payload(
+            &self,
+            _plaintext_hex: String,
+            _random_bytes_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_decrypt_peer_storage_payload(
+            &self,
+            _ciphertext_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_encrypt_blinded_message_payload(
+            &self,
+            _plaintext_hex: String,
+            _rho_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_decrypt_blinded_message_payload(
+            &self,
+            _ciphertext_hex: String,
+            _rho_hex: String,
+        ) -> Result<(String, bool), RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_get_hmac_for_offer_key(&self) -> Result<String, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_crypt_for_offer(
+            &self,
+            _bytes_hex: String,
+            _nonce_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_create_inbound_payment(
+            &self,
+            _min_value_msat: Option<u64>,
+            _invoice_expiry_delta_secs: u32,
+            _random_bytes_hex: String,
+            _current_time: u64,
+            _min_final_cltv_expiry_delta: Option<u16>,
+        ) -> Result<(String, String), RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_create_inbound_payment_for_hash(
+            &self,
+            _payment_hash_hex: String,
+            _min_value_msat: Option<u64>,
+            _invoice_expiry_delta_secs: u32,
+            _current_time: u64,
+            _min_final_cltv_expiry_delta: Option<u16>,
+        ) -> Result<String, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_create_spontaneous_payment_secret(
+            &self,
+            _min_value_msat: Option<u64>,
+            _invoice_expiry_delta_secs: u32,
+            _current_time: u64,
+            _min_final_cltv_expiry_delta: Option<u16>,
+        ) -> Result<String, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_verify_inbound_payment(
+            &self,
+            _payment_hash_hex: String,
+            _payment_secret_hex: String,
+            _total_msat: u64,
+            _highest_seen_timestamp: u64,
+        ) -> Result<(Option<String>, Option<u16>), RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn node_get_payment_preimage(
+            &self,
+            _payment_hash_hex: String,
+            _payment_secret_hex: String,
+        ) -> Result<String, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
+        fn prepare_async_payments_hashes(
+            &self,
+            _host_node_id_hex: String,
+            _start_index: u64,
+            _batch_size: u32,
+        ) -> Result<Vec<AsyncPaymentsHashEntry>, RlnSignerError> {
+            Err(RlnSignerError::Unsupported("unused".to_string()))
+        }
+
         fn generate_channel_keys_id(
             &self,
             _inbound: bool,
@@ -125,7 +218,7 @@ mod tests {
 
         fn sign_spendable_outputs_psbt(
             &self,
-            _utxos: Vec<super::super::types::SpendableOutputUtxo>,
+            _inputs: Vec<super::super::types::SpendableOutputSignInput>,
             _psbt: String,
         ) -> Result<String, RlnSignerError> {
             Err(RlnSignerError::Unsupported("unused".to_string()))
@@ -170,9 +263,6 @@ mod tests {
             ExternalSignerResponse::Bootstrap(data) => {
                 assert_eq!(data.identity.node_id, "node");
                 assert_eq!(data.api_level, 1);
-                assert_eq!(data.ldk_inbound_payment_key_hex.len(), 64);
-                assert_eq!(data.ldk_peer_storage_key_hex.len(), 64);
-                assert_eq!(data.ldk_receive_auth_key_hex.len(), 64);
             }
             other => panic!("unexpected response: {other:?}"),
         }

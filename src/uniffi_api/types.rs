@@ -182,7 +182,8 @@ pub enum TransactionType {
     RgbSend,
     Drain,
     CreateUtxos,
-    User,
+    SendBtc,
+    Incoming,
 }
 
 pub struct Transaction {

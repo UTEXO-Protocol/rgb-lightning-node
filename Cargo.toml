@@ -26,6 +26,7 @@ biscuit-auth = "6.0.0"
 bitcoin = "0.32"
 bitcoin-bech32 = "0.13"
 chacha20poly1305 = { version = "0.10.1", features = ["stream"] }
+chacha20 = "0.9.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = "4.5.20"
 dirs = "5.0.1"
@@ -44,13 +45,13 @@ magic-crypt = "4.0.1"
 rand = "0.8.5"
 regex = { version = "1.11", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", rev = "5aabef63b8fc004fa51a143f47c687fc6dc9c0e5", features = [
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", branch = "dev", features = [
     "electrum",
     "esplora",
 ] }
 rln-migration = { path = "migration" }
 # Pinned fork/branch for RGB compatibility work; CI and clones do not require a sibling checkout.
-signer-external = { git = "https://github.com/rmn-boiko/rln-external-signer.git", branch = "feat/rgb-compatibility", default-features = false }
+signer-external = { git = "https://github.com/rmn-boiko/rln-external-signer.git", branch = "feat/followup-review-fix", default-features = false }
 sea-orm = { version = "1.1.19", default-features = false, features = [
     "macros",
     "runtime-tokio-rustls",
@@ -96,18 +97,17 @@ tracing-test = "0.2.5"
 uniffi = { version = "0.28.3", features = ["build"], optional = true }
 
 [patch.crates-io]
-lightning = { git = "https://github.com/rmn-boiko/rust-lightning.git", branch = "feat/external-signer-compatibility" }
-lightning-background-processor = { git = "https://github.com/rmn-boiko/rust-lightning.git", branch = "feat/external-signer-compatibility" }
-lightning-block-sync = { git = "https://github.com/rmn-boiko/rust-lightning.git", branch = "feat/external-signer-compatibility" }
-lightning-dns-resolver = { git = "https://github.com/rmn-boiko/rust-lightning.git", branch = "feat/external-signer-compatibility" }
-lightning-invoice = { git = "https://github.com/rmn-boiko/rust-lightning.git", branch = "feat/external-signer-compatibility" }
-lightning-net-tokio = { git = "https://github.com/rmn-boiko/rust-lightning.git", branch = "feat/external-signer-compatibility" }
-lightning-persister = { git = "https://github.com/rmn-boiko/rust-lightning.git", branch = "feat/external-signer-compatibility" }
-lightning-rapid-gossip-sync = { git = "https://github.com/rmn-boiko/rust-lightning.git", branch = "feat/external-signer-compatibility" }
-# Use the remote RGB compatibility branches; no sibling local checkout required.
-vls-core = { git = "https://github.com/rmn-boiko/vls-core.git", branch = "feat/rgb-compatibility" }
-# Use the remote RGB compatibility fork for the signer protocol adapter.
-vls-protocol-signer = { git = "https://github.com/rmn-boiko/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
+lightning = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", branch = "feat/external-signer-compatibility" }
+lightning-background-processor = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", branch = "feat/external-signer-compatibility" }
+lightning-block-sync = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", branch = "feat/external-signer-compatibility" }
+lightning-dns-resolver = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", branch = "feat/external-signer-compatibility" }
+lightning-invoice = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", branch = "feat/external-signer-compatibility" }
+lightning-net-tokio = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", branch = "feat/external-signer-compatibility" }
+lightning-persister = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", branch = "feat/external-signer-compatibility" }
+lightning-rapid-gossip-sync = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", branch = "feat/external-signer-compatibility" }
+# Use the UTEXO RGB compatibility branches; no sibling local checkout required.
+vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
+vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
 
 [lints.rust.unexpected_cfgs]
 level = "allow"

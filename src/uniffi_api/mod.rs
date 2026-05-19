@@ -921,7 +921,8 @@ impl SdkNode {
                     crate::sdk::TransactionType::RgbSend => TransactionType::RgbSend,
                     crate::sdk::TransactionType::Drain => TransactionType::Drain,
                     crate::sdk::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
-                    crate::sdk::TransactionType::User => TransactionType::User,
+                    crate::sdk::TransactionType::SendBtc => TransactionType::SendBtc,
+                    crate::sdk::TransactionType::Incoming => TransactionType::Incoming,
                 };
                 Ok(Transaction {
                     transaction_type,

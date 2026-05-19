@@ -5,7 +5,7 @@
 pub use signer_external::contract::{
     BootstrapData, ChannelOp, ChannelPublicKeys, ChannelRequest, ChannelResponse,
     DerivedAddressMatch, NodeRequest, NodeResponse, SignerIdentity, SignerRequest, SignerResponse,
-    SpendableOutputUtxo, WalletInputMetadata,
+    SpendableDescriptorKind, SpendableOutputSignInput, WalletDerivationMatch, WalletInputMetadata,
 };
 
 use crate::signer::proto::{decode_signer_request, encode_signer_response};

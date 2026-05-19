@@ -47,7 +47,7 @@ pub(crate) use key_source::{
 pub(crate) use transport::ExternalSignerTransport;
 #[allow(unused_imports)]
 pub(crate) use types::{
-    validate_bootstrap_ldk_auxiliary_keys, BootstrapData, RgbWalletAccountInfo, RlnSignerError,
+    validate_bootstrap_payload, BootstrapData, RgbWalletAccountInfo, RlnSignerError,
     SignerIdentity, SUPPORTED_SIGNER_API_LEVEL,
 };
 

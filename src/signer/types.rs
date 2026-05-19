@@ -1,5 +1,8 @@
 pub(crate) type WalletInputMetadata = signer_external::contract::WalletInputMetadata;
-pub(crate) type SpendableOutputUtxo = signer_external::contract::SpendableOutputUtxo;
+pub(crate) type AsyncPaymentsHashEntry = signer_external::contract::AsyncPaymentsHashEntry;
+pub(crate) type SpendableDescriptorKind = signer_external::contract::SpendableDescriptorKind;
+pub(crate) type SpendableOutputSignInput = signer_external::contract::SpendableOutputSignInput;
+pub(crate) type WalletDerivationMatch = signer_external::contract::WalletDerivationMatch;
 pub(crate) type DerivedAddressMatch = signer_external::contract::DerivedAddressMatch;
 #[allow(dead_code)]
 pub(crate) type SignerIdentity = signer_external::contract::SignerIdentity;
@@ -48,52 +51,12 @@ pub(crate) fn hex_encode_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// Validates LDK auxiliary key hex fields from bootstrap (64 hex chars = 32 bytes each).
-pub(crate) fn validate_bootstrap_ldk_auxiliary_keys(
-    bootstrap: &BootstrapData,
-) -> Result<(), RlnSignerError> {
-    use bitcoin::hex::FromHex;
-    for (label, h) in [
-        (
-            "ldk_inbound_payment_key_hex",
-            bootstrap.ldk_inbound_payment_key_hex.as_str(),
-        ),
-        (
-            "ldk_peer_storage_key_hex",
-            bootstrap.ldk_peer_storage_key_hex.as_str(),
-        ),
-        (
-            "ldk_receive_auth_key_hex",
-            bootstrap.ldk_receive_auth_key_hex.as_str(),
-        ),
-    ] {
-        if h.len() != 64 {
-            return Err(RlnSignerError::Protocol(format!(
-                "{label} must be 64 hex characters (32 bytes), got length {}",
-                h.len()
-            )));
-        }
-        let _ = Vec::<u8>::from_hex(h)
-            .map_err(|e| RlnSignerError::Protocol(format!("{label} is not valid hex: {e}")))?;
-    }
-    let ap = bootstrap.async_payments_root_seed_hex.as_str();
-    if !ap.is_empty() {
-        if ap.len() != 64 {
-            return Err(RlnSignerError::Protocol(format!(
-                "async_payments_root_seed_hex must be empty or 64 hex characters (32 bytes), got length {}",
-                ap.len()
-            )));
-        }
-        let _ = Vec::<u8>::from_hex(ap).map_err(|e| {
-            RlnSignerError::Protocol(format!(
-                "async_payments_root_seed_hex is not valid hex: {e}"
-            ))
-        })?;
-    }
+/// Validates bootstrap payload fields consumed by RLN directly.
+pub(crate) fn validate_bootstrap_payload(_bootstrap: &BootstrapData) -> Result<(), RlnSignerError> {
     Ok(())
 }
 
-/// Legacy deterministic 32-byte seed when [`BootstrapData::async_payments_root_seed_hex`] is empty.
+/// Legacy deterministic 32-byte seed derived from public bootstrap identity.
 pub(crate) fn derive_async_payments_compat_seed_from_bootstrap(
     bootstrap: &BootstrapData,
 ) -> [u8; 32] {
@@ -107,31 +70,11 @@ pub(crate) fn derive_async_payments_compat_seed_from_bootstrap(
     <sha256::Hash as BitcoinHash>::hash(&seed_material).to_byte_array()
 }
 
-/// 32-byte seed for [`crate::async_order::AsyncPaymentsPreimageRoot::build_from_seed`]: host value
-/// when [`BootstrapData::async_payments_root_seed_hex`] is set, otherwise [`derive_async_payments_compat_seed_from_bootstrap`].
-pub(crate) fn async_payments_root_seed_bytes(
-    bootstrap: &BootstrapData,
-) -> Result<[u8; 32], RlnSignerError> {
-    use bitcoin::hex::FromHex;
-    let h = bootstrap.async_payments_root_seed_hex.as_str();
-    if h.is_empty() {
-        return Ok(derive_async_payments_compat_seed_from_bootstrap(bootstrap));
-    }
-    let v = Vec::<u8>::from_hex(h).map_err(|e| {
-        RlnSignerError::Protocol(format!("async_payments_root_seed_hex invalid hex: {e}"))
-    })?;
-    v.try_into().map_err(|_| {
-        RlnSignerError::Protocol(
-            "async_payments_root_seed_hex must decode to exactly 32 bytes".to_string(),
-        )
-    })
-}
-
 #[cfg(test)]
 mod async_payments_seed_tests {
     use super::*;
 
-    fn fake_bootstrap(async_hex: String) -> BootstrapData {
+    fn fake_bootstrap() -> BootstrapData {
         BootstrapData {
             identity: SignerIdentity {
                 node_id: "02".repeat(33),
@@ -141,26 +84,19 @@ mod async_payments_seed_tests {
             },
             protocol_version: "1".to_string(),
             api_level: 1,
-            ldk_inbound_payment_key_hex: "ab".repeat(32),
-            ldk_peer_storage_key_hex: "cd".repeat(32),
-            ldk_receive_auth_key_hex: "ef".repeat(32),
-            async_payments_root_seed_hex: async_hex,
         }
     }
 
     #[test]
-    fn empty_async_seed_uses_compat_derivation() {
-        let b = fake_bootstrap(String::new());
-        validate_bootstrap_ldk_auxiliary_keys(&b).expect("valid");
-        let seed = async_payments_root_seed_bytes(&b).expect("seed");
-        assert_eq!(seed, derive_async_payments_compat_seed_from_bootstrap(&b));
+    fn bootstrap_payload_validation_accepts_identity_only() {
+        let b = fake_bootstrap();
+        validate_bootstrap_payload(&b).expect("valid");
     }
 
     #[test]
-    fn nonempty_async_seed_is_host_bytes() {
-        let b = fake_bootstrap("07".repeat(32));
-        validate_bootstrap_ldk_auxiliary_keys(&b).expect("valid");
-        let seed = async_payments_root_seed_bytes(&b).expect("seed");
-        assert_eq!(seed, [7u8; 32]);
+    fn compat_seed_still_derives_from_public_bootstrap_identity() {
+        let b = fake_bootstrap();
+        let seed = derive_async_payments_compat_seed_from_bootstrap(&b);
+        assert_ne!(seed, [0u8; 32]);
     }
 }

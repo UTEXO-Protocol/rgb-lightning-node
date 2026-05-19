@@ -14,7 +14,7 @@ use lightning::ln::chan_utils::{
     HTLCOutputInCommitment, HolderCommitmentTransaction,
 };
 use lightning::ln::inbound_payment::ExpandedKey;
-use lightning::ln::msgs::{UnsignedChannelAnnouncement, UnsignedGossipMessage};
+use lightning::ln::msgs::{DecodeError, FinalOnionHopData, UnsignedChannelAnnouncement, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::offers::invoice::UnsignedBolt12Invoice;
 use lightning::sign::ecdsa::EcdsaChannelSigner;
@@ -22,7 +22,8 @@ use lightning::sign::{
     ChannelSigner, EntropySource, HTLCDescriptor, InMemorySigner, NodeSigner, OutputSpender,
     PeerStorageKey, ReceiveAuthKey, Recipient, SignerProvider, SpendableOutputDescriptor,
 };
-use lightning::types::payment::PaymentPreimage;
+use lightning::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::util::errors::APIError;
 use lightning_invoice::RawBolt11Invoice;
 
 use super::{
@@ -262,6 +263,122 @@ impl NodeSigner for DynRlnSigner {
         }
     }
 
+    fn crypt_for_offer(&self, payment_id: [u8; 32], nonce: lightning::offers::nonce::Nonce) -> [u8; 32] {
+        match self {
+            Self::Internal(km) => km.crypt_for_offer(payment_id, nonce),
+            Self::External(es) => es.crypt_for_offer(payment_id, nonce),
+        }
+    }
+
+    fn hmac_for_offer(&self) -> bitcoin::hashes::hmac::HmacEngine<bitcoin::hashes::sha256::Hash> {
+        match self {
+            Self::Internal(km) => km.hmac_for_offer(),
+            Self::External(es) => es.hmac_for_offer(),
+        }
+    }
+
+    fn create_inbound_payment(
+        &self,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        random_bytes: [u8; 32],
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<(PaymentHash, PaymentSecret), ()> {
+        match self {
+            Self::Internal(km) => km.create_inbound_payment(
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                random_bytes,
+                current_time,
+                min_final_cltv_expiry_delta,
+            ),
+            Self::External(es) => es.create_inbound_payment(
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                random_bytes,
+                current_time,
+                min_final_cltv_expiry_delta,
+            ),
+        }
+    }
+
+    fn create_inbound_payment_for_hash(
+        &self,
+        payment_hash: PaymentHash,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<PaymentSecret, ()> {
+        match self {
+            Self::Internal(km) => km.create_inbound_payment_for_hash(
+                payment_hash,
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                current_time,
+                min_final_cltv_expiry_delta,
+            ),
+            Self::External(es) => es.create_inbound_payment_for_hash(
+                payment_hash,
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                current_time,
+                min_final_cltv_expiry_delta,
+            ),
+        }
+    }
+
+    fn create_spontaneous_payment_secret(
+        &self,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<PaymentSecret, ()> {
+        match self {
+            Self::Internal(km) => km.create_spontaneous_payment_secret(
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                current_time,
+                min_final_cltv_expiry_delta,
+            ),
+            Self::External(es) => es.create_spontaneous_payment_secret(
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                current_time,
+                min_final_cltv_expiry_delta,
+            ),
+        }
+    }
+
+    fn verify_inbound_payment(
+        &self,
+        payment_hash: PaymentHash,
+        payment_data: &FinalOnionHopData,
+        highest_seen_timestamp: u64,
+    ) -> Result<(Option<PaymentPreimage>, Option<u16>), ()> {
+        match self {
+            Self::Internal(km) => {
+                km.verify_inbound_payment(payment_hash, payment_data, highest_seen_timestamp)
+            }
+            Self::External(es) => {
+                es.verify_inbound_payment(payment_hash, payment_data, highest_seen_timestamp)
+            }
+        }
+    }
+
+    fn get_payment_preimage(
+        &self,
+        payment_hash: PaymentHash,
+        payment_secret: PaymentSecret,
+    ) -> Result<PaymentPreimage, APIError> {
+        match self {
+            Self::Internal(km) => km.get_payment_preimage(payment_hash, payment_secret),
+            Self::External(es) => es.get_payment_preimage(payment_hash, payment_secret),
+        }
+    }
+
     fn get_peer_storage_key(&self) -> PeerStorageKey {
         match self {
             Self::Internal(km) => km.get_peer_storage_key(),
@@ -269,10 +386,50 @@ impl NodeSigner for DynRlnSigner {
         }
     }
 
+    fn encrypt_peer_storage_payload(
+        &self,
+        plaintext: Vec<u8>,
+        random_bytes: [u8; 32],
+    ) -> Vec<u8> {
+        match self {
+            Self::Internal(km) => km.encrypt_peer_storage_payload(plaintext, random_bytes),
+            Self::External(es) => es.encrypt_peer_storage_payload(plaintext, random_bytes),
+        }
+    }
+
+    fn decrypt_peer_storage_payload(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, ()> {
+        match self {
+            Self::Internal(km) => km.decrypt_peer_storage_payload(ciphertext),
+            Self::External(es) => es.decrypt_peer_storage_payload(ciphertext),
+        }
+    }
+
     fn get_receive_auth_key(&self) -> ReceiveAuthKey {
         match self {
             Self::Internal(km) => km.get_receive_auth_key(),
             Self::External(es) => es.get_receive_auth_key(),
+        }
+    }
+
+    fn encrypt_blinded_message_payload(
+        &self,
+        plaintext: Vec<u8>,
+        rho: [u8; 32],
+    ) -> Vec<u8> {
+        match self {
+            Self::Internal(km) => km.encrypt_blinded_message_payload(plaintext, rho),
+            Self::External(es) => es.encrypt_blinded_message_payload(plaintext, rho),
+        }
+    }
+
+    fn decrypt_blinded_message_payload(
+        &self,
+        ciphertext: &[u8],
+        rho: [u8; 32],
+    ) -> Result<(Vec<u8>, bool), DecodeError> {
+        match self {
+            Self::Internal(km) => km.decrypt_blinded_message_payload(ciphertext, rho),
+            Self::External(es) => es.decrypt_blinded_message_payload(ciphertext, rho),
         }
     }
 
@@ -338,14 +495,24 @@ impl SignerProvider for DynRlnSigner {
         match self {
             Self::Internal(km) => km.generate_channel_keys_id(inbound, user_channel_id),
             Self::External(es) => {
-                let hex_id = es
-                    .generate_channel_keys_id(inbound, 0, user_channel_id)
-                    .unwrap_or_else(|_| "00".repeat(32));
-                let bytes = Vec::<u8>::from_hex(&hex_id).unwrap_or_else(|_| vec![0u8; 32]);
-                let mut out = [0u8; 32];
-                if bytes.len() >= 32 {
-                    out.copy_from_slice(&bytes[..32]);
+                let hex_id = es.generate_channel_keys_id(inbound, 0, user_channel_id).unwrap_or_else(|e| {
+                    panic!(
+                        "external signer generate_channel_keys_id failed: inbound={inbound} user_channel_id={user_channel_id} error={e}"
+                    )
+                });
+                let bytes = Vec::<u8>::from_hex(&hex_id).unwrap_or_else(|e| {
+                    panic!(
+                        "external signer generate_channel_keys_id returned invalid hex: inbound={inbound} user_channel_id={user_channel_id} hex={hex_id} error={e}"
+                    )
+                });
+                if bytes.len() < 32 {
+                    panic!(
+                        "external signer generate_channel_keys_id returned too few bytes: inbound={inbound} user_channel_id={user_channel_id} len={} hex={hex_id}",
+                        bytes.len()
+                    );
                 }
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&bytes[..32]);
                 out
             }
         }

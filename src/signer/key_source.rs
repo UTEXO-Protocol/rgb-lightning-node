@@ -121,12 +121,6 @@ mod tests {
     use crate::signer::types::SignerIdentity;
 
     fn sample_bootstrap() -> BootstrapData {
-        let seed = [6u8; 32];
-        let (inb, peer, recv) =
-            signer_external::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes(
-                &seed,
-            )
-            .expect("derive ldk aux");
         BootstrapData {
             identity: SignerIdentity {
                 node_id: "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -137,10 +131,6 @@ mod tests {
             },
             protocol_version: "v1".to_string(),
             api_level: 1,
-            ldk_inbound_payment_key_hex: crate::signer::types::hex_encode_lower(&inb),
-            ldk_peer_storage_key_hex: crate::signer::types::hex_encode_lower(&peer),
-            ldk_receive_auth_key_hex: crate::signer::types::hex_encode_lower(&recv),
-            async_payments_root_seed_hex: crate::signer::types::hex_encode_lower(&seed),
         }
     }
 

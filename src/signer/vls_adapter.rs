@@ -1,9 +1,9 @@
 use super::proto::{decode_signer_response, encode_signer_request};
 use super::transport::ExternalSignerTransport;
 use super::types::{
-    BootstrapData, ChannelPublicKeys, DerivedAddressMatch, ExternalChannelRequest,
-    ExternalNodeRequest, ExternalNodeResponse, ExternalSignerRequest, ExternalSignerResponse,
-    RlnSignerError, SpendableOutputUtxo, WalletInputMetadata,
+    AsyncPaymentsHashEntry, BootstrapData, ChannelPublicKeys, DerivedAddressMatch,
+    ExternalChannelRequest, ExternalNodeRequest, ExternalNodeResponse, ExternalSignerRequest,
+    ExternalSignerResponse, RlnSignerError, SpendableOutputSignInput, WalletInputMetadata,
 };
 use std::sync::Arc;
 
@@ -23,6 +23,72 @@ pub(crate) trait ExternalSignerBackend: Send + Sync {
         channel_keys_id_hex: String,
     ) -> Result<String, RlnSignerError>;
     fn node_get_shutdown_scriptpubkey(&self) -> Result<String, RlnSignerError>;
+    fn node_encrypt_peer_storage_payload(
+        &self,
+        plaintext_hex: String,
+        random_bytes_hex: String,
+    ) -> Result<String, RlnSignerError>;
+    fn node_decrypt_peer_storage_payload(
+        &self,
+        ciphertext_hex: String,
+    ) -> Result<String, RlnSignerError>;
+    fn node_encrypt_blinded_message_payload(
+        &self,
+        plaintext_hex: String,
+        rho_hex: String,
+    ) -> Result<String, RlnSignerError>;
+    fn node_decrypt_blinded_message_payload(
+        &self,
+        ciphertext_hex: String,
+        rho_hex: String,
+    ) -> Result<(String, bool), RlnSignerError>;
+    fn node_get_hmac_for_offer_key(&self) -> Result<String, RlnSignerError>;
+    fn node_crypt_for_offer(
+        &self,
+        bytes_hex: String,
+        nonce_hex: String,
+    ) -> Result<String, RlnSignerError>;
+    fn node_create_inbound_payment(
+        &self,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        random_bytes_hex: String,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<(String, String), RlnSignerError>;
+    fn node_create_inbound_payment_for_hash(
+        &self,
+        payment_hash_hex: String,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<String, RlnSignerError>;
+    fn node_create_spontaneous_payment_secret(
+        &self,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<String, RlnSignerError>;
+    fn node_verify_inbound_payment(
+        &self,
+        payment_hash_hex: String,
+        payment_secret_hex: String,
+        total_msat: u64,
+        highest_seen_timestamp: u64,
+    ) -> Result<(Option<String>, Option<u16>), RlnSignerError>;
+    fn node_get_payment_preimage(
+        &self,
+        payment_hash_hex: String,
+        payment_secret_hex: String,
+    ) -> Result<String, RlnSignerError>;
+    fn prepare_async_payments_hashes(
+        &self,
+        host_node_id_hex: String,
+        start_index: u64,
+        batch_size: u32,
+    ) -> Result<Vec<AsyncPaymentsHashEntry>, RlnSignerError>;
     fn generate_channel_keys_id(
         &self,
         inbound: bool,
@@ -36,7 +102,7 @@ pub(crate) trait ExternalSignerBackend: Send + Sync {
     ) -> Result<(String, ChannelPublicKeys), RlnSignerError>;
     fn sign_spendable_outputs_psbt(
         &self,
-        utxos: Vec<SpendableOutputUtxo>,
+        inputs: Vec<SpendableOutputSignInput>,
         psbt: String,
     ) -> Result<String, RlnSignerError>;
     fn sign_rgb_psbt(
@@ -134,6 +200,259 @@ impl ExternalSignerBackend for VlsSignerAdapter {
         }
     }
 
+    fn node_encrypt_peer_storage_payload(
+        &self,
+        plaintext_hex: String,
+        random_bytes_hex: String,
+    ) -> Result<String, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::EncryptPeerStoragePayload {
+                plaintext_hex,
+                random_bytes_hex,
+            },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::PeerStoragePayload {
+                bytes_hex,
+            }) => Ok(bytes_hex),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for encrypt_peer_storage_payload: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_decrypt_peer_storage_payload(
+        &self,
+        ciphertext_hex: String,
+    ) -> Result<String, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::DecryptPeerStoragePayload { ciphertext_hex },
+        ))? {
+            ExternalSignerResponse::Node(
+                ExternalNodeResponse::DecryptedPeerStoragePayload { bytes_hex },
+            ) => Ok(bytes_hex),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for decrypt_peer_storage_payload: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_encrypt_blinded_message_payload(
+        &self,
+        plaintext_hex: String,
+        rho_hex: String,
+    ) -> Result<String, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::EncryptBlindedMessagePayload {
+                plaintext_hex,
+                rho_hex,
+            },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::BlindedMessagePayload {
+                bytes_hex,
+            }) => Ok(bytes_hex),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for encrypt_blinded_message_payload: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_decrypt_blinded_message_payload(
+        &self,
+        ciphertext_hex: String,
+        rho_hex: String,
+    ) -> Result<(String, bool), RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::DecryptBlindedMessagePayload {
+                ciphertext_hex,
+                rho_hex,
+            },
+        ))? {
+            ExternalSignerResponse::Node(
+                ExternalNodeResponse::DecryptedBlindedMessagePayload {
+                    bytes_hex,
+                    used_aad,
+                },
+            ) => Ok((bytes_hex, used_aad)),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for decrypt_blinded_message_payload: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_get_hmac_for_offer_key(&self) -> Result<String, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::GetHmacForOfferKey,
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::HmacForOfferKey { key_hex }) => {
+                Ok(key_hex)
+            }
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for get_hmac_for_offer_key: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_crypt_for_offer(
+        &self,
+        bytes_hex: String,
+        nonce_hex: String,
+    ) -> Result<String, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::CryptForOffer { bytes_hex, nonce_hex },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::CryptForOffer { bytes_hex }) => {
+                Ok(bytes_hex)
+            }
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for crypt_for_offer: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_create_inbound_payment(
+        &self,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        random_bytes_hex: String,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<(String, String), RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::CreateInboundPayment {
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                random_bytes_hex,
+                current_time,
+                min_final_cltv_expiry_delta,
+            },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::PaymentHashAndSecret {
+                payment_hash_hex,
+                payment_secret_hex,
+            }) => Ok((payment_hash_hex, payment_secret_hex)),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for create_inbound_payment: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_create_inbound_payment_for_hash(
+        &self,
+        payment_hash_hex: String,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<String, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::CreateInboundPaymentForHash {
+                payment_hash_hex,
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                current_time,
+                min_final_cltv_expiry_delta,
+            },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::PaymentSecret {
+                payment_secret_hex,
+            }) => Ok(payment_secret_hex),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for create_inbound_payment_for_hash: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_create_spontaneous_payment_secret(
+        &self,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    ) -> Result<String, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::CreateSpontaneousPaymentSecret {
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                current_time,
+                min_final_cltv_expiry_delta,
+            },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::PaymentSecret {
+                payment_secret_hex,
+            }) => Ok(payment_secret_hex),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for create_spontaneous_payment_secret: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_verify_inbound_payment(
+        &self,
+        payment_hash_hex: String,
+        payment_secret_hex: String,
+        total_msat: u64,
+        highest_seen_timestamp: u64,
+    ) -> Result<(Option<String>, Option<u16>), RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::VerifyInboundPayment {
+                payment_hash_hex,
+                payment_secret_hex,
+                total_msat,
+                highest_seen_timestamp,
+            },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::VerifyInboundPayment {
+                payment_preimage_hex,
+                min_final_cltv_expiry_delta,
+            }) => Ok((payment_preimage_hex, min_final_cltv_expiry_delta)),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for verify_inbound_payment: {other:?}"
+            ))),
+        }
+    }
+
+    fn node_get_payment_preimage(
+        &self,
+        payment_hash_hex: String,
+        payment_secret_hex: String,
+    ) -> Result<String, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::GetPaymentPreimage {
+                payment_hash_hex,
+                payment_secret_hex,
+            },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::PaymentPreimage {
+                payment_preimage_hex,
+            }) => Ok(payment_preimage_hex),
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for get_payment_preimage: {other:?}"
+            ))),
+        }
+    }
+
+    fn prepare_async_payments_hashes(
+        &self,
+        host_node_id_hex: String,
+        start_index: u64,
+        batch_size: u32,
+    ) -> Result<Vec<AsyncPaymentsHashEntry>, RlnSignerError> {
+        match self.call(ExternalSignerRequest::Node(
+            ExternalNodeRequest::PrepareAsyncPaymentsHashes {
+                host_node_id_hex,
+                start_index,
+                batch_size,
+            },
+        ))? {
+            ExternalSignerResponse::Node(ExternalNodeResponse::AsyncPaymentsHashes { hashes }) => {
+                Ok(hashes)
+            }
+            other => Err(RlnSignerError::Protocol(format!(
+                "unexpected response for prepare_async_payments_hashes: {other:?}"
+            ))),
+        }
+    }
+
     fn generate_channel_keys_id(
         &self,
         inbound: bool,
@@ -196,10 +515,10 @@ impl ExternalSignerBackend for VlsSignerAdapter {
 
     fn sign_spendable_outputs_psbt(
         &self,
-        utxos: Vec<SpendableOutputUtxo>,
+        inputs: Vec<SpendableOutputSignInput>,
         psbt: String,
     ) -> Result<String, RlnSignerError> {
-        match self.call(ExternalSignerRequest::SignSpendableOutputsPsbt { utxos, psbt })? {
+        match self.call(ExternalSignerRequest::SignSpendableOutputsPsbt { inputs, psbt })? {
             ExternalSignerResponse::SignedPsbt { psbt } => Ok(psbt),
             other => Err(RlnSignerError::Protocol(format!(
                 "unexpected response for sign_spendable_outputs_psbt: {other:?}"
@@ -279,12 +598,6 @@ mod tests {
             })?;
             let response = match req {
                 ExternalSignerRequest::Bootstrap => {
-                    let seed = [4u8; 32];
-                    let (inb, peer, recv) =
-                        signer_external::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes(
-                            &seed,
-                        )
-                        .expect("derive");
                     ExternalSignerResponse::Bootstrap(BootstrapData {
                         identity: SignerIdentity {
                             node_id: "02".repeat(33),
@@ -294,10 +607,6 @@ mod tests {
                         },
                         protocol_version: "v1".to_string(),
                         api_level: 1,
-                        ldk_inbound_payment_key_hex: crate::signer::types::hex_encode_lower(&inb),
-                        ldk_peer_storage_key_hex: crate::signer::types::hex_encode_lower(&peer),
-                        ldk_receive_auth_key_hex: crate::signer::types::hex_encode_lower(&recv),
-                        async_payments_root_seed_hex: crate::signer::types::hex_encode_lower(&seed),
                     })
                 }
                 ExternalSignerRequest::Node(ExternalNodeRequest::GetNodeId { .. }) => {
@@ -318,6 +627,70 @@ mod tests {
                         bytes_hex: "ab".repeat(32),
                     })
                 }
+                ExternalSignerRequest::Node(
+                    ExternalNodeRequest::EncryptPeerStoragePayload {
+                        plaintext_hex,
+                        ..
+                    },
+                ) => ExternalSignerResponse::Node(
+                    ExternalNodeResponse::PeerStoragePayload {
+                        bytes_hex: plaintext_hex,
+                    },
+                ),
+                ExternalSignerRequest::Node(
+                    ExternalNodeRequest::DecryptPeerStoragePayload {
+                        ciphertext_hex,
+                    },
+                ) => ExternalSignerResponse::Node(
+                    ExternalNodeResponse::DecryptedPeerStoragePayload {
+                        bytes_hex: ciphertext_hex,
+                    },
+                ),
+                ExternalSignerRequest::Node(
+                    ExternalNodeRequest::EncryptBlindedMessagePayload {
+                        plaintext_hex,
+                        ..
+                    },
+                ) => ExternalSignerResponse::Node(
+                    ExternalNodeResponse::BlindedMessagePayload {
+                        bytes_hex: plaintext_hex,
+                    },
+                ),
+                ExternalSignerRequest::Node(
+                    ExternalNodeRequest::DecryptBlindedMessagePayload {
+                        ciphertext_hex,
+                        ..
+                    },
+                ) => ExternalSignerResponse::Node(
+                    ExternalNodeResponse::DecryptedBlindedMessagePayload {
+                        bytes_hex: ciphertext_hex,
+                        used_aad: true,
+                    },
+                ),
+                ExternalSignerRequest::Node(ExternalNodeRequest::GetHmacForOfferKey) => {
+                    ExternalSignerResponse::Node(ExternalNodeResponse::HmacForOfferKey {
+                        key_hex: "12".repeat(32),
+                    })
+                }
+                ExternalSignerRequest::Node(ExternalNodeRequest::PrepareAsyncPaymentsHashes {
+                    start_index,
+                    batch_size,
+                    ..
+                }) => ExternalSignerResponse::Node(
+                    ExternalNodeResponse::AsyncPaymentsHashes {
+                        hashes: (0..batch_size as u64)
+                            .map(|offset| super::types::AsyncPaymentsHashEntry {
+                                hash_index: start_index + offset,
+                                payment_hash_hex: format!("{:064x}", start_index + offset),
+                            })
+                            .collect(),
+                    },
+                ),
+                ExternalSignerRequest::Node(ExternalNodeRequest::CryptForOffer {
+                    bytes_hex, ..
+                }) => ExternalSignerResponse::Node(ExternalNodeResponse::CryptForOffer {
+                    bytes_hex,
+                }),
                 ExternalSignerRequest::Channel(ExternalChannelRequest::GenerateChannelKeysId {
                     ..
                 }) => ExternalSignerResponse::Channel(
@@ -464,12 +837,6 @@ mod tests {
                     })
                 }
                 ExternalSignerRequest::Bootstrap => {
-                    let seed = [4u8; 32];
-                    let (inb, peer, recv) =
-                        signer_external::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes(
-                            &seed,
-                        )
-                        .expect("derive");
                     ExternalSignerResponse::Bootstrap(BootstrapData {
                         identity: SignerIdentity {
                             node_id: "02".repeat(33),
@@ -479,10 +846,6 @@ mod tests {
                         },
                         protocol_version: "v1".to_string(),
                         api_level: 1,
-                        ldk_inbound_payment_key_hex: crate::signer::types::hex_encode_lower(&inb),
-                        ldk_peer_storage_key_hex: crate::signer::types::hex_encode_lower(&peer),
-                        ldk_receive_auth_key_hex: crate::signer::types::hex_encode_lower(&recv),
-                        async_payments_root_seed_hex: crate::signer::types::hex_encode_lower(&seed),
                     })
                 }
                 _ => ExternalSignerResponse::Node(ExternalNodeResponse::RandomBytes {

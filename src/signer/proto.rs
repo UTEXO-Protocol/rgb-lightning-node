@@ -1,8 +1,9 @@
 use prost::Message;
 use signer_external::contract::{
-    BootstrapData, ChannelHtlc, ChannelOp, ChannelPublicKeys, ChannelRequest, ChannelResponse,
-    DerivedAddressMatch, NodeRequest, NodeResponse, SignerIdentity, SignerRequest, SignerResponse,
-    SpendableOutputUtxo, WalletInputMetadata,
+    AsyncPaymentsHashEntry, BootstrapData, ChannelHtlc, ChannelOp, ChannelPublicKeys,
+    ChannelRequest, ChannelResponse, DerivedAddressMatch, NodeRequest, NodeResponse,
+    SignerIdentity, SignerRequest, SignerResponse, SpendableDescriptorKind,
+    SpendableOutputSignInput, WalletDerivationMatch, WalletInputMetadata,
 };
 
 use super::types::RlnSignerError;
@@ -43,14 +44,6 @@ struct BootstrapDataV1 {
     pub protocol_version: String,
     #[prost(uint32, tag = "3")]
     pub api_level: u32,
-    #[prost(string, tag = "4")]
-    pub ldk_inbound_payment_key_hex: String,
-    #[prost(string, tag = "5")]
-    pub ldk_peer_storage_key_hex: String,
-    #[prost(string, tag = "6")]
-    pub ldk_receive_auth_key_hex: String,
-    #[prost(string, tag = "7")]
-    pub async_payments_root_seed_hex: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -100,6 +93,108 @@ struct EcdhV1 {
 }
 
 #[derive(Clone, PartialEq, Message)]
+struct CryptForOfferV1 {
+    #[prost(string, tag = "1")]
+    pub bytes_hex: String,
+    #[prost(string, tag = "2")]
+    pub nonce_hex: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct BlindedMessagePayloadV1 {
+    #[prost(string, tag = "1")]
+    pub bytes_hex: String,
+    #[prost(string, tag = "2")]
+    pub rho_hex: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct PeerStoragePayloadV1 {
+    #[prost(string, tag = "1")]
+    pub bytes_hex: String,
+    #[prost(string, optional, tag = "2")]
+    pub random_bytes_hex: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CreateInboundPaymentV1 {
+    #[prost(uint64, optional, tag = "1")]
+    pub min_value_msat: Option<u64>,
+    #[prost(uint32, tag = "2")]
+    pub invoice_expiry_delta_secs: u32,
+    #[prost(string, tag = "3")]
+    pub random_bytes_hex: String,
+    #[prost(uint64, tag = "4")]
+    pub current_time: u64,
+    #[prost(uint32, optional, tag = "5")]
+    pub min_final_cltv_expiry_delta: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CreateInboundPaymentForHashV1 {
+    #[prost(string, tag = "1")]
+    pub payment_hash_hex: String,
+    #[prost(uint64, optional, tag = "2")]
+    pub min_value_msat: Option<u64>,
+    #[prost(uint32, tag = "3")]
+    pub invoice_expiry_delta_secs: u32,
+    #[prost(uint64, tag = "4")]
+    pub current_time: u64,
+    #[prost(uint32, optional, tag = "5")]
+    pub min_final_cltv_expiry_delta: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CreateSpontaneousPaymentSecretV1 {
+    #[prost(uint64, optional, tag = "1")]
+    pub min_value_msat: Option<u64>,
+    #[prost(uint32, tag = "2")]
+    pub invoice_expiry_delta_secs: u32,
+    #[prost(uint64, tag = "3")]
+    pub current_time: u64,
+    #[prost(uint32, optional, tag = "4")]
+    pub min_final_cltv_expiry_delta: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct VerifyInboundPaymentV1 {
+    #[prost(string, tag = "1")]
+    pub payment_hash_hex: String,
+    #[prost(string, tag = "2")]
+    pub payment_secret_hex: String,
+    #[prost(uint64, tag = "3")]
+    pub total_msat: u64,
+    #[prost(uint64, tag = "4")]
+    pub highest_seen_timestamp: u64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GetPaymentPreimageV1 {
+    #[prost(string, tag = "1")]
+    pub payment_hash_hex: String,
+    #[prost(string, tag = "2")]
+    pub payment_secret_hex: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct PrepareAsyncPaymentsHashesV1 {
+    #[prost(string, tag = "1")]
+    pub host_node_id_hex: String,
+    #[prost(uint64, tag = "2")]
+    pub start_index: u64,
+    #[prost(uint32, tag = "3")]
+    pub batch_size: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AsyncPaymentsHashEntryV1 {
+    #[prost(uint64, tag = "1")]
+    pub hash_index: u64,
+    #[prost(string, tag = "2")]
+    pub payment_hash_hex: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
 struct SignInvoiceV1 {
     #[prost(string, tag = "1")]
     pub hrp: String,
@@ -127,7 +222,7 @@ struct SignMessageV1 {
 
 #[derive(Clone, PartialEq, Message)]
 struct NodeRequestV1 {
-    #[prost(oneof = "node_request_v1::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(oneof = "node_request_v1::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24")]
     pub kind: Option<node_request_v1::Kind>,
 }
 
@@ -143,6 +238,30 @@ mod node_request_v1 {
         GetShutdownScriptpubkey(EmptyV1),
         #[prost(message, tag = "4")]
         GetSecureRandomBytes(EmptyV1),
+        #[prost(message, tag = "23")]
+        EncryptPeerStoragePayload(PeerStoragePayloadV1),
+        #[prost(message, tag = "24")]
+        DecryptPeerStoragePayload(PeerStoragePayloadV1),
+        #[prost(message, tag = "21")]
+        EncryptBlindedMessagePayload(BlindedMessagePayloadV1),
+        #[prost(message, tag = "22")]
+        DecryptBlindedMessagePayload(BlindedMessagePayloadV1),
+        #[prost(message, tag = "10")]
+        GetHmacForOfferKey(EmptyV1),
+        #[prost(message, tag = "11")]
+        CryptForOffer(CryptForOfferV1),
+        #[prost(message, tag = "15")]
+        PrepareAsyncPaymentsHashes(PrepareAsyncPaymentsHashesV1),
+        #[prost(message, tag = "16")]
+        CreateInboundPayment(CreateInboundPaymentV1),
+        #[prost(message, tag = "17")]
+        CreateInboundPaymentForHash(CreateInboundPaymentForHashV1),
+        #[prost(message, tag = "18")]
+        CreateSpontaneousPaymentSecret(CreateSpontaneousPaymentSecretV1),
+        #[prost(message, tag = "19")]
+        VerifyInboundPayment(VerifyInboundPaymentV1),
+        #[prost(message, tag = "20")]
+        GetPaymentPreimage(GetPaymentPreimageV1),
         #[prost(message, tag = "5")]
         Ecdh(EcdhV1),
         #[prost(message, tag = "6")]
@@ -175,6 +294,26 @@ struct RandomBytesV1 {
 }
 
 #[derive(Clone, PartialEq, Message)]
+struct HmacForOfferKeyV1 {
+    #[prost(string, tag = "1")]
+    pub key_hex: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CryptForOfferResponseV1 {
+    #[prost(string, tag = "1")]
+    pub bytes_hex: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct DecryptedBlindedMessagePayloadResponseV1 {
+    #[prost(string, tag = "1")]
+    pub bytes_hex: String,
+    #[prost(bool, tag = "2")]
+    pub used_aad: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
 struct EcdhResponseV1 {
     #[prost(string, tag = "1")]
     pub shared_secret_hex: String,
@@ -196,7 +335,7 @@ struct SignatureV1 {
 
 #[derive(Clone, PartialEq, Message)]
 struct NodeResponseV1 {
-    #[prost(oneof = "node_response_v1::Kind", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(oneof = "node_response_v1::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18")]
     pub kind: Option<node_response_v1::Kind>,
 }
 
@@ -210,6 +349,28 @@ mod node_response_v1 {
         Script(ScriptV1),
         #[prost(message, tag = "3")]
         RandomBytes(RandomBytesV1),
+        #[prost(message, tag = "17")]
+        PeerStoragePayload(RandomBytesV1),
+        #[prost(message, tag = "18")]
+        DecryptedPeerStoragePayload(RandomBytesV1),
+        #[prost(message, tag = "15")]
+        BlindedMessagePayload(RandomBytesV1),
+        #[prost(message, tag = "16")]
+        DecryptedBlindedMessagePayload(DecryptedBlindedMessagePayloadResponseV1),
+        #[prost(message, tag = "7")]
+        HmacForOfferKey(HmacForOfferKeyV1),
+        #[prost(message, tag = "8")]
+        CryptForOffer(CryptForOfferResponseV1),
+        #[prost(message, tag = "10")]
+        AsyncPaymentsHashes(AsyncPaymentsHashesV1),
+        #[prost(message, tag = "11")]
+        PaymentHashAndSecret(PaymentHashAndSecretV1),
+        #[prost(message, tag = "12")]
+        PaymentSecret(PaymentSecretV1),
+        #[prost(message, tag = "13")]
+        VerifyInboundPayment(VerifyInboundPaymentResponseV1),
+        #[prost(message, tag = "14")]
+        PaymentPreimage(PaymentPreimageV1),
         #[prost(message, tag = "4")]
         Ecdh(EcdhResponseV1),
         #[prost(message, tag = "5")]
@@ -217,6 +378,40 @@ mod node_response_v1 {
         #[prost(message, tag = "6")]
         Signature(SignatureV1),
     }
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AsyncPaymentsHashesV1 {
+    #[prost(message, repeated, tag = "1")]
+    pub hashes: Vec<AsyncPaymentsHashEntryV1>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct PaymentHashAndSecretV1 {
+    #[prost(string, tag = "1")]
+    pub payment_hash_hex: String,
+    #[prost(string, tag = "2")]
+    pub payment_secret_hex: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct PaymentSecretV1 {
+    #[prost(string, tag = "1")]
+    pub payment_secret_hex: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct VerifyInboundPaymentResponseV1 {
+    #[prost(string, optional, tag = "1")]
+    pub payment_preimage_hex: Option<String>,
+    #[prost(uint32, optional, tag = "2")]
+    pub min_final_cltv_expiry_delta: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct PaymentPreimageV1 {
+    #[prost(string, tag = "1")]
+    pub payment_preimage_hex: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -596,55 +791,117 @@ mod channel_response_v1 {
 }
 
 #[derive(Clone, PartialEq, Message)]
-struct SpendableOutputUtxoV1 {
+struct WalletDerivationMatchV1 {
     #[prost(string, tag = "1")]
-    pub txid_hex: String,
+    pub account_name: String,
     #[prost(uint32, tag = "2")]
-    pub vout: u32,
-    #[prost(uint64, tag = "3")]
-    pub amount_sat: u64,
-    #[prost(uint32, tag = "4")]
     pub keyindex: u32,
-    #[prost(bool, tag = "5")]
-    pub is_p2sh: bool,
-    #[prost(string, tag = "6")]
-    pub script_pubkey_hex: String,
-    #[prost(bool, tag = "7")]
-    pub is_in_coinbase: bool,
+    #[prost(string, tag = "3")]
+    pub derivation_path: String,
 }
 
-impl From<SpendableOutputUtxo> for SpendableOutputUtxoV1 {
-    fn from(value: SpendableOutputUtxo) -> Self {
+impl From<WalletDerivationMatch> for WalletDerivationMatchV1 {
+    fn from(value: WalletDerivationMatch) -> Self {
         Self {
-            txid_hex: value.txid_hex,
-            vout: value.vout,
-            amount_sat: value.amount_sat,
+            account_name: value.account_name,
             keyindex: value.keyindex,
-            is_p2sh: value.is_p2sh,
-            script_pubkey_hex: value.script_pubkey_hex,
-            is_in_coinbase: value.is_in_coinbase,
+            derivation_path: value.derivation_path,
         }
     }
 }
 
-impl From<SpendableOutputUtxoV1> for SpendableOutputUtxo {
-    fn from(value: SpendableOutputUtxoV1) -> Self {
+impl From<WalletDerivationMatchV1> for WalletDerivationMatch {
+    fn from(value: WalletDerivationMatchV1) -> Self {
         Self {
+            account_name: value.account_name,
+            keyindex: value.keyindex,
+            derivation_path: value.derivation_path,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct SpendableOutputSignInputV1 {
+    #[prost(int32, tag = "1")]
+    pub descriptor_kind: i32,
+    #[prost(string, tag = "2")]
+    pub txid_hex: String,
+    #[prost(uint32, tag = "3")]
+    pub vout: u32,
+    #[prost(uint64, tag = "4")]
+    pub amount_sat: u64,
+    #[prost(string, tag = "5")]
+    pub script_pubkey_hex: String,
+    #[prost(string, optional, tag = "6")]
+    pub channel_keys_id_hex: Option<String>,
+    #[prost(message, optional, tag = "7")]
+    pub wallet_derivation_match: Option<WalletDerivationMatchV1>,
+    #[prost(string, optional, tag = "8")]
+    pub witness_script_hex: Option<String>,
+    #[prost(string, optional, tag = "9")]
+    pub redeem_script_hex: Option<String>,
+    #[prost(string, optional, tag = "10")]
+    pub per_commitment_point_hex: Option<String>,
+    #[prost(uint32, optional, tag = "11")]
+    pub to_self_delay: Option<u32>,
+}
+
+impl From<SpendableOutputSignInput> for SpendableOutputSignInputV1 {
+    fn from(value: SpendableOutputSignInput) -> Self {
+        let descriptor_kind = match value.descriptor_kind {
+            SpendableDescriptorKind::StaticOutput => 0,
+            SpendableDescriptorKind::StaticPaymentOutput => 1,
+            SpendableDescriptorKind::DelayedPaymentOutput => 2,
+        };
+        Self {
+            descriptor_kind,
             txid_hex: value.txid_hex,
             vout: value.vout,
             amount_sat: value.amount_sat,
-            keyindex: value.keyindex,
-            is_p2sh: value.is_p2sh,
             script_pubkey_hex: value.script_pubkey_hex,
-            is_in_coinbase: value.is_in_coinbase,
+            channel_keys_id_hex: value.channel_keys_id_hex,
+            wallet_derivation_match: value.wallet_derivation_match.map(Into::into),
+            witness_script_hex: value.witness_script_hex,
+            redeem_script_hex: value.redeem_script_hex,
+            per_commitment_point_hex: value.per_commitment_point_hex,
+            to_self_delay: value.to_self_delay.map(|v| v as u32),
         }
+    }
+}
+
+impl TryFrom<SpendableOutputSignInputV1> for SpendableOutputSignInput {
+    type Error = RlnSignerError;
+    fn try_from(value: SpendableOutputSignInputV1) -> Result<Self, Self::Error> {
+        let descriptor_kind = match value.descriptor_kind {
+            0 => SpendableDescriptorKind::StaticOutput,
+            1 => SpendableDescriptorKind::StaticPaymentOutput,
+            2 => SpendableDescriptorKind::DelayedPaymentOutput,
+            other => {
+                return Err(RlnSignerError::Protocol(format!(
+                    "invalid spendable descriptor kind: {other}"
+                )))
+            }
+        };
+        Ok(Self {
+            descriptor_kind,
+            txid_hex: value.txid_hex,
+            vout: value.vout,
+            amount_sat: value.amount_sat,
+            script_pubkey_hex: value.script_pubkey_hex,
+            channel_keys_id_hex: value.channel_keys_id_hex,
+            wallet_derivation_match: value.wallet_derivation_match.map(Into::into),
+            witness_script_hex: value.witness_script_hex,
+            redeem_script_hex: value.redeem_script_hex,
+            per_commitment_point_hex: value.per_commitment_point_hex,
+            to_self_delay: value.to_self_delay.map(|v| v as u16),
+        })
     }
 }
 
 #[derive(Clone, PartialEq, Message)]
 struct SignSpendableOutputsPsbtRequestV1 {
     #[prost(message, repeated, tag = "1")]
-    pub utxos: Vec<SpendableOutputUtxoV1>,
+    pub inputs: Vec<SpendableOutputSignInputV1>,
     #[prost(string, tag = "2")]
     pub psbt: String,
 }
@@ -790,10 +1047,6 @@ impl From<BootstrapData> for BootstrapDataV1 {
             identity: Some(value.identity.into()),
             protocol_version: value.protocol_version,
             api_level: value.api_level,
-            ldk_inbound_payment_key_hex: value.ldk_inbound_payment_key_hex,
-            ldk_peer_storage_key_hex: value.ldk_peer_storage_key_hex,
-            ldk_receive_auth_key_hex: value.ldk_receive_auth_key_hex,
-            async_payments_root_seed_hex: value.async_payments_root_seed_hex,
         }
     }
 }
@@ -815,11 +1068,25 @@ impl TryFrom<BootstrapDataV1> for BootstrapData {
                 .into(),
             protocol_version: value.protocol_version,
             api_level,
-            ldk_inbound_payment_key_hex: value.ldk_inbound_payment_key_hex,
-            ldk_peer_storage_key_hex: value.ldk_peer_storage_key_hex,
-            ldk_receive_auth_key_hex: value.ldk_receive_auth_key_hex,
-            async_payments_root_seed_hex: value.async_payments_root_seed_hex,
         })
+    }
+}
+
+impl From<AsyncPaymentsHashEntry> for AsyncPaymentsHashEntryV1 {
+    fn from(value: AsyncPaymentsHashEntry) -> Self {
+        Self {
+            hash_index: value.hash_index,
+            payment_hash_hex: value.payment_hash_hex,
+        }
+    }
+}
+
+impl From<AsyncPaymentsHashEntryV1> for AsyncPaymentsHashEntry {
+    fn from(value: AsyncPaymentsHashEntryV1) -> Self {
+        Self {
+            hash_index: value.hash_index,
+            payment_hash_hex: value.payment_hash_hex,
+        }
     }
 }
 
@@ -884,6 +1151,117 @@ impl From<NodeRequest> for NodeRequestV1 {
             NodeRequest::GetSecureRandomBytes => {
                 node_request_v1::Kind::GetSecureRandomBytes(EmptyV1 {})
             }
+            NodeRequest::EncryptPeerStoragePayload {
+                plaintext_hex,
+                random_bytes_hex,
+            } => node_request_v1::Kind::EncryptPeerStoragePayload(PeerStoragePayloadV1 {
+                bytes_hex: plaintext_hex,
+                random_bytes_hex: Some(random_bytes_hex),
+            }),
+            NodeRequest::DecryptPeerStoragePayload { ciphertext_hex } => {
+                node_request_v1::Kind::DecryptPeerStoragePayload(PeerStoragePayloadV1 {
+                    bytes_hex: ciphertext_hex,
+                    random_bytes_hex: None,
+                })
+            }
+            NodeRequest::EncryptBlindedMessagePayload {
+                plaintext_hex,
+                rho_hex,
+            } => node_request_v1::Kind::EncryptBlindedMessagePayload(
+                BlindedMessagePayloadV1 {
+                    bytes_hex: plaintext_hex,
+                    rho_hex,
+                },
+            ),
+            NodeRequest::DecryptBlindedMessagePayload {
+                ciphertext_hex,
+                rho_hex,
+            } => node_request_v1::Kind::DecryptBlindedMessagePayload(
+                BlindedMessagePayloadV1 {
+                    bytes_hex: ciphertext_hex,
+                    rho_hex,
+                },
+            ),
+            NodeRequest::GetHmacForOfferKey => {
+                node_request_v1::Kind::GetHmacForOfferKey(EmptyV1 {})
+            }
+            NodeRequest::CryptForOffer {
+                bytes_hex,
+                nonce_hex,
+            } => node_request_v1::Kind::CryptForOffer(CryptForOfferV1 {
+                bytes_hex,
+                nonce_hex,
+            }),
+            NodeRequest::PrepareAsyncPaymentsHashes {
+                host_node_id_hex,
+                start_index,
+                batch_size,
+            } => node_request_v1::Kind::PrepareAsyncPaymentsHashes(
+                PrepareAsyncPaymentsHashesV1 {
+                    host_node_id_hex,
+                    start_index,
+                    batch_size,
+                },
+            ),
+            NodeRequest::CreateInboundPayment {
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                random_bytes_hex,
+                current_time,
+                min_final_cltv_expiry_delta,
+            } => node_request_v1::Kind::CreateInboundPayment(CreateInboundPaymentV1 {
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                random_bytes_hex,
+                current_time,
+                min_final_cltv_expiry_delta: min_final_cltv_expiry_delta.map(|v| v as u32),
+            }),
+            NodeRequest::CreateInboundPaymentForHash {
+                payment_hash_hex,
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                current_time,
+                min_final_cltv_expiry_delta,
+            } => node_request_v1::Kind::CreateInboundPaymentForHash(
+                CreateInboundPaymentForHashV1 {
+                    payment_hash_hex,
+                    min_value_msat,
+                    invoice_expiry_delta_secs,
+                    current_time,
+                    min_final_cltv_expiry_delta: min_final_cltv_expiry_delta.map(|v| v as u32),
+                },
+            ),
+            NodeRequest::CreateSpontaneousPaymentSecret {
+                min_value_msat,
+                invoice_expiry_delta_secs,
+                current_time,
+                min_final_cltv_expiry_delta,
+            } => node_request_v1::Kind::CreateSpontaneousPaymentSecret(
+                CreateSpontaneousPaymentSecretV1 {
+                    min_value_msat,
+                    invoice_expiry_delta_secs,
+                    current_time,
+                    min_final_cltv_expiry_delta: min_final_cltv_expiry_delta.map(|v| v as u32),
+                },
+            ),
+            NodeRequest::VerifyInboundPayment {
+                payment_hash_hex,
+                payment_secret_hex,
+                total_msat,
+                highest_seen_timestamp,
+            } => node_request_v1::Kind::VerifyInboundPayment(VerifyInboundPaymentV1 {
+                payment_hash_hex,
+                payment_secret_hex,
+                total_msat,
+                highest_seen_timestamp,
+            }),
+            NodeRequest::GetPaymentPreimage {
+                payment_hash_hex,
+                payment_secret_hex,
+            } => node_request_v1::Kind::GetPaymentPreimage(GetPaymentPreimageV1 {
+                payment_hash_hex,
+                payment_secret_hex,
+            }),
             NodeRequest::Ecdh {
                 recipient,
                 other_key,
@@ -925,6 +1303,85 @@ impl TryFrom<NodeRequestV1> for NodeRequest {
             }),
             node_request_v1::Kind::GetShutdownScriptpubkey(_) => Ok(Self::GetShutdownScriptpubkey),
             node_request_v1::Kind::GetSecureRandomBytes(_) => Ok(Self::GetSecureRandomBytes),
+            node_request_v1::Kind::EncryptPeerStoragePayload(v) => {
+                Ok(Self::EncryptPeerStoragePayload {
+                    plaintext_hex: v.bytes_hex,
+                    random_bytes_hex: v.random_bytes_hex.ok_or_else(|| {
+                        proto_err("node request")(
+                            "missing random_bytes_hex for EncryptPeerStoragePayload",
+                        )
+                    })?,
+                })
+            }
+            node_request_v1::Kind::DecryptPeerStoragePayload(v) => {
+                Ok(Self::DecryptPeerStoragePayload {
+                    ciphertext_hex: v.bytes_hex,
+                })
+            }
+            node_request_v1::Kind::EncryptBlindedMessagePayload(v) => {
+                Ok(Self::EncryptBlindedMessagePayload {
+                    plaintext_hex: v.bytes_hex,
+                    rho_hex: v.rho_hex,
+                })
+            }
+            node_request_v1::Kind::DecryptBlindedMessagePayload(v) => {
+                Ok(Self::DecryptBlindedMessagePayload {
+                    ciphertext_hex: v.bytes_hex,
+                    rho_hex: v.rho_hex,
+                })
+            }
+            node_request_v1::Kind::GetHmacForOfferKey(_) => Ok(Self::GetHmacForOfferKey),
+            node_request_v1::Kind::CryptForOffer(v) => Ok(Self::CryptForOffer {
+                bytes_hex: v.bytes_hex,
+                nonce_hex: v.nonce_hex,
+            }),
+            node_request_v1::Kind::PrepareAsyncPaymentsHashes(v) => {
+                Ok(Self::PrepareAsyncPaymentsHashes {
+                    host_node_id_hex: v.host_node_id_hex,
+                    start_index: v.start_index,
+                    batch_size: v.batch_size,
+                })
+            }
+            node_request_v1::Kind::CreateInboundPayment(v) => Ok(Self::CreateInboundPayment {
+                min_value_msat: v.min_value_msat,
+                invoice_expiry_delta_secs: v.invoice_expiry_delta_secs,
+                random_bytes_hex: v.random_bytes_hex,
+                current_time: v.current_time,
+                min_final_cltv_expiry_delta: v
+                    .min_final_cltv_expiry_delta
+                    .map(|vv| vv as u16),
+            }),
+            node_request_v1::Kind::CreateInboundPaymentForHash(v) => {
+                Ok(Self::CreateInboundPaymentForHash {
+                    payment_hash_hex: v.payment_hash_hex,
+                    min_value_msat: v.min_value_msat,
+                    invoice_expiry_delta_secs: v.invoice_expiry_delta_secs,
+                    current_time: v.current_time,
+                    min_final_cltv_expiry_delta: v
+                        .min_final_cltv_expiry_delta
+                        .map(|vv| vv as u16),
+                })
+            }
+            node_request_v1::Kind::CreateSpontaneousPaymentSecret(v) => {
+                Ok(Self::CreateSpontaneousPaymentSecret {
+                    min_value_msat: v.min_value_msat,
+                    invoice_expiry_delta_secs: v.invoice_expiry_delta_secs,
+                    current_time: v.current_time,
+                    min_final_cltv_expiry_delta: v
+                        .min_final_cltv_expiry_delta
+                        .map(|vv| vv as u16),
+                })
+            }
+            node_request_v1::Kind::VerifyInboundPayment(v) => Ok(Self::VerifyInboundPayment {
+                payment_hash_hex: v.payment_hash_hex,
+                payment_secret_hex: v.payment_secret_hex,
+                total_msat: v.total_msat,
+                highest_seen_timestamp: v.highest_seen_timestamp,
+            }),
+            node_request_v1::Kind::GetPaymentPreimage(v) => Ok(Self::GetPaymentPreimage {
+                payment_hash_hex: v.payment_hash_hex,
+                payment_secret_hex: v.payment_secret_hex,
+            }),
             node_request_v1::Kind::Ecdh(v) => Ok(Self::Ecdh {
                 recipient: v.recipient,
                 other_key: v.other_key,
@@ -957,6 +1414,55 @@ impl From<NodeResponse> for NodeResponseV1 {
             NodeResponse::RandomBytes { bytes_hex } => {
                 node_response_v1::Kind::RandomBytes(RandomBytesV1 { bytes_hex })
             }
+            NodeResponse::PeerStoragePayload { bytes_hex } => {
+                node_response_v1::Kind::PeerStoragePayload(RandomBytesV1 { bytes_hex })
+            }
+            NodeResponse::DecryptedPeerStoragePayload { bytes_hex } => {
+                node_response_v1::Kind::DecryptedPeerStoragePayload(RandomBytesV1 { bytes_hex })
+            }
+            NodeResponse::BlindedMessagePayload { bytes_hex } => {
+                node_response_v1::Kind::BlindedMessagePayload(RandomBytesV1 { bytes_hex })
+            }
+            NodeResponse::DecryptedBlindedMessagePayload { bytes_hex, used_aad } => {
+                node_response_v1::Kind::DecryptedBlindedMessagePayload(
+                    DecryptedBlindedMessagePayloadResponseV1 { bytes_hex, used_aad },
+                )
+            }
+            NodeResponse::HmacForOfferKey { key_hex } => {
+                node_response_v1::Kind::HmacForOfferKey(HmacForOfferKeyV1 { key_hex })
+            }
+            NodeResponse::CryptForOffer { bytes_hex } => {
+                node_response_v1::Kind::CryptForOffer(CryptForOfferResponseV1 { bytes_hex })
+            }
+            NodeResponse::AsyncPaymentsHashes { hashes } => {
+                node_response_v1::Kind::AsyncPaymentsHashes(AsyncPaymentsHashesV1 {
+                    hashes: hashes.into_iter().map(Into::into).collect(),
+                })
+            }
+            NodeResponse::PaymentHashAndSecret {
+                payment_hash_hex,
+                payment_secret_hex,
+            } => node_response_v1::Kind::PaymentHashAndSecret(PaymentHashAndSecretV1 {
+                payment_hash_hex,
+                payment_secret_hex,
+            }),
+            NodeResponse::PaymentSecret { payment_secret_hex } => {
+                node_response_v1::Kind::PaymentSecret(PaymentSecretV1 { payment_secret_hex })
+            }
+            NodeResponse::VerifyInboundPayment {
+                payment_preimage_hex,
+                min_final_cltv_expiry_delta,
+            } => node_response_v1::Kind::VerifyInboundPayment(
+                VerifyInboundPaymentResponseV1 {
+                    payment_preimage_hex,
+                    min_final_cltv_expiry_delta: min_final_cltv_expiry_delta.map(|v| v as u32),
+                },
+            ),
+            NodeResponse::PaymentPreimage {
+                payment_preimage_hex,
+            } => node_response_v1::Kind::PaymentPreimage(PaymentPreimageV1 {
+                payment_preimage_hex,
+            }),
             NodeResponse::Ecdh { shared_secret_hex } => {
                 node_response_v1::Kind::Ecdh(EcdhResponseV1 { shared_secret_hex })
             }
@@ -990,6 +1496,52 @@ impl TryFrom<NodeResponseV1> for NodeResponse {
             }),
             node_response_v1::Kind::RandomBytes(v) => Ok(Self::RandomBytes {
                 bytes_hex: v.bytes_hex,
+            }),
+            node_response_v1::Kind::PeerStoragePayload(v) => {
+                Ok(Self::PeerStoragePayload {
+                    bytes_hex: v.bytes_hex,
+                })
+            }
+            node_response_v1::Kind::DecryptedPeerStoragePayload(v) => {
+                Ok(Self::DecryptedPeerStoragePayload {
+                    bytes_hex: v.bytes_hex,
+                })
+            }
+            node_response_v1::Kind::BlindedMessagePayload(v) => {
+                Ok(Self::BlindedMessagePayload {
+                    bytes_hex: v.bytes_hex,
+                })
+            }
+            node_response_v1::Kind::DecryptedBlindedMessagePayload(v) => {
+                Ok(Self::DecryptedBlindedMessagePayload {
+                    bytes_hex: v.bytes_hex,
+                    used_aad: v.used_aad,
+                })
+            }
+            node_response_v1::Kind::HmacForOfferKey(v) => Ok(Self::HmacForOfferKey {
+                key_hex: v.key_hex,
+            }),
+            node_response_v1::Kind::CryptForOffer(v) => Ok(Self::CryptForOffer {
+                bytes_hex: v.bytes_hex,
+            }),
+            node_response_v1::Kind::AsyncPaymentsHashes(v) => Ok(Self::AsyncPaymentsHashes {
+                hashes: v.hashes.into_iter().map(Into::into).collect(),
+            }),
+            node_response_v1::Kind::PaymentHashAndSecret(v) => Ok(Self::PaymentHashAndSecret {
+                payment_hash_hex: v.payment_hash_hex,
+                payment_secret_hex: v.payment_secret_hex,
+            }),
+            node_response_v1::Kind::PaymentSecret(v) => Ok(Self::PaymentSecret {
+                payment_secret_hex: v.payment_secret_hex,
+            }),
+            node_response_v1::Kind::VerifyInboundPayment(v) => Ok(Self::VerifyInboundPayment {
+                payment_preimage_hex: v.payment_preimage_hex,
+                min_final_cltv_expiry_delta: v
+                    .min_final_cltv_expiry_delta
+                    .map(|vv| vv as u16),
+            }),
+            node_response_v1::Kind::PaymentPreimage(v) => Ok(Self::PaymentPreimage {
+                payment_preimage_hex: v.payment_preimage_hex,
             }),
             node_response_v1::Kind::Ecdh(v) => Ok(Self::Ecdh {
                 shared_secret_hex: v.shared_secret_hex,
@@ -1521,10 +2073,10 @@ impl From<SignerRequest> for SignerRequestV1 {
             SignerRequest::Bootstrap => signer_request_v1::Kind::Bootstrap(EmptyV1 {}),
             SignerRequest::Node(v) => signer_request_v1::Kind::Node(v.into()),
             SignerRequest::Channel(v) => signer_request_v1::Kind::Channel(v.into()),
-            SignerRequest::SignSpendableOutputsPsbt { utxos, psbt } => {
+            SignerRequest::SignSpendableOutputsPsbt { inputs, psbt } => {
                 signer_request_v1::Kind::SignSpendableOutputsPsbt(
                     SignSpendableOutputsPsbtRequestV1 {
-                        utxos: utxos.into_iter().map(|u| u.into()).collect(),
+                        inputs: inputs.into_iter().map(Into::into).collect(),
                         psbt,
                     },
                 )
@@ -1567,7 +2119,11 @@ impl TryFrom<SignerRequestV1> for SignerRequest {
             signer_request_v1::Kind::Channel(v) => Ok(Self::Channel(v.try_into()?)),
             signer_request_v1::Kind::SignSpendableOutputsPsbt(v) => {
                 Ok(Self::SignSpendableOutputsPsbt {
-                    utxos: v.utxos.into_iter().map(Into::into).collect(),
+                    inputs: v
+                        .inputs
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<Vec<_>, _>>()?,
                     psbt: v.psbt,
                 })
             }
@@ -1719,10 +2275,6 @@ mod tests {
             },
             protocol_version: "1".to_string(),
             api_level: 1,
-            ldk_inbound_payment_key_hex: "ab".repeat(32),
-            ldk_peer_storage_key_hex: "cd".repeat(32),
-            ldk_receive_auth_key_hex: "ef".repeat(32),
-            async_payments_root_seed_hex: "11".repeat(32),
         });
         let wire = encode_signer_response(&response).expect("encode");
         let decoded = decode_signer_response(&wire).expect("decode");
@@ -1775,16 +2327,24 @@ mod tests {
     }
 
     #[test]
-    fn sign_spendable_outputs_psbt_utxo_roundtrip() {
+    fn sign_spendable_outputs_psbt_roundtrip() {
         let request = SignerRequest::SignSpendableOutputsPsbt {
-            utxos: vec![SpendableOutputUtxo {
+            inputs: vec![SpendableOutputSignInput {
+                descriptor_kind: SpendableDescriptorKind::StaticOutput,
                 txid_hex: "aa".repeat(32),
                 vout: 1,
                 amount_sat: 50_000,
-                keyindex: 0,
-                is_p2sh: false,
                 script_pubkey_hex: String::new(),
-                is_in_coinbase: false,
+                channel_keys_id_hex: None,
+                wallet_derivation_match: Some(WalletDerivationMatch {
+                    account_name: "vanilla".to_string(),
+                    keyindex: 0,
+                    derivation_path: "0/0".to_string(),
+                }),
+                witness_script_hex: None,
+                redeem_script_hex: None,
+                per_commitment_point_hex: None,
+                to_self_delay: None,
             }],
             psbt: "psbt-here".to_string(),
         };

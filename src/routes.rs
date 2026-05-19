@@ -41,7 +41,7 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description, Pa
 use regex::Regex;
 use rgb_lib::{
     bdk_wallet::keys::bip39::Mnemonic,
-    keys::generate_keys,
+    keys::{generate_keys, WitnessVersion},
     utils::recipient_id_from_script_buf,
     wallet::{
         rust_only::{
@@ -71,8 +71,8 @@ use tokio::{
 
 use crate::async_order::{
     read_async_payments_next_hash_index, write_async_payments_next_hash_index,
-    AsyncOrderNewHashWire, AsyncOrderNewResultWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
-    ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    AsyncOrderNewHashWire, AsyncOrderNewParamsWire, AsyncOrderNewResultWire,
+    ASYNC_ORDER_MAX_HASH_BATCH_SIZE, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
 };
 use crate::ldk::{
     clear_rgb_payment_pending, start_ldk, stop_ldk, LdkBackgroundServices,
@@ -1235,7 +1235,8 @@ pub(crate) enum TransactionType {
     RgbSend,
     Drain,
     CreateUtxos,
-    User,
+    SendBtc,
+    Incoming,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1262,12 +1263,14 @@ pub(crate) enum TransferKind {
     ReceiveWitness,
     Send,
     Inflation,
+    Burn,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) enum TransferStatus {
     Initiated,
     WaitingCounterparty,
+    WaitingSafeHeight,
     WaitingConfirmations,
     Settled,
     Failed,
@@ -1426,14 +1429,37 @@ pub(crate) async fn async_order_new(
         )));
     }
 
-    let params = unlocked_state
-        .async_payments_preimage_root
-        .prepare_async_order_new_params(
-            read_async_payments_next_hash_index(unlocked_state.kv_store.as_ref(), &host_node_id)
-                .map_err(|err| APIError::Unexpected(err.message))?,
-            ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
-        )
-        .map_err(|err| APIError::InvalidRequest(err.message))?;
+    let start_index =
+        read_async_payments_next_hash_index(unlocked_state.kv_store.as_ref(), &host_node_id)
+            .map_err(|err| APIError::Unexpected(err.message))?;
+    let params = if unlocked_state.external_signer_mode {
+        let external_signer = unlocked_state
+            .external_signer
+            .as_ref()
+            .ok_or_else(|| APIError::Unexpected("external signer missing".to_string()))?;
+        let hashes = external_signer
+            .prepare_async_payments_hashes(
+                hex_str(&host_node_id.serialize()),
+                start_index,
+                ASYNC_ORDER_MAX_HASH_BATCH_SIZE as u32,
+            )
+            .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
+        AsyncOrderNewParamsWire {
+            protocol_version: 1,
+            hashes: hashes
+                .into_iter()
+                .map(|entry| crate::async_order::AsyncOrderNewHashWire {
+                    hash_index: entry.hash_index,
+                    payment_hash: entry.payment_hash_hex,
+                })
+                .collect(),
+        }
+    } else {
+        unlocked_state
+            .async_payments_preimage_root
+            .prepare_async_order_new_params(start_index, ASYNC_ORDER_MAX_HASH_BATCH_SIZE)
+            .map_err(|err| APIError::InvalidRequest(err.message))?
+    };
     let hashes = params.hashes.clone();
     let first_hash_index = hashes
         .first()
@@ -2363,7 +2389,7 @@ pub(crate) async fn init(
             Some(mnemonic) => Mnemonic::from_str(&mnemonic)
                 .map_err(|e| APIError::InvalidMnemonic(e.to_string()))?
                 .to_string(),
-            None => generate_keys(state.static_state.network).mnemonic,
+            None => generate_keys(state.static_state.network, WitnessVersion::Taproot).mnemonic,
         };
 
         encrypt_and_save_mnemonic(
@@ -2978,7 +3004,8 @@ pub(crate) async fn list_transactions(
                 rgb_lib::wallet::TransactionType::RgbSend => TransactionType::RgbSend,
                 rgb_lib::wallet::TransactionType::Drain => TransactionType::Drain,
                 rgb_lib::wallet::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
-                rgb_lib::wallet::TransactionType::User => TransactionType::User,
+                rgb_lib::wallet::TransactionType::SendBtc => TransactionType::SendBtc,
+                rgb_lib::wallet::TransactionType::Incoming => TransactionType::Incoming,
             },
             txid: tx.txid,
             received: tx.received,
@@ -3010,6 +3037,7 @@ pub(crate) async fn list_transfers(
             status: match transfer.status {
                 rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
                 rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
+                rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
                 rgb_lib::TransferStatus::WaitingConfirmations => {
                     TransferStatus::WaitingConfirmations
                 }
@@ -3024,6 +3052,7 @@ pub(crate) async fn list_transfers(
                 rgb_lib::wallet::TransferKind::ReceiveWitness => TransferKind::ReceiveWitness,
                 rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
                 rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
+                rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
             },
             txid: transfer.txid,
             recipient_id: transfer.recipient_id,

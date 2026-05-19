@@ -459,7 +459,10 @@ fn success() {
             .iter()
             .find(|tx| tx.sent == 128_000)
             .expect("rgb send transaction");
-        assert!(matches!(tx_user.transaction_type, TransactionType::User));
+        assert!(matches!(
+            tx_user.transaction_type,
+            TransactionType::Incoming
+        ));
         assert!(matches!(
             tx_utxos.transaction_type,
             TransactionType::CreateUtxos
