@@ -66,6 +66,14 @@ impl GossipSource {
     pub(crate) fn is_rgs(&self) -> bool {
         matches!(self, Self::RapidGossipSync { .. })
     }
+
+    pub(crate) fn as_gossip_sync(&self) -> crate::ldk::GossipSync {
+        use lightning_background_processor::GossipSync as Lbp;
+        match self {
+            Self::RapidGossipSync { gossip_sync, .. } => Lbp::Rapid(Arc::clone(gossip_sync)),
+            Self::P2PNetwork { gossip_sync } => Lbp::P2P(Arc::clone(gossip_sync)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +160,28 @@ mod source_tests {
         let source =
             GossipSource::new_rgs("https://example.invalid/snapshot".into(), 0, graph, logger);
         assert!(source.is_rgs());
+    }
+
+    #[test]
+    fn p2p_as_gossip_sync_returns_p2p_variant() {
+        let logger = test_logger();
+        let graph = test_graph(Arc::clone(&logger));
+        let source = GossipSource::new_p2p(graph, None, logger);
+        assert!(matches!(
+            source.as_gossip_sync(),
+            lightning_background_processor::GossipSync::P2P(_)
+        ));
+    }
+
+    #[test]
+    fn rgs_as_gossip_sync_returns_rapid_variant() {
+        let logger = test_logger();
+        let graph = test_graph(Arc::clone(&logger));
+        let source =
+            GossipSource::new_rgs("https://example.invalid/snapshot".into(), 0, graph, logger);
+        assert!(matches!(
+            source.as_gossip_sync(),
+            lightning_background_processor::GossipSync::Rapid(_)
+        ));
     }
 }
