@@ -3055,6 +3055,7 @@ pub(crate) async fn start_ldk(
     key_source: NodeKeySource,
     unlock_request: UnlockRequest,
 ) -> Result<(LdkBackgroundServices, Arc<UnlockedAppState>), APIError> {
+    let _gossip_source_config = unlock_request.gossip_source.clone().unwrap_or_default();
     let static_state = &app_state.static_state;
     let (
         internal_mnemonic,

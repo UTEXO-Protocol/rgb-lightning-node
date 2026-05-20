@@ -1905,6 +1905,7 @@ pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Resu
         proxy_endpoint: request.proxy_endpoint,
         announce_addresses: request.announce_addresses,
         announce_alias: request.announce_alias,
+        gossip_source: None,
     };
     let (new_ldk_background_services, new_unlocked_app_state) = match start_ldk(
         state.clone(),

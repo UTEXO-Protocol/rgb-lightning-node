@@ -1285,6 +1285,8 @@ pub(crate) struct UnlockRequest {
     pub(crate) proxy_endpoint: Option<String>,
     pub(crate) announce_addresses: Vec<String>,
     pub(crate) announce_alias: Option<String>,
+    #[serde(default)]
+    pub(crate) gossip_source: Option<crate::gossip::GossipSourceConfig>,
 }
 
 #[cfg(feature = "vss")]
@@ -1304,6 +1306,7 @@ impl From<UnlockRequest> for CoreUnlockRequest {
             proxy_endpoint: value.proxy_endpoint,
             announce_addresses: value.announce_addresses,
             announce_alias: value.announce_alias,
+            gossip_source: value.gossip_source,
         }
     }
 }
@@ -4817,4 +4820,42 @@ pub(crate) async fn vss_clear_fence(
         Ok(Json(EmptyResponse {}))
     })
     .await
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use crate::gossip::GossipSourceConfig;
+
+    #[test]
+    fn unlock_request_with_gossip_source_deserializes() {
+        let json = r#"{
+            "password": "x",
+            "bitcoind_rpc_username": "u",
+            "bitcoind_rpc_password": "p",
+            "bitcoind_rpc_host": "127.0.0.1",
+            "bitcoind_rpc_port": 18443,
+            "announce_addresses": [],
+            "gossip_source": { "type": "rgs", "server_url": "https://example.invalid" }
+        }"#;
+        let req: UnlockRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            req.gossip_source,
+            Some(GossipSourceConfig::RapidGossipSync { .. })
+        ));
+    }
+
+    #[test]
+    fn unlock_request_without_gossip_source_defaults_to_none() {
+        let json = r#"{
+            "password": "x",
+            "bitcoind_rpc_username": "u",
+            "bitcoind_rpc_password": "p",
+            "bitcoind_rpc_host": "127.0.0.1",
+            "bitcoind_rpc_port": 18443,
+            "announce_addresses": []
+        }"#;
+        let req: UnlockRequest = serde_json::from_str(json).unwrap();
+        assert!(req.gossip_source.is_none());
+    }
 }

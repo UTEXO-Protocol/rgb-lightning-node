@@ -1926,6 +1926,7 @@ fn unlock_req(password: &str) -> UnlockRequest {
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
         announce_addresses: vec![],
         announce_alias: Some(s!("RLN_alias")),
+        gossip_source: None,
     }
 }
 

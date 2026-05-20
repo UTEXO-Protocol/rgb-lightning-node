@@ -11,19 +11,14 @@ pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const RGS_SNAPSHOT_MAX_SIZE: usize = 15 * 1024 * 1024;
 pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub(crate) enum GossipSourceConfig {
+    #[default]
     #[serde(rename = "p2p")]
     P2PNetwork,
     #[serde(rename = "rgs")]
     RapidGossipSync { server_url: String },
-}
-
-impl Default for GossipSourceConfig {
-    fn default() -> Self {
-        Self::P2PNetwork
-    }
 }
 
 pub(crate) enum GossipSource {
@@ -34,7 +29,6 @@ pub(crate) enum GossipSource {
         gossip_sync: Arc<RapidGossipSync>,
         server_url: String,
         latest_sync_timestamp: AtomicU32,
-        logger: Arc<FilesystemLogger>,
     },
 }
 
@@ -54,12 +48,11 @@ impl GossipSource {
         network_graph: Arc<NetworkGraph>,
         logger: Arc<FilesystemLogger>,
     ) -> Self {
-        let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, Arc::clone(&logger)));
+        let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, logger));
         Self::RapidGossipSync {
             gossip_sync,
             server_url,
             latest_sync_timestamp: AtomicU32::new(latest_sync_timestamp),
-            logger,
         }
     }
 
