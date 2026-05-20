@@ -91,6 +91,12 @@ lightning = { path = "./rust-lightning/lightning" }
 lightning-background-processor = { path = "./rust-lightning/lightning-background-processor"}
 rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib", branch = "dev" }
 
+# Temporary: route rgb-lib (rln + rust-lightning submodule) to the funding-tx
+# locktime fix branch until it merges into UTEXO-Protocol/rgb-lib dev. Revert by
+# deleting this patch block.
+[patch."https://github.com/UTEXO-Protocol/rgb-lib.git"]
+rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", branch = "fix/funding-tx-final-locktime" }
+
 [lints.rust.unexpected_cfgs]
 level = "allow"
 
