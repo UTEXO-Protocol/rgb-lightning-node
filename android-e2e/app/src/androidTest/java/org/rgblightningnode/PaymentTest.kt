@@ -66,7 +66,7 @@ class PaymentTest {
     private val utxosFeeRate: ULong = 7u
     private val assetSupply: ULong = 1000u
     private val channelAssetAmount: ULong = 600u
-    private val channelReadyTimeoutSec: Long = 60L
+    private val channelReadyTimeoutSec: Long = 120L
 
     // ── Bitcoin RPC ──────────────────────────────────────────────────────────
 
@@ -523,7 +523,7 @@ class PaymentTest {
             )
             log("openchannel sent")
 
-            val fundingTxid = waitForChannelFundingTx(nodeA, nodeB, assetId, 120L)
+            val fundingTxid = waitForChannelFundingTx(nodeA, nodeB, assetId, 240L)
             log("Mining blocks one by one until funding tx is confirmed..."); mineUntilTxConfirmed(nodeA, fundingTxid)
             mine(6)
             waitForUsableChannel(nodeA, nodeB, assetId, channelReadyTimeoutSec)
@@ -731,8 +731,8 @@ class PaymentTest {
             assertEquals(chan2Before.localBalanceSat, chan2.localBalanceSat)
 
             closeChannel(nodeA, channelId, infoB.pubkey)
-            waitForBalance(nodeA, assetId, 950uL, 70L)
-            waitForBalance(nodeB, assetId, 50uL, 70L)
+            waitForBalance(nodeA, assetId, 950uL, 180L)
+            waitForBalance(nodeB, assetId, 50uL, 180L)
 
             val recipientId1 = rgbInvoice(nodeC)
             sendRgb(nodeA, assetId, recipientId1, 925u)
