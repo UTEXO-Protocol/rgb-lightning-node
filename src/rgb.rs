@@ -271,6 +271,7 @@ impl UnlockedAppState {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn rgb_send_begin(
         &self,
         recipient_map: HashMap<String, Vec<Recipient>>,
@@ -279,6 +280,7 @@ impl UnlockedAppState {
         min_confirmations: u8,
         expiration_timestamp: Option<u64>,
         dry_run: bool,
+        lock_time: Option<u32>,
     ) -> Result<SendBeginResult, RgbLibError> {
         self.rgb_wallet_wrapper.send_begin(
             recipient_map,
@@ -287,6 +289,7 @@ impl UnlockedAppState {
             min_confirmations,
             expiration_timestamp,
             dry_run,
+            lock_time,
         )
     }
 
@@ -647,9 +650,11 @@ impl RgbLibWalletWrapper {
             fee_rate,
             min_confirmations,
             expiration_timestamp,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn send_begin(
         &self,
         recipient_map: HashMap<String, Vec<Recipient>>,
@@ -658,6 +663,7 @@ impl RgbLibWalletWrapper {
         min_confirmations: u8,
         expiration_timestamp: Option<u64>,
         dry_run: bool,
+        lock_time: Option<u32>,
     ) -> Result<SendBeginResult, RgbLibError> {
         self.get_rgb_wallet().send_begin(
             self.online,
@@ -667,6 +673,7 @@ impl RgbLibWalletWrapper {
             min_confirmations,
             expiration_timestamp,
             dry_run,
+            lock_time,
         )
     }
 
@@ -678,7 +685,7 @@ impl RgbLibWalletWrapper {
         skip_sync: bool,
     ) -> Result<String, RgbLibError> {
         self.get_rgb_wallet()
-            .send_btc(self.online, address, amount, fee_rate, skip_sync)
+            .send_btc(self.online, address, amount, fee_rate, skip_sync, None)
     }
 
     pub(crate) fn send_btc_begin(
@@ -687,8 +694,17 @@ impl RgbLibWalletWrapper {
         amount: u64,
         fee_rate: u64,
     ) -> Result<String, RgbLibError> {
-        self.get_rgb_wallet()
-            .send_btc_begin(self.online, address, amount, fee_rate, false, false)
+        // Funding-only path: pin a final (zero) locktime so LDK accepts the
+        // vanilla channel funding tx regardless of the node's chain-tip lag.
+        self.get_rgb_wallet().send_btc_begin(
+            self.online,
+            address,
+            amount,
+            fee_rate,
+            false,
+            false,
+            Some(0),
+        )
     }
 
     pub(crate) fn send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {

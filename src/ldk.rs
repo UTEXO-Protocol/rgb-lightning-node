@@ -1243,7 +1243,7 @@ async fn handle_ldk_events(
                     let unlocked_state_copy = unlocked_state.clone();
                     let res = tokio::task::spawn_blocking(move || -> Result<String, String> {
                         let res = unlocked_state_copy
-                            .rgb_send_begin(recipient_map, true, FEE_RATE, 0, None, false)
+                            .rgb_send_begin(recipient_map, true, FEE_RATE, 0, None, false, Some(0))
                             .map_err(|e| e.to_string())?;
                         let fascia_str = fs::read_to_string(&res.details.fascia_path)
                             .map_err(|e| e.to_string())?;
@@ -1458,6 +1458,8 @@ async fn handle_ldk_events(
                             MIN_CHANNEL_CONFIRMATIONS,
                             None,
                             false,
+                            // Final locktime: this colored tx funds an LN channel.
+                            Some(0),
                         )
                         .map_err(|e| e.to_string())?;
                     let fascia_str =

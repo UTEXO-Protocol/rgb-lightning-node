@@ -3786,6 +3786,8 @@ pub(crate) async fn open_channel(
                         MIN_CHANNEL_CONFIRMATIONS,
                         None,
                         true,
+                        // Channel-funding dry run: mirror the real funding tx's final locktime.
+                        Some(0),
                     )
                 })
                 .await
