@@ -96,6 +96,24 @@ jobs:
           PYTHON_E2E_SCENARIO: ${{ matrix.scenario }}
         run: python3 test/python-e2e/PythonUniffiE2e.py
 
+      - name: Dump node logs on failure
+        if: failure()
+        run: |
+          echo "===== LDK logs (logs.txt) ====="
+          find target/uniffi/python-e2e/data -name logs.txt -print -exec tail -n 300 {} \; || true
+          echo "===== rgb-lib logs (log) ====="
+          find target/uniffi/python-e2e/data -path '*/data/*' -name log -print -exec tail -n 300 {} \; || true
+
+      - name: Upload node logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-logs-${{ matrix.scenario }}
+          path: |
+            target/uniffi/python-e2e/data/**/logs.txt
+            target/uniffi/python-e2e/data/**/log
+          if-no-files-found: ignore
+
       - name: Stop regtest services
         if: always()
         run: ./regtest.sh stop

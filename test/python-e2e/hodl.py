@@ -272,7 +272,7 @@ def open_hodl_asset_channel(
     )
 
     funding_txid = wait_for_peer_channel_funding_tx(
-        sender, receiver_info.pubkey, asset_id, 120
+        sender, receiver_info.pubkey, asset_id, 240
     )
     print(f"Mining blocks until {receiver_name} funding tx is confirmed...")
     mine_until_tx_confirmed(sender, funding_txid, 180)
