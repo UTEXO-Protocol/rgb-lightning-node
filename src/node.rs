@@ -19,7 +19,7 @@ pub struct NodeConfig {
     pub lsp_base_url: Option<String>,
     pub lsp_bearer_token: Option<String>,
     pub vss_url: Option<String>,
-    pub vss_unencrypted: bool,
+    pub vss_allow_empty_restore: bool,
 }
 
 #[derive(Clone)]
@@ -51,7 +51,7 @@ impl NodeHandle {
             lsp_base_url: config.lsp_base_url,
             lsp_bearer_token: config.lsp_bearer_token,
             vss_url: config.vss_url,
-            vss_unencrypted: config.vss_unencrypted,
+            vss_allow_empty_restore: config.vss_allow_empty_restore,
         };
         let state = start_daemon(&args).await?;
         Ok(Self { state })

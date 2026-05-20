@@ -97,7 +97,7 @@ impl Default for UserArgs {
             lsp_base_url: None,
             lsp_bearer_token: None,
             vss_url: None,
-            vss_unencrypted: false,
+            vss_allow_empty_restore: false,
         }
     }
 }
@@ -1737,7 +1737,6 @@ async fn send_assets(
             OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
         ),
         recipient_map,
-        skip_sync: false,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/sendrgb"))

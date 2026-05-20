@@ -299,7 +299,6 @@ def send_asset_for_second_channel(
             donation=True,
             fee_rate=1,
             min_confirmations=1,
-            skip_sync=False,
             recipient_groups=[
                 rln.AssetRecipients(
                     asset_id=asset_id,

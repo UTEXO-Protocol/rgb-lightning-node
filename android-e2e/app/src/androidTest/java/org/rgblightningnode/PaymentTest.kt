@@ -413,7 +413,6 @@ class PaymentTest {
                 donation = true,
                 feeRate = utxosFeeRate,
                 minConfirmations = 1u,
-                skipSync = false,
                 recipientGroups = listOf(
                     AssetRecipients(
                         assetId = assetId,
@@ -757,7 +756,7 @@ class PaymentTest {
             val txUser = transactions.first { it.received == 100_000_000uL }
             val txUtxos = transactions.first { it.sent == 100_000_000uL }
             val txSend = transactions.first { it.sent == 128_000uL }
-            assertEquals(TransactionType.USER, txUser.transactionType)
+            assertEquals(TransactionType.INCOMING, txUser.transactionType)
             assertEquals(TransactionType.CREATE_UTXOS, txUtxos.transactionType)
             assertEquals(TransactionType.RGB_SEND, txSend.transactionType)
             assertNotNull(txUtxos.confirmationTime)

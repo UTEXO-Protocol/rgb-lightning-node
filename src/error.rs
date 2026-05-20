@@ -582,7 +582,11 @@ impl IntoResponse for APIError {
                 self.name(),
             ),
             #[cfg(feature = "vss")]
-            APIError::FailedVssInit(_) => (StatusCode::FORBIDDEN, self.to_string(), self.name()),
+            APIError::FailedVssInit(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.to_string(),
+                self.name(),
+            ),
         };
 
         let error = error.replace("\n", " ");
@@ -613,6 +617,9 @@ pub enum AppError {
 
     #[error("Invalid virtual peer pubkey: {0}")]
     InvalidVirtualPeerPubkey(String),
+
+    #[error("Invalid VSS configuration: {0}")]
+    InvalidVssConfig(String),
 
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),

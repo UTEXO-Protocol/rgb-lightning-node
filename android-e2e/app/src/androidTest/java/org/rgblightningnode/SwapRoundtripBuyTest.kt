@@ -445,7 +445,6 @@ class SwapRoundtripBuyTest {
                 donation = true,
                 feeRate = utxosFeeRate,
                 minConfirmations = 1u,
-                skipSync = false,
                 recipientGroups = listOf(
                     AssetRecipients(
                         assetId = assetId,

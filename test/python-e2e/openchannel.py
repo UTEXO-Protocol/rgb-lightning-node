@@ -441,7 +441,6 @@ def openchannel_push_asset_amount_scenario():
                 donation=True,
                 fee_rate=CREATE_UTXOS_FEE_RATE,
                 min_confirmations=1,
-                skip_sync=False,
                 recipient_groups=[
                     rln.AssetRecipients(
                         asset_id=asset_id,

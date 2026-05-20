@@ -72,11 +72,12 @@ use rgb_lib::{
         secp256k1::Secp256k1 as Secp256k1_30,
         ScriptBuf,
     },
+    keys::WitnessVersion,
     utils::{get_account_data, recipient_id_from_script_buf, script_buf_from_recipient_id},
     wallet::{
         rust_only::{check_indexer_url, AssetColoringInfo, ColoringInfo},
-        DatabaseType, Recipient, SinglesigKeys, TransportEndpoint, Wallet as RgbLibWallet,
-        WalletData, WitnessData,
+        DatabaseType, OnlineOptions, Recipient, SinglesigKeys, TransportEndpoint,
+        Wallet as RgbLibWallet, WalletData, WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Fascia, FileContent,
     RgbTransfer, RgbTxid, WitnessOrd,
@@ -2666,6 +2667,50 @@ impl OutputSpender for RgbOutputSpender {
     }
 }
 
+/// VSS identity derived from the wallet mnemonic.
+///
+/// `signing_key` is used both for sigs-auth against the VSS server and for
+/// deriving per-value encryption keys via HKDF-SHA256. `pubkey_hex` is its
+/// serialized compressed public key in lower-hex; it serves as the LDK
+/// stream's `store_id` directly, and the RGB-wallet stream uses
+/// `{pubkey_hex}_rgb` to avoid key collisions within the same VSS server.
+#[cfg(feature = "vss")]
+struct VssIdentity {
+    signing_key: rgb_lib::bitcoin::secp256k1::SecretKey,
+    pubkey_hex: String,
+}
+
+/// Derive the VSS identity from the wallet mnemonic at `m/535'/1'` — a
+/// hardened child of the node's seed at `m/535'`. Hardened derivation
+/// prevents recovering the node seed from the VSS key, but the mnemonic
+/// compromises both.
+#[cfg(feature = "vss")]
+fn derive_vss_identity(mnemonic: &Mnemonic, network: Network) -> Result<VssIdentity, APIError> {
+    let xkey: ExtendedKey = mnemonic
+        .clone()
+        .into_extended_key()
+        .map_err(|e| APIError::FailedVssInit(format!("VSS identity: invalid mnemonic: {e}")))?;
+    let master_xprv = xkey.into_xprv(network.into()).ok_or_else(|| {
+        APIError::FailedVssInit("VSS identity: failed to derive master xprv for network".into())
+    })?;
+    let secp = Secp256k1_30::new();
+    let vss_xprv = master_xprv
+        .derive_priv(
+            &secp,
+            &[
+                ChildNumber::Hardened { index: 535 },
+                ChildNumber::Hardened { index: 1 },
+            ],
+        )
+        .map_err(|e| APIError::FailedVssInit(format!("VSS identity: derive_priv failed: {e}")))?;
+    let signing_key = vss_xprv.private_key;
+    let pubkey_hex = hex_str(&signing_key.public_key(&secp).serialize());
+    Ok(VssIdentity {
+        signing_key,
+        pubkey_hex,
+    })
+}
+
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     mnemonic: Mnemonic,
@@ -2678,40 +2723,46 @@ pub(crate) async fn start_ldk(
         &static_state.database,
     )));
 
-    // Initialize VSS replication if configured
+    // Initialize VSS replication if configured.
+    //
+    // The same VSS identity is reused across three call sites further down
+    // (RGB-wallet auto-backup config and the rgb-lib VssBackupClient handle),
+    // so derive it once here and pass it around instead of repeating the
+    // derivation. [[derive_vss_identity]]
     #[cfg(feature = "vss")]
-    let kv_store = if let Some(ref vss_url) = static_state.vss_url {
-        let network: Network = static_state.network.into();
-        let xkey: ExtendedKey = mnemonic
-            .clone()
-            .into_extended_key()
-            .expect("valid mnemonic");
-        let master_xprv = &xkey.into_xprv(network).expect("valid xprv");
-        // Derive VSS signing key at m/535'/1' (separate from LDK's m/535')
-        let vss_xprv = master_xprv
-            .derive_priv(
-                &Secp256k1_30::new(),
-                &[
-                    ChildNumber::Hardened { index: 535 },
-                    ChildNumber::Hardened { index: 1 },
-                ],
-            )
-            .unwrap();
-        let vss_signing_key = vss_xprv.private_key;
+    let vss_identity: Option<VssIdentity> = if static_state.vss_url.is_some() {
+        Some(derive_vss_identity(&mnemonic, static_state.network.into())?)
+    } else {
+        None
+    };
 
-        // Derive store_id from the VSS key's public key
-        let secp = Secp256k1_30::new();
-        let vss_pubkey = vss_signing_key.public_key(&secp);
-        let store_id = hex_str(&vss_pubkey.serialize());
-
-        tracing::info!(store_id, "Initializing VSS KV store");
+    #[cfg(feature = "vss")]
+    let kv_store = if let (Some(ref vss_url), Some(ref identity)) =
+        (&static_state.vss_url, &vss_identity)
+    {
+        tracing::info!(store_id = %identity.pubkey_hex, "Initializing VSS KV store");
         let vss_kv_store = Arc::new(
-            crate::vss_kv_store::VssKvStore::new(vss_url.clone(), store_id, vss_signing_key)
-                .map_err(|e| APIError::FailedVssInit(e.to_string()))?,
+            crate::vss_kv_store::VssKvStore::new(
+                vss_url.clone(),
+                identity.pubkey_hex.clone(),
+                identity.signing_key,
+            )
+            .map_err(|e| APIError::FailedVssInit(e.to_string()))?,
         );
+
+        // Acquire the single-writer fence before any reads/writes go out.
+        // This refuses to start if another instance owns this store_id —
+        // see [[single_writer_invariant]] in CLAUDE.md.
+        vss_kv_store
+            .acquire_fence()
+            .map_err(|e| APIError::FailedVssInit(e.to_string()))?;
+
         let synced = Arc::new(SyncedKvStore::with_vss(local_kv_store, vss_kv_store));
 
-        // Auto-restore from VSS if local DB has no channel manager data
+        // Auto-restore from VSS if local DB has no channel manager data.
+        // On failure: abort unlock unless --vss-allow-empty-restore was set.
+        // Starting a recovering node with empty local state can lose funds
+        // (no channel monitors → can't watch chain), so we refuse by default.
         let has_local_data = synced
             .read(
                 CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -2720,10 +2771,23 @@ pub(crate) async fn start_ldk(
             )
             .is_ok();
         if !has_local_data {
-            match synced.restore_from_vss() {
+            match synced.restore_from_vss(false) {
                 Ok(0) => tracing::info!("No VSS backup data found, starting fresh"),
-                Ok(n) => tracing::info!(keys_restored = n, "Restored LDK state from VSS"),
-                Err(e) => tracing::warn!(error = %e, "VSS restore failed, starting fresh"),
+                Ok(n) => tracing::info!(keys_restored = n, "Restored node KV state from VSS"),
+                Err(e) => {
+                    if static_state.vss_allow_empty_restore {
+                        tracing::warn!(
+                            error = %e,
+                            "VSS restore failed; starting fresh due to --vss-allow-empty-restore"
+                        );
+                    } else {
+                        return Err(APIError::FailedVssInit(format!(
+                            "VSS restore failed: {e}. Pass --vss-allow-empty-restore \
+                             to start with an empty local state instead (UNSAFE if \
+                             you previously had active channels)."
+                        )));
+                    }
+                }
             }
         }
 
@@ -2847,7 +2911,7 @@ pub(crate) async fn start_ldk(
         .into_extended_key()
         .expect("a valid key should have been provided");
     let master_xprv = &xkey
-        .into_xprv(network)
+        .into_xprv(network.into())
         .expect("should be possible to get an extended private key");
     let xprv: Xpriv = master_xprv
         .derive_priv(&Secp256k1_30::new(), &ChildNumber::Hardened { index: 535 })
@@ -2999,10 +3063,20 @@ pub(crate) async fn start_ldk(
 
     // Prepare the RGB wallet
     let mnemonic_str = mnemonic.to_string();
-    let (_, account_xpub_vanilla, _) =
-        get_account_data(&bitcoin_network, &mnemonic_str, false).unwrap();
-    let (_, account_xpub_colored, master_fingerprint) =
-        get_account_data(&bitcoin_network, &mnemonic_str, true).unwrap();
+    let (_, account_xpub_vanilla, _) = get_account_data(
+        &bitcoin_network,
+        &mnemonic_str,
+        false,
+        WitnessVersion::Taproot,
+    )
+    .unwrap();
+    let (_, account_xpub_colored, master_fingerprint) = get_account_data(
+        &bitcoin_network,
+        &mnemonic_str,
+        true,
+        WitnessVersion::Taproot,
+    )
+    .unwrap();
     let data_dir = static_state
         .storage_dir_path
         .clone()
@@ -3014,6 +3088,7 @@ pub(crate) async fn start_ldk(
         vanilla_keychain: None,
         master_fingerprint: master_fingerprint.to_string(),
         mnemonic: Some(mnemonic.to_string()),
+        witness_version: WitnessVersion::Taproot,
     };
     let mut rgb_wallet = tokio::task::spawn_blocking(move || {
         RgbLibWallet::new(
@@ -3036,37 +3111,24 @@ pub(crate) async fn start_ldk(
     })
     .await
     .unwrap();
-    let rgb_online = rgb_wallet.go_online(false, indexer_url.to_string())?;
+    let rgb_online = rgb_wallet.go_online(OnlineOptions {
+        indexer_url: indexer_url.to_string(),
+        skip_consistency_check: false,
+        vanilla_sync_lookback: 20,
+    })?;
 
-    // Configure VSS backup for the RGB wallet if VSS is enabled
+    // Configure VSS backup for the RGB wallet if VSS is enabled. Reuses the
+    // identity derived once at the top of this function — see N3.1 / the
+    // `derive_vss_identity` helper.
     #[cfg(feature = "vss")]
-    if let Some(ref vss_url) = static_state.vss_url {
-        let network: Network = static_state.network.into();
-        let xkey: ExtendedKey = mnemonic
-            .clone()
-            .into_extended_key()
-            .expect("valid mnemonic");
-        let master_xprv_vss = &xkey.into_xprv(network).expect("valid xprv");
-        let vss_xprv = master_xprv_vss
-            .derive_priv(
-                &Secp256k1_30::new(),
-                &[
-                    ChildNumber::Hardened { index: 535 },
-                    ChildNumber::Hardened { index: 1 },
-                ],
-            )
-            .unwrap();
-        let vss_signing_key = vss_xprv.private_key;
-        let secp = Secp256k1_30::new();
-        let vss_pubkey = vss_signing_key.public_key(&secp);
-        let rgb_store_id = format!("{}_rgb", hex_str(&vss_pubkey.serialize()));
-
+    if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
+        let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
         let vss_config = rgb_lib::wallet::vss::VssBackupConfig::new(
             vss_url.clone(),
             rgb_store_id,
-            vss_signing_key,
+            identity.signing_key,
         )
-        .with_encryption(!static_state.vss_unencrypted)
+        .with_encryption(true)
         .with_auto_backup(true);
 
         match rgb_wallet.configure_vss_backup(vss_config) {
@@ -3100,47 +3162,16 @@ pub(crate) async fn start_ldk(
         &master_fingerprint.to_string(),
     )?;
 
-    #[allow(unused_mut)]
-    let mut rgb_wallet_wrapper =
-        RgbLibWalletWrapper::new(Arc::new(Mutex::new(rgb_wallet)), rgb_online);
-
-    // Create and store the VssBackupClient for manual backup/info API routes
-    #[cfg(feature = "vss")]
-    if let Some(ref vss_url) = static_state.vss_url {
-        let network: Network = static_state.network.into();
-        let xkey: ExtendedKey = mnemonic
-            .clone()
-            .into_extended_key()
-            .expect("valid mnemonic");
-        let master_xprv_client = &xkey.into_xprv(network).expect("valid xprv");
-        let vss_xprv = master_xprv_client
-            .derive_priv(
-                &Secp256k1_30::new(),
-                &[
-                    ChildNumber::Hardened { index: 535 },
-                    ChildNumber::Hardened { index: 1 },
-                ],
-            )
-            .unwrap();
-        let vss_signing_key = vss_xprv.private_key;
-        let secp = Secp256k1_30::new();
-        let vss_pubkey = vss_signing_key.public_key(&secp);
-        let rgb_store_id = format!("{}_rgb", hex_str(&vss_pubkey.serialize()));
-
-        let client_config = rgb_lib::wallet::vss::VssBackupConfig::new(
-            vss_url.clone(),
-            rgb_store_id,
-            vss_signing_key,
-        )
-        .with_encryption(!static_state.vss_unencrypted);
-
-        match rgb_lib::wallet::vss::VssBackupClient::new(client_config) {
-            Ok(client) => rgb_wallet_wrapper.set_vss_client(client),
-            Err(e) => tracing::warn!("Failed to create VssBackupClient: {e}"),
-        }
-    }
-
-    let rgb_wallet_wrapper = Arc::new(rgb_wallet_wrapper);
+    // No second VssBackupClient is constructed here: the manual /vssbackup
+    // and /vssbackupinfo routes use the wallet's own client, retrievable via
+    // `wallet.vss_client()` (R-lib.1 in rgb-lib's PR #31). Keeping a single
+    // client per stream avoids running two tokio runtimes for the same
+    // backups and removes the race between the two clients writing
+    // overlapping state.
+    let rgb_wallet_wrapper = Arc::new(RgbLibWalletWrapper::new(
+        Arc::new(Mutex::new(rgb_wallet)),
+        rgb_online,
+    ));
 
     // Initialize the OutputSweeper.
     let txes: OutputSpenderTxes = match kv_store.read("", "", OUTPUT_SPENDER_TXES_KEY) {

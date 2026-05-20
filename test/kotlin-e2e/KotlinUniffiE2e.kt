@@ -889,7 +889,6 @@ private fun openchannelPushAssetAmountScenario() {
                 donation = true,
                 feeRate = CREATE_UTXOS_FEE_RATE,
                 minConfirmations = 1u,
-                skipSync = false,
                 recipientGroups = listOf(
                     AssetRecipients(
                         assetId = assetId,

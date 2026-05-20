@@ -38,7 +38,7 @@ mod tests {
         use rln_migration::MigratorTrait;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.into_path();
+        let path = tmp.keep();
         let db_path = path.join("test_rln_db");
         let conn_str = format!("sqlite:{}?mode=rwc", db_path.display());
         let mut opt = ConnectOptions::new(conn_str);
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(err.kind(), bitcoin::io::ErrorKind::NotFound);
 
         // --- Phase 3: Restore from VSS ---
-        let restored_count = synced2.restore_from_vss().expect("restore");
+        let restored_count = synced2.restore_from_vss(true).expect("restore");
         assert_eq!(restored_count, test_data.len());
 
         // --- Phase 4: Verify all data matches after restore ---

@@ -261,7 +261,6 @@ impl UnlockedAppState {
         fee_rate: u64,
         min_confirmations: u8,
         expiration_timestamp: Option<u64>,
-        skip_sync: bool,
     ) -> Result<OperationResult, RgbLibError> {
         self.rgb_wallet_wrapper.send(
             recipient_map,
@@ -269,7 +268,6 @@ impl UnlockedAppState {
             fee_rate,
             min_confirmations,
             expiration_timestamp,
-            skip_sync,
         )
     }
 
@@ -359,27 +357,24 @@ impl UnlockedAppState {
 pub(crate) struct RgbLibWalletWrapper {
     pub(crate) wallet: Arc<Mutex<RgbLibWallet>>,
     pub(crate) online: Online,
-    #[cfg(feature = "vss")]
-    pub(crate) vss_client: Option<Arc<rgb_lib::wallet::vss::VssBackupClient>>,
 }
 
 impl RgbLibWalletWrapper {
     pub(crate) fn new(wallet: Arc<Mutex<RgbLibWallet>>, online: Online) -> Self {
-        RgbLibWalletWrapper {
-            wallet,
-            online,
-            #[cfg(feature = "vss")]
-            vss_client: None,
-        }
-    }
-
-    #[cfg(feature = "vss")]
-    pub(crate) fn set_vss_client(&mut self, client: rgb_lib::wallet::vss::VssBackupClient) {
-        self.vss_client = Some(Arc::new(client));
+        RgbLibWalletWrapper { wallet, online }
     }
 
     pub(crate) fn get_rgb_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {
         self.wallet.lock().unwrap()
+    }
+
+    /// Returns the wallet's configured `VssBackupClient`, if any. This is the
+    /// client constructed by `configure_vss_backup` in `start_ldk`; callers
+    /// (e.g. the manual `/vssbackup` route) reuse it instead of building a
+    /// duplicate with the same configuration.
+    #[cfg(feature = "vss")]
+    pub(crate) fn vss_client(&self) -> Option<Arc<rgb_lib::wallet::vss::VssBackupClient>> {
+        self.get_rgb_wallet().vss_client()
     }
 
     pub(crate) fn bitcoin_network(&self) -> BitcoinNetwork {
@@ -644,7 +639,6 @@ impl RgbLibWalletWrapper {
         fee_rate: u64,
         min_confirmations: u8,
         expiration_timestamp: Option<u64>,
-        skip_sync: bool,
     ) -> Result<OperationResult, RgbLibError> {
         self.get_rgb_wallet().send(
             self.online,
@@ -653,7 +647,6 @@ impl RgbLibWalletWrapper {
             fee_rate,
             min_confirmations,
             expiration_timestamp,
-            skip_sync,
         )
     }
 
@@ -695,17 +688,15 @@ impl RgbLibWalletWrapper {
         fee_rate: u64,
     ) -> Result<String, RgbLibError> {
         self.get_rgb_wallet()
-            .send_btc_begin(self.online, address, amount, fee_rate, false)
+            .send_btc_begin(self.online, address, amount, fee_rate, false, false)
     }
 
     pub(crate) fn send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {
-        self.get_rgb_wallet()
-            .send_btc_end(self.online, signed_psbt, false)
+        self.get_rgb_wallet().send_btc_end(self.online, signed_psbt)
     }
 
     pub(crate) fn send_end(&self, signed_psbt: String) -> Result<OperationResult, RgbLibError> {
-        self.get_rgb_wallet()
-            .send_end(self.online, signed_psbt, false)
+        self.get_rgb_wallet().send_end(self.online, signed_psbt)
     }
 
     pub(crate) fn sign_psbt(&self, unsigned_psbt: String) -> Result<String, RgbLibError> {
@@ -713,7 +704,13 @@ impl RgbLibWalletWrapper {
     }
 
     pub(crate) fn sync(&self) -> Result<(), RgbLibError> {
-        self.get_rgb_wallet().sync(self.online)
+        self.get_rgb_wallet().sync(
+            self.online,
+            rgb_lib::wallet::SyncOptions {
+                keychain: rgb_lib::wallet::SyncKeychain::Colored,
+                strategy: rgb_lib::wallet::SyncStrategy::FastSync,
+            },
+        )
     }
 
     pub(crate) fn update_witnesses(

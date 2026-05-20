@@ -67,7 +67,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::NotInitialized)));
@@ -98,7 +97,7 @@ mod uniffi_smoke_tests {
                 lsp_base_url: None,
                 lsp_bearer_token: None,
                 vss_url: None,
-                vss_unencrypted: false,
+                vss_allow_empty_restore: false,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),
@@ -133,7 +132,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::InvalidRequest)));
@@ -167,7 +165,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::InvalidRequest)));
