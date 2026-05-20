@@ -4052,6 +4052,7 @@ pub(crate) async fn start_ldk(
 
     let unlocked_state = Arc::new(UnlockedAppState {
         channel_manager: Arc::clone(&channel_manager),
+        gossip_source: Arc::clone(&gossip_source),
         inbound_payments,
         signer: keys_manager,
         entropy_source,
