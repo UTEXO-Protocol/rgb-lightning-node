@@ -20,6 +20,9 @@ NODE_B_PASSWORD = os.getenv("NODE_B_PASSWORD", "nodeBpass")
 
 OPEN_CHANNEL_CAPACITY_SAT = int(os.getenv("OPEN_CHANNEL_CAPACITY_SAT", "500000"))
 OPEN_CHANNEL_PUSH_MSAT = int(os.getenv("OPEN_CHANNEL_PUSH_MSAT", "0"))
+ROUNDTRIP_OPEN_CHANNEL_PUSH_MSAT = int(
+    os.getenv("ROUNDTRIP_OPEN_CHANNEL_PUSH_MSAT", "6000000")
+)
 PAYMENT_MSAT = int(os.getenv("PAYMENT_MSAT", "3000000"))
 CREATE_UTXOS_NUM = int(os.getenv("CREATE_UTXOS_NUM", "10"))
 CREATE_UTXOS_SIZE_SAT = int(os.getenv("CREATE_UTXOS_SIZE_SAT", "100000"))
@@ -550,6 +553,8 @@ def wait_for_asset_balance(
 
 def _setup_mixed_asset_channel_with_payment(
     scenario_name: str,
+    *,
+    open_channel_push_msat: Optional[int] = None,
 ) -> tuple[
     rln.SdkNode,
     rln.SdkNode,
@@ -601,11 +606,12 @@ def _setup_mixed_asset_channel_with_payment(
     except rln.RlnError.Conflict:
         pass
 
+    push_msat = OPEN_CHANNEL_PUSH_MSAT if open_channel_push_msat is None else open_channel_push_msat
     open_res = node_a.openchannel(
         rln.SdkOpenChannelRequest(
             peer_pubkey_and_opt_addr=peer_uri,
             capacity_sat=OPEN_CHANNEL_CAPACITY_SAT,
-            push_msat=OPEN_CHANNEL_PUSH_MSAT,
+            push_msat=push_msat,
             public=False,
             with_anchors=True,
             fee_base_msat=None,
@@ -835,6 +841,87 @@ def run_mixed_asset_channel_internal_external_real():
         node_a, node_b, _signer, _asset_id, _channel = _setup_mixed_asset_channel_with_payment(
             "mixed-asset-channel-real"
         )
+    finally:
+        if node_a is not None:
+            try:
+                node_a.shutdown()
+            except Exception:
+                pass
+        if node_b is not None:
+            try:
+                node_b.shutdown()
+            except Exception:
+                pass
+
+
+def run_mixed_asset_channel_roundtrip_real():
+    """Validate that the external-signer node can originate an RGB asset payment."""
+    if os.getenv("RUN_MIXED_ASSET_EXTERNAL_E2E", "").lower() not in ("1", "true", "yes"):
+        print(
+            "SKIP mixed-asset-channel-roundtrip-real: set RUN_MIXED_ASSET_EXTERNAL_E2E=1 to run "
+            "(requires regtest + ``cargo build --features uniffi,vls`` and generated Python bindings)."
+        )
+        return
+
+    ensure_regtest_available()
+    node_a = node_b = None
+    try:
+        node_a, node_b, _signer, asset_id, _channel = _setup_mixed_asset_channel_with_payment(
+            "mixed-asset-channel-roundtrip-real",
+            open_channel_push_msat=max(
+                OPEN_CHANNEL_PUSH_MSAT, ROUNDTRIP_OPEN_CHANNEL_PUSH_MSAT
+            ),
+        )
+        invoice = node_a.ln_invoice(
+            rln.LnInvoiceRequest(
+                amt_msat=PAYMENT_MSAT,
+                expiry_sec=900,
+                asset_id=asset_id,
+                asset_amount=PAYMENT_ASSET_AMOUNT,
+                payment_hash=None,
+                description_hash=None,
+            )
+        ).invoice
+        send = node_b.sendpayment(
+            rln.SdkSendPaymentRequest(
+                invoice=str(invoice),
+                amt_msat=None,
+                asset_id=None,
+                asset_amount=None,
+            )
+        )
+        if send.payment_hash is None:
+            raise RuntimeError("external signer sendpayment did not return payment_hash")
+
+        try:
+            wait_for_payment_succeeded(node_b, send.payment_hash, peer_node=node_a)
+            wait_for_payment_succeeded(node_a, send.payment_hash, peer_node=node_b)
+        except Exception as e:
+            raise RuntimeError(
+                "external signer outbound RGB round-trip payment failed "
+                f"(payment_hash={send.payment_hash}): {e}"
+            ) from e
+        wait_for_asset_balance(
+            node_a,
+            asset_id,
+            settled=1000,
+            future=1000,
+            spendable=1000,
+            offchain_outbound=200,
+            offchain_inbound=0,
+            timeout_sec=120,
+        )
+        wait_for_asset_balance(
+            node_b,
+            asset_id,
+            settled=0,
+            future=0,
+            spendable=0,
+            offchain_outbound=0,
+            offchain_inbound=200,
+            timeout_sec=120,
+        )
+        print("mixed internal/external RGB round-trip succeeded")
     finally:
         if node_a is not None:
             try:
@@ -1145,6 +1232,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "regular-flow-real",
             "mixed-asset-channel-real",
+            "mixed-asset-channel-roundtrip-real",
             "mixed-asset-channel-coop-close-real",
             "mixed-asset-channel-force-close-real",
             "restart-mismatch-real",
@@ -1162,6 +1250,8 @@ def main():
         run_regular_channel_flow_external_real()
     elif args.scenario == "mixed-asset-channel-real":
         run_mixed_asset_channel_internal_external_real()
+    elif args.scenario == "mixed-asset-channel-roundtrip-real":
+        run_mixed_asset_channel_roundtrip_real()
     elif args.scenario == "mixed-asset-channel-coop-close-real":
         run_mixed_asset_channel_close_settlement_real(False)
     elif args.scenario == "mixed-asset-channel-force-close-real":

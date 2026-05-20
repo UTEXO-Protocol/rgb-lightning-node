@@ -123,9 +123,8 @@ use crate::rgb::{
 };
 use crate::signer::vls_adapter::{ExternalSignerBackend, VlsSignerAdapter};
 use crate::signer::{
-    read_key_source_file, validate_bootstrap_payload,
-    validate_key_source_matches_bootstrap, ExternalSigner, ExternalSignerAttachment,
-    ExternalSignerTransport, SUPPORTED_SIGNER_API_LEVEL,
+    read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
+    ExternalSigner, ExternalSignerAttachment, ExternalSignerTransport, SUPPORTED_SIGNER_API_LEVEL,
 };
 use crate::signer::{
     ActiveSignerRef, DynRlnChannelSigner, DynRlnSigner, LightningEntropySource, RlnKeysInterface,
@@ -2915,17 +2914,18 @@ pub(crate) async fn start_ldk(
 
     // Initialize the ChainMonitor
     let peer_storage_signer = Arc::clone(&keys_manager);
-    let chain_monitor: Arc<ChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new_with_peer_storage_encryptor(
-        None,
-        Arc::clone(&broadcaster),
-        Arc::clone(&logger),
-        Arc::clone(&fee_estimator),
-        Arc::clone(&persister),
-        Arc::clone(&keys_manager),
-        Arc::new(move |plaintext: Vec<u8>, random_bytes: [u8; 32]| {
-            peer_storage_signer.encrypt_peer_storage_payload(plaintext, random_bytes)
-        }),
-    ));
+    let chain_monitor: Arc<ChainMonitor> =
+        Arc::new(chainmonitor::ChainMonitor::new_with_peer_storage_encryptor(
+            None,
+            Arc::clone(&broadcaster),
+            Arc::clone(&logger),
+            Arc::clone(&fee_estimator),
+            Arc::clone(&persister),
+            Arc::clone(&keys_manager),
+            Arc::new(move |plaintext: Vec<u8>, random_bytes: [u8; 32]| {
+                peer_storage_signer.encrypt_peer_storage_payload(plaintext, random_bytes)
+            }),
+        ));
 
     // Read ChannelMonitor state from disk
     let mut channelmonitors = persister.read_all_channel_monitors_with_updates().unwrap();
@@ -3334,10 +3334,9 @@ pub(crate) async fn start_ldk(
             ),
             None => {
                 let bootstrap = external_bootstrap.as_ref().expect("external bootstrap");
-                let seed =
-                    crate::signer::types::derive_async_payments_compat_seed_from_bootstrap(
-                        bootstrap,
-                    );
+                let seed = crate::signer::types::derive_async_payments_compat_seed_from_bootstrap(
+                    bootstrap,
+                );
                 AsyncPaymentsPreimageRoot::build_from_seed(
                     &seed,
                     network,

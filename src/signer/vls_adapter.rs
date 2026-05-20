@@ -227,9 +227,9 @@ impl ExternalSignerBackend for VlsSignerAdapter {
         match self.call(ExternalSignerRequest::Node(
             ExternalNodeRequest::DecryptPeerStoragePayload { ciphertext_hex },
         ))? {
-            ExternalSignerResponse::Node(
-                ExternalNodeResponse::DecryptedPeerStoragePayload { bytes_hex },
-            ) => Ok(bytes_hex),
+            ExternalSignerResponse::Node(ExternalNodeResponse::DecryptedPeerStoragePayload {
+                bytes_hex,
+            }) => Ok(bytes_hex),
             other => Err(RlnSignerError::Protocol(format!(
                 "unexpected response for decrypt_peer_storage_payload: {other:?}"
             ))),
@@ -298,7 +298,10 @@ impl ExternalSignerBackend for VlsSignerAdapter {
         nonce_hex: String,
     ) -> Result<String, RlnSignerError> {
         match self.call(ExternalSignerRequest::Node(
-            ExternalNodeRequest::CryptForOffer { bytes_hex, nonce_hex },
+            ExternalNodeRequest::CryptForOffer {
+                bytes_hex,
+                nonce_hex,
+            },
         ))? {
             ExternalSignerResponse::Node(ExternalNodeResponse::CryptForOffer { bytes_hex }) => {
                 Ok(bytes_hex)
@@ -627,40 +630,26 @@ mod tests {
                         bytes_hex: "ab".repeat(32),
                     })
                 }
-                ExternalSignerRequest::Node(
-                    ExternalNodeRequest::EncryptPeerStoragePayload {
-                        plaintext_hex,
-                        ..
-                    },
-                ) => ExternalSignerResponse::Node(
-                    ExternalNodeResponse::PeerStoragePayload {
-                        bytes_hex: plaintext_hex,
-                    },
-                ),
-                ExternalSignerRequest::Node(
-                    ExternalNodeRequest::DecryptPeerStoragePayload {
-                        ciphertext_hex,
-                    },
-                ) => ExternalSignerResponse::Node(
+                ExternalSignerRequest::Node(ExternalNodeRequest::EncryptPeerStoragePayload {
+                    plaintext_hex,
+                    ..
+                }) => ExternalSignerResponse::Node(ExternalNodeResponse::PeerStoragePayload {
+                    bytes_hex: plaintext_hex,
+                }),
+                ExternalSignerRequest::Node(ExternalNodeRequest::DecryptPeerStoragePayload {
+                    ciphertext_hex,
+                }) => ExternalSignerResponse::Node(
                     ExternalNodeResponse::DecryptedPeerStoragePayload {
                         bytes_hex: ciphertext_hex,
                     },
                 ),
                 ExternalSignerRequest::Node(
-                    ExternalNodeRequest::EncryptBlindedMessagePayload {
-                        plaintext_hex,
-                        ..
-                    },
-                ) => ExternalSignerResponse::Node(
-                    ExternalNodeResponse::BlindedMessagePayload {
-                        bytes_hex: plaintext_hex,
-                    },
-                ),
+                    ExternalNodeRequest::EncryptBlindedMessagePayload { plaintext_hex, .. },
+                ) => ExternalSignerResponse::Node(ExternalNodeResponse::BlindedMessagePayload {
+                    bytes_hex: plaintext_hex,
+                }),
                 ExternalSignerRequest::Node(
-                    ExternalNodeRequest::DecryptBlindedMessagePayload {
-                        ciphertext_hex,
-                        ..
-                    },
+                    ExternalNodeRequest::DecryptBlindedMessagePayload { ciphertext_hex, .. },
                 ) => ExternalSignerResponse::Node(
                     ExternalNodeResponse::DecryptedBlindedMessagePayload {
                         bytes_hex: ciphertext_hex,
@@ -676,21 +665,20 @@ mod tests {
                     start_index,
                     batch_size,
                     ..
-                }) => ExternalSignerResponse::Node(
-                    ExternalNodeResponse::AsyncPaymentsHashes {
-                        hashes: (0..batch_size as u64)
-                            .map(|offset| super::types::AsyncPaymentsHashEntry {
-                                hash_index: start_index + offset,
-                                payment_hash_hex: format!("{:064x}", start_index + offset),
-                            })
-                            .collect(),
-                    },
-                ),
-                ExternalSignerRequest::Node(ExternalNodeRequest::CryptForOffer {
-                    bytes_hex, ..
-                }) => ExternalSignerResponse::Node(ExternalNodeResponse::CryptForOffer {
-                    bytes_hex,
+                }) => ExternalSignerResponse::Node(ExternalNodeResponse::AsyncPaymentsHashes {
+                    hashes: (0..batch_size as u64)
+                        .map(|offset| AsyncPaymentsHashEntry {
+                            hash_index: start_index + offset,
+                            payment_hash_hex: format!("{:064x}", start_index + offset),
+                        })
+                        .collect(),
                 }),
+                ExternalSignerRequest::Node(ExternalNodeRequest::CryptForOffer {
+                    bytes_hex,
+                    ..
+                }) => {
+                    ExternalSignerResponse::Node(ExternalNodeResponse::CryptForOffer { bytes_hex })
+                }
                 ExternalSignerRequest::Channel(ExternalChannelRequest::GenerateChannelKeysId {
                     ..
                 }) => ExternalSignerResponse::Channel(

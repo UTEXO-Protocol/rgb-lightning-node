@@ -24,6 +24,32 @@ pub enum RlnError {
     NotFound,
     #[error("conflict with current node state")]
     Conflict,
+    #[error("failed bitcoind connection")]
+    FailedBitcoindConnection,
+    #[error("failed bdk sync")]
+    FailedBdkSync,
+    #[error("failed broadcast")]
+    FailedBroadcast,
+    #[error("failed peer connection")]
+    FailedPeerConnection,
+    #[error("insufficient capacity")]
+    InsufficientCapacity,
+    #[error("insufficient funds")]
+    InsufficientFunds,
+    #[error("no available utxos")]
+    NoAvailableUtxos,
+    #[error("no route")]
+    NoRoute,
+    #[error("external signer required")]
+    ExternalSignerRequired,
+    #[error("external signer mismatch")]
+    ExternalSignerMismatch,
+    #[error("external signer unavailable")]
+    ExternalSignerUnavailable,
+    #[error("external signer protocol error")]
+    ExternalSignerProtocolError,
+    #[error("unsupported in external signer mode")]
+    UnsupportedInExternalSignerMode,
     #[error("internal error")]
     Internal,
 }

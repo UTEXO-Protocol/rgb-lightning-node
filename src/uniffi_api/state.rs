@@ -126,30 +126,30 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::CannotEstimateFees
         | APIError::ChangingState
         | APIError::OpenChannelInProgress
-        | APIError::FailedBdkSync(_)
-        | APIError::FailedBitcoindConnection(_)
-        | APIError::FailedBroadcast(_)
-        | APIError::FailedPeerConnection
         | APIError::InsufficientAssets
-        | APIError::InsufficientCapacity(_)
-        | APIError::InsufficientFunds(_)
         | APIError::InvalidIndexer(_)
         | APIError::InvalidProxyEndpoint
         | APIError::InvalidProxyProtocol(_)
         | APIError::MaxFeeExceeded(_)
         | APIError::MinFeeNotMet(_)
         | APIError::NetworkMismatch(_, _)
-        | APIError::NoAvailableUtxos
-        | APIError::NoRoute
         | APIError::DuplicatePayment(_)
-        | APIError::ExternalSignerRequired
-        | APIError::ExternalSignerMismatch
         | APIError::RecipientIDAlreadyUsed
         | APIError::TemporaryChannelIdAlreadyUsed
         | APIError::UnsupportedLayer1(_)
         | APIError::UnsupportedTransportType
-        | APIError::UnsupportedInExternalSignerMode(_)
         | APIError::CannotFailBatchTransfer => RlnError::Conflict,
+        APIError::FailedBdkSync(_) => RlnError::FailedBdkSync,
+        APIError::FailedBitcoindConnection(_) => RlnError::FailedBitcoindConnection,
+        APIError::FailedBroadcast(_) => RlnError::FailedBroadcast,
+        APIError::FailedPeerConnection => RlnError::FailedPeerConnection,
+        APIError::InsufficientCapacity(_) => RlnError::InsufficientCapacity,
+        APIError::InsufficientFunds(_) => RlnError::InsufficientFunds,
+        APIError::NoAvailableUtxos => RlnError::NoAvailableUtxos,
+        APIError::NoRoute => RlnError::NoRoute,
+        APIError::ExternalSignerRequired => RlnError::ExternalSignerRequired,
+        APIError::ExternalSignerMismatch => RlnError::ExternalSignerMismatch,
+        APIError::UnsupportedInExternalSignerMode(_) => RlnError::UnsupportedInExternalSignerMode,
         APIError::AnchorsRequired
         | APIError::ExpiredSwapOffer
         | APIError::IncompleteRGBInfo
@@ -195,10 +195,9 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::OutputBelowDustLimit
         | APIError::WrongPassword
         | APIError::UnsupportedBackupVersion { .. } => RlnError::InvalidRequest,
-        APIError::Network(_)
-        | APIError::NoValidTransportEndpoint
-        | APIError::ExternalSignerUnavailable(_)
-        | APIError::ExternalSignerProtocolError(_) => RlnError::Conflict,
+        APIError::Network(_) | APIError::NoValidTransportEndpoint => RlnError::Conflict,
+        APIError::ExternalSignerUnavailable(_) => RlnError::ExternalSignerUnavailable,
+        APIError::ExternalSignerProtocolError(_) => RlnError::ExternalSignerProtocolError,
         other => {
             tracing::error!("UniFFI API error mapped to internal: {:?}", other);
             RlnError::Internal

@@ -12,9 +12,8 @@ use crate::ldk::{start_ldk, InvoiceType, PaymentInfo, VirtualChannelSessionStatu
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
 use crate::rgb_kv_store::{write_rgb_payment_info_file, RgbKvStoreExt};
 use crate::signer::{
-    read_key_source_file, validate_bootstrap_payload,
-    validate_key_source_matches_bootstrap, write_key_source_file, BootstrapData, KeySourceFile,
-    SUPPORTED_SIGNER_API_LEVEL,
+    read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
+    write_key_source_file, BootstrapData, KeySourceFile, SUPPORTED_SIGNER_API_LEVEL,
 };
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{

@@ -122,7 +122,20 @@ python3 src/uniffi_api/examples/python-interop/manual_py_external_signer_e2e.py 
    - `PAYMENT_SUCCEEDED_TIMEOUT_SEC` — seconds to wait for `HtlcStatus.SUCCEEDED` after `sendpayment`
      (default `300`; payment wait also syncs the peer and mines a block every 5 polls, like `lib_sdk`).
 
-5. **Mixed RGB cooperative close settlement** (`mixed-asset-channel-coop-close-real`): same mixed
+5. **Mixed RGB round-trip payment** (`mixed-asset-channel-roundtrip-real`): same mixed
+   internal/external RGB flow, then attempt to send the same RGB amount back from the
+   external-signer node to the internal node. Use this as the direct validation/regression scenario
+   for outbound RGB from RLN with external signer. This scenario opens the channel with a higher
+   push amount by default (`ROUNDTRIP_OPEN_CHANNEL_PUSH_MSAT=6000000`) so the external-signer node
+   has enough outbound msat to satisfy the RGB HTLC minimum on the reverse payment.
+
+   ```sh
+   RUN_MIXED_ASSET_EXTERNAL_E2E=1 RESET_DATA=1 \
+   python3 src/uniffi_api/examples/python-interop/manual_py_external_signer_e2e.py \
+     --scenario mixed-asset-channel-roundtrip-real
+   ```
+
+6. **Mixed RGB cooperative close settlement** (`mixed-asset-channel-coop-close-real`): same mixed
    internal/external RGB flow, then cooperative close and explicit on-chain balance assertions.
 
    ```sh
@@ -131,7 +144,7 @@ python3 src/uniffi_api/examples/python-interop/manual_py_external_signer_e2e.py 
      --scenario mixed-asset-channel-coop-close-real
    ```
 
-6. **Mixed RGB force-close settlement** (`mixed-asset-channel-force-close-real`): same mixed
+7. **Mixed RGB force-close settlement** (`mixed-asset-channel-force-close-real`): same mixed
    internal/external RGB flow, then force close and wait for balances to settle after CSV.
    Useful as a focused regression scenario for receiver-side sweep and settlement after CSV.
 
@@ -164,6 +177,10 @@ EXTERNAL_SIGNER_SCENARIO=restart-mismatch-real \
 
 START_REGTEST=1 \
 EXTERNAL_SIGNER_SCENARIO=connection-loss-real \
+./scripts/ci/external_signer_real_e2e.sh
+
+START_REGTEST=1 \
+EXTERNAL_SIGNER_SCENARIO=mixed-asset-channel-roundtrip-real \
 ./scripts/ci/external_signer_real_e2e.sh
 
 START_REGTEST=1 \

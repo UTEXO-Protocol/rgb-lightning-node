@@ -222,7 +222,10 @@ struct SignMessageV1 {
 
 #[derive(Clone, PartialEq, Message)]
 struct NodeRequestV1 {
-    #[prost(oneof = "node_request_v1::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24")]
+    #[prost(
+        oneof = "node_request_v1::Kind",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
+    )]
     pub kind: Option<node_request_v1::Kind>,
 }
 
@@ -335,7 +338,10 @@ struct SignatureV1 {
 
 #[derive(Clone, PartialEq, Message)]
 struct NodeResponseV1 {
-    #[prost(oneof = "node_response_v1::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18")]
+    #[prost(
+        oneof = "node_response_v1::Kind",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18"
+    )]
     pub kind: Option<node_response_v1::Kind>,
 }
 
@@ -1167,21 +1173,17 @@ impl From<NodeRequest> for NodeRequestV1 {
             NodeRequest::EncryptBlindedMessagePayload {
                 plaintext_hex,
                 rho_hex,
-            } => node_request_v1::Kind::EncryptBlindedMessagePayload(
-                BlindedMessagePayloadV1 {
-                    bytes_hex: plaintext_hex,
-                    rho_hex,
-                },
-            ),
+            } => node_request_v1::Kind::EncryptBlindedMessagePayload(BlindedMessagePayloadV1 {
+                bytes_hex: plaintext_hex,
+                rho_hex,
+            }),
             NodeRequest::DecryptBlindedMessagePayload {
                 ciphertext_hex,
                 rho_hex,
-            } => node_request_v1::Kind::DecryptBlindedMessagePayload(
-                BlindedMessagePayloadV1 {
-                    bytes_hex: ciphertext_hex,
-                    rho_hex,
-                },
-            ),
+            } => node_request_v1::Kind::DecryptBlindedMessagePayload(BlindedMessagePayloadV1 {
+                bytes_hex: ciphertext_hex,
+                rho_hex,
+            }),
             NodeRequest::GetHmacForOfferKey => {
                 node_request_v1::Kind::GetHmacForOfferKey(EmptyV1 {})
             }
@@ -1196,13 +1198,11 @@ impl From<NodeRequest> for NodeRequestV1 {
                 host_node_id_hex,
                 start_index,
                 batch_size,
-            } => node_request_v1::Kind::PrepareAsyncPaymentsHashes(
-                PrepareAsyncPaymentsHashesV1 {
-                    host_node_id_hex,
-                    start_index,
-                    batch_size,
-                },
-            ),
+            } => node_request_v1::Kind::PrepareAsyncPaymentsHashes(PrepareAsyncPaymentsHashesV1 {
+                host_node_id_hex,
+                start_index,
+                batch_size,
+            }),
             NodeRequest::CreateInboundPayment {
                 min_value_msat,
                 invoice_expiry_delta_secs,
@@ -1222,15 +1222,15 @@ impl From<NodeRequest> for NodeRequestV1 {
                 invoice_expiry_delta_secs,
                 current_time,
                 min_final_cltv_expiry_delta,
-            } => node_request_v1::Kind::CreateInboundPaymentForHash(
-                CreateInboundPaymentForHashV1 {
+            } => {
+                node_request_v1::Kind::CreateInboundPaymentForHash(CreateInboundPaymentForHashV1 {
                     payment_hash_hex,
                     min_value_msat,
                     invoice_expiry_delta_secs,
                     current_time,
                     min_final_cltv_expiry_delta: min_final_cltv_expiry_delta.map(|v| v as u32),
-                },
-            ),
+                })
+            }
             NodeRequest::CreateSpontaneousPaymentSecret {
                 min_value_msat,
                 invoice_expiry_delta_secs,
@@ -1347,9 +1347,7 @@ impl TryFrom<NodeRequestV1> for NodeRequest {
                 invoice_expiry_delta_secs: v.invoice_expiry_delta_secs,
                 random_bytes_hex: v.random_bytes_hex,
                 current_time: v.current_time,
-                min_final_cltv_expiry_delta: v
-                    .min_final_cltv_expiry_delta
-                    .map(|vv| vv as u16),
+                min_final_cltv_expiry_delta: v.min_final_cltv_expiry_delta.map(|vv| vv as u16),
             }),
             node_request_v1::Kind::CreateInboundPaymentForHash(v) => {
                 Ok(Self::CreateInboundPaymentForHash {
@@ -1357,9 +1355,7 @@ impl TryFrom<NodeRequestV1> for NodeRequest {
                     min_value_msat: v.min_value_msat,
                     invoice_expiry_delta_secs: v.invoice_expiry_delta_secs,
                     current_time: v.current_time,
-                    min_final_cltv_expiry_delta: v
-                        .min_final_cltv_expiry_delta
-                        .map(|vv| vv as u16),
+                    min_final_cltv_expiry_delta: v.min_final_cltv_expiry_delta.map(|vv| vv as u16),
                 })
             }
             node_request_v1::Kind::CreateSpontaneousPaymentSecret(v) => {
@@ -1367,9 +1363,7 @@ impl TryFrom<NodeRequestV1> for NodeRequest {
                     min_value_msat: v.min_value_msat,
                     invoice_expiry_delta_secs: v.invoice_expiry_delta_secs,
                     current_time: v.current_time,
-                    min_final_cltv_expiry_delta: v
-                        .min_final_cltv_expiry_delta
-                        .map(|vv| vv as u16),
+                    min_final_cltv_expiry_delta: v.min_final_cltv_expiry_delta.map(|vv| vv as u16),
                 })
             }
             node_request_v1::Kind::VerifyInboundPayment(v) => Ok(Self::VerifyInboundPayment {
@@ -1423,11 +1417,15 @@ impl From<NodeResponse> for NodeResponseV1 {
             NodeResponse::BlindedMessagePayload { bytes_hex } => {
                 node_response_v1::Kind::BlindedMessagePayload(RandomBytesV1 { bytes_hex })
             }
-            NodeResponse::DecryptedBlindedMessagePayload { bytes_hex, used_aad } => {
-                node_response_v1::Kind::DecryptedBlindedMessagePayload(
-                    DecryptedBlindedMessagePayloadResponseV1 { bytes_hex, used_aad },
-                )
-            }
+            NodeResponse::DecryptedBlindedMessagePayload {
+                bytes_hex,
+                used_aad,
+            } => node_response_v1::Kind::DecryptedBlindedMessagePayload(
+                DecryptedBlindedMessagePayloadResponseV1 {
+                    bytes_hex,
+                    used_aad,
+                },
+            ),
             NodeResponse::HmacForOfferKey { key_hex } => {
                 node_response_v1::Kind::HmacForOfferKey(HmacForOfferKeyV1 { key_hex })
             }
@@ -1452,12 +1450,10 @@ impl From<NodeResponse> for NodeResponseV1 {
             NodeResponse::VerifyInboundPayment {
                 payment_preimage_hex,
                 min_final_cltv_expiry_delta,
-            } => node_response_v1::Kind::VerifyInboundPayment(
-                VerifyInboundPaymentResponseV1 {
-                    payment_preimage_hex,
-                    min_final_cltv_expiry_delta: min_final_cltv_expiry_delta.map(|v| v as u32),
-                },
-            ),
+            } => node_response_v1::Kind::VerifyInboundPayment(VerifyInboundPaymentResponseV1 {
+                payment_preimage_hex,
+                min_final_cltv_expiry_delta: min_final_cltv_expiry_delta.map(|v| v as u32),
+            }),
             NodeResponse::PaymentPreimage {
                 payment_preimage_hex,
             } => node_response_v1::Kind::PaymentPreimage(PaymentPreimageV1 {
@@ -1497,30 +1493,26 @@ impl TryFrom<NodeResponseV1> for NodeResponse {
             node_response_v1::Kind::RandomBytes(v) => Ok(Self::RandomBytes {
                 bytes_hex: v.bytes_hex,
             }),
-            node_response_v1::Kind::PeerStoragePayload(v) => {
-                Ok(Self::PeerStoragePayload {
-                    bytes_hex: v.bytes_hex,
-                })
-            }
+            node_response_v1::Kind::PeerStoragePayload(v) => Ok(Self::PeerStoragePayload {
+                bytes_hex: v.bytes_hex,
+            }),
             node_response_v1::Kind::DecryptedPeerStoragePayload(v) => {
                 Ok(Self::DecryptedPeerStoragePayload {
                     bytes_hex: v.bytes_hex,
                 })
             }
-            node_response_v1::Kind::BlindedMessagePayload(v) => {
-                Ok(Self::BlindedMessagePayload {
-                    bytes_hex: v.bytes_hex,
-                })
-            }
+            node_response_v1::Kind::BlindedMessagePayload(v) => Ok(Self::BlindedMessagePayload {
+                bytes_hex: v.bytes_hex,
+            }),
             node_response_v1::Kind::DecryptedBlindedMessagePayload(v) => {
                 Ok(Self::DecryptedBlindedMessagePayload {
                     bytes_hex: v.bytes_hex,
                     used_aad: v.used_aad,
                 })
             }
-            node_response_v1::Kind::HmacForOfferKey(v) => Ok(Self::HmacForOfferKey {
-                key_hex: v.key_hex,
-            }),
+            node_response_v1::Kind::HmacForOfferKey(v) => {
+                Ok(Self::HmacForOfferKey { key_hex: v.key_hex })
+            }
             node_response_v1::Kind::CryptForOffer(v) => Ok(Self::CryptForOffer {
                 bytes_hex: v.bytes_hex,
             }),
@@ -1536,9 +1528,7 @@ impl TryFrom<NodeResponseV1> for NodeResponse {
             }),
             node_response_v1::Kind::VerifyInboundPayment(v) => Ok(Self::VerifyInboundPayment {
                 payment_preimage_hex: v.payment_preimage_hex,
-                min_final_cltv_expiry_delta: v
-                    .min_final_cltv_expiry_delta
-                    .map(|vv| vv as u16),
+                min_final_cltv_expiry_delta: v.min_final_cltv_expiry_delta.map(|vv| vv as u16),
             }),
             node_response_v1::Kind::PaymentPreimage(v) => Ok(Self::PaymentPreimage {
                 payment_preimage_hex: v.payment_preimage_hex,

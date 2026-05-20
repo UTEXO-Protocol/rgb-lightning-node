@@ -51,7 +51,7 @@ rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", branch = "dev
 ] }
 rln-migration = { path = "migration" }
 # Pinned fork/branch for RGB compatibility work; CI and clones do not require a sibling checkout.
-signer-external = { git = "https://github.com/rmn-boiko/rln-external-signer.git", branch = "feat/followup-review-fix", default-features = false }
+signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer.git", branch = "main", default-features = false }
 sea-orm = { version = "1.1.19", default-features = false, features = [
     "macros",
     "runtime-tokio-rustls",

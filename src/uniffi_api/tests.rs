@@ -274,6 +274,28 @@ mod uniffi_smoke_tests {
             RlnError::Conflict
         ));
         assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::FailedBitcoindConnection(
+                "down".to_string()
+            )),
+            RlnError::FailedBitcoindConnection
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::FailedBdkSync(
+                "sync".to_string()
+            )),
+            RlnError::FailedBdkSync
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::FailedBroadcast(
+                "broadcast".to_string()
+            )),
+            RlnError::FailedBroadcast
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::FailedPeerConnection),
+            RlnError::FailedPeerConnection
+        ));
+        assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::IO(std::io::Error::other(
                 "invalid"
             ))),
@@ -287,7 +309,19 @@ mod uniffi_smoke_tests {
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::NoAvailableUtxos),
-            RlnError::Conflict
+            RlnError::NoAvailableUtxos
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::InsufficientFunds(42)),
+            RlnError::InsufficientFunds
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::InsufficientCapacity(42)),
+            RlnError::InsufficientCapacity
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::NoRoute),
+            RlnError::NoRoute
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::NoValidTransportEndpoint),
@@ -295,29 +329,29 @@ mod uniffi_smoke_tests {
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::ExternalSignerRequired),
-            RlnError::Conflict
+            RlnError::ExternalSignerRequired
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::ExternalSignerMismatch),
-            RlnError::Conflict
+            RlnError::ExternalSignerMismatch
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::ExternalSignerUnavailable(
                 "down".to_string()
             )),
-            RlnError::Conflict
+            RlnError::ExternalSignerUnavailable
         ));
         assert!(matches!(
             super::super::state::map_api_error(
                 crate::error::APIError::ExternalSignerProtocolError("decode".to_string())
             ),
-            RlnError::Conflict
+            RlnError::ExternalSignerProtocolError
         ));
         assert!(matches!(
             super::super::state::map_api_error(
                 crate::error::APIError::UnsupportedInExternalSignerMode("x".to_string())
             ),
-            RlnError::Conflict
+            RlnError::UnsupportedInExternalSignerMode
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::WrongPassword),

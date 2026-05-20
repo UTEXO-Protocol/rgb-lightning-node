@@ -527,6 +527,167 @@ fn rgb_native_external_signer_mixed_one_hop_payment_quick() {
     }
 }
 
+/// Mixed internal/external RGB channel: after receiving RGB, the external-signer node must be able
+/// to send RGB back over the same channel.
+#[test]
+#[serial]
+fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
+    ensure_regtest_available();
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    const PORT_OFF: u16 = 260;
+    const PAY_ASSET: u64 = 50;
+    const ROUNDTRIP_PUSH_MSAT: u64 = 6_000_000;
+    let da = NODE_A_DAEMON_PORT + PORT_OFF;
+    let pa = NODE_A_PEER_PORT + PORT_OFF;
+    let db = NODE_B_DAEMON_PORT + PORT_OFF;
+    let pb = NODE_B_PEER_PORT + PORT_OFF;
+
+    let test_dir = test_dir("sdk_rgb_native_external_roundtrip");
+    if test_dir.exists() {
+        fs::remove_dir_all(&test_dir).expect("remove previous lib_sdk test dir");
+    }
+    fs::create_dir_all(&test_dir).expect("create lib_sdk test dir");
+    let node_a_dir = test_dir.join("node_a");
+    let node_b_dir = test_dir.join("node_b");
+    let signer_b_dir = test_dir.join("signer_b");
+
+    let signer_b = make_native_signer(&signer_b_dir, None);
+
+    let node_a = make_node(&node_a_dir, da, pa);
+    let node_b = make_node(&node_b_dir, db, pb);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        node_a
+            .init("nodeApass".to_string(), None)
+            .expect("node A init");
+        node_b
+            .init_with_native_external_signer(signer_b.clone())
+            .expect("node B init native external signer");
+
+        node_a
+            .unlock(unlock_request("nodeApass"))
+            .expect("node A unlock");
+        node_b
+            .unlock_with_native_external_signer(
+                signer_b.clone(),
+                "user".to_string(),
+                "password".to_string(),
+                "localhost".to_string(),
+                18443,
+                Some("127.0.0.1:50001".to_string()),
+                Some(PROXY_ENDPOINT_LOCAL.to_string()),
+                vec![],
+                Some("RLN_rgb_native_roundtrip".to_string()),
+            )
+            .expect("node B unlock native external signer");
+
+        fund_and_create_utxos(&node_a, "node A roundtrip");
+        node_a
+            .createutxos(SdkCreateUtxosRequest {
+                up_to: false,
+                num: Some(25),
+                size: None,
+                fee_rate: CREATE_UTXOS_FEE_RATE,
+                skip_sync: false,
+            })
+            .expect("node A createutxos (extra RGB allocation headroom)");
+        ensure_funded(&node_b, 200_000, "node B roundtrip");
+        mine(1);
+        node_a.sync().expect("node A sync after fund");
+        node_b.sync().expect("node B sync after fund");
+
+        let asset_id = node_a
+            .issueassetnia(SdkIssueAssetNiaRequest {
+                amounts: vec![1_000],
+                ticker: "QRT".to_string(),
+                name: "QuickRoundTripRgb".to_string(),
+                precision: 0,
+            })
+            .expect("issueassetnia")
+            .asset_id;
+
+        let peer_uri = format!(
+            "{}@127.0.0.1:{pb}",
+            node_b.node_info().expect("node B node_info").pubkey
+        );
+        node_a.connectpeer(peer_uri.clone()).expect("connectpeer");
+
+        node_a
+            .openchannel(SdkOpenChannelRequest {
+                peer_pubkey_and_opt_addr: peer_uri,
+                capacity_sat: OPEN_CHANNEL_CAPACITY_SAT,
+                push_msat: ROUNDTRIP_PUSH_MSAT,
+                public: false,
+                with_anchors: true,
+                fee_base_msat: None,
+                fee_proportional_millionths: None,
+                temporary_channel_id: None,
+                asset_id: Some(asset_id.clone()),
+                asset_amount: Some(OPEN_CHANNEL_ASSET_AMOUNT),
+                push_asset_amount: None,
+                virtual_open_mode: None,
+            })
+            .expect("openchannel");
+
+        wait_for_channel_funding_tx(&node_a, &node_b, &asset_id, Duration::from_secs(90));
+        mine(OPEN_CHANNEL_CONFIRM_BLOCKS);
+        wait_for_usable_channel(&node_a, &node_b, &asset_id, Duration::from_secs(300));
+
+        let invoice_1 = node_b
+            .ln_invoice(LnInvoiceRequest {
+                amt_msat: Some(PAYMENT_MSAT),
+                expiry_sec: 900,
+                asset_id: Some(asset_id.clone()),
+                asset_amount: Some(PAY_ASSET),
+                payment_hash: None,
+                description_hash: None,
+            })
+            .expect("ln_invoice first")
+            .invoice;
+
+        send_payment_with_ln_balance(
+            &node_a,
+            &node_b,
+            invoice_1,
+            &asset_id,
+            PAY_ASSET,
+            OPEN_CHANNEL_ASSET_AMOUNT,
+            0,
+        );
+
+        let invoice_2 = node_a
+            .ln_invoice(LnInvoiceRequest {
+                amt_msat: Some(PAYMENT_MSAT),
+                expiry_sec: 900,
+                asset_id: Some(asset_id.clone()),
+                asset_amount: Some(PAY_ASSET),
+                payment_hash: None,
+                description_hash: None,
+            })
+            .expect("ln_invoice second")
+            .invoice;
+
+        send_payment_with_ln_balance(
+            &node_b,
+            &node_a,
+            invoice_2,
+            &asset_id,
+            PAY_ASSET,
+            PAY_ASSET,
+            OPEN_CHANNEL_ASSET_AMOUNT - PAY_ASSET,
+        );
+
+        node_a.shutdown();
+        node_b.shutdown();
+        thread::sleep(Duration::from_millis(300));
+    }));
+
+    if result.is_err() {
+        panic!("rgb_native_external_signer_mixed_one_hop_payment_roundtrip failed");
+    }
+}
+
 /// Mixed internal/external RGB channel: one RGB payment followed by cooperative close must settle
 /// balances back on-chain.
 #[test]

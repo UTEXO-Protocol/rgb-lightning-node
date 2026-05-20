@@ -26,10 +26,10 @@ use super::channel_signer::ExternalChannelSigner;
 use super::entropy::SystemEntropySource;
 use super::transport::ExternalSignerTransport;
 use super::types::{
-    AsyncPaymentsHashEntry, validate_bootstrap_payload, BootstrapData,
-    DerivedAddressMatch, ExternalNodeRequest, ExternalNodeResponse, ExternalSignerRequest,
-    ExternalSignerResponse, RgbWalletAccountInfo, RlnSignerError, SpendableDescriptorKind,
-    SpendableOutputSignInput, WalletDerivationMatch, WalletInputMetadata,
+    validate_bootstrap_payload, AsyncPaymentsHashEntry, BootstrapData, DerivedAddressMatch,
+    ExternalNodeRequest, ExternalNodeResponse, ExternalSignerRequest, ExternalSignerResponse,
+    RgbWalletAccountInfo, RlnSignerError, SpendableDescriptorKind, SpendableOutputSignInput,
+    WalletDerivationMatch, WalletInputMetadata,
 };
 use super::vls_adapter::{ExternalSignerBackend, VlsSignerAdapter};
 use super::RlnEntropySource;
@@ -237,10 +237,15 @@ impl NodeSigner for ExternalSigner {
                 nonce.as_slice().to_lower_hex_string(),
             )
             .unwrap_or_else(|e| {
-                panic!("external signer crypt_for_offer failed: nonce={} error={e}", nonce.as_slice().to_lower_hex_string())
+                panic!(
+                    "external signer crypt_for_offer failed: nonce={} error={e}",
+                    nonce.as_slice().to_lower_hex_string()
+                )
             });
         let bytes = Vec::<u8>::from_hex(&bytes_hex).unwrap_or_else(|e| {
-            panic!("external signer crypt_for_offer returned invalid hex: hex={bytes_hex} error={e}")
+            panic!(
+                "external signer crypt_for_offer returned invalid hex: hex={bytes_hex} error={e}"
+            )
         });
         let bytes_len = bytes.len();
         bytes.try_into().unwrap_or_else(|_| {
@@ -345,7 +350,13 @@ impl NodeSigner for ExternalSigner {
         payment_hash: lightning::types::payment::PaymentHash,
         payment_data: &lightning::ln::msgs::FinalOnionHopData,
         highest_seen_timestamp: u64,
-    ) -> Result<(Option<lightning::types::payment::PaymentPreimage>, Option<u16>), ()> {
+    ) -> Result<
+        (
+            Option<lightning::types::payment::PaymentPreimage>,
+            Option<u16>,
+        ),
+        (),
+    > {
         let (payment_preimage_hex, min_final_cltv_expiry_delta) = self
             .backend
             .node_verify_inbound_payment(
@@ -371,8 +382,7 @@ impl NodeSigner for ExternalSigner {
         &self,
         payment_hash: lightning::types::payment::PaymentHash,
         payment_secret: lightning::types::payment::PaymentSecret,
-    ) -> Result<lightning::types::payment::PaymentPreimage, lightning::util::errors::APIError>
-    {
+    ) -> Result<lightning::types::payment::PaymentPreimage, lightning::util::errors::APIError> {
         let payment_preimage_hex = self
             .backend
             .node_get_payment_preimage(
@@ -384,17 +394,15 @@ impl NodeSigner for ExternalSigner {
             })?;
         let bytes = Vec::<u8>::from_hex(&payment_preimage_hex).map_err(|e| {
             lightning::util::errors::APIError::APIMisuseError {
-                err: format!(
-                    "external signer get_payment_preimage returned invalid hex: {e}"
-                ),
+                err: format!("external signer get_payment_preimage returned invalid hex: {e}"),
             }
         })?;
         Ok(lightning::types::payment::PaymentPreimage(
-            bytes.try_into().map_err(|_| {
-                lightning::util::errors::APIError::APIMisuseError {
+            bytes
+                .try_into()
+                .map_err(|_| lightning::util::errors::APIError::APIMisuseError {
                     err: "external signer get_payment_preimage returned invalid length".to_string(),
-                }
-            })?,
+                })?,
         ))
     }
 
@@ -402,11 +410,7 @@ impl NodeSigner for ExternalSigner {
         panic!("ExternalSigner::get_peer_storage_key should not be used in external signer mode")
     }
 
-    fn encrypt_peer_storage_payload(
-        &self,
-        plaintext: Vec<u8>,
-        random_bytes: [u8; 32],
-    ) -> Vec<u8> {
+    fn encrypt_peer_storage_payload(&self, plaintext: Vec<u8>, random_bytes: [u8; 32]) -> Vec<u8> {
         let bytes_hex = self
             .backend
             .node_encrypt_peer_storage_payload(
@@ -431,11 +435,7 @@ impl NodeSigner for ExternalSigner {
         Vec::<u8>::from_hex(&bytes_hex).map_err(|_| ())
     }
 
-    fn encrypt_blinded_message_payload(
-        &self,
-        plaintext: Vec<u8>,
-        rho: [u8; 32],
-    ) -> Vec<u8> {
+    fn encrypt_blinded_message_payload(&self, plaintext: Vec<u8>, rho: [u8; 32]) -> Vec<u8> {
         let bytes_hex = self
             .backend
             .node_encrypt_blinded_message_payload(
@@ -443,9 +443,7 @@ impl NodeSigner for ExternalSigner {
                 rho.to_lower_hex_string(),
             )
             .unwrap_or_else(|e| {
-                panic!(
-                    "external signer encrypt_blinded_message_payload failed: error={e}"
-                )
+                panic!("external signer encrypt_blinded_message_payload failed: error={e}")
             });
         Vec::<u8>::from_hex(&bytes_hex).unwrap_or_else(|e| {
             panic!(
@@ -466,8 +464,8 @@ impl NodeSigner for ExternalSigner {
                 rho.to_lower_hex_string(),
             )
             .map_err(|_| lightning::ln::msgs::DecodeError::InvalidValue)?;
-        let bytes =
-            Vec::<u8>::from_hex(&bytes_hex).map_err(|_| lightning::ln::msgs::DecodeError::InvalidValue)?;
+        let bytes = Vec::<u8>::from_hex(&bytes_hex)
+            .map_err(|_| lightning::ln::msgs::DecodeError::InvalidValue)?;
         Ok((bytes, used_aad))
     }
 

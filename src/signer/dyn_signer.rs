@@ -14,7 +14,9 @@ use lightning::ln::chan_utils::{
     HTLCOutputInCommitment, HolderCommitmentTransaction,
 };
 use lightning::ln::inbound_payment::ExpandedKey;
-use lightning::ln::msgs::{DecodeError, FinalOnionHopData, UnsignedChannelAnnouncement, UnsignedGossipMessage};
+use lightning::ln::msgs::{
+    DecodeError, FinalOnionHopData, UnsignedChannelAnnouncement, UnsignedGossipMessage,
+};
 use lightning::ln::script::ShutdownScript;
 use lightning::offers::invoice::UnsignedBolt12Invoice;
 use lightning::sign::ecdsa::EcdsaChannelSigner;
@@ -263,7 +265,11 @@ impl NodeSigner for DynRlnSigner {
         }
     }
 
-    fn crypt_for_offer(&self, payment_id: [u8; 32], nonce: lightning::offers::nonce::Nonce) -> [u8; 32] {
+    fn crypt_for_offer(
+        &self,
+        payment_id: [u8; 32],
+        nonce: lightning::offers::nonce::Nonce,
+    ) -> [u8; 32] {
         match self {
             Self::Internal(km) => km.crypt_for_offer(payment_id, nonce),
             Self::External(es) => es.crypt_for_offer(payment_id, nonce),
@@ -386,11 +392,7 @@ impl NodeSigner for DynRlnSigner {
         }
     }
 
-    fn encrypt_peer_storage_payload(
-        &self,
-        plaintext: Vec<u8>,
-        random_bytes: [u8; 32],
-    ) -> Vec<u8> {
+    fn encrypt_peer_storage_payload(&self, plaintext: Vec<u8>, random_bytes: [u8; 32]) -> Vec<u8> {
         match self {
             Self::Internal(km) => km.encrypt_peer_storage_payload(plaintext, random_bytes),
             Self::External(es) => es.encrypt_peer_storage_payload(plaintext, random_bytes),
@@ -411,11 +413,7 @@ impl NodeSigner for DynRlnSigner {
         }
     }
 
-    fn encrypt_blinded_message_payload(
-        &self,
-        plaintext: Vec<u8>,
-        rho: [u8; 32],
-    ) -> Vec<u8> {
+    fn encrypt_blinded_message_payload(&self, plaintext: Vec<u8>, rho: [u8; 32]) -> Vec<u8> {
         match self {
             Self::Internal(km) => km.encrypt_blinded_message_payload(plaintext, rho),
             Self::External(es) => es.encrypt_blinded_message_payload(plaintext, rho),
