@@ -99,19 +99,24 @@ jobs:
       - name: Dump node logs on failure
         if: failure()
         run: |
-          echo "===== LDK logs (logs.txt) ====="
-          find target/uniffi/python-e2e/data -name logs.txt -print -exec tail -n 300 {} \; || true
-          echo "===== rgb-lib logs (log) ====="
-          find target/uniffi/python-e2e/data -path '*/data/*' -name log -print -exec tail -n 300 {} \; || true
+          echo "===== LDK channel/funding events ====="
+          find target/uniffi/python-e2e/data -name logs.txt | while read -r f; do
+            echo "### $f"
+            grep -iE "OpenChannel|AcceptChannel|FundingGeneration|funding_transaction|Channel went away|Funding TXID|disconnect|refus|reject|closed|close_channel|ERROR|WARN|Generated funding|broadcast|chan.*clos|cannot " "$f" || true
+          done
+          echo "===== rgb-lib non-sync lines ====="
+          find target/uniffi/python-e2e/data -path '*/data/*' -name log | while read -r f; do
+            echo "### $f"
+            grep -vE "Syncing\.\.\.|Sync completed" "$f" || true
+          done
 
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: node-logs-${{ matrix.scenario }}
-          path: |
-            target/uniffi/python-e2e/data/**/logs.txt
-            target/uniffi/python-e2e/data/**/log
+          path: target/uniffi/python-e2e/data/**
+          include-hidden-files: true
           if-no-files-found: ignore
 
       - name: Stop regtest services
