@@ -106,6 +106,7 @@ use crate::core_types::{
 };
 use crate::database::RlnDatabase;
 use crate::disk::{self, FilesystemLogger};
+use crate::gossip::{GossipSource, GossipSourceConfig};
 
 pub(crate) const INBOUND_PAYMENTS_KEY: &str = "inbound_payments";
 const OUTBOUND_PAYMENTS_KEY: &str = "outbound_payments";
@@ -952,10 +953,13 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
     Arc<FilesystemLogger>,
 >;
 
+pub(crate) type RoutingMessageHandler =
+    dyn lightning::ln::msgs::RoutingMessageHandler + Send + Sync;
+
 pub(crate) type PeerManager = LdkPeerManager<
     SocketDescriptor,
     Arc<ChannelManager>,
-    Arc<P2PGossipSync>,
+    Arc<RoutingMessageHandler>,
     Arc<OnionMessenger>,
     Arc<FilesystemLogger>,
     Arc<AsyncOrderMessageHandler>,
@@ -3055,7 +3059,7 @@ pub(crate) async fn start_ldk(
     key_source: NodeKeySource,
     unlock_request: UnlockRequest,
 ) -> Result<(LdkBackgroundServices, Arc<UnlockedAppState>), APIError> {
-    let _gossip_source_config = unlock_request.gossip_source.clone().unwrap_or_default();
+    let gossip_source_config = unlock_request.gossip_source.clone().unwrap_or_default();
     let static_state = &app_state.static_state;
     let (
         internal_mnemonic,
@@ -3741,12 +3745,38 @@ pub(crate) async fn start_ldk(
         );
     }
 
-    // Optional: Initialize the P2PGossipSync
-    let gossip_sync = Arc::new(P2PGossipSync::new(
-        Arc::clone(&network_graph),
-        None,
-        Arc::clone(&logger),
-    ));
+    // Build the gossip source from the operator's choice (defaults to P2P).
+    let gossip_source = Arc::new(match gossip_source_config {
+        GossipSourceConfig::P2PNetwork => {
+            GossipSource::new_p2p(Arc::clone(&network_graph), None, Arc::clone(&logger))
+        }
+        GossipSourceConfig::RapidGossipSync { server_url } => {
+            let latest_sync_timestamp = network_graph
+                .get_last_rapid_gossip_sync_timestamp()
+                .unwrap_or(0);
+            GossipSource::new_rgs(
+                server_url,
+                latest_sync_timestamp,
+                Arc::clone(&network_graph),
+                Arc::clone(&logger),
+            )
+        }
+    });
+
+    // The UTXO verifier can only attach to a P2P sync, and only after PeerManager
+    // is built (the verifier holds an Arc<PeerManager>). RGS mode skips it.
+    let p2p_gossip_sync_for_verifier = match &*gossip_source {
+        GossipSource::P2PNetwork { gossip_sync } => Some(Arc::clone(gossip_sync)),
+        GossipSource::RapidGossipSync { .. } => None,
+    };
+
+    let route_handler: Arc<RoutingMessageHandler> = match gossip_source.as_gossip_sync() {
+        lightning_background_processor::GossipSync::P2P(p2p) => p2p,
+        lightning_background_processor::GossipSync::Rapid(_) => Arc::new(IgnoringMessageHandler {}),
+        lightning_background_processor::GossipSync::None => {
+            unreachable!("gossip source is always set")
+        }
+    };
 
     // Initialize an OMDomainResolver as a service to other nodes.
     // As a service to other LDK users, using an `OMDomainResolver` allows others to resolve BIP
@@ -3816,7 +3846,7 @@ pub(crate) async fn start_ldk(
 
     let lightning_msg_handler = MessageHandler {
         chan_handler: channel_manager.clone(),
-        route_handler: gossip_sync.clone(),
+        route_handler: Arc::clone(&route_handler),
         onion_message_handler: onion_messenger.clone(),
         custom_message_handler: Arc::clone(&async_order_handler),
         send_only_message_handler: Arc::clone(&chain_monitor),
@@ -3829,14 +3859,16 @@ pub(crate) async fn start_ldk(
         Arc::clone(&keys_manager),
     ));
 
-    // Install a GossipVerifier in in the P2PGossipSync
-    let utxo_lookup = GossipVerifier::new(
-        Arc::clone(&bitcoind_client.bitcoind_rpc_client),
-        TokioSpawner,
-        Arc::clone(&gossip_sync),
-        Arc::clone(&peer_manager),
-    );
-    gossip_sync.add_utxo_lookup(Some(Arc::new(utxo_lookup)));
+    // Install a GossipVerifier in the P2PGossipSync (P2P mode only).
+    if let Some(p2p) = &p2p_gossip_sync_for_verifier {
+        let utxo_lookup = GossipVerifier::new(
+            Arc::clone(&bitcoind_client.bitcoind_rpc_client),
+            TokioSpawner,
+            Arc::clone(p2p),
+            Arc::clone(&peer_manager),
+        );
+        p2p.add_utxo_lookup(Some(Arc::new(utxo_lookup)));
+    }
 
     // ## Running LDK
     // Initialize networking
@@ -4076,7 +4108,7 @@ pub(crate) async fn start_ldk(
         chain_monitor.clone(),
         channel_manager.clone(),
         Some(onion_messenger),
-        GossipSync::P2P(gossip_sync),
+        gossip_source.as_gossip_sync(),
         peer_manager.clone(),
         NO_LIQUIDITY_MANAGER,
         Some(Arc::clone(&output_sweeper)),
