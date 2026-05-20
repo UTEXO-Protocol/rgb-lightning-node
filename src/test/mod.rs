@@ -1941,6 +1941,27 @@ async fn unlock_res(node_address: SocketAddr, password: &str) -> Response {
         .unwrap()
 }
 
+async fn unlock_with_gossip_source(
+    node_address: SocketAddr,
+    password: &str,
+    gossip_source: Option<crate::gossip::GossipSourceConfig>,
+) {
+    println!("unlocking node {node_address} with custom gossip source");
+    let mut payload = unlock_req(password);
+    payload.gossip_source = gossip_source;
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/unlock"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    _check_response_is_ok(res)
+        .await
+        .json::<EmptyResponse>()
+        .await
+        .unwrap();
+}
+
 async fn unlock(node_address: SocketAddr, password: &str) {
     println!("unlocking node {node_address}");
     let res = unlock_res(node_address, password).await;
@@ -2313,6 +2334,8 @@ mod concurrent_btc_payments;
 mod concurrent_openchannel;
 mod fail_transfers;
 mod getchannelid;
+mod gossip_p2p;
+mod gossip_rgs;
 mod hodl_invoice;
 mod htlc_amount_checks;
 mod inflate;
