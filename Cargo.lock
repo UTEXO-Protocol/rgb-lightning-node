@@ -3845,7 +3845,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.5"
-source = "git+https://github.com/dcorral/rgb-lib.git?branch=fix%2Ffunding-tx-final-locktime#9aa42d1dbc74a04ea06446ed7f5d093cbf7c44ea"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=dev#b1a14bd88acbc3777cbd45998018e60ff1b3e58a"
 dependencies = [
  "amplify",
  "base64 0.22.1",
@@ -3890,7 +3890,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib-migration"
 version = "0.3.0-beta.3"
-source = "git+https://github.com/dcorral/rgb-lib.git?branch=fix%2Ffunding-tx-final-locktime#9aa42d1dbc74a04ea06446ed7f5d093cbf7c44ea"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=dev#b1a14bd88acbc3777cbd45998018e60ff1b3e58a"
 dependencies = [
  "sea-orm-migration",
  "tokio",
@@ -6809,8 +6809,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "rgb-lib"
-version = "0.3.0-beta.5"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=dev#1fdb460176559c097f97dcd989b155a3c45b10c7"
