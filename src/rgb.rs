@@ -592,7 +592,19 @@ impl RgbLibWalletWrapper {
     }
 
     pub(crate) fn get_rgb_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {
-        self.wallet.lock().unwrap()
+        // Recover from poisoning instead of unwrapping: a panic crossing
+        // `extern "C"` frames aborts via `panic_cannot_unwind`, which would
+        // cascade to every subsequent wallet op.
+        match self.wallet.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!(
+                    "RgbLibWallet mutex was poisoned by a prior panic; recovering. \
+                     Wallet state may be inconsistent — inspect earlier 'panicked at' lines."
+                );
+                poisoned.into_inner()
+            }
+        }
     }
 
     pub(crate) fn bitcoin_network(&self) -> BitcoinNetwork {
@@ -1098,52 +1110,89 @@ impl ChangeDestinationSource for RgbLibWalletWrapper {
 }
 
 impl WalletSource for RgbLibWalletWrapper {
+    // All three methods return Result<_, ()> to LDK. Unwrapping internally would
+    // poison the wallet mutex on panic and cascade aborts on every later op (see
+    // `get_rgb_wallet`), so each fallible step early-returns Err(()) with a log.
     fn list_confirmed_utxos<'a>(&'a self) -> AsyncResult<'a, Vec<Utxo>, ()> {
         Box::pin(async move {
-            let network =
-                Network::from_str(&self.bitcoin_network().to_string().to_lowercase()).unwrap();
-            let mut wallet = self.wallet.lock().unwrap();
-            Ok(wallet.list_unspents_vanilla(self.online, 1, false).unwrap().iter().filter_map(|u| {
-            let script = u.txout.script_pubkey.clone().into_boxed_script();
-            let address = Address::from_script(&script, network).unwrap();
-            let outpoint = OutPoint::from_str(&u.outpoint.to_string()).unwrap();
-            let value = u.txout.value;
-            match address.witness_program() {
-                Some(prog) if prog.is_p2wpkh() => {
-                    WPubkeyHash::from_slice(prog.program().as_bytes())
-                        .map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, value, &wpkh))
-                        .ok()
-                },
-                Some(prog) if prog.is_p2tr() => {
-                    // TODO: Add `Utxo::new_v1_p2tr` upstream.
-                    XOnlyPublicKey::from_slice(prog.program().as_bytes())
-                        .map(|_| Utxo {
-                            outpoint,
-                            output: TxOut {
-                                value,
-                                script_pubkey: ScriptBuf::new_witness_program(&prog),
-                            },
-                            #[allow(clippy::identity_op)]
-                            satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
-                                1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
-                        })
-                        .ok()
-                },
-                _ => None,
-            }
-        })
-        .collect())
+            let network = match Network::from_str(&self.bitcoin_network().to_string().to_lowercase()) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!(error = %e, "list_confirmed_utxos: failed to parse bitcoin network");
+                    return Err(());
+                }
+            };
+            let mut wallet = self.get_rgb_wallet();
+            let unspents = match wallet.list_unspents_vanilla(self.online, 1, false) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::error!(error = ?e, "list_confirmed_utxos: list_unspents_vanilla failed");
+                    return Err(());
+                }
+            };
+            Ok(unspents.iter().filter_map(|u| {
+                let script = u.txout.script_pubkey.clone().into_boxed_script();
+                let address = match Address::from_script(&script, network) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        // Non-standard scripts are expected in mixed wallets — debug, not error.
+                        tracing::debug!(error = %e, "list_confirmed_utxos: skipping non-address script");
+                        return None;
+                    }
+                };
+                let outpoint = match OutPoint::from_str(&u.outpoint.to_string()) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        tracing::error!(error = %e, outpoint = %u.outpoint, "list_confirmed_utxos: outpoint parse failed");
+                        return None;
+                    }
+                };
+                let value = u.txout.value;
+                match address.witness_program() {
+                    Some(prog) if prog.is_p2wpkh() => {
+                        WPubkeyHash::from_slice(prog.program().as_bytes())
+                            .map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, value, &wpkh))
+                            .ok()
+                    },
+                    Some(prog) if prog.is_p2tr() => {
+                        // TODO: Add `Utxo::new_v1_p2tr` upstream.
+                        XOnlyPublicKey::from_slice(prog.program().as_bytes())
+                            .map(|_| Utxo {
+                                outpoint,
+                                output: TxOut {
+                                    value,
+                                    script_pubkey: ScriptBuf::new_witness_program(&prog),
+                                },
+                                #[allow(clippy::identity_op)]
+                                satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
+                                    1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
+                            })
+                            .ok()
+                    },
+                    _ => None,
+                }
+            })
+            .collect())
         })
     }
 
     fn get_change_script<'a>(&'a self) -> AsyncResult<'a, ScriptBuf, ()> {
         Box::pin(async move {
-            Ok(
-                Address::from_str(&self.wallet.lock().unwrap().get_address().unwrap())
-                    .unwrap()
-                    .assume_checked()
-                    .script_pubkey(),
-            )
+            let addr_str = match self.get_rgb_wallet().get_address() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!(error = ?e, "get_change_script: wallet.get_address failed");
+                    return Err(());
+                }
+            };
+            let addr = match Address::from_str(&addr_str) {
+                Ok(a) => a.assume_checked(),
+                Err(e) => {
+                    tracing::error!(error = %e, addr = %addr_str, "get_change_script: address parse failed");
+                    return Err(());
+                }
+            };
+            Ok(addr.script_pubkey())
         })
     }
 
@@ -1153,13 +1202,26 @@ impl WalletSource for RgbLibWalletWrapper {
                 trust_witness_utxo: true,
                 ..Default::default()
             };
-            let signed = self
-                .wallet
-                .lock()
-                .unwrap()
+            let signed = match self
+                .get_rgb_wallet()
                 .sign_psbt(tx.to_string(), Some(sign_options))
-                .unwrap();
-            Ok(Psbt::from_str(&signed).unwrap().extract_tx().unwrap())
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = ?e, "sign_psbt: wallet.sign_psbt failed");
+                    return Err(());
+                }
+            };
+            let psbt = match Psbt::from_str(&signed) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(error = %e, "sign_psbt: PSBT parse failed after signing");
+                    return Err(());
+                }
+            };
+            psbt.extract_tx().map_err(|e| {
+                tracing::error!(error = %e, "sign_psbt: extract_tx failed");
+            })
         })
     }
 }

@@ -17,6 +17,7 @@ use state::{
     is_uniffi_app_state_initialized, set_uniffi_node_handle,
 };
 pub(crate) use state::{clear_uniffi_app_state, set_uniffi_app_state};
+pub use state::take_last_api_error_detail;
 pub use types::*;
 
 pub fn uniffi_healthcheck() -> String {
