@@ -77,8 +77,8 @@ mod tests {
 
     // --- Integration tests (require VSS server) ---
 
-    #[test]
-    fn vss_kv_store_crud() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vss_kv_store_crud() {
         if !vss_server_available() {
             eprintln!("SKIP: VSS server not available at {VSS_URL}");
             return;
@@ -125,8 +125,8 @@ mod tests {
         assert!(!keys.contains(&key.to_string()));
     }
 
-    #[test]
-    fn vss_kv_store_multiple_namespaces() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vss_kv_store_multiple_namespaces() {
         if !vss_server_available() {
             eprintln!("SKIP: VSS server not available at {VSS_URL}");
             return;
@@ -169,8 +169,8 @@ mod tests {
         assert_eq!(cm_keys, vec!["manager"]);
     }
 
-    #[test]
-    fn vss_kv_store_download_all() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vss_kv_store_download_all() {
         if !vss_server_available() {
             eprintln!("SKIP: VSS server not available at {VSS_URL}");
             return;
@@ -203,8 +203,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn synced_kv_store_backup_restore_cycle() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synced_kv_store_backup_restore_cycle() {
         if !vss_server_available() {
             eprintln!("SKIP: VSS server not available at {VSS_URL}");
             return;
@@ -271,6 +271,110 @@ mod tests {
         // List should also work
         let cm_keys = synced2.list("channel_manager", "").expect("list");
         assert_eq!(cm_keys, vec!["manager"]);
+    }
+
+    /// Edge case: VSS server unreachable. Writes must still succeed locally
+    /// (the local store is authoritative) and the failed replication must be
+    /// queued for later retry. Does not require a running VSS server.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synced_kv_store_degrades_when_vss_unreachable() {
+        let (signing_key, store_id) = generate_test_keys();
+        let local = Arc::new(SeaOrmKvStore::from_connection(create_test_sqlite()));
+        // Nothing is listening here, so every VSS request fails fast.
+        let unreachable = Arc::new(
+            VssKvStore::new("http://127.0.0.1:5/vss".to_string(), store_id, signing_key)
+                .expect("vss store"),
+        );
+        let synced = SyncedKvStore::with_vss(local, unreachable);
+
+        // Local write succeeds even though VSS is down.
+        synced
+            .write("channel_manager", "", "manager", b"cm_data".to_vec())
+            .expect("local write should succeed while VSS is unreachable");
+
+        // Data is immediately readable from the local store.
+        assert_eq!(
+            synced.read("channel_manager", "", "manager").unwrap(),
+            b"cm_data"
+        );
+
+        // The failed replication was queued for retry.
+        assert!(
+            synced.pending_remote_writes() > 0,
+            "failed VSS write should be queued for retry"
+        );
+    }
+
+    /// Edge case: node shutdown and recovery on a fresh device using the
+    /// production default (`force = false`). An empty local store is
+    /// repopulated from VSS; a second restore is a no-op so existing state is
+    /// never clobbered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synced_kv_store_recovers_with_default_guard() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        // The restore guard keys off LDK's real channel-manager location, so
+        // store the manager under exactly that namespace/key.
+        use lightning::util::persist::{
+            CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+            CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+        };
+
+        let (signing_key, store_id) = generate_test_keys();
+
+        // Original node: persist some state (local + VSS), then "shut down".
+        let original = SyncedKvStore::with_vss(
+            Arc::new(SeaOrmKvStore::from_connection(create_test_sqlite())),
+            Arc::new(
+                VssKvStore::new(VSS_URL.to_string(), store_id.clone(), signing_key)
+                    .expect("vss store"),
+            ),
+        );
+        let state = vec![
+            (
+                CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+                CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+                CHANNEL_MANAGER_PERSISTENCE_KEY,
+                vec![0x11; 128],
+            ),
+            (
+                "channel_monitors",
+                "funding_xyz",
+                "monitor",
+                vec![0x22; 256],
+            ),
+        ];
+        for (ns, sub, key, val) in &state {
+            original.write(ns, sub, key, val.clone()).expect("write");
+        }
+        drop(original);
+
+        // Recovery on a fresh device: empty local store, same VSS URL + key.
+        let recovered = SyncedKvStore::with_vss(
+            Arc::new(SeaOrmKvStore::from_connection(create_test_sqlite())),
+            Arc::new(
+                VssKvStore::new(VSS_URL.to_string(), store_id, signing_key).expect("vss store"),
+            ),
+        );
+
+        // Production default (force = false) restores because local is empty.
+        let restored = recovered.restore_from_vss(false).expect("restore");
+        assert_eq!(restored, state.len());
+        for (ns, sub, key, val) in &state {
+            assert_eq!(
+                &recovered.read(ns, sub, key).unwrap(),
+                val,
+                "{ns}/{sub}/{key}"
+            );
+        }
+
+        // Second restore is a no-op: local now holds channel-manager state, so
+        // force = false must refuse to clobber it.
+        let again = recovered.restore_from_vss(false).expect("second restore");
+        assert_eq!(again, 0, "force=false must not re-clobber populated state");
     }
 
     /// Helper to create a minimal wallet zip (required format for VssBackupClient)
