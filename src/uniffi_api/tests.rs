@@ -11,7 +11,7 @@ mod uniffi_smoke_tests {
     use serial_test::serial;
     use std::collections::HashSet;
     use std::str::FromStr;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use tokio::sync::Mutex as TokioMutex;
     use tokio_util::sync::CancellationToken;
 
@@ -49,6 +49,7 @@ mod uniffi_smoke_tests {
             asset_amount: None,
             payment_hash: None,
             description_hash: None,
+            min_final_cltv_expiry_delta: None,
         });
         assert!(matches!(invoice, Err(RlnError::NotInitialized)));
 
@@ -78,7 +79,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::NotInitialized)));
@@ -105,9 +105,11 @@ mod uniffi_smoke_tests {
                 max_media_upload_size_mb: 1,
                 enable_virtual_channels_v0: false,
                 virtual_peer_pubkeys: vec![],
-                database: Arc::new(database),
+                database: RwLock::new(Arc::new(database)),
                 lsp_base_url: None,
                 lsp_bearer_token: None,
+                vss_url: None,
+                vss_allow_empty_restore: false,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),
@@ -143,7 +145,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::InvalidRequest)));
@@ -177,7 +178,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::InvalidRequest)));
@@ -381,5 +381,24 @@ mod uniffi_smoke_tests {
         assert_eq!(mapped.payment_hash.0, [7u8; 32]);
         assert_eq!(mapped.preimage, expected_preimage);
         assert!(matches!(mapped.payment_type, PaymentType::InboundHodl));
+    }
+
+    #[test]
+    fn sdk_create_rejects_invalid_vss_url() {
+        let res = SdkNode::create(SdkInitRequest {
+            storage_dir_path: "/tmp/rln_vss_validation_test".to_string(),
+            daemon_listening_port: 3001,
+            ldk_peer_listening_port: 9735,
+            network: "regtest".to_string(),
+            max_media_upload_size_mb: 1,
+            enable_virtual_channels_v0: None,
+            virtual_peer_pubkeys: None,
+            lsp_base_url: None,
+            lsp_bearer_token: None,
+            vss_url: Some("http://example.com/vss".to_string()),
+            vss_allow_http: false,
+            vss_allow_empty_restore: false,
+        });
+        assert!(matches!(res, Err(RlnError::InvalidRequest)));
     }
 }

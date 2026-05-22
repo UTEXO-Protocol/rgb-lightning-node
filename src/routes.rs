@@ -70,7 +70,12 @@ use tokio::{
 use crate::async_order::{
     read_async_payments_next_hash_index, write_async_payments_next_hash_index,
     AsyncOrderNewHashWire, AsyncOrderNewParamsWire, AsyncOrderNewResultWire,
-    ASYNC_ORDER_MAX_HASH_BATCH_SIZE, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
+    ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+};
+use crate::core_types::async_order::{
+    AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
+    AsyncOrderOutboundInvoiceResponse,
 };
 use crate::ldk::{
     clear_rgb_payment_pending, start_ldk, stop_ldk, LdkBackgroundServices,
@@ -80,7 +85,7 @@ use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
     encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_route, hex_str,
-    hex_str_to_compressed_pubkey, hex_str_to_vec, new_jsonrpc_request_id,
+    hex_str_to_compressed_pubkey, hex_str_to_vec, new_jsonrpc_request_id, open_database_pool,
     validate_and_parse_description_hash, validate_and_parse_payment_hash,
     validate_and_parse_payment_preimage, UnlockedAppState, UserOnionMessageContents,
 };
@@ -350,27 +355,6 @@ impl From<Assignment> for RgbLibAssignment {
 }
 
 #[derive(Deserialize, Serialize)]
-pub(crate) struct AsyncOrderNewRequest {
-    pub(crate) host_node_id: String,
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct AsyncOrderNewResponse {
-    pub(crate) request_id: String,
-    pub(crate) host_node_id: String,
-    pub(crate) protocol_version: u64,
-    pub(crate) order_id: String,
-    pub(crate) status: String,
-    pub(crate) accepted_through_index: u64,
-    pub(crate) next_index_expected: u64,
-    pub(crate) unused_hashes: u64,
-    pub(crate) refill_batch_size: u64,
-    pub(crate) first_hash_index: u64,
-    pub(crate) last_hash_index: u64,
-    pub(crate) hashes: Vec<AsyncOrderNewHashWire>,
-}
-
-#[derive(Deserialize, Serialize)]
 pub(crate) struct BackupRequest {
     pub(crate) backup_path: String,
     pub(crate) password: String,
@@ -535,9 +519,11 @@ pub(crate) struct DecodeLNInvoiceResponse {
     pub(crate) timestamp: u64,
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
+    pub(crate) description_hash: Option<String>,
     pub(crate) payment_hash: String,
     pub(crate) payment_secret: String,
     pub(crate) payee_pubkey: Option<String>,
+    pub(crate) min_final_cltv_expiry_delta: u64,
     pub(crate) network: BitcoinNetwork,
 }
 
@@ -849,6 +835,7 @@ pub(crate) struct LNInvoiceRequest {
     pub(crate) asset_amount: Option<u64>,
     pub(crate) payment_hash: Option<String>,
     pub(crate) description_hash: Option<String>,
+    pub(crate) min_final_cltv_expiry_delta: Option<u16>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -973,7 +960,7 @@ pub(crate) struct Payment {
 fn payment_type_from_invoice(invoice_type: Option<InvoiceType>) -> PaymentType {
     match invoice_type.unwrap_or(InvoiceType::AutoClaim) {
         InvoiceType::AutoClaim => PaymentType::InboundAutoClaim,
-        InvoiceType::Hodl => PaymentType::InboundHodl,
+        InvoiceType::Hodl { .. } => PaymentType::InboundHodl,
     }
 }
 
@@ -1119,7 +1106,6 @@ pub(crate) struct SendRgbRequest {
     pub(crate) min_confirmations: u8,
     pub(crate) expiration_timestamp: Option<u64>,
     pub(crate) recipient_map: HashMap<String, Vec<Recipient>>,
-    pub(crate) skip_sync: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1471,10 +1457,10 @@ pub(crate) async fn async_order_new(
 
     let response_rx = unlocked_state
         .async_order_handler
-        .queue_async_order_new_request(host_node_id, Value::String(request_id.clone()), params)
+        .queue_async_order_new(host_node_id, Value::String(request_id.clone()), params)
         .map_err(|err| APIError::InvalidRequest(err.message))?;
     unlocked_state.peer_manager.process_events();
-    let order_state: AsyncOrderNewResultWire = match timeout(
+    let order_state_value = match timeout(
         Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
         response_rx,
     )
@@ -1501,6 +1487,10 @@ pub(crate) async fn async_order_new(
             )));
         }
     };
+    let order_state: AsyncOrderNewResultWire =
+        serde_json::from_value(order_state_value).map_err(|err| {
+            APIError::InvalidRequest(format!("invalid async_order.new response: {err}"))
+        })?;
     let next_hash_index = order_state.next_index_expected;
     write_async_payments_next_hash_index(
         unlocked_state.kv_store.as_ref(),
@@ -1522,6 +1512,79 @@ pub(crate) async fn async_order_new(
         first_hash_index,
         last_hash_index,
         hashes,
+    }))
+}
+
+pub(crate) async fn async_order_outbound_invoice(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<
+        Json<AsyncOrderOutboundInvoiceRequest>,
+        APIError,
+    >,
+) -> Result<Json<AsyncOrderOutboundInvoiceResponse>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = Arc::clone(guard.as_ref().unwrap());
+    drop(guard);
+
+    let peer_node_id =
+        hex_str_to_compressed_pubkey(&payload.client_node_id).ok_or(APIError::InvalidPubkey)?;
+    if unlocked_state
+        .peer_manager
+        .peer_by_node_id(&peer_node_id)
+        .is_none()
+    {
+        return Err(APIError::InvalidPeerInfo(s!(
+            "/apay/outboundinvoice requires a connected recipient peer"
+        )));
+    }
+
+    let request_id = new_jsonrpc_request_id();
+    let response_rx = unlocked_state
+        .async_order_handler
+        .queue_async_order_request_invoice(
+            peer_node_id,
+            Value::String(request_id.clone()),
+            payload.params,
+        )
+        .map_err(|err| APIError::InvalidRequest(err.message))?;
+    unlocked_state.peer_manager.process_events();
+
+    let response_value = match timeout(
+        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        response_rx,
+    )
+    .await
+    {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(err))) => {
+            return Err(APIError::InvalidRequest(format!(
+                "async_order host error {}: {}",
+                err.code, err.message
+            )));
+        }
+        Ok(Err(_)) => {
+            return Err(APIError::Network(s!(
+                "/apay/outboundinvoice response channel closed before peer replied"
+            )))
+        }
+        Err(_) => {
+            unlocked_state
+                .async_order_handler
+                .forget_async_order_response(peer_node_id, &request_id);
+            return Err(APIError::Network(s!(
+                "/apay/outboundinvoice timed out waiting for peer response"
+            )));
+        }
+    };
+
+    let response: AsyncOrderOutboundInvoiceResultWire = serde_json::from_value(response_value)
+        .map_err(|err| {
+            APIError::InvalidRequest(format!("invalid request_invoice response: {err}"))
+        })?;
+
+    Ok(Json(AsyncOrderOutboundInvoiceResponse {
+        payment_hash: response.payment_hash,
+        bolt11: response.bolt11,
     }))
 }
 
@@ -1600,7 +1663,7 @@ pub(crate) async fn backup(
     no_cancel(async move {
         let _guard = state.check_locked().await?;
 
-        let _mnemonic = check_password_validity(&payload.password, &state.static_state.database)?;
+        let _mnemonic = check_password_validity(&payload.password, &state.db())?;
 
         do_backup(
             &state.static_state.storage_dir_path,
@@ -1652,7 +1715,7 @@ pub(crate) async fn cancel_hodl_invoice(
             .get(&payment_hash)
             .cloned()
             .ok_or(APIError::UnknownLNInvoice)?;
-        if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl)) {
+        if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl { .. })) {
             return Err(APIError::InvoiceNotHodl);
         }
         match payment_info.status {
@@ -1684,14 +1747,9 @@ pub(crate) async fn change_password(
 
         check_password_strength(payload.new_password.clone())?;
 
-        let mnemonic =
-            check_password_validity(&payload.old_password, &state.static_state.database)?;
+        let mnemonic = check_password_validity(&payload.old_password, &state.db())?;
 
-        encrypt_and_save_mnemonic(
-            payload.new_password,
-            mnemonic.to_string(),
-            &state.static_state.database,
-        )?;
+        encrypt_and_save_mnemonic(payload.new_password, mnemonic.to_string(), &state.db())?;
 
         Ok(Json(EmptyResponse {}))
     })
@@ -1734,7 +1792,10 @@ pub(crate) async fn claim_hodl_invoice(
                 return Err(APIError::UnknownLNInvoice);
             };
 
-            if !matches!(existing_payment_mut.invoice_type, Some(InvoiceType::Hodl)) {
+            if !matches!(
+                existing_payment_mut.invoice_type,
+                Some(InvoiceType::Hodl { .. })
+            ) {
                 return Err(APIError::InvoiceNotHodl);
             }
 
@@ -2035,6 +2096,7 @@ pub(crate) async fn create_utxos(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn decode_ln_invoice(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<DecodeLNInvoiceRequest>, APIError>,
@@ -2052,9 +2114,16 @@ pub(crate) async fn decode_ln_invoice(
         timestamp: invoice.duration_since_epoch().as_secs(),
         asset_id: invoice.rgb_contract_id().map(|c| c.to_string()),
         asset_amount: invoice.rgb_amount(),
+        description_hash: match invoice.description() {
+            lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
+                Some(hex_str(&hash.0.to_byte_array()))
+            }
+            _ => None,
+        },
         payment_hash: hex_str(&invoice.payment_hash().to_byte_array()),
         payment_secret: hex_str(&invoice.payment_secret().0),
-        payee_pubkey: invoice.payee_pub_key().map(|p| p.to_string()),
+        payee_pubkey: Some(invoice.get_payee_pub_key().to_string()),
+        min_final_cltv_expiry_delta: invoice.min_final_cltv_expiry_delta(),
         network: invoice.network().into(),
     }))
 }
@@ -2381,7 +2450,7 @@ pub(crate) async fn init(
 
         check_password_strength(payload.password.clone())?;
 
-        check_already_initialized(&state.static_state.database)?;
+        check_already_initialized(&state.db())?;
 
         let mnemonic = match payload.mnemonic {
             Some(mnemonic) => Mnemonic::from_str(&mnemonic)
@@ -2390,11 +2459,7 @@ pub(crate) async fn init(
             None => generate_keys(state.static_state.network, WitnessVersion::Taproot).mnemonic,
         };
 
-        encrypt_and_save_mnemonic(
-            payload.password,
-            mnemonic.clone(),
-            &state.static_state.database,
-        )?;
+        encrypt_and_save_mnemonic(payload.password, mnemonic.clone(), &state.db())?;
 
         Ok(Json(InitResponse { mnemonic }))
     })
@@ -3150,10 +3215,10 @@ pub(crate) async fn ln_invoice(
             amount_msats: payload.amt_msat,
             description,
             invoice_expiry_delta_secs: Some(payload.expiry_sec),
+            min_final_cltv_expiry_delta: payload.min_final_cltv_expiry_delta,
             payment_hash: requested_payment_hash,
             contract_id,
             asset_amount: payload.asset_amount,
-            ..Default::default()
         };
 
         let invoice = unlocked_state
@@ -3162,7 +3227,12 @@ pub(crate) async fn ln_invoice(
             .map_err(|e| APIError::FailedInvoiceCreation(e.to_string()))?;
 
         let (payment_hash, invoice_type) = match requested_payment_hash {
-            Some(payment_hash) => (payment_hash, InvoiceType::Hodl),
+            Some(payment_hash) => (
+                payment_hash,
+                InvoiceType::Hodl {
+                    async_payment_recipient: false,
+                },
+            ),
             None => (
                 PaymentHash((*invoice.payment_hash()).to_byte_array()),
                 InvoiceType::AutoClaim,
@@ -4028,7 +4098,7 @@ pub(crate) async fn restore(
             ));
         }
 
-        check_already_initialized(&state.static_state.database)?;
+        check_already_initialized(&state.db())?;
 
         restore_backup(
             Path::new(&payload.backup_path),
@@ -4036,7 +4106,17 @@ pub(crate) async fn restore(
             &state.static_state.storage_dir_path,
         )?;
 
-        let _mnemonic = check_password_validity(&payload.password, &state.static_state.database)?;
+        // restore_backup overwrote the SQLite file under the pre-restore pool;
+        // reopen so subsequent queries (including unlock) see the restored data.
+        let new_pool = open_database_pool(&state.static_state.storage_dir_path)
+            .await
+            .map_err(|e| APIError::Unexpected(e.to_string()))?;
+        {
+            let mut guard = state.static_state.database.write().unwrap();
+            *guard = Arc::new(new_pool);
+        }
+
+        let _mnemonic = check_password_validity(&payload.password, &state.db())?;
 
         Ok(Json(EmptyResponse {}))
     })
@@ -4426,21 +4506,7 @@ pub(crate) async fn send_rgb(
             })
             .collect();
 
-        let send_result = if payload.skip_sync && !unlocked_state.external_signer_mode {
-            let unlocked_state_copy = unlocked_state.clone();
-            tokio::task::spawn_blocking(move || {
-                unlocked_state_copy.rgb_send(
-                    recipient_map,
-                    payload.donation,
-                    payload.fee_rate,
-                    payload.min_confirmations,
-                    payload.expiration_timestamp,
-                    payload.skip_sync,
-                )
-            })
-            .await
-            .unwrap()?
-        } else {
+        let send_result = if unlocked_state.external_signer_mode {
             let unlocked_state_copy = unlocked_state.clone();
             let begin_result = tokio::task::spawn_blocking(move || {
                 unlocked_state_copy.rgb_send_begin(
@@ -4450,6 +4516,7 @@ pub(crate) async fn send_rgb(
                     payload.min_confirmations,
                     payload.expiration_timestamp,
                     false,
+                    None,
                 )
             })
             .await
@@ -4468,6 +4535,19 @@ pub(crate) async fn send_rgb(
             tokio::task::spawn_blocking(move || unlocked_state_copy.rgb_send_end(signed_psbt))
                 .await
                 .unwrap()?
+        } else {
+            let unlocked_state_copy = unlocked_state.clone();
+            tokio::task::spawn_blocking(move || {
+                unlocked_state_copy.rgb_send(
+                    recipient_map,
+                    payload.donation,
+                    payload.fee_rate,
+                    payload.min_confirmations,
+                    payload.expiration_timestamp,
+                )
+            })
+            .await
+            .unwrap()?
         };
 
         Ok(Json(SendRgbResponse {
@@ -4574,14 +4654,13 @@ pub(crate) async fn unlock(
             }
         }
 
-        let mnemonic =
-            match check_password_validity(&payload.password, &state.static_state.database) {
-                Ok(mnemonic) => mnemonic,
-                Err(e) => {
-                    state.update_changing_state(false);
-                    return Err(e);
-                }
-            };
+        let mnemonic = match check_password_validity(&payload.password, &state.db()) {
+            Ok(mnemonic) => mnemonic,
+            Err(e) => {
+                state.update_changing_state(false);
+                return Err(e);
+            }
+        };
 
         tracing::debug!("Starting LDK...");
         let (new_ldk_background_services, new_unlocked_app_state) = match start_ldk(
@@ -4611,4 +4690,63 @@ pub(crate) async fn unlock(
         Ok(Json(EmptyResponse {}))
     })
     .await
+}
+
+#[cfg(feature = "vss")]
+pub(crate) async fn vss_backup(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap().clone();
+    drop(guard);
+
+    let vss_client = unlocked_state
+        .rgb_wallet_wrapper
+        .vss_client()
+        .ok_or_else(|| APIError::Unexpected("VSS is not configured".to_string()))?;
+
+    let wrapper = unlocked_state.rgb_wallet_wrapper.clone();
+    let version = tokio::task::spawn_blocking(move || {
+        let wallet = wrapper.get_rgb_wallet();
+        let rt = vss_client.handle().clone();
+        rt.block_on(wallet.vss_backup(&vss_client))
+    })
+    .await
+    .map_err(|e| APIError::Unexpected(format!("VSS backup task failed: {e}")))?
+    .map_err(|e| APIError::Unexpected(format!("VSS backup failed: {e}")))?;
+
+    Ok(Json(serde_json::json!({ "version": version })))
+}
+
+#[cfg(feature = "vss")]
+pub(crate) async fn vss_backup_info(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap().clone();
+    drop(guard);
+
+    let vss_client = unlocked_state
+        .rgb_wallet_wrapper
+        .vss_client()
+        .ok_or_else(|| APIError::Unexpected("VSS is not configured".to_string()))?;
+
+    let wrapper = unlocked_state.rgb_wallet_wrapper.clone();
+    let info = tokio::task::spawn_blocking(move || {
+        let wallet = wrapper.get_rgb_wallet();
+        let rt = vss_client.handle().clone();
+        rt.block_on(wallet.vss_backup_info(&vss_client))
+    })
+    .await
+    .map_err(|e| APIError::Unexpected(format!("VSS backup info task failed: {e}")))?
+    .map_err(|e| APIError::Unexpected(format!("VSS backup info failed: {e}")))?;
+
+    let pending_kv_writes = unlocked_state.kv_store.pending_remote_writes();
+
+    Ok(Json(serde_json::json!({
+        "backup_exists": info.backup_exists,
+        "server_version": info.server_version,
+        "backup_required": info.backup_required,
+        "pending_kv_writes": pending_kv_writes,
+    })))
 }

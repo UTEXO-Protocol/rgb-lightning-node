@@ -358,6 +358,7 @@ pub struct DecodeLnInvoiceResponse {
     pub payment_hash: PaymentHash,
     pub payment_secret: String,
     pub payee_pubkey: Option<PublicKey>,
+    pub min_final_cltv_expiry_delta: u64,
     pub network: String,
 }
 
@@ -428,6 +429,7 @@ pub struct LnInvoiceRequest {
     pub asset_amount: Option<u64>,
     pub payment_hash: Option<PaymentHash>,
     pub description_hash: Option<String>,
+    pub min_final_cltv_expiry_delta: Option<u16>,
 }
 
 pub struct CancelHodlInvoiceRequest {
@@ -665,13 +667,15 @@ pub struct SdkInitRequest {
     pub virtual_peer_pubkeys: Option<Vec<PublicKey>>,
     pub lsp_base_url: Option<String>,
     pub lsp_bearer_token: Option<String>,
+    pub vss_url: Option<String>,
+    pub vss_allow_http: bool,
+    pub vss_allow_empty_restore: bool,
 }
 
 pub struct SendRgbRequest {
     pub donation: bool,
     pub fee_rate: u64,
     pub min_confirmations: u8,
-    pub skip_sync: bool,
     pub recipient_groups: Vec<AssetRecipients>,
 }
 

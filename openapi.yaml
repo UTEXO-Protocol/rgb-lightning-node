@@ -19,6 +19,8 @@ tags:
     description: APIs to perform operations related to LN peers
   - name: Payments
     description: APIs to perform operations related to LN payments
+  - name: Async Payments
+    description: APIs to perform async payment lifecycle operations
   - name: Invoices
     description: APIs to perform operations related to LN invoices
   - name: On-chain
@@ -46,7 +48,7 @@ paths:
   /apay/new:
     post:
       tags:
-        - Payments
+        - Async Payments
       summary: Send a new order with async-payment hashes
       description: Derive deterministic payment hashes for async payments from the unlocked wallet. Send an async_order.new JSON-RPC request to the connected invoice-host peer so it can track those hashes and process asynchronous payments.
       requestBody:
@@ -61,6 +63,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AsyncOrderNewResponse'
+  /apay/outboundinvoice:
+    post:
+      tags:
+        - Async Payments
+      summary: Request an outbound LN invoice
+      description: Request an outbound invoice from the connected recipient peer for an async payment claim session.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsyncOrderOutboundInvoiceRequest'
+      responses:
+        '200':
+          description: Recipient peer returned an outbound invoice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOrderOutboundInvoiceResponse'
   /assetbalance:
     post:
       tags:
@@ -731,6 +751,7 @@ paths:
       description: >-
         Get a LN invoice to receive a payment. Provide `payment_hash` to create a HODL invoice.
         Provide `description_hash` to include an out-of-band BOLT11 description hash.
+        Provide `min_final_cltv_expiry_delta` to request an explicit inbound final CLTV policy.
       requestBody:
         content:
           application/json:
@@ -1066,6 +1087,75 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EmptyResponse'
+  /vssbackup:
+    post:
+      tags:
+        - Other
+      summary: Trigger a manual VSS backup of the RGB wallet
+      description: >
+        Builds a zip of the current RGB wallet directory and uploads it to the
+        configured VSS server. Only available when the node was started with
+        --vss-url. The node's KV state is replicated automatically on every
+        persistence event and is not affected by this endpoint.
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - version
+                properties:
+                  version:
+                    type: integer
+                    format: int64
+                    description: Server-side version of the just-uploaded RGB wallet backup.
+        '503':
+          description: VSS is not configured or unreachable
+  /vssbackupinfo:
+    get:
+      tags:
+        - Other
+      summary: Inspect VSS backup status
+      description: >
+        Returns whether a backup exists on the server, its server-side version,
+        whether the local wallet has changes since the last backup, and how
+        many KV-stream writes are queued for retry after a replication
+        failure. Read-only; callable by tokens with the read-only role.
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - backup_exists
+                  - backup_required
+                  - pending_kv_writes
+                properties:
+                  backup_exists:
+                    type: boolean
+                    description: True if the VSS server has a backup for this wallet.
+                  server_version:
+                    type: integer
+                    format: int64
+                    nullable: true
+                    description: Server-side version of the most recent backup, if any.
+                  backup_required:
+                    type: boolean
+                    description: >
+                      True if the local wallet has changes since the last
+                      successful upload (i.e. a manual backup is needed).
+                  pending_kv_writes:
+                    type: integer
+                    description: >
+                      Number of KV writes that failed to replicate and are
+                      queued for retry. A persistently non-zero value
+                      indicates VSS replication is degraded.
+        '503':
+          description: VSS is not configured or unreachable
 components:
   schemas:
     AddressResponse:
@@ -1149,6 +1239,67 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AsyncOrderNewHash'
+    AsyncOrderOutboundInvoiceRequest:
+      type: object
+      required:
+        - client_node_id
+        - params
+      properties:
+        client_node_id:
+          type: string
+          example: 02270dadcd6e7ba0ef707dac72acccae1a3607453a8dd2aef36ff3be4e0d31f043
+        params:
+          $ref: '#/components/schemas/AsyncOrderRequestInvoiceParams'
+    AsyncOrderOutboundInvoiceResponse:
+      type: object
+      required:
+        - payment_hash
+        - bolt11
+      properties:
+        payment_hash:
+          type: string
+          example: abababababababababababababababababababababababababababababababab
+        bolt11:
+          type: string
+          example: lnbc1test
+    AsyncOrderRequestInvoiceParams:
+      type: object
+      required:
+        - hash_index
+        - payment_hash
+        - amount_msat
+        - description_hash
+        - invoice_expiry_sec
+        - min_final_cltv_expiry_delta
+      properties:
+        hash_index:
+          type: string
+          example: '42'
+        payment_hash:
+          type: string
+          example: abababababababababababababababababababababababababababababababab
+        amount_msat:
+          type: integer
+          example: 99000
+        asset_id:
+          type:
+            - string
+            - 'null'
+          example: rgb:EIkAVQvq-WbAb5JG-CYxbUER-oqDNwne-ZNxBDID-p0cpf9U
+        asset_amount:
+          type:
+            - integer
+            - 'null'
+          example: 10
+        description_hash:
+          type: string
+          example: 5ca5d81b482b4015e7b14df7a27fe0a38c226273604ffd3b008b752571811938
+        invoice_expiry_sec:
+          type: integer
+          example: 900
+        min_final_cltv_expiry_delta:
+          type: integer
+          example: 18
     AssetBalanceRequest:
       type: object
       required:
@@ -1761,6 +1912,7 @@ components:
         - timestamp
         - payment_hash
         - payment_secret
+        - min_final_cltv_expiry_delta
         - network
       properties:
         amt_msat:
@@ -1784,6 +1936,11 @@ components:
             - integer
             - 'null'
           example: 42
+        description_hash:
+          type:
+            - string
+            - 'null'
+          example: 5ca5d81b482b4015e7b14df7a27fe0a38c226273604ffd3b008b752571811938
         payment_hash:
           type: string
           example: 5ca5d81b482b4015e7b14df7a27fe0a38c226273604ffd3b008b752571811938
@@ -1795,6 +1952,9 @@ components:
             - string
             - 'null'
           example: 0343851df9e0e8aff0c10b3498ce723ff4c9b4a855e6c8819adcafbbb3e24ea2af
+        min_final_cltv_expiry_delta:
+          type: integer
+          example: 144
         network:
           $ref: '#/components/schemas/BitcoinNetwork'
     DecodeRGBInvoiceRequest:
@@ -2413,6 +2573,10 @@ components:
           type: string
           description: Optional. When provided, the invoice includes a BOLT11 description hash.
           example: 5ca5d81b482b4015e7b14df7a27fe0a38c226273604ffd3b008b752571811938
+        min_final_cltv_expiry_delta:
+          type: integer
+          description: Optional. Requested inbound final CLTV policy in blocks.
+          example: 144
     LNInvoiceResponse:
       type: object
       required:
@@ -2947,7 +3111,6 @@ components:
         - fee_rate
         - min_confirmations
         - recipient_map
-        - skip_sync
       properties:
         donation:
           type: boolean
@@ -2987,9 +3150,6 @@ components:
                   Fungible: 100
                 transport_endpoints:
                   - rpc://127.0.0.1:3000/json-rpc
-        skip_sync:
-          type: boolean
-          example: false
     SendRgbResponse:
       type: object
       required:

@@ -436,6 +436,7 @@ dictionary DecodeLnInvoiceResponse {
     PaymentHash payment_hash;
     string payment_secret;
     PublicKey? payee_pubkey;
+    u64 min_final_cltv_expiry_delta;
     string network;
 };
 
@@ -506,6 +507,7 @@ dictionary LnInvoiceRequest {
     u64? asset_amount;
     PaymentHash? payment_hash;
     string? description_hash;
+    u16? min_final_cltv_expiry_delta;
 };
 
 dictionary LnInvoiceResponse {
@@ -546,6 +548,9 @@ dictionary SdkInitRequest {
     sequence<PublicKey>? virtual_peer_pubkeys;
     string? lsp_base_url;
     string? lsp_bearer_token;
+    string? vss_url = null;
+    boolean vss_allow_http = false;
+    boolean vss_allow_empty_restore = false;
 };
 
 dictionary SdkUnlockRequest {
@@ -749,7 +754,6 @@ dictionary SendRgbRequest {
     boolean donation;
     u64 fee_rate;
     u8 min_confirmations;
-    boolean skip_sync;
     sequence<AssetRecipients> recipient_groups;
 };
 

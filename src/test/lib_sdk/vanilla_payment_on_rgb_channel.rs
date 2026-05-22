@@ -103,6 +103,7 @@ fn vanilla_payment_on_rgb_channel() {
                 asset_amount: None,
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("node B vanilla ln_invoice")
             .invoice;
@@ -173,7 +174,6 @@ fn vanilla_payment_on_rgb_channel() {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
-                skip_sync: false,
                 recipient_groups: vec![AssetRecipients {
                     asset_id: asset_id.clone(),
                     recipients: vec![RgbRecipient {

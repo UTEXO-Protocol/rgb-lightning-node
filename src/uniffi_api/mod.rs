@@ -80,6 +80,16 @@ fn attach_host_with_expected_key_source(
 
 fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> {
     let network = network_from_str(&request.network)?;
+    if let Some(url) = &request.vss_url {
+        #[cfg(feature = "vss")]
+        crate::utils::validate_vss_url(url, request.vss_allow_http)
+            .map_err(|_| RlnError::InvalidRequest)?;
+        #[cfg(not(feature = "vss"))]
+        {
+            let _ = url;
+            return Err(RlnError::InvalidRequest);
+        }
+    }
     let config = NodeConfig {
         storage_dir_path: std::path::PathBuf::from(request.storage_dir_path),
         daemon_listening_port: request.daemon_listening_port,
@@ -91,6 +101,8 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
         virtual_peer_pubkeys: request.virtual_peer_pubkeys.unwrap_or_default(),
         lsp_base_url: request.lsp_base_url,
         lsp_bearer_token: request.lsp_bearer_token,
+        vss_url: request.vss_url,
+        vss_allow_empty_restore: request.vss_allow_empty_restore,
     };
     block_on_app(NodeHandle::new(config))
 }
@@ -103,7 +115,6 @@ fn send_rgb_from_state(
         donation: request.donation,
         fee_rate: request.fee_rate,
         min_confirmations: request.min_confirmations,
-        skip_sync: request.skip_sync,
         recipient_groups: request
             .recipient_groups
             .into_iter()
@@ -1186,6 +1197,7 @@ impl SdkNode {
             payment_hash,
             payment_secret: resp.payment_secret,
             payee_pubkey,
+            min_final_cltv_expiry_delta: resp.min_final_cltv_expiry_delta,
             network: format!("{:?}", resp.network),
         })
     }
@@ -1302,6 +1314,7 @@ impl SdkNode {
         let asset_id = request.asset_id.map(|a| a.to_string());
         let payment_hash = request.payment_hash.map(|h| h.0.as_hex().to_string());
         let description_hash = request.description_hash;
+        let min_final_cltv_expiry_delta = request.min_final_cltv_expiry_delta;
         let data = block_on_sdk(sdk::create_ln_invoice(
             state,
             request.amt_msat,
@@ -1310,6 +1323,7 @@ impl SdkNode {
             request.asset_amount,
             payment_hash,
             description_hash,
+            min_final_cltv_expiry_delta,
         ))?;
         let invoice = Bolt11Invoice::from_str(&data.invoice).map_err(|_| RlnError::Internal)?;
         Ok(LnInvoiceResponse { invoice })

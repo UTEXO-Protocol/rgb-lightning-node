@@ -1,5 +1,5 @@
 use crate::database::RlnDatabase;
-use crate::kv_store::SeaOrmKvStore;
+use crate::synced_kv_store::SyncedKvStore;
 use amplify::s;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -30,7 +30,7 @@ use std::{
     path::Path,
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
     time::{Duration, SystemTime},
 };
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
@@ -76,8 +76,12 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn db(&self) -> Arc<DatabaseConnection> {
+        self.static_state.db()
+    }
+
     pub(crate) fn get_db(&self) -> RlnDatabase {
-        RlnDatabase::new((*self.static_state.database).clone())
+        RlnDatabase::new((*self.db()).clone())
     }
 
     pub(crate) fn get_changing_state(&self) -> MutexGuard<'_, bool> {
@@ -110,6 +114,12 @@ impl AppState {
     }
 }
 
+// VSS-related fields below are always present on `StaticState` regardless of
+// the `vss` feature flag — they ride the same SDK / NodeConfig surface as the
+// non-VSS knobs. With `vss` off the implementation never reads them, so we
+// silence the dead-code warning at the field level (the older
+// `cfg_attr(dead_code)` annotations made the fields look optional; they
+// aren't, only their consumers are gated).
 pub(crate) struct StaticState {
     pub(crate) enable_virtual_channels_v0: bool,
     pub(crate) ldk_peer_listening_port: u16,
@@ -119,9 +129,23 @@ pub(crate) struct StaticState {
     pub(crate) logger: Arc<FilesystemLogger>,
     pub(crate) max_media_upload_size_mb: u16,
     pub(crate) virtual_peer_pubkeys: Vec<PublicKey>,
-    pub(crate) database: Arc<DatabaseConnection>,
+    pub(crate) database: RwLock<Arc<DatabaseConnection>>,
     pub(crate) lsp_base_url: Option<String>,
     pub(crate) lsp_bearer_token: Option<String>,
+    /// VSS server URL (None = VSS disabled). Populated regardless of the
+    /// `vss` feature flag; only the consumer in `start_ldk` is feature-gated.
+    #[cfg_attr(not(feature = "vss"), allow(dead_code))]
+    pub(crate) vss_url: Option<String>,
+    /// When true, a failed VSS restore on a fresh device logs a warning and
+    /// continues with empty local state instead of aborting unlock.
+    #[cfg_attr(not(feature = "vss"), allow(dead_code))]
+    pub(crate) vss_allow_empty_restore: bool,
+}
+
+impl StaticState {
+    pub(crate) fn db(&self) -> Arc<DatabaseConnection> {
+        self.database.read().unwrap().clone()
+    }
 }
 
 pub(crate) struct UnlockedAppState {
@@ -136,7 +160,7 @@ pub(crate) struct UnlockedAppState {
     pub(crate) peer_manager: Arc<PeerManager>,
     pub(crate) async_order_handler: Arc<AsyncOrderMessageHandler>,
     pub(crate) async_payments_preimage_root: Arc<AsyncPaymentsPreimageRoot>,
-    pub(crate) kv_store: Arc<SeaOrmKvStore>,
+    pub(crate) kv_store: Arc<SyncedKvStore>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,
@@ -280,6 +304,44 @@ pub(crate) fn check_port_is_available(port: u16) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validate a VSS URL. By default only `https://` URLs and loopback HTTP
+/// URLs (`http://localhost`, `http://127.0.0.1`, `http://[::1]`) are
+/// accepted; pass `allow_http = true` to allow `http://` on any host (for
+/// private networks with out-of-band trust).
+pub(crate) fn validate_vss_url(url: &str, allow_http: bool) -> Result<(), AppError> {
+    let trimmed = url.trim();
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        if rest.is_empty() {
+            return Err(AppError::InvalidVssConfig(format!(
+                "VSS URL `{url}` has no host"
+            )));
+        }
+        return Ok(());
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        // Strip any optional userinfo (`user:pass@`) and trailing path/query.
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host_with_port = authority
+            .rsplit_once('@')
+            .map(|(_, after)| after)
+            .unwrap_or(authority);
+        let is_loopback_host = ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]
+            .iter()
+            .any(|h| host_with_port == *h || host_with_port.starts_with(&format!("{h}:")));
+        if is_loopback_host || allow_http {
+            return Ok(());
+        }
+        return Err(AppError::InvalidVssConfig(format!(
+            "VSS URL `{url}` uses http:// on non-loopback host `{host_with_port}`. \
+             Use https:// in production, or pass --vss-allow-http to allow http:// \
+             on a private network you trust out-of-band."
+        )));
+    }
+    Err(AppError::InvalidVssConfig(format!(
+        "VSS URL `{url}` must start with http:// or https://"
+    )))
+}
+
 pub(crate) fn get_db_path(storage_dir_path: &Path) -> PathBuf {
     storage_dir_path.join("rln_db")
 }
@@ -417,13 +479,10 @@ pub(crate) fn parse_peer_info(
     Ok((pubkey.unwrap(), peer_addr))
 }
 
-pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppError> {
-    // Initialize the Logger (creates ldk_data_dir and its logs directory)
-    let ldk_data_dir = args.storage_dir_path.join(LDK_DIR);
-    let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
-
-    // Initialize the shared database connection
-    let db_path = get_db_path(&args.storage_dir_path);
+pub(crate) async fn open_database_pool(
+    storage_dir_path: &Path,
+) -> Result<DatabaseConnection, AppError> {
+    let db_path = get_db_path(storage_dir_path);
     let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
     let mut opt = ConnectOptions::new(connection_string);
     // Use single connection to avoid deadlocks
@@ -432,12 +491,21 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         .connect_timeout(Duration::from_secs(8))
         .idle_timeout(Duration::from_secs(8))
         .max_lifetime(Duration::from_secs(8));
-
-    let database = crate::runtime::block_on(Database::connect(opt)).map_err(|e| {
+    Database::connect(opt).await.map_err(|e| {
         AppError::IO(std::io::Error::other(format!(
             "Database connection failed: {e}"
         )))
-    })?;
+    })
+}
+
+pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppError> {
+    // Initialize the Logger (creates ldk_data_dir and its logs directory)
+    let ldk_data_dir = args.storage_dir_path.join(LDK_DIR);
+    let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
+
+    // Initialize the shared database connection
+    let database = crate::runtime::block_on(open_database_pool(&args.storage_dir_path))?;
+    let db_path = get_db_path(&args.storage_dir_path);
 
     crate::runtime::block_on(Migrator::up(&database, None))
         .map_err(|e| AppError::IO(std::io::Error::other(format!("Migration failed: {e}"))))?;
@@ -445,6 +513,10 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
     tracing::info!(db_path = %db_path.display(), "Shared database initialized");
 
     let cancel_token = CancellationToken::new();
+
+    if args.vss_url.is_some() {
+        tracing::info!(vss_url = ?args.vss_url, "VSS cloud backup enabled");
+    }
 
     let static_state = Arc::new(StaticState {
         enable_virtual_channels_v0: args.enable_virtual_channels_v0,
@@ -455,9 +527,11 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         logger,
         max_media_upload_size_mb: args.max_media_upload_size_mb,
         virtual_peer_pubkeys: args.virtual_peer_pubkeys.clone(),
-        database: Arc::new(database),
+        database: RwLock::new(Arc::new(database)),
         lsp_base_url: args.lsp_base_url.clone(),
         lsp_bearer_token: args.lsp_bearer_token.clone(),
+        vss_url: args.vss_url.clone(),
+        vss_allow_empty_restore: args.vss_allow_empty_restore,
     });
 
     let app_state = Arc::new(AppState {
@@ -579,4 +653,38 @@ pub(crate) fn validate_and_parse_payment_preimage(
         return Err(APIError::InvalidPaymentPreimage);
     }
     Ok(preimage)
+}
+
+#[cfg(test)]
+mod utils_tests {
+    use super::validate_vss_url;
+
+    #[test]
+    fn vss_url_https_accepted() {
+        assert!(validate_vss_url("https://example.com/vss", false).is_ok());
+        assert!(validate_vss_url("https://example.com/vss", true).is_ok());
+    }
+
+    #[test]
+    fn vss_url_loopback_http_accepted_without_override() {
+        assert!(validate_vss_url("http://localhost:8081/vss", false).is_ok());
+        assert!(validate_vss_url("http://127.0.0.1:8081/vss", false).is_ok());
+        assert!(validate_vss_url("http://[::1]:8081/vss", false).is_ok());
+    }
+
+    #[test]
+    fn vss_url_non_loopback_http_rejected_without_override() {
+        assert!(validate_vss_url("http://example.com/vss", false).is_err());
+    }
+
+    #[test]
+    fn vss_url_non_loopback_http_accepted_with_override() {
+        assert!(validate_vss_url("http://example.com/vss", true).is_ok());
+    }
+
+    #[test]
+    fn vss_url_other_schemes_rejected() {
+        assert!(validate_vss_url("ftp://example.com/vss", true).is_err());
+        assert!(validate_vss_url("example.com/vss", true).is_err());
+    }
 }

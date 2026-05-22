@@ -3,8 +3,12 @@
 
 use crate::async_order::{
     read_async_payments_next_hash_index, write_async_payments_next_hash_index,
-    AsyncOrderNewHashWire, AsyncOrderNewResultWire, JsonRpcErrorWire,
-    ASYNC_ORDER_MAX_HASH_BATCH_SIZE, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    AsyncOrderNewResultWire, AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
+    ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+};
+use crate::core_types::async_order::{
+    AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
+    AsyncOrderOutboundInvoiceResponse,
 };
 use crate::core_types::{FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
 use crate::error::APIError;
@@ -239,25 +243,6 @@ pub(crate) struct AssetMetadataData {
     pub(crate) token: Option<Token>,
 }
 
-pub(crate) struct AsyncOrderNewRequestData {
-    pub(crate) host_node_id: String,
-}
-
-pub(crate) struct AsyncOrderNewData {
-    pub(crate) request_id: String,
-    pub(crate) host_node_id: String,
-    pub(crate) protocol_version: u64,
-    pub(crate) order_id: String,
-    pub(crate) status: String,
-    pub(crate) accepted_through_index: u64,
-    pub(crate) next_index_expected: u64,
-    pub(crate) unused_hashes: u64,
-    pub(crate) refill_batch_size: u64,
-    pub(crate) first_hash_index: u64,
-    pub(crate) last_hash_index: u64,
-    pub(crate) hashes: Vec<AsyncOrderNewHashWire>,
-}
-
 pub(crate) struct BtcBalance {
     pub(crate) settled: u64,
     pub(crate) future: u64,
@@ -278,6 +263,7 @@ pub(crate) struct DecodeLnInvoiceData {
     pub(crate) payment_hash: String,
     pub(crate) payment_secret: String,
     pub(crate) payee_pubkey: Option<String>,
+    pub(crate) min_final_cltv_expiry_delta: u64,
     pub(crate) network: RgbBitcoinNetwork,
 }
 
@@ -366,7 +352,6 @@ pub(crate) struct SendRgbRequestData {
     pub(crate) donation: bool,
     pub(crate) fee_rate: u64,
     pub(crate) min_confirmations: u8,
-    pub(crate) skip_sync: bool,
     pub(crate) recipient_groups: Vec<AssetRecipientsInput>,
 }
 
@@ -1153,8 +1138,8 @@ pub(crate) async fn address(state: Arc<AppState>) -> Result<AddressData, APIErro
 
 pub(crate) async fn async_order_new(
     state: Arc<AppState>,
-    request: AsyncOrderNewRequestData,
-) -> Result<AsyncOrderNewData, APIError> {
+    request: AsyncOrderNewRequest,
+) -> Result<AsyncOrderNewResponse, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = Arc::clone(guard.as_ref().unwrap());
     drop(guard);
@@ -1192,10 +1177,10 @@ pub(crate) async fn async_order_new(
 
     let response_rx = unlocked_state
         .async_order_handler
-        .queue_async_order_new_request(host_node_id, Value::String(request_id.clone()), params)
+        .queue_async_order_new(host_node_id, Value::String(request_id.clone()), params)
         .map_err(|err| APIError::InvalidRequest(err.message))?;
     unlocked_state.peer_manager.process_events();
-    let order_state: AsyncOrderNewResultWire = match timeout(
+    let order_state_value = match timeout(
         Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
         response_rx,
     )
@@ -1222,6 +1207,10 @@ pub(crate) async fn async_order_new(
             )));
         }
     };
+    let order_state: AsyncOrderNewResultWire =
+        serde_json::from_value(order_state_value).map_err(|err| {
+            APIError::InvalidRequest(format!("invalid async_order.new response: {err}"))
+        })?;
     let next_hash_index = order_state.next_index_expected;
     write_async_payments_next_hash_index(
         unlocked_state.kv_store.as_ref(),
@@ -1230,7 +1219,7 @@ pub(crate) async fn async_order_new(
     )
     .map_err(|err| APIError::Unexpected(err.message))?;
 
-    Ok(AsyncOrderNewData {
+    Ok(AsyncOrderNewResponse {
         request_id,
         host_node_id: hex_str(&host_node_id.serialize()),
         protocol_version: order_state.protocol_version,
@@ -1243,6 +1232,76 @@ pub(crate) async fn async_order_new(
         first_hash_index,
         last_hash_index,
         hashes,
+    })
+}
+
+pub(crate) async fn async_order_outbound_invoice(
+    state: Arc<AppState>,
+    request: AsyncOrderOutboundInvoiceRequest,
+) -> Result<AsyncOrderOutboundInvoiceResponse, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = Arc::clone(guard.as_ref().unwrap());
+    drop(guard);
+
+    let peer_node_id =
+        hex_str_to_compressed_pubkey(&request.client_node_id).ok_or(APIError::InvalidPubkey)?;
+    if unlocked_state
+        .peer_manager
+        .peer_by_node_id(&peer_node_id)
+        .is_none()
+    {
+        return Err(APIError::InvalidPeerInfo(s!(
+            "/apay/outboundinvoice requires a connected recipient peer"
+        )));
+    }
+
+    let request_id = new_jsonrpc_request_id();
+    let response_rx = unlocked_state
+        .async_order_handler
+        .queue_async_order_request_invoice(
+            peer_node_id,
+            Value::String(request_id.clone()),
+            request.params,
+        )
+        .map_err(|err| APIError::InvalidRequest(err.message))?;
+    unlocked_state.peer_manager.process_events();
+
+    let response_value = match timeout(
+        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        response_rx,
+    )
+    .await
+    {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(err))) => {
+            return Err(APIError::InvalidRequest(format!(
+                "async_order host error {}: {}",
+                err.code, err.message
+            )));
+        }
+        Ok(Err(_)) => {
+            return Err(APIError::Network(s!(
+                "/apay/outboundinvoice response channel closed before peer replied"
+            )))
+        }
+        Err(_) => {
+            unlocked_state
+                .async_order_handler
+                .forget_async_order_response(peer_node_id, &request_id);
+            return Err(APIError::Network(s!(
+                "/apay/outboundinvoice timed out waiting for peer response"
+            )));
+        }
+    };
+
+    let response: AsyncOrderOutboundInvoiceResultWire = serde_json::from_value(response_value)
+        .map_err(|err| {
+            APIError::InvalidRequest(format!("invalid request_invoice response: {err}"))
+        })?;
+
+    Ok(AsyncOrderOutboundInvoiceResponse {
+        payment_hash: response.payment_hash,
+        bolt11: response.bolt11,
     })
 }
 
@@ -1571,7 +1630,6 @@ pub(crate) async fn send_rgb(
     donation: bool,
     fee_rate: u64,
     min_confirmations: u8,
-    skip_sync: bool,
 ) -> Result<SendRgbData, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
@@ -1580,21 +1638,7 @@ pub(crate) async fn send_rgb(
         return Err(APIError::OpenChannelInProgress);
     }
 
-    let send_result = if skip_sync && !unlocked_state.external_signer_mode {
-        let unlocked_state_copy = unlocked_state.clone();
-        tokio::task::spawn_blocking(move || {
-            unlocked_state_copy.rgb_send(
-                recipient_map,
-                donation,
-                fee_rate,
-                min_confirmations,
-                None,
-                skip_sync,
-            )
-        })
-        .await
-        .unwrap()?
-    } else {
+    let send_result = if unlocked_state.external_signer_mode {
         let unlocked_state_copy = unlocked_state.clone();
         let begin_result = tokio::task::spawn_blocking(move || {
             unlocked_state_copy.rgb_send_begin(
@@ -1604,6 +1648,7 @@ pub(crate) async fn send_rgb(
                 min_confirmations,
                 None,
                 false,
+                None,
             )
         })
         .await
@@ -1622,6 +1667,13 @@ pub(crate) async fn send_rgb(
         tokio::task::spawn_blocking(move || unlocked_state_copy.rgb_send_end(signed_psbt))
             .await
             .unwrap()?
+    } else {
+        let unlocked_state_copy = unlocked_state.clone();
+        tokio::task::spawn_blocking(move || {
+            unlocked_state_copy.rgb_send(recipient_map, donation, fee_rate, min_confirmations, None)
+        })
+        .await
+        .unwrap()?
     };
 
     Ok(SendRgbData {
@@ -1672,7 +1724,6 @@ pub(crate) async fn send_rgb_from_groups(
         request.donation,
         request.fee_rate,
         request.min_confirmations,
-        request.skip_sync,
     )
     .await
 }
@@ -1688,7 +1739,7 @@ pub(crate) async fn init(
     }
 
     check_password_strength(password.clone())?;
-    check_already_initialized(&state.static_state.database)?;
+    check_already_initialized(&state.db())?;
 
     let mnemonic = match mnemonic {
         Some(mnemonic) => Mnemonic::from_str(&mnemonic)
@@ -1697,7 +1748,7 @@ pub(crate) async fn init(
         None => generate_keys(state.static_state.network, WitnessVersion::Taproot).mnemonic,
     };
 
-    encrypt_and_save_mnemonic(password, mnemonic.clone(), &state.static_state.database)?;
+    encrypt_and_save_mnemonic(password, mnemonic.clone(), &state.db())?;
     Ok(InitData { mnemonic })
 }
 
@@ -1712,7 +1763,7 @@ pub(crate) async fn init_with_external_signer(
         )));
     }
     let _unlocked_state = check_locked(&state).await?;
-    check_already_initialized(&state.static_state.database)?;
+    check_already_initialized(&state.db())?;
 
     if read_key_source_file(&state.static_state.storage_dir_path)
         .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
@@ -1745,7 +1796,7 @@ pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Resu
         }
     }
 
-    let mnemonic = match check_password_validity(&request.password, &state.static_state.database) {
+    let mnemonic = match check_password_validity(&request.password, &state.db()) {
         Ok(mnemonic) => mnemonic,
         Err(e) => {
             update_changing_state(&state, false);
@@ -3409,7 +3460,8 @@ pub(crate) async fn decode_ln_invoice(
         asset_amount: invoice.rgb_amount(),
         payment_hash: hex_str(&invoice.payment_hash().to_byte_array()),
         payment_secret: hex_str(&invoice.payment_secret().0),
-        payee_pubkey: invoice.payee_pub_key().map(|p| p.to_string()),
+        payee_pubkey: Some(invoice.get_payee_pub_key().to_string()),
+        min_final_cltv_expiry_delta: invoice.min_final_cltv_expiry_delta(),
         network: match invoice.network() {
             bitcoin::Network::Bitcoin => rgb_lib::BitcoinNetwork::Mainnet,
             bitcoin::Network::Testnet => rgb_lib::BitcoinNetwork::Testnet,
@@ -3473,6 +3525,7 @@ pub(crate) async fn invoice_status(
  * This method is an SDK-facing adapter corresponding to `routes::ln_invoice`.
  * It keeps route-equivalent semantics while using SDK-native parameter shape.
  */
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_ln_invoice(
     state: Arc<AppState>,
     amt_msat: Option<u64>,
@@ -3481,6 +3534,7 @@ pub(crate) async fn create_ln_invoice(
     asset_amount: Option<u64>,
     payment_hash: Option<String>,
     description_hash: Option<String>,
+    min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<LnInvoiceData, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
@@ -3523,10 +3577,10 @@ pub(crate) async fn create_ln_invoice(
         amount_msats: amt_msat,
         description,
         invoice_expiry_delta_secs: Some(expiry_sec),
+        min_final_cltv_expiry_delta,
         payment_hash: requested_payment_hash,
         contract_id,
         asset_amount,
-        ..Default::default()
     };
 
     let invoice = match unlocked_state
@@ -3538,7 +3592,12 @@ pub(crate) async fn create_ln_invoice(
     };
 
     let (payment_hash, invoice_type) = match requested_payment_hash {
-        Some(payment_hash) => (payment_hash, InvoiceType::Hodl),
+        Some(payment_hash) => (
+            payment_hash,
+            InvoiceType::Hodl {
+                async_payment_recipient: false,
+            },
+        ),
         None => (
             PaymentHash((*invoice.payment_hash()).to_byte_array()),
             InvoiceType::AutoClaim,
@@ -3568,7 +3627,7 @@ pub(crate) async fn create_ln_invoice(
 fn payment_type_from_invoice(invoice_type: Option<InvoiceType>) -> PaymentType {
     match invoice_type.unwrap_or(InvoiceType::AutoClaim) {
         InvoiceType::AutoClaim => PaymentType::InboundAutoClaim,
-        InvoiceType::Hodl => PaymentType::InboundHodl,
+        InvoiceType::Hodl { .. } => PaymentType::InboundHodl,
     }
 }
 
@@ -3719,7 +3778,7 @@ pub(crate) async fn cancel_hodl_invoice(
         .get(&payment_hash)
         .cloned()
         .ok_or(APIError::UnknownLNInvoice)?;
-    if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl)) {
+    if !matches!(payment_info.invoice_type, Some(InvoiceType::Hodl { .. })) {
         return Err(APIError::InvoiceNotHodl);
     }
     match payment_info.status {
@@ -3750,7 +3809,10 @@ pub(crate) async fn claim_hodl_invoice(
             return Err(APIError::UnknownLNInvoice);
         };
 
-        if !matches!(existing_payment_mut.invoice_type, Some(InvoiceType::Hodl)) {
+        if !matches!(
+            existing_payment_mut.invoice_type,
+            Some(InvoiceType::Hodl { .. })
+        ) {
             return Err(APIError::InvoiceNotHodl);
         }
 

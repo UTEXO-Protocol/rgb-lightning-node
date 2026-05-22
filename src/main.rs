@@ -18,7 +18,10 @@ mod routes;
 mod runtime;
 mod signer;
 mod swap;
+mod synced_kv_store;
 mod utils;
+#[cfg(feature = "vss")]
+mod vss_kv_store;
 
 #[cfg(test)]
 mod test;
@@ -52,8 +55,8 @@ use crate::auth::conditional_auth_middleware;
 use crate::error::AppError;
 use crate::ldk::stop_ldk;
 use crate::routes::{
-    address, asset_balance, asset_metadata, async_order_new, backup, btc_balance,
-    cancel_hodl_invoice, change_password, check_indexer_url, check_proxy_endpoint,
+    address, asset_balance, asset_metadata, async_order_new, async_order_outbound_invoice, backup,
+    btc_balance, cancel_hodl_invoice, change_password, check_indexer_url, check_proxy_endpoint,
     claim_hodl_invoice, close_channel, connect_peer, create_utxos, decode_ln_invoice,
     decode_rgb_invoice, disconnect_peer, estimate_fee, fail_transfers, get_asset_media,
     get_channel_id, get_payment, get_swap, inflate, init, invoice_status, issue_asset_cfa,
@@ -63,6 +66,8 @@ use crate::routes::{
     post_asset_media, refresh_transfers, restore, revoke_token, rgb_invoice, send_btc,
     send_onion_message, send_payment, send_rgb, shutdown, sign_message, sync, taker, unlock,
 };
+#[cfg(feature = "vss")]
+use crate::routes::{vss_backup, vss_backup_info};
 use crate::utils::{start_daemon, AppState, LOGS_DIR};
 
 #[tokio::main]
@@ -117,6 +122,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .layer(DefaultBodyLimit::disable())
         .route("/address", post(address))
         .route("/apay/new", post(async_order_new))
+        .route("/apay/outboundinvoice", post(async_order_outbound_invoice))
         .route("/assetbalance", post(asset_balance))
         .route("/assetmetadata", post(asset_metadata))
         .route("/backup", post(backup))
@@ -173,7 +179,14 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/signmessage", post(sign_message))
         .route("/sync", post(sync))
         .route("/taker", post(taker))
-        .route("/unlock", post(unlock))
+        .route("/unlock", post(unlock));
+
+    #[cfg(feature = "vss")]
+    let router = router
+        .route("/vssbackup", post(vss_backup))
+        .route("/vssbackupinfo", get(vss_backup_info));
+
+    let router = router
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<_>| {

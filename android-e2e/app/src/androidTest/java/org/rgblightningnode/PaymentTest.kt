@@ -67,7 +67,7 @@ class PaymentTest {
     private val utxosSizeSat: UInt = 100_000u
     private val utxosFeeRate: ULong = 1u
     private val assetSupply: ULong = 1000u
-    private val channelAssetAmount: ULong = 200u
+    private val channelAssetAmount: ULong = 600u
     private val paymentAssetAmount: ULong = 50u
     /** CI emulators are slow; keep generous margins vs host-side Kotlin E2E. */
     private val channelReadyTimeoutSec: Long = 180L
@@ -445,7 +445,6 @@ class PaymentTest {
                 donation = true,
                 feeRate = utxosFeeRate,
                 minConfirmations = 1u,
-                skipSync = false,
                 recipientGroups = listOf(
                     AssetRecipients(
                         assetId = assetId,
@@ -568,6 +567,7 @@ class PaymentTest {
                     assetAmount = paymentAssetAmount,
                     descriptionHash = null,
                     paymentHash = null,
+                    minFinalCltvExpiryDelta = null,
                 )
             ).invoice
             sendPaymentWithLnBalance(
@@ -628,7 +628,207 @@ class PaymentTest {
             )
             assertEquals(decoded1.paymentHash, listedPayment1Receiver.paymentHash)
             checkPreimageMatchesHash(listedPayment1Receiver, decoded1.paymentHash)
-            log("SUCCESS: Android payment smoke flow completed")
+            val invoice2 = nodeA.lnInvoice(
+                LnInvoiceRequest(
+                    amtMsat = paymentMsat,
+                    expirySec = 900u,
+                    assetId = assetId,
+                    assetAmount = paymentAssetAmount,
+                    descriptionHash = null,
+                    paymentHash = null,
+                    minFinalCltvExpiryDelta = null,
+                )
+            ).invoice
+            sendPaymentWithLnBalance(nodeB, nodeA, invoice2, assetId, paymentAssetAmount, 100u, 500u)
+
+            val decoded2 = nodeA.decodeLnInvoice(invoice2)
+            val payment2Receiver = waitForPaymentStatus(
+                nodeA,
+                decoded2.paymentHash,
+                PaymentType.INBOUND_AUTO_CLAIM,
+                60L,
+            )
+            assertEquals(assetId, payment2Receiver.assetId)
+            assertEquals(paymentAssetAmount, payment2Receiver.assetAmount)
+            assertEquals(HtlcStatus.SUCCEEDED, payment2Receiver.status)
+            checkPreimageMatchesHash(payment2Receiver, decoded2.paymentHash)
+            val payment2Sender = waitForPaymentStatus(
+                nodeB,
+                decoded2.paymentHash,
+                PaymentType.OUTBOUND,
+                60L,
+            )
+            assertEquals(assetId, payment2Sender.assetId)
+            assertEquals(paymentAssetAmount, payment2Sender.assetAmount)
+            assertEquals(HtlcStatus.SUCCEEDED, payment2Sender.status)
+            checkPreimageMatchesHash(payment2Sender, decoded2.paymentHash)
+
+            val invoice3 = nodeB.lnInvoice(
+                LnInvoiceRequest(
+                    amtMsat = paymentMsat,
+                    expirySec = 900u,
+                    assetId = assetId,
+                    assetAmount = paymentAssetAmount,
+                    descriptionHash = null,
+                    paymentHash = null,
+                    minFinalCltvExpiryDelta = null,
+                )
+            ).invoice
+            nodeA.sendpayment(
+                SdkSendPaymentRequest(
+                    invoice = invoice3,
+                    amtMsat = null,
+                    assetId = null,
+                    assetAmount = null,
+                )
+            )
+            val decoded3 = nodeA.decodeLnInvoice(invoice3)
+            val payment3Sender = waitForPaymentStatus(
+                nodeA,
+                decoded3.paymentHash,
+                PaymentType.OUTBOUND,
+                60L,
+            )
+            assertEquals(assetId, payment3Sender.assetId)
+            assertEquals(paymentAssetAmount, payment3Sender.assetAmount)
+            assertEquals(HtlcStatus.SUCCEEDED, payment3Sender.status)
+            checkPreimageMatchesHash(payment3Sender, decoded3.paymentHash)
+            val payment3Receiver = waitForPaymentStatus(
+                nodeB,
+                decoded3.paymentHash,
+                PaymentType.INBOUND_AUTO_CLAIM,
+                60L,
+            )
+            assertEquals(assetId, payment3Receiver.assetId)
+            assertEquals(paymentAssetAmount, payment3Receiver.assetAmount)
+            assertEquals(HtlcStatus.SUCCEEDED, payment3Receiver.status)
+            checkPreimageMatchesHash(payment3Receiver, decoded3.paymentHash)
+
+            val invoice4 = nodeA.lnInvoice(
+                LnInvoiceRequest(
+                    amtMsat = paymentMsat,
+                    expirySec = 900u,
+                    assetId = assetId,
+                    assetAmount = paymentAssetAmount,
+                    descriptionHash = null,
+                    paymentHash = null,
+                    minFinalCltvExpiryDelta = null,
+                )
+            ).invoice
+            nodeB.sendpayment(
+                SdkSendPaymentRequest(
+                    invoice = invoice4,
+                    amtMsat = null,
+                    assetId = null,
+                    assetAmount = null,
+                )
+            )
+            val decoded4 = nodeA.decodeLnInvoice(invoice4)
+            val payment4Receiver = waitForPaymentStatus(
+                nodeA,
+                decoded4.paymentHash,
+                PaymentType.INBOUND_AUTO_CLAIM,
+                60L,
+            )
+            assertEquals(assetId, payment4Receiver.assetId)
+            assertEquals(paymentAssetAmount, payment4Receiver.assetAmount)
+            assertEquals(HtlcStatus.SUCCEEDED, payment4Receiver.status)
+            checkPreimageMatchesHash(payment4Receiver, decoded4.paymentHash)
+            val payment4Sender = waitForPaymentStatus(
+                nodeB,
+                decoded4.paymentHash,
+                PaymentType.OUTBOUND,
+                60L,
+            )
+            assertEquals(assetId, payment4Sender.assetId)
+            assertEquals(paymentAssetAmount, payment4Sender.assetAmount)
+            assertEquals(HtlcStatus.SUCCEEDED, payment4Sender.status)
+            checkPreimageMatchesHash(payment4Sender, decoded4.paymentHash)
+
+            waitForStableChannelBalances(
+                nodeA = nodeA,
+                nodeB = nodeB,
+                channelId = channelId,
+                expectedNodeABalance = chan1Before.localBalanceSat,
+                expectedNodeBBalance = chan2Before.localBalanceSat,
+                timeoutSec = 10L,
+            )
+            val channels1 = nodeA.listChannels()
+            val channels2 = nodeB.listChannels()
+            assertEquals(1, channels1.size)
+            assertEquals(1, channels2.size)
+            val chan1 = channels1.first()
+            val chan2 = channels2.first()
+            assertEquals(chan1Before.localBalanceSat, chan1.localBalanceSat)
+            assertEquals(chan2Before.localBalanceSat, chan2.localBalanceSat)
+
+            closeChannel(nodeA, channelId, infoB.pubkey)
+            waitForBalance(nodeA, assetId, 950uL, 180L)
+            waitForBalance(nodeB, assetId, 50uL, 180L)
+
+            val recipientId1 = rgbInvoice(nodeC)
+            sendRgb(nodeA, assetId, recipientId1, 925u)
+            mine(1)
+            refreshTransfers(nodeC)
+            refreshTransfers(nodeC)
+            refreshTransfers(nodeA)
+
+            val recipientId2 = rgbInvoice(nodeC)
+            sendRgb(nodeB, assetId, recipientId2, 25u)
+            mine(1)
+            refreshTransfers(nodeC)
+            refreshTransfers(nodeC)
+            refreshTransfers(nodeB)
+
+            assertEquals(25uL, assetBalanceSpendable(nodeA, assetId))
+            assertEquals(25uL, assetBalanceSpendable(nodeB, assetId))
+            assertEquals(950uL, assetBalanceSpendable(nodeC, assetId))
+
+            val transactions = nodeA.listTransactions(false)
+            val txUser = transactions.first { it.received == 100_000_000uL }
+            val txUtxos = transactions.first { it.sent == 100_000_000uL }
+            val txSend = transactions.first { it.sent == 128_000uL }
+            assertEquals(TransactionType.INCOMING, txUser.transactionType)
+            assertEquals(TransactionType.CREATE_UTXOS, txUtxos.transactionType)
+            assertEquals(TransactionType.RGB_SEND, txSend.transactionType)
+            assertNotNull(txUtxos.confirmationTime)
+
+            val transfers = nodeA.listTransfers(assetId)
+            val xfer1 = transfers.first { it.idx == 1 }
+            assertEquals("Settled", xfer1.status)
+            assertEquals("Issuance", xfer1.kind)
+            assertEquals(listOf("Fungible(1000)"), xfer1.assignments)
+            assertNull(xfer1.txid)
+            assertNull(xfer1.recipientId)
+            assertNull(xfer1.receiveUtxo)
+            assertNull(xfer1.changeUtxo)
+            assertNull(xfer1.expiration)
+            assertTrue(xfer1.transportEndpoints.isEmpty())
+
+            val xfer2 = transfers.first { it.idx == 2 }
+            assertEquals("Settled", xfer2.status)
+            assertEquals("Send", xfer2.kind)
+            assertEquals("Fungible(600)", xfer2.requestedAssignment)
+            assertEquals(listOf("Fungible(400)"), xfer2.assignments)
+            assertNotNull(xfer2.txid)
+            assertNotNull(xfer2.recipientId)
+            assertNull(xfer2.receiveUtxo)
+            assertNotNull(xfer2.changeUtxo)
+            assertNull(xfer2.expiration)
+            assertTrue(xfer2.transportEndpoints.isNotEmpty())
+
+            val xfer3 = transfers.first { it.idx == 3 }
+            assertEquals("Settled", xfer3.status)
+            assertEquals("ReceiveWitness", xfer3.kind)
+            assertEquals(listOf("Fungible(550)"), xfer3.assignments)
+            assertNotNull(xfer3.txid)
+            assertNotNull(xfer3.recipientId)
+            assertNotNull(xfer3.receiveUtxo)
+            assertNull(xfer3.changeUtxo)
+            assertNull(xfer3.expiration)
+            assertTrue(xfer3.transportEndpoints.isNotEmpty())
+
+            log("SUCCESS: Android payment parity flow completed")
         } finally {
             safeShutdown(nodeA)
             safeShutdown(nodeB)

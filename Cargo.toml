@@ -12,6 +12,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 default = []
 test-utils = []
 vls = ["signer-external/with-vls"]
+vss = ["rgb-lib/vss", "dep:vss-client"]
 
 [dependencies]
 amplify = { version = "=4.8.1", default-features = false }
@@ -83,6 +84,7 @@ vls-protocol-signer = "0.14.0"
 lightning-signer = { package = "vls-core", version = "0.14.0", features = ["rgb-commitment-compat"] }
 walkdir = "2.5.0"
 uniffi = { version = "0.28.3", features = ["build"], optional = true }
+vss-client = { package = "vss-client-ng", git = "https://github.com/lightningdevkit/vss-client", rev = "ad63805047561dcf3117cd992ad6d8bc3881adef", default-features = false, features = ["sigs-auth"], optional = true }
 zip = { version = "2.2.0", default-features = false, features = ["time", "zstd"] }
 
 [dev-dependencies]

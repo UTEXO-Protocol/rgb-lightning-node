@@ -96,6 +96,10 @@ pub enum APIError {
     #[error("Failed to connect to peer")]
     FailedPeerConnection,
 
+    #[cfg(feature = "vss")]
+    #[error("Failed to initialize VSS: {0}")]
+    FailedVssInit(String),
+
     #[error("Failed to disconnect to peer: {0}")]
     FailedPeerDisconnection(String),
 
@@ -601,6 +605,12 @@ impl IntoResponse for APIError {
                 self.to_string(),
                 self.name(),
             ),
+            #[cfg(feature = "vss")]
+            APIError::FailedVssInit(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.to_string(),
+                self.name(),
+            ),
         };
 
         let error = error.replace("\n", " ");
@@ -631,6 +641,9 @@ pub enum AppError {
 
     #[error("Invalid virtual peer pubkey: {0}")]
     InvalidVirtualPeerPubkey(String),
+
+    #[error("Invalid VSS configuration: {0}")]
+    InvalidVssConfig(String),
 
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
