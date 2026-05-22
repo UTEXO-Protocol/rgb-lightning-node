@@ -656,7 +656,8 @@ def _setup_mixed_asset_channel_with_payment(
             asset_amount=PAYMENT_ASSET_AMOUNT,
             payment_hash=None,
             description_hash=None,
-        )
+                    min_final_cltv_expiry_delta=None,
+)
     ).invoice
     send = node_a.sendpayment(
         rln.SdkSendPaymentRequest(
@@ -755,7 +756,8 @@ def run_regular_channel_flow_external_real():
                 asset_amount=None,
                 payment_hash=None,
                 description_hash=None,
-            )
+                            min_final_cltv_expiry_delta=None,
+)
         ).invoice
         send_1 = node_a.sendpayment(
             rln.SdkSendPaymentRequest(
@@ -798,7 +800,8 @@ def run_regular_channel_flow_external_real():
                 asset_amount=None,
                 payment_hash=None,
                 description_hash=None,
-            )
+                            min_final_cltv_expiry_delta=None,
+)
         ).invoice
         send_2 = node_a.sendpayment(
             rln.SdkSendPaymentRequest(
@@ -882,7 +885,8 @@ def run_mixed_asset_channel_roundtrip_real():
                 asset_amount=PAYMENT_ASSET_AMOUNT,
                 payment_hash=None,
                 description_hash=None,
-            )
+                            min_final_cltv_expiry_delta=None,
+)
         ).invoice
         send = node_b.sendpayment(
             rln.SdkSendPaymentRequest(
@@ -1098,7 +1102,8 @@ def run_connection_loss_restore_real():
                 asset_amount=None,
                 payment_hash=None,
                 description_hash=None,
-            )
+                            min_final_cltv_expiry_delta=None,
+)
         ).invoice
         send_1 = node_a.sendpayment(
             rln.SdkSendPaymentRequest(
@@ -1137,7 +1142,8 @@ def run_connection_loss_restore_real():
                 asset_amount=None,
                 payment_hash=None,
                 description_hash=None,
-            )
+                            min_final_cltv_expiry_delta=None,
+)
         ).invoice
         send_2 = node_a.sendpayment(
             rln.SdkSendPaymentRequest(

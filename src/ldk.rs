@@ -66,7 +66,7 @@ use lightning_invoice::{Bolt11InvoiceDescription, PaymentSecret};
 use lightning_net_tokio::SocketDescriptor;
 use rand::RngCore;
 use rgb_lib::{
-    bdk_wallet::keys::{bip39::Mnemonic, DerivableKey, ExtendedKey},
+    bdk_wallet::keys::{DerivableKey, ExtendedKey},
     bitcoin::{
         bip32::{ChildNumber, Xpriv},
         psbt::Psbt as RgbLibPsbt,
@@ -3130,6 +3130,9 @@ impl OutputSpender for RgbOutputSpender {
 /// serialized compressed public key in lower-hex; it serves as the LDK
 /// stream's `store_id` directly, and the RGB-wallet stream uses
 /// `{pubkey_hex}_rgb` to avoid key collisions within the same VSS server.
+#[cfg(feature = "vss")]
+use rgb_lib::bdk_wallet::keys::bip39::Mnemonic;
+
 #[cfg(feature = "vss")]
 struct VssIdentity {
     signing_key: rgb_lib::bitcoin::secp256k1::SecretKey,

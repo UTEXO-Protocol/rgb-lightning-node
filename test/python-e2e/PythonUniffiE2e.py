@@ -863,6 +863,7 @@ def payment_scenario():
                 asset_amount=PAYMENT_ASSET_AMOUNT,
                 description_hash=None,
                 payment_hash=None,
+                min_final_cltv_expiry_delta=None,
             )
         ).invoice
         print(f"invoice: {invoice}")
@@ -1070,9 +1071,7 @@ def openchannel_push_asset_amount_scenario():
             rln.SendRgbRequest(
                 donation=True,
                 fee_rate=CREATE_UTXOS_FEE_RATE,
-                min_confirmations=1,
-                skip_sync=False,
-                recipient_groups=[
+                min_confirmations=1,                recipient_groups=[
                     rln.AssetRecipients(
                         asset_id=asset_id,
                         recipients=[
@@ -1432,9 +1431,7 @@ def send_asset_for_second_channel(
         rln.SendRgbRequest(
             donation=True,
             fee_rate=1,
-            min_confirmations=1,
-            skip_sync=False,
-            recipient_groups=[
+            min_confirmations=1,            recipient_groups=[
                 rln.AssetRecipients(
                     asset_id=asset_id,
                     recipients=[
@@ -1584,6 +1581,7 @@ def run_hodl_claim_phase(
             asset_amount=PAYMENT_ASSET_AMOUNT,
             payment_hash=payment_hash_hex,
             description_hash=None,
+            min_final_cltv_expiry_delta=None,
         )
     ).invoice
     print(f"hodl claim invoice: {invoice}")
@@ -1705,6 +1703,7 @@ def run_hodl_cancel_phase(
             asset_amount=PAYMENT_ASSET_AMOUNT,
             payment_hash=payment_hash_hex,
             description_hash=None,
+            min_final_cltv_expiry_delta=None,
         )
     ).invoice
     print(f"hodl cancel invoice: {invoice}")
@@ -1850,6 +1849,7 @@ def run_hodl_to_claimable(sender: rln.SdkNode, receiver: rln.SdkNode, asset_id, 
             asset_amount=PAYMENT_ASSET_AMOUNT,
             payment_hash=payment_hash_hex,
             description_hash=None,
+            min_final_cltv_expiry_delta=None,
         )
     ).invoice
     print(f"hodl expiry invoice: {invoice}")
