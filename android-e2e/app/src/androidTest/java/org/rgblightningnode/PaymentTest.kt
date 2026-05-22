@@ -59,29 +59,14 @@ class PaymentTest {
     private val nodeBPeerPort: UShort = 13112u
     private val nodeCPeerPort: UShort = 13113u
 
-    // Keep Android smoke aligned with the stable host Kotlin payment scenario.
-    private val channelCapacitySat: ULong = 500_000u
-    private val channelPushMsat: ULong = 0u
+    private val channelCapacitySat: ULong = 100_000u
+    private val channelPushMsat: ULong = 3_500_000u
     private val paymentMsat: ULong = 3_000_000u
     private val utxosNum: UByte = 10u
-    private val utxosSizeSat: UInt = 100_000u
-    private val utxosFeeRate: ULong = 1u
+    private val utxosFeeRate: ULong = 7u
     private val assetSupply: ULong = 1000u
     private val channelAssetAmount: ULong = 600u
-    private val paymentAssetAmount: ULong = 50u
-    /** CI emulators are slow; keep generous margins vs host-side Kotlin E2E. */
-    private val channelReadyTimeoutSec: Long = 180L
-    private val channelFundingTxTimeoutSec: Long = 180L
-    private val paymentStatusTimeoutSec: Long = 120L
-    private val lnBalanceWaitTimeoutSec: Long = 120L
-    private val stableChannelBalanceTimeoutSec: Long = 120L
-
-    private fun assertRegtestNetwork(label: String, network: String) {
-        assertTrue(
-            "$label: expected regtest-class network, got '$network'",
-            network.contains("egtest", ignoreCase = true),
-        )
-    }
+    private val channelReadyTimeoutSec: Long = 120L
 
     // ── Bitcoin RPC ──────────────────────────────────────────────────────────
 
@@ -90,8 +75,6 @@ class PaymentTest {
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 60_000
         conn.setRequestProperty("Content-Type", "application/json")
         val creds = Base64.getEncoder().encodeToString("$bitcoindUser:$bitcoindPass".toByteArray())
         conn.setRequestProperty("Authorization", "Basic $creds")
@@ -173,12 +156,13 @@ class PaymentTest {
         assertTrue("$name still underfunded: $after < $minSat", after >= minSat)
     }
 
-    private fun createUtxos(node: SdkNode, name: String) {
+    private fun fundAndCreateUtxos(node: SdkNode, name: String) {
+        ensureFunded(node, name, 1u, "1")
         node.createutxos(
             SdkCreateUtxosRequest(
                 upTo = false,
                 num = utxosNum,
-                size = utxosSizeSat,
+                size = null,
                 feeRate = utxosFeeRate,
                 skipSync = false,
             )
@@ -186,19 +170,6 @@ class PaymentTest {
         log("$name: createutxos done")
         mine(1)
         node.sync()
-    }
-
-    private fun waitForPeer(node: SdkNode, peerPubkey: Any, timeoutSec: Long) {
-        val expected = peerPubkey.toString()
-        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
-        while (System.currentTimeMillis() < deadline) {
-            if (node.listPeers().any { it.pubkey.toString() == expected }) {
-                return
-            }
-            log("waiting for peer connection: $expected")
-            Thread.sleep(1_000L)
-        }
-        error("peer did not appear in listPeers() after ${timeoutSec}s: peer=$expected")
     }
 
     private fun assetBalanceSpendable(node: SdkNode, assetId: ContractId): ULong =
@@ -211,13 +182,11 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var lastBalance = 0uL
         while (System.currentTimeMillis() < deadline) {
-            node.sync()
             val balance = assetBalanceOffchainOutbound(node, assetId)
             lastBalance = balance
             if (balance == expected) {
                 return
             }
-            node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
             Thread.sleep(1_000L)
         }
         error("offchain_outbound balance did not become expected=$expected actual=$lastBalance after ${timeoutSec}s")
@@ -227,7 +196,6 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var lastBalance = 0uL
         while (System.currentTimeMillis() < deadline) {
-            node.sync()
             val balance = assetBalanceSpendable(node, assetId)
             lastBalance = balance
             if (balance == expected) {
@@ -315,7 +283,7 @@ class PaymentTest {
         )
     }
 
-    private fun waitPaymentFinal(node: SdkNode, invoice: String, timeoutSec: Long = 120L): InvoiceStatus {
+    private fun waitPaymentFinal(node: SdkNode, invoice: String, timeoutSec: Long = 60L): InvoiceStatus {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var last = InvoiceStatus.PENDING
         while (System.currentTimeMillis() < deadline) {
@@ -395,8 +363,8 @@ class PaymentTest {
                 assetAmount = null,
             )
         )
-        waitForLnBalance(sender, assetId, initialSenderBalance - assetAmount, lnBalanceWaitTimeoutSec)
-        waitForLnBalance(receiver, assetId, initialReceiverBalance + assetAmount, lnBalanceWaitTimeoutSec)
+        waitForLnBalance(sender, assetId, initialSenderBalance - assetAmount, 60L)
+        waitForLnBalance(receiver, assetId, initialReceiverBalance + assetAmount, 60L)
     }
 
     private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false) {
@@ -498,19 +466,22 @@ class PaymentTest {
     fun payment() {
         File("$storageBase/payment/node_a").deleteRecursively()
         File("$storageBase/payment/node_b").deleteRecursively()
+        File("$storageBase/payment/node_c").deleteRecursively()
 
         val nodeA = makeNode("payment/node_a", nodeADaemonPort, nodeAPeerPort)
         val nodeB = makeNode("payment/node_b", nodeBDaemonPort, nodeBPeerPort)
+        val nodeC = makeNode("payment/node_c", nodeCDaemonPort, nodeCPeerPort)
         try {
             initNode(nodeA, "nodeApass", "node A")
             initNode(nodeB, "nodeBpass", "node B")
+            initNode(nodeC, "nodeCpass", "node C")
             unlockNode(nodeA, "nodeApass", "node A")
             unlockNode(nodeB, "nodeBpass", "node B")
+            unlockNode(nodeC, "nodeCpass", "node C")
 
-            ensureFunded(nodeA, "node A", channelCapacitySat + 200_000u, "0.02")
-            ensureFunded(nodeB, "node B", 200_000u, "0.02")
-            createUtxos(nodeA, "node A")
-            createUtxos(nodeB, "node B")
+            fundAndCreateUtxos(nodeA, "node A")
+            fundAndCreateUtxos(nodeB, "node B")
+            fundAndCreateUtxos(nodeC, "node C")
 
             val assetId = nodeA.issueassetnia(
                 SdkIssueAssetNiaRequest(
@@ -533,14 +504,13 @@ class PaymentTest {
             } catch (_: RlnException.Conflict) {
                 log("connectpeer: already connected")
             }
-            waitForPeer(nodeA, infoB.pubkey, 20L)
 
-            nodeA.openchannel(
+            val openResponse = nodeA.openchannel(
                 SdkOpenChannelRequest(
                     peerPubkeyAndOptAddr = peerUri,
                     capacitySat = channelCapacitySat,
                     pushMsat = channelPushMsat,
-                    `public` = false,
+                    `public` = true,
                     withAnchors = true,
                     feeBaseMsat = null,
                     feeProportionalMillionths = null,
@@ -553,69 +523,70 @@ class PaymentTest {
             )
             log("openchannel sent")
 
-            val fundingTxid = waitForChannelFundingTx(nodeA, nodeB, assetId, channelFundingTxTimeoutSec)
+            val fundingTxid = waitForChannelFundingTx(nodeA, nodeB, assetId, 240L)
             log("Mining blocks one by one until funding tx is confirmed..."); mineUntilTxConfirmed(nodeA, fundingTxid)
             mine(6)
             waitForUsableChannel(nodeA, nodeB, assetId, channelReadyTimeoutSec)
-            assertEquals(0uL, assetBalanceSpendable(nodeB, assetId))
+            assertEquals(400uL, assetBalanceSpendable(nodeA, assetId))
+
+            val channels1Before = nodeA.listChannels()
+            val channels2Before = nodeB.listChannels()
+            assertEquals(1, channels1Before.size)
+            assertEquals(1, channels2Before.size)
+            val chan1Before = channels1Before.first()
+            val chan2Before = channels2Before.first()
+            val channelId = nodeA.getChannelId(openResponse.temporaryChannelId)
+            assertEquals(channelId, chan1Before.channelId)
 
             val invoice1 = nodeB.lnInvoice(
                 LnInvoiceRequest(
                     amtMsat = paymentMsat,
                     expirySec = 900u,
                     assetId = assetId,
-                    assetAmount = paymentAssetAmount,
+                    assetAmount = 100u,
                     descriptionHash = null,
                     paymentHash = null,
                     minFinalCltvExpiryDelta = null,
                 )
             ).invoice
-            sendPaymentWithLnBalance(
-                nodeA,
-                nodeB,
-                invoice1,
-                assetId,
-                paymentAssetAmount,
-                channelAssetAmount,
-                0u,
-            )
+            sendPaymentWithLnBalance(nodeA, nodeB, invoice1, assetId, 100u, 600u, 0u)
 
             val decoded1 = nodeA.decodeLnInvoice(invoice1)
             assertEquals(assetId, decoded1.assetId)
-            assertEquals(paymentAssetAmount, decoded1.assetAmount)
+            assertEquals(100uL, decoded1.assetAmount)
             assertEquals(paymentMsat, decoded1.amtMsat)
             assertEquals(900uL, decoded1.expirySec)
             assertEquals(infoB.pubkey, decoded1.payeePubkey)
-            assertRegtestNetwork("decode invoice1", decoded1.network)
+            assertEquals("Regtest", decoded1.network)
             assertEquals(InvoiceStatus.SUCCEEDED, nodeB.invoiceStatus(invoice1))
 
             val payment1Sender = waitForPaymentStatus(
                 nodeA,
                 decoded1.paymentHash,
                 PaymentType.OUTBOUND,
-                paymentStatusTimeoutSec,
+                60L,
             )
             assertEquals(HtlcStatus.SUCCEEDED, payment1Sender.status)
             assertEquals(assetId, payment1Sender.assetId)
-            assertEquals(paymentAssetAmount, payment1Sender.assetAmount)
+            assertEquals(100uL, payment1Sender.assetAmount)
             checkPreimageMatchesHash(payment1Sender, decoded1.paymentHash)
 
             val payment1Receiver = waitForPaymentStatus(
                 nodeB,
                 decoded1.paymentHash,
                 PaymentType.INBOUND_AUTO_CLAIM,
-                paymentStatusTimeoutSec,
+                60L,
             )
             assertEquals(HtlcStatus.SUCCEEDED, payment1Receiver.status)
             assertEquals(assetId, payment1Receiver.assetId)
-            assertEquals(paymentAssetAmount, payment1Receiver.assetAmount)
+            assertEquals(100uL, payment1Receiver.assetAmount)
             checkPreimageMatchesHash(payment1Receiver, decoded1.paymentHash)
 
             val listedPayment1Sender = waitForPaymentPresentInList(
                 nodeA,
                 decoded1.paymentHash,
                 PaymentType.OUTBOUND,
-                paymentStatusTimeoutSec,
+                60L,
             )
             assertEquals(decoded1.paymentHash, listedPayment1Sender.paymentHash)
             checkPreimageMatchesHash(listedPayment1Sender, decoded1.paymentHash)
@@ -624,22 +595,23 @@ class PaymentTest {
                 nodeB,
                 decoded1.paymentHash,
                 PaymentType.INBOUND_AUTO_CLAIM,
-                paymentStatusTimeoutSec,
+                60L,
             )
             assertEquals(decoded1.paymentHash, listedPayment1Receiver.paymentHash)
             checkPreimageMatchesHash(listedPayment1Receiver, decoded1.paymentHash)
+
             val invoice2 = nodeA.lnInvoice(
                 LnInvoiceRequest(
                     amtMsat = paymentMsat,
                     expirySec = 900u,
                     assetId = assetId,
-                    assetAmount = paymentAssetAmount,
+                    assetAmount = 50u,
                     descriptionHash = null,
                     paymentHash = null,
                     minFinalCltvExpiryDelta = null,
                 )
             ).invoice
-            sendPaymentWithLnBalance(nodeB, nodeA, invoice2, assetId, paymentAssetAmount, 100u, 500u)
+            sendPaymentWithLnBalance(nodeB, nodeA, invoice2, assetId, 50u, 100u, 500u)
 
             val decoded2 = nodeA.decodeLnInvoice(invoice2)
             val payment2Receiver = waitForPaymentStatus(
@@ -649,7 +621,7 @@ class PaymentTest {
                 60L,
             )
             assertEquals(assetId, payment2Receiver.assetId)
-            assertEquals(paymentAssetAmount, payment2Receiver.assetAmount)
+            assertEquals(50uL, payment2Receiver.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment2Receiver.status)
             checkPreimageMatchesHash(payment2Receiver, decoded2.paymentHash)
             val payment2Sender = waitForPaymentStatus(
@@ -659,7 +631,7 @@ class PaymentTest {
                 60L,
             )
             assertEquals(assetId, payment2Sender.assetId)
-            assertEquals(paymentAssetAmount, payment2Sender.assetAmount)
+            assertEquals(50uL, payment2Sender.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment2Sender.status)
             checkPreimageMatchesHash(payment2Sender, decoded2.paymentHash)
 
@@ -668,7 +640,7 @@ class PaymentTest {
                     amtMsat = paymentMsat,
                     expirySec = 900u,
                     assetId = assetId,
-                    assetAmount = paymentAssetAmount,
+                    assetAmount = 50u,
                     descriptionHash = null,
                     paymentHash = null,
                     minFinalCltvExpiryDelta = null,
@@ -690,7 +662,7 @@ class PaymentTest {
                 60L,
             )
             assertEquals(assetId, payment3Sender.assetId)
-            assertEquals(paymentAssetAmount, payment3Sender.assetAmount)
+            assertEquals(50uL, payment3Sender.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment3Sender.status)
             checkPreimageMatchesHash(payment3Sender, decoded3.paymentHash)
             val payment3Receiver = waitForPaymentStatus(
@@ -700,7 +672,7 @@ class PaymentTest {
                 60L,
             )
             assertEquals(assetId, payment3Receiver.assetId)
-            assertEquals(paymentAssetAmount, payment3Receiver.assetAmount)
+            assertEquals(50uL, payment3Receiver.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment3Receiver.status)
             checkPreimageMatchesHash(payment3Receiver, decoded3.paymentHash)
 
@@ -709,7 +681,7 @@ class PaymentTest {
                     amtMsat = paymentMsat,
                     expirySec = 900u,
                     assetId = assetId,
-                    assetAmount = paymentAssetAmount,
+                    assetAmount = 50u,
                     descriptionHash = null,
                     paymentHash = null,
                     minFinalCltvExpiryDelta = null,
@@ -731,7 +703,7 @@ class PaymentTest {
                 60L,
             )
             assertEquals(assetId, payment4Receiver.assetId)
-            assertEquals(paymentAssetAmount, payment4Receiver.assetAmount)
+            assertEquals(50uL, payment4Receiver.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment4Receiver.status)
             checkPreimageMatchesHash(payment4Receiver, decoded4.paymentHash)
             val payment4Sender = waitForPaymentStatus(
@@ -741,7 +713,7 @@ class PaymentTest {
                 60L,
             )
             assertEquals(assetId, payment4Sender.assetId)
-            assertEquals(paymentAssetAmount, payment4Sender.assetAmount)
+            assertEquals(50uL, payment4Sender.assetAmount)
             assertEquals(HtlcStatus.SUCCEEDED, payment4Sender.status)
             checkPreimageMatchesHash(payment4Sender, decoded4.paymentHash)
 
@@ -832,6 +804,7 @@ class PaymentTest {
         } finally {
             safeShutdown(nodeA)
             safeShutdown(nodeB)
+            safeShutdown(nodeC)
             Thread.sleep(1_000L)
         }
     }
