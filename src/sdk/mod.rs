@@ -4107,7 +4107,7 @@ mod tests {
     use rln_migration::{Migrator, MigratorTrait};
     use sea_orm::{ConnectOptions, Database};
     use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use tokio::sync::Mutex as TokioMutex;
     use tokio_util::sync::CancellationToken;
 
@@ -4139,7 +4139,9 @@ mod tests {
                 virtual_peer_pubkeys: vec![],
                 lsp_base_url: None,
                 lsp_bearer_token: None,
-                database: Arc::new(database),
+                database: RwLock::new(Arc::new(database)),
+                vss_url: None,
+                vss_allow_empty_restore: false,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),

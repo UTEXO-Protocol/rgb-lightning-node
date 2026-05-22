@@ -500,6 +500,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_quick() {
                 asset_amount: Some(PAY_ASSET),
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("ln_invoice")
             .invoice;
@@ -642,6 +643,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
                 asset_amount: Some(PAY_ASSET),
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("ln_invoice first")
             .invoice;
@@ -664,6 +666,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
                 asset_amount: Some(PAY_ASSET),
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("ln_invoice second")
             .invoice;
@@ -807,6 +810,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
                 asset_amount: Some(PAY_ASSET),
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("ln_invoice")
             .invoice;

@@ -69,9 +69,8 @@ use tokio::{
 
 use crate::async_order::{
     read_async_payments_next_hash_index, write_async_payments_next_hash_index,
-    AsyncOrderNewHashWire, AsyncOrderNewParamsWire, AsyncOrderNewResultWire,
-    AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
-    ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    AsyncOrderNewParamsWire, AsyncOrderNewResultWire, AsyncOrderOutboundInvoiceResultWire,
+    ASYNC_ORDER_MAX_HASH_BATCH_SIZE, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
 };
 use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,

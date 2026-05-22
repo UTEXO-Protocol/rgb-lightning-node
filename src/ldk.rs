@@ -4,7 +4,6 @@ use crate::async_order::{
     AsyncPaymentsPreimageRoot, JsonRpcErrorWire, ASYNC_ERROR_INVOICE_HASH_MISMATCH,
     ASYNC_ERROR_STALE_FLOW,
 };
-use crate::kv_store::SeaOrmKvStore;
 use crate::rgb_kv_store::{
     get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount, RgbKvStoreExt,
     RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
@@ -28,9 +27,7 @@ use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{
     self, Bolt11InvoiceParameters, ChannelFundingType, PaymentId, RecentPaymentDetails,
 };
-use lightning::ln::channelmanager::{
-    ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
-};
+use lightning::ln::channelmanager::{ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
