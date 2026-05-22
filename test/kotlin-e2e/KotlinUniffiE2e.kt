@@ -173,6 +173,10 @@ private fun issueAssetNia(node: SdkNode, name: String): ContractId {
         )
     )
     println("$name: issued NIA asset_id=${asset.assetId}")
+    runRegtest("mine", OPEN_CHANNEL_CONFIRM_BLOCKS.toString())
+    refreshTransfers(node)
+    refreshTransfers(node)
+    waitForBalance(node, asset.assetId, ISSUE_ASSET_SUPPLY, BALANCE_TIMEOUT_SEC)
     return asset.assetId
 }
 
@@ -395,6 +399,7 @@ private fun waitForBalance(node: SdkNode, assetId: ContractId, expected: ULong, 
     val deadline = System.currentTimeMillis() + timeoutSec * 1000L
     var lastBalance = 0uL
     while (System.currentTimeMillis() < deadline) {
+        node.sync()
         val balance = assetBalanceSpendable(node, assetId)
         lastBalance = balance
         if (balance == expected) {
@@ -826,6 +831,7 @@ private fun openchannelPushAssetAmountScenario() {
 
         var fundingTxid = waitForChannelFundingTx(nodeA, nodeB, assetId, CHANNEL_FUNDING_TX_TIMEOUT_SEC)
         confirmChannelFunding(nodeA, assetId, fundingTxid)
+
         // Wait for channel usable on both sides before attempting keysend.
         waitForUsableChannel(nodeA, nodeB, assetId, CHANNEL_READY_TIMEOUT_SEC)
         waitForUsableChannel(nodeB, nodeA, assetId, CHANNEL_READY_TIMEOUT_SEC)
@@ -992,9 +998,10 @@ private fun openchannelPushAssetAmountScenario() {
                 ),
             )
         )
-        runRegtest("mine", "1")
+        runRegtest("mine", OPEN_CHANNEL_CONFIRM_BLOCKS.toString())
         refreshTransfers(nodeC)
         refreshTransfers(nodeC)
+        refreshTransfers(nodeB)
         refreshTransfers(nodeB)
 
         check(assetBalanceSpendable(nodeA, assetId) == 200uL)

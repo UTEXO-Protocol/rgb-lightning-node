@@ -139,6 +139,8 @@ def unlock_if_needed(node: rln.SdkNode, password: str, name: str):
         print(f"{name}: {unlock_state}")
 
 
+
+
 def create_utxos(
     node: rln.SdkNode,
     name: str,
@@ -166,6 +168,10 @@ def issue_asset_nia(node: rln.SdkNode, name: str):
     )
     asset = node.issueassetnia(req)
     print(f"{name}: issued NIA asset_id={asset.asset_id}")
+    run_regtest("mine", str(OPEN_CHANNEL_CONFIRM_BLOCKS))
+    refresh_transfers(node)
+    refresh_transfers(node)
+    wait_for_balance(node, asset.asset_id, ISSUE_ASSET_SUPPLY, 60)
     return asset.asset_id
 
 
@@ -207,11 +213,17 @@ def fund_and_create_utxos(
 
 
 def asset_balance_spendable(node: rln.SdkNode, asset_id) -> int:
-    return node.asset_balance(asset_id).spendable
+    try:
+        return node.asset_balance(asset_id).spendable
+    except rln.RlnError.NotFound:
+        return 0
 
 
 def asset_balance_offchain_outbound(node: rln.SdkNode, asset_id) -> int:
-    return node.asset_balance(asset_id).offchain_outbound
+    try:
+        return node.asset_balance(asset_id).offchain_outbound
+    except rln.RlnError.NotFound:
+        return 0
 
 
 def channel_matches_asset(channel_asset_id, expected_asset_id) -> bool:
@@ -248,7 +260,6 @@ def wait_for_channel_funding_tx(
         if opening is not None:
             print(f"channel funding tx found: {opening.funding_txid}")
             return str(opening.funding_txid)
-
         print("waiting for channel funding tx broadcast...")
         time.sleep(1)
 
@@ -385,6 +396,7 @@ def wait_for_balance(node: rln.SdkNode, asset_id, expected: int, timeout_sec: in
     deadline = time.time() + timeout_sec
     last_balance = 0
     while time.time() < deadline:
+        node.sync()
         balance = asset_balance_spendable(node, asset_id)
         last_balance = balance
         if balance == expected:
@@ -680,8 +692,14 @@ def openchannel_fail_no_utxos_scenario():
             )
         )
             raise RuntimeError("openchannel should fail when no uncolored UTXOs are available")
-        except rln.RlnError.Conflict:
-            pass
+        except Exception as e:
+            no_utxos_err = getattr(rln.RlnError, "NoAvailableUtxos", None)
+            if isinstance(e, rln.RlnError.Conflict) or (
+                no_utxos_err is not None and isinstance(e, no_utxos_err)
+            ):
+                pass
+            else:
+                raise
 
         assert len(node_a.list_channels()) == 0
         assert len(node_b.list_channels()) == 0
@@ -1070,9 +1088,10 @@ def openchannel_push_asset_amount_scenario():
                 ],
             )
         )
-        run_regtest("mine", "1")
+        run_regtest("mine", str(OPEN_CHANNEL_CONFIRM_BLOCKS))
         refresh_transfers(node_c)
         refresh_transfers(node_c)
+        refresh_transfers(node_b)
         refresh_transfers(node_b)
 
         assert asset_balance_spendable(node_a, asset_id) == 200
@@ -1294,7 +1313,6 @@ def wait_for_peer_channel_funding_tx(
                 f"channel funding tx found for peer {receiver_pubkey}: {opening.funding_txid}"
             )
             return str(opening.funding_txid)
-
         print(f"waiting for channel funding tx broadcast for peer {receiver_pubkey}...")
         time.sleep(1)
 
@@ -1407,6 +1425,8 @@ def send_asset_for_second_channel(
     asset_id,
     asset_amount: int,
 ):
+    sender_initial_balance = asset_balance_spendable(sender, asset_id)
+    receiver_initial_balance = asset_balance_spendable(receiver, asset_id)
     recipient_id = rgb_invoice(receiver)
     sender.send_rgb(
         rln.SendRgbRequest(
@@ -1431,11 +1451,13 @@ def send_asset_for_second_channel(
         )
     )
     print(f"sent on-chain asset {asset_amount} to {receiver_name} for second channel setup")
-    run_regtest("mine", "1")
+    run_regtest("mine", str(OPEN_CHANNEL_CONFIRM_BLOCKS))
     refresh_transfers(receiver)
     refresh_transfers(receiver)
     refresh_transfers(sender)
-    wait_for_balance(receiver, asset_id, asset_amount, 60)
+    refresh_transfers(sender)
+    wait_for_balance(receiver, asset_id, receiver_initial_balance + asset_amount, 60)
+    wait_for_balance(sender, asset_id, sender_initial_balance - asset_amount, 60)
 
 
 def assert_decoded_hodl_invoice(decoded, payment_hash_hex: str, asset_id):
@@ -1779,6 +1801,8 @@ def setup_two_node_hodl_channel(
     node_b: rln.SdkNode,
     scenario_name: str,
     node_b_peer_port: int,
+    node_a_storage: Path | None = None,
+    node_b_storage: Path | None = None,
 ):
     print(f"Python UniFFI HODL expiry flow: {scenario_name}")
 
@@ -1797,7 +1821,13 @@ def setup_two_node_hodl_channel(
     node_b.sync()
 
     asset_id = issue_asset_nia(node_a, "node A")
-    channel_id = open_hodl_asset_channel(node_a, node_b, "node B", node_b_peer_port, asset_id)
+    channel_id = open_hodl_asset_channel(
+        node_a,
+        node_b,
+        "node B",
+        node_b_peer_port,
+        asset_id,
+    )
 
     assert_node_channel_counts(node_a, 1, 1, 1, "node A")
     assert_node_channel_counts(node_b, 1, 1, 1, "node B")
@@ -2281,7 +2311,7 @@ def hodl_expiry_scenario():
         node_b = make_node(node_b_storage, NODE_B_DAEMON_PORT + 30, NODE_B_PEER_PORT + 30)
 
         asset_id, channel_id = setup_two_node_hodl_channel(
-            node_a, node_b, scenario, NODE_B_PEER_PORT + 30
+            node_a, node_b, scenario, NODE_B_PEER_PORT + 30, node_a_storage, node_b_storage
         )
         run_hodl_time_expiry_phase(node_a, node_b, asset_id, channel_id)
         run_hodl_block_expiry_phase(node_a, node_b, node_b_storage, asset_id, channel_id)

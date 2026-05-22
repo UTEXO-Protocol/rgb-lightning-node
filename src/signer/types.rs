@@ -40,17 +40,6 @@ pub(crate) enum RlnSignerError {
 /// with hosts and `signer_external::contract::BootstrapData::api_level` (currently **`1`** only).
 pub(crate) const SUPPORTED_SIGNER_API_LEVEL: u32 = 1;
 
-/// Lowercase hex encoding for test fixtures and mock signers (not used in release-only paths).
-#[cfg(test)]
-pub(crate) fn hex_encode_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(&mut s, "{b:02x}");
-    }
-    s
-}
-
 /// Validates bootstrap payload fields consumed by RLN directly.
 pub(crate) fn validate_bootstrap_payload(_bootstrap: &BootstrapData) -> Result<(), RlnSignerError> {
     Ok(())

@@ -203,6 +203,8 @@ def issue_asset_nia(node: rln.SdkNode, name: str) -> str:
         )
     )
     print(f"{name}: issued NIA asset_id={asset.asset_id}")
+    run_regtest("mine", str(OPEN_CHANNEL_CONFIRM_BLOCKS))
+    wait_for_asset_balance(node, asset.asset_id, spendable=ISSUE_ASSET_SUPPLY, timeout_sec=60)
     return asset.asset_id
 
 

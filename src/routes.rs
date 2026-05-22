@@ -1,5 +1,5 @@
 use crate::rgb_kv_store::{write_rgb_payment_info_file, RgbKvStoreExt};
-use amplify::{map, s};
+use amplify::s;
 use axum::{
     extract::{Multipart, State},
     Json,
@@ -9,14 +9,13 @@ use biscuit_auth::Biscuit;
 use bitcoin::hashes::sha256::{self, Hash as Sha256};
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Network, ScriptBuf};
+use bitcoin::Network;
 use hex::DisplayHex;
 use lightning::chain::channelmonitor::Balance;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
 use lightning::rgb_utils::RgbInfo;
-use lightning::rgb_utils::STATIC_BLINDING;
 use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::util::config::ChannelConfig;
@@ -42,7 +41,6 @@ use regex::Regex;
 use rgb_lib::{
     bdk_wallet::keys::bip39::Mnemonic,
     keys::{generate_keys, WitnessVersion},
-    utils::recipient_id_from_script_buf,
     wallet::{
         rust_only::{
             check_indexer_url as rgb_lib_check_indexer_url,
@@ -90,8 +88,8 @@ use crate::{
     backup::{do_backup, restore_backup},
     core_types::{
         HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest,
-        DEFAULT_FINAL_CLTV_EXPIRY_DELTA, DUST_LIMIT_MSAT, FEE_RATE, HTLC_MIN_MSAT,
-        MAX_SWAP_FEE_MSAT, MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
+        DEFAULT_FINAL_CLTV_EXPIRY_DELTA, DUST_LIMIT_MSAT, HTLC_MIN_MSAT, MAX_SWAP_FEE_MSAT,
+        MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
@@ -3817,6 +3815,13 @@ pub(crate) async fn open_channel(
             if *asset_amount > spendable_rgb_amount {
                 return Err(APIError::InsufficientAssets);
             }
+            let has_uncolored_utxo = unlocked_state
+                .rgb_list_unspents(false)?
+                .into_iter()
+                .any(|unspent| unspent.utxo.colorable && unspent.rgb_allocations.is_empty());
+            if !has_uncolored_utxo {
+                return Err(APIError::NoAvailableUtxos);
+            }
 
             Some(RgbTransport::from_str(&unlocked_state.proxy_endpoint).unwrap())
         } else {
@@ -3828,44 +3833,14 @@ pub(crate) async fn open_channel(
                 .rgb_get_asset_metadata(*contract_id)?
                 .asset_schema;
             if !is_virtual_open {
-                let mut fake_p2wsh: [u8; 34] = [0; 34];
-                fake_p2wsh[1] = 32;
-                fake_p2wsh[2..34]
-                    .copy_from_slice(&unlocked_state.entropy_source.get_secure_random_bytes());
-                let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
-                let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network);
-                let asset_id = contract_id.to_string();
-                let assignment = match schema {
-                    RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa => {
-                        Assignment::Fungible(*asset_amount)
-                    }
-                    RgbLibAssetSchema::Uda => Assignment::NonFungible,
-                };
-
-                let recipient_map = map! {
-                    asset_id => vec![RgbLibRecipient {
-                        recipient_id,
-                        witness_data: Some(RgbLibWitnessData {
-                            amount_sat: payload.capacity_sat,
-                            blinding: Some(STATIC_BLINDING + 1),
-                        }),
-                        assignment: assignment.into(),
-                        transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
-                }]};
-
-                let unlocked_state_copy = unlocked_state.clone();
-                tokio::task::spawn_blocking(move || {
-                    unlocked_state_copy.rgb_send_begin(
-                        recipient_map,
-                        true,
-                        FEE_RATE,
-                        MIN_CHANNEL_CONFIRMATIONS,
-                        None,
-                        true,
-                    )
-                })
-                .await
-                .unwrap()?;
+                // Keep REST openchannel aligned with SDK open_channel: do not call
+                // rgb_send_begin(dry_run=true) during preflight because current
+                // rgb-lib behavior can still reserve assignments.
+                tracing::info!(
+                    contract_id = %contract_id,
+                    asset_amount = *asset_amount,
+                    "openchannel route: skipping rgb_send_begin dry-run preflight and deferring RGB funding prep to FundingGenerationReady"
+                );
             }
             Some(schema)
         } else {

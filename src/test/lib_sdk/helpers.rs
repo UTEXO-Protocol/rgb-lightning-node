@@ -848,10 +848,13 @@ pub(crate) fn close_channel_with_force(
             .any(|channel| channel.channel_id == channel_id)
         {
             if force {
-                // Force-close settlement needs the CSV delay to elapse before the sweep
-                // transaction is broadcast. Mine a short tail of extra blocks so the
-                // delayed sweep reliably gets confirmed before balance assertions run.
-                mine_blocks(true, 144);
+                // Force-close settlement needs the CSV delay to elapse after the commitment
+                // transaction confirms, not merely after the channel disappears locally.
+                // With anchors, LDK may rebroadcast fee-bumped anchor packages for dozens of
+                // blocks before the commitment actually lands. Mine a conservative tail well
+                // past CSV maturity so the delayed sweep has time to become claimable and
+                // confirm before balance assertions run.
+                mine_blocks(true, 288);
                 for _ in 0..6 {
                     sleep(Duration::from_secs(1));
                     mine(1);

@@ -2706,53 +2706,28 @@ pub(crate) async fn open_channel(
         if *asset_amount > spendable_rgb_amount {
             return Err(APIError::InsufficientAssets);
         }
+        let has_uncolored_utxo = unlocked_state
+            .rgb_list_unspents(false)?
+            .into_iter()
+            .any(|unspent| unspent.utxo.colorable && unspent.rgb_allocations.is_empty());
+        if !has_uncolored_utxo {
+            return Err(APIError::NoAvailableUtxos);
+        }
         Some(RgbTransport::from_str(&unlocked_state.proxy_endpoint).unwrap())
     } else {
         None
     };
 
-    let schema = if let Some((contract_id, asset_amount)) = &colored_info {
-        let mut fake_p2wsh: [u8; 34] = [0; 34];
-        fake_p2wsh[1] = 32;
-        fake_p2wsh[2..34].copy_from_slice(&unlocked_state.entropy_source.get_secure_random_bytes());
-        let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
-        let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network);
-        let asset_id = contract_id.to_string();
-        let schema = unlocked_state
-            .rgb_get_asset_metadata(*contract_id)?
-            .asset_schema;
-        let assignment = match schema {
-            RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa => {
-                RgbLibAssignment::Fungible(*asset_amount)
-            }
-            RgbLibAssetSchema::Uda => RgbLibAssignment::NonFungible,
-        };
-
-        let recipient_map = map! {
-            asset_id => vec![RgbLibRecipient {
-                recipient_id,
-                witness_data: Some(RgbLibWitnessData {
-                    amount_sat: request.capacity_sat,
-                    blinding: Some(STATIC_BLINDING + 1),
-                }),
-                assignment,
-                transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()],
-        }]};
-
-        let unlocked_state_copy = unlocked_state.clone();
-        tokio::task::spawn_blocking(move || {
-            unlocked_state_copy.rgb_send_begin(
-                recipient_map,
-                true,
-                FEE_RATE,
-                MIN_CHANNEL_CONFIRMATIONS,
-                None,
-                true,
-            )
-        })
-        .await
-        .unwrap()?;
-        Some(schema)
+    let schema = if let Some((contract_id, _asset_amount)) = &colored_info {
+        // rgb-lib's send_begin(dry_run=true) is expected to be validation-only here,
+        // but current runtime behavior can still reserve assignments and leave the real
+        // FundingGenerationReady path with spendable=0/offchain_outbound=asset_amount.
+        // Defer the real rgb_send_begin call to FundingGenerationReady.
+        Some(
+            unlocked_state
+                .rgb_get_asset_metadata(*contract_id)?
+                .asset_schema,
+        )
     } else {
         None
     };

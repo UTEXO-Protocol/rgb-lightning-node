@@ -12,6 +12,7 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::hex::FromHex;
 #[cfg(feature = "vls")]
 pub use native_signer::NativeExternalSigner;
+pub use state::take_last_api_error_detail;
 use state::{
     block_on_app, block_on_sdk, clear_uniffi_node_handle, get_uniffi_app_state,
     is_uniffi_app_state_initialized, set_uniffi_node_handle,

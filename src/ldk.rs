@@ -11,6 +11,7 @@ use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::hashes::{sha256, Hash as BitcoinHash};
 use bitcoin::psbt::{ExtractTxError, Psbt};
 use bitcoin::secp256k1::{All, PublicKey, Secp256k1};
+use bitcoin::Sequence;
 use bitcoin::{io, Amount, Network};
 use bitcoin::{BlockHash, TxOut};
 use bitcoin_bech32::WitnessProgram;
@@ -108,6 +109,7 @@ const MAKER_SWAPS_KEY: &str = "maker_swaps";
 const TAKER_SWAPS_KEY: &str = "taker_swaps";
 const OUTPUT_SPENDER_TXES_KEY: &str = "output_spender_txes";
 const PSBT_NAMESPACE: &str = "psbt";
+const FUNDING_PSBT_PENDING_NAMESPACE: &str = "funding_psbt_pending";
 const CONFIG_INDEXER_URL: &str = "indexer_url";
 const CONFIG_BITCOIN_NETWORK: &str = "bitcoin_network";
 const CONFIG_WALLET_FINGERPRINT: &str = "wallet_fingerprint";
@@ -1165,6 +1167,70 @@ fn _finalize_virtual_rgb_channel_info(
     }
 }
 
+fn normalize_funding_psbt_locktime(
+    unsigned_psbt: String,
+    current_best_height: u32,
+) -> Result<String, String> {
+    let mut psbt = Psbt::from_str(&unsigned_psbt).map_err(|e| e.to_string())?;
+    let tx = &mut psbt.unsigned_tx;
+    let needs_locktime_adjustment = !tx.input.iter().all(|input| input.sequence == Sequence::MAX)
+        && tx.lock_time.is_block_height()
+        && tx.lock_time.to_consensus_u32() > current_best_height + 1;
+    if needs_locktime_adjustment {
+        let old_locktime = tx.lock_time.to_consensus_u32();
+        tx.lock_time = LockTime::from_height(current_best_height).unwrap_or(LockTime::ZERO);
+        tracing::warn!(
+            old_locktime,
+            new_locktime = tx.lock_time.to_consensus_u32(),
+            current_best_height,
+            "adjusted funding PSBT locktime to match LDK best height"
+        );
+    }
+    Ok(psbt.to_string())
+}
+
+fn psbt_txid(psbt_str: &str) -> Result<String, String> {
+    let psbt = Psbt::from_str(psbt_str).map_err(|e| e.to_string())?;
+    Ok(psbt.unsigned_tx.compute_txid().to_string())
+}
+
+fn read_pending_funding_psbt(
+    kv_store: &dyn KVStoreSync,
+    temporary_channel_id: &ChannelId,
+) -> Result<String, io::Error> {
+    let bytes = kv_store.read(
+        RGB_PRIMARY_NS,
+        FUNDING_PSBT_PENDING_NAMESPACE,
+        &temporary_channel_id.to_string(),
+    )?;
+    String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn write_pending_funding_psbt(
+    kv_store: &dyn KVStoreSync,
+    temporary_channel_id: &ChannelId,
+    unsigned_psbt: &str,
+) -> Result<(), io::Error> {
+    kv_store.write(
+        RGB_PRIMARY_NS,
+        FUNDING_PSBT_PENDING_NAMESPACE,
+        &temporary_channel_id.to_string(),
+        unsigned_psbt.as_bytes().to_vec(),
+    )
+}
+
+fn remove_pending_funding_psbt(
+    kv_store: &dyn KVStoreSync,
+    channel_id: &ChannelId,
+) -> Result<(), io::Error> {
+    kv_store.remove(
+        RGB_PRIMARY_NS,
+        FUNDING_PSBT_PENDING_NAMESPACE,
+        &channel_id.to_string(),
+        false,
+    )
+}
+
 async fn handle_ldk_events(
     event: Event,
     unlocked_state: Arc<UnlockedAppState>,
@@ -1440,7 +1506,7 @@ async fn handle_ldk_events(
                 return Ok(());
             }
 
-            let (unsigned_psbt, asset_id) = if is_colored {
+            let (unsigned_psbt, asset_id, reused_cached_rgb_funding_psbt) = if is_colored {
                 let rgb_info = get_rgb_channel_info_pending(
                     &temporary_channel_id,
                     unlocked_state.kv_store.as_ref(),
@@ -1455,7 +1521,6 @@ async fn handle_ldk_events(
                 };
 
                 let recipient_id = recipient_id_from_script_buf(script_buf, static_state.network);
-
                 let recipient_map = map! {
                     asset_id.clone() => vec![Recipient {
                         recipient_id: recipient_id.clone(),
@@ -1467,45 +1532,155 @@ async fn handle_ldk_events(
                         transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
                 }]};
 
-                let unlocked_state_copy = unlocked_state.clone();
-                let res = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                    let res = unlocked_state_copy
-                        .rgb_send_begin(
-                            recipient_map,
-                            true,
-                            FEE_RATE,
-                            MIN_CHANNEL_CONFIRMATIONS,
-                            None,
-                            false,
+                let unsigned_psbt = match read_pending_funding_psbt(
+                    unlocked_state.kv_store.as_ref(),
+                    &temporary_channel_id,
+                ) {
+                    Ok(psbt) => {
+                        tracing::info!(
+                            temporary_channel_id = %temporary_channel_id,
+                            "Reusing cached RGB funding PSBT for replayed FundingGenerationReady"
+                        );
+                        (psbt, true)
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        let asset_id_for_prepare = asset_id.clone();
+                        let unlocked_state_copy = unlocked_state.clone();
+                        let res = tokio::task::spawn_blocking(
+                            move || -> Result<String, String> {
+                            let res = unlocked_state_copy
+                                .rgb_send_begin(
+                                    recipient_map,
+                                    true,
+                                    FEE_RATE,
+                                    MIN_CHANNEL_CONFIRMATIONS,
+                                    None,
+                                    false,
+                                )
+                                .map_err(|e| e.to_string())?;
+                            // rgb_send_begin syncs rgb-lib to the chain tip and sets the PSBT
+                            // locktime = tip height. If LDK's channel manager hasn't yet processed
+                            // that block, the counterparty will reject the funding tx as non-final.
+                            // Detect this early: cancel the transfer and let LDK retry the event
+                            // (by which time LDK will have processed the block).
+                            let psbt_locktime = {
+                                let psbt = bitcoin::psbt::Psbt::from_str(&res.psbt)
+                                    .map_err(|e| e.to_string())?;
+                                psbt.unsigned_tx.lock_time.to_consensus_u32()
+                            };
+                            let ldk_height = unlocked_state_copy
+                                .channel_manager
+                                .current_best_block()
+                                .height;
+                            if psbt_locktime > ldk_height {
+                                tracing::warn!(
+                                    psbt_locktime,
+                                    ldk_height,
+                                    "funding PSBT locktime is ahead of LDK best height; cancelling transfer and retrying"
+                                );
+                                let _ = unlocked_state_copy.rgb_fail_transfers(
+                                    res.batch_transfer_idx,
+                                    false,
+                                    true,
+                                );
+                                return Err(format!(
+                                    "funding PSBT locktime {psbt_locktime} is ahead of LDK best height {ldk_height}; will retry"
+                                ));
+                            }
+                            let original_psbt = res.psbt.clone();
+                            let original_txid = psbt_txid(&original_psbt)?;
+
+                            let fascia_path = PathBuf::from(&res.details.fascia_path);
+                            let fascia_str = fs::read_to_string(&fascia_path)
+                                .map_err(|e| e.to_string())?;
+                            let fascia: Fascia =
+                                serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
+                            unlocked_state_copy
+                                .rgb_consume_fascia(fascia, None)
+                                .map_err(|e| e.to_string())?;
+                            unlocked_state_copy
+                                .rgb_create_consignments(original_psbt.clone())
+                                .map_err(|e| e.to_string())?;
+                            let consignment_path = unlocked_state_copy
+                                .rgb_get_send_consignment_path(
+                                    &asset_id_for_prepare,
+                                    &original_txid,
+                                );
+                            if !consignment_path.exists() {
+                                return Err(format!(
+                                    "missing RGB funding consignment at {}",
+                                    consignment_path.display()
+                                ));
+                            }
+                            Ok(original_psbt)
+                        },
                         )
-                        .map_err(|e| e.to_string())?;
-                    let fascia_str =
-                        fs::read_to_string(&res.details.fascia_path).map_err(|e| e.to_string())?;
-                    let fascia: Fascia =
-                        serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
-                    unlocked_state_copy
-                        .rgb_consume_fascia(fascia, None)
-                        .map_err(|e| e.to_string())?;
-                    unlocked_state_copy
-                        .rgb_create_consignments(res.psbt.clone())
-                        .map_err(|e| e.to_string())?;
-                    Ok(res.psbt)
-                })
-                .await
-                .unwrap();
-                let unsigned_psbt = match res {
-                    Ok(psbt) => psbt,
+                        .await;
+                        let task_result = match res {
+                            Ok(r) => r,
+                            Err(join_err) => {
+                                tracing::error!("RGB funding prepare task panicked: {join_err}");
+                                return Err(ReplayEvent());
+                            }
+                        };
+                        let psbt = match task_result {
+                            Ok(psbt) => psbt,
+                            Err(e) => {
+                                tracing::error!("cannot prepare channel funding transfer: {e}");
+                                return Err(ReplayEvent());
+                            }
+                        };
+                        if let Err(e) = write_pending_funding_psbt(
+                            unlocked_state.kv_store.as_ref(),
+                            &temporary_channel_id,
+                            &psbt,
+                        ) {
+                            tracing::warn!(
+                                temporary_channel_id = %temporary_channel_id,
+                                error = %e,
+                                "Failed to cache RGB funding PSBT for replay safety"
+                            );
+                        }
+                        (psbt, false)
+                    }
                     Err(e) => {
-                        tracing::error!("cannot prepare channel funding transfer: {e}");
+                        tracing::error!(
+                            temporary_channel_id = %temporary_channel_id,
+                            error = %e,
+                            "Failed to read cached RGB funding PSBT"
+                        );
                         return Err(ReplayEvent());
                     }
                 };
-                (unsigned_psbt, Some(asset_id))
+                let (unsigned_psbt, reused_cached_rgb_funding_psbt) = unsigned_psbt;
+                (
+                    unsigned_psbt,
+                    Some(asset_id),
+                    reused_cached_rgb_funding_psbt,
+                )
             } else {
                 let unsigned_psbt = unlocked_state
                     .rgb_send_btc_begin(addr.to_address(), channel_value_satoshis, FEE_RATE)
                     .unwrap();
-                (unsigned_psbt, None)
+                (unsigned_psbt, None, false)
+            };
+
+            let unsigned_psbt = if is_colored {
+                // For RGB funding we must preserve the txid produced by `rgb_send_begin`,
+                // because rgb-lib has already created transfer state and consignment files
+                // keyed by that txid. Mutating locktime here can change the txid and break
+                // consignment lookup/posting as well as later RGB witness handling.
+                unsigned_psbt
+            } else {
+                let current_best_height =
+                    unlocked_state.channel_manager.current_best_block().height;
+                match normalize_funding_psbt_locktime(unsigned_psbt, current_best_height) {
+                    Ok(psbt) => psbt,
+                    Err(e) => {
+                        tracing::error!("failed to normalize channel funding PSBT locktime: {e}");
+                        return Err(ReplayEvent());
+                    }
+                }
             };
 
             let signed_psbt = match unlocked_state.rgb_sign_psbt(unsigned_psbt) {
@@ -1515,65 +1690,111 @@ async fn handle_ldk_events(
                     return Err(ReplayEvent());
                 }
             };
-            let psbt = Psbt::from_str(&signed_psbt).unwrap();
+            let psbt = match Psbt::from_str(&signed_psbt) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!("failed to parse signed funding PSBT: {e}");
+                    return Err(ReplayEvent());
+                }
+            };
 
-            let funding_tx = psbt.clone().extract_tx().unwrap();
+            let funding_tx = match psbt.clone().extract_tx() {
+                Ok(tx) => tx,
+                Err(e) => {
+                    tracing::error!("failed to extract funding tx from signed PSBT: {e}");
+                    return Err(ReplayEvent());
+                }
+            };
             let funding_txid = funding_tx.compute_txid().to_string();
             tracing::info!("Funding TXID: {funding_txid}");
 
             // Store PSBT in database for later use when channel is funded
-            unlocked_state
-                .kv_store
-                .write(
-                    PSBT_NAMESPACE,
-                    "",
-                    &funding_txid,
-                    psbt.to_string().into_bytes(),
-                )
-                .unwrap();
+            if let Err(e) = unlocked_state.kv_store.write(
+                PSBT_NAMESPACE,
+                "",
+                &funding_txid,
+                psbt.to_string().into_bytes(),
+            ) {
+                tracing::error!("failed to store funding PSBT in kv_store: {e}");
+                return Err(ReplayEvent());
+            }
 
             if let Some(asset_id) = asset_id {
                 let unlocked_state_copy = unlocked_state.clone();
                 let witness_id = funding_txid.clone();
-                tokio::task::spawn_blocking(move || {
+                let upsert_result = tokio::task::spawn_blocking(move || {
+                    let rgb_txid = RgbTxid::from_str(&witness_id).map_err(|e| e.to_string())?;
                     unlocked_state_copy
-                        .rgb_upsert_witness(
-                            RgbTxid::from_str(&witness_id).unwrap(),
-                            WitnessOrd::Tentative,
-                        )
-                        .unwrap()
+                        .rgb_upsert_witness(rgb_txid, WitnessOrd::Tentative)
+                        .map_err(|e| e.to_string())
                 })
-                .await
-                .unwrap();
+                .await;
+                match upsert_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::error!("failed to upsert RGB witness: {e}");
+                        return Err(ReplayEvent());
+                    }
+                    Err(e) => {
+                        tracing::error!("rgb_upsert_witness task panicked: {e}");
+                        return Err(ReplayEvent());
+                    }
+                }
 
                 let consignment_path =
                     unlocked_state.rgb_get_send_consignment_path(&asset_id, &funding_txid);
-                let proxy_url = TransportEndpoint::new(unlocked_state.proxy_endpoint.clone())
-                    .unwrap()
-                    .endpoint;
-                let consignment_path_copy = consignment_path.clone();
-                let unlocked_state_copy = unlocked_state.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    unlocked_state_copy.rgb_post_consignment(
-                        &proxy_url,
-                        funding_txid.clone(),
-                        &consignment_path_copy,
-                        funding_txid,
-                        None,
-                    )
-                })
-                .await
-                .unwrap();
+                if reused_cached_rgb_funding_psbt && !consignment_path.exists() {
+                    tracing::info!(
+                        temporary_channel_id = %temporary_channel_id,
+                        funding_txid = %funding_txid,
+                        consignment_path = %consignment_path.display(),
+                        "Skipping consignment repost for replayed FundingGenerationReady because the cached consignment file is already gone"
+                    );
+                } else {
+                    let proxy_url = TransportEndpoint::new(unlocked_state.proxy_endpoint.clone())
+                        .unwrap()
+                        .endpoint;
+                    let consignment_path_copy = consignment_path.clone();
+                    let unlocked_state_copy = unlocked_state.clone();
+                    let funding_txid_for_post = funding_txid.clone();
+                    let post_result = tokio::task::spawn_blocking(move || {
+                        unlocked_state_copy.rgb_post_consignment(
+                            &proxy_url,
+                            funding_txid_for_post.clone(),
+                            &consignment_path_copy,
+                            funding_txid_for_post,
+                            None,
+                        )
+                    })
+                    .await;
+                    let res = match post_result {
+                        Ok(r) => r,
+                        Err(join_err) => {
+                            tracing::error!("rgb_post_consignment task panicked: {join_err}");
+                            return Err(ReplayEvent());
+                        }
+                    };
 
-                if let Err(e) = res {
-                    tracing::error!("cannot post consignment: {e}");
-                    return Err(ReplayEvent());
+                    if let Err(e) = res {
+                        if reused_cached_rgb_funding_psbt
+                            && e.to_string().contains("No such file or directory")
+                        {
+                            tracing::info!(
+                                temporary_channel_id = %temporary_channel_id,
+                                funding_txid = %funding_txid,
+                                "Skipping consignment repost for replayed FundingGenerationReady after missing cached consignment file"
+                            );
+                        } else {
+                            tracing::error!("cannot post consignment: {e}");
+                            return Err(ReplayEvent());
+                        }
+                    }
+                    tracing::debug!(
+                        asset_id,
+                        consignment_path = %consignment_path.display(),
+                        "Preserving consignment_out for rgb_send_end"
+                    );
                 }
-                tracing::debug!(
-                    asset_id,
-                    consignment_path = %consignment_path.display(),
-                    "Preserving consignment_out for rgb_send_end"
-                );
             }
 
             let channel_manager_copy = unlocked_state.channel_manager.clone();
@@ -2138,6 +2359,7 @@ async fn handle_ldk_events(
                 "EVENT: ChannelPending requires former_temporary_channel_id (LDK >= 0.0.115)",
             );
             unlocked_state.add_channel_id(former_temp, channel_id);
+            let _ = remove_pending_funding_psbt(unlocked_state.kv_store.as_ref(), &former_temp);
 
             _finalize_virtual_rgb_channel_info(
                 &former_temp,
@@ -2262,6 +2484,13 @@ async fn handle_ldk_events(
             *unlocked_state.rgb_send_lock.lock().unwrap() = false;
 
             let former_temporary_channel_id = unlocked_state.delete_channel_id(channel_id);
+            let _ = remove_pending_funding_psbt(unlocked_state.kv_store.as_ref(), &channel_id);
+            if let Some(ref former_temporary_channel_id) = former_temporary_channel_id {
+                let _ = remove_pending_funding_psbt(
+                    unlocked_state.kv_store.as_ref(),
+                    former_temporary_channel_id,
+                );
+            }
             let virtual_draft_temporary_channel_id = if unlocked_state
                 .virtual_channel_draft_get(&channel_id)
                 .is_some()
@@ -2307,6 +2536,7 @@ async fn handle_ldk_events(
             );
 
             unlocked_state.delete_channel_id(channel_id);
+            let _ = remove_pending_funding_psbt(unlocked_state.kv_store.as_ref(), &channel_id);
             let _ = unlocked_state.kv_store.remove(
                 "",
                 "",
