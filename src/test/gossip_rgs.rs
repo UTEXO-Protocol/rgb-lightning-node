@@ -14,7 +14,10 @@ fn start_rgs_stack(ln_peer: &str) {
             "up",
             "-d",
             "--force-recreate",
-            "--no-build",
+            "--no-deps",
+            "rgs-postgres",
+            "rgs-server",
+            "rgs-http",
         ])
         .env("RGS_LN_PEERS", ln_peer)
         .status()
