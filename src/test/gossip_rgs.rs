@@ -1,98 +1,139 @@
 use super::*;
 use crate::gossip::GossipSourceConfig;
-use tokio::io::AsyncWriteExt;
+use std::process::Command;
 
 const TEST_DIR_BASE: &str = "tmp/gossip_rgs/";
+const RGS_HTTP_URL: &str = "http://localhost:8002";
 
-// A known-valid Rapid Gossip Sync v1 snapshot (1 channel announcement + updates).
-// The chain hash (bytes 4..36) and the snapshot timestamp (bytes 36..40) are
-// patched at runtime so the snapshot applies to the regtest network graph and
-// passes the freshness check.
-const RGS_SNAPSHOT_TEMPLATE: [u8; 300] = [
-    76, 68, 75, 1, 111, 226, 140, 10, 182, 241, 179, 114, 193, 166, 162, 70, 174, 99, 247, 79, 147,
-    30, 131, 101, 225, 90, 8, 156, 104, 214, 25, 0, 0, 0, 0, 0, 97, 227, 98, 218, 0, 0, 0, 4, 2,
-    22, 7, 207, 206, 25, 164, 197, 231, 230, 231, 56, 102, 61, 250, 251, 187, 172, 38, 46, 79, 247,
-    108, 44, 155, 48, 219, 238, 252, 53, 192, 6, 67, 2, 36, 125, 157, 176, 223, 175, 234, 116, 94,
-    248, 201, 225, 97, 235, 50, 47, 115, 172, 63, 136, 88, 216, 115, 11, 111, 217, 114, 84, 116,
-    124, 231, 107, 2, 158, 1, 242, 121, 152, 106, 204, 131, 186, 35, 93, 70, 216, 10, 237, 224,
-    183, 89, 95, 65, 3, 83, 185, 58, 138, 181, 64, 187, 103, 127, 68, 50, 2, 201, 19, 17, 138, 136,
-    149, 185, 226, 156, 137, 175, 110, 32, 237, 0, 217, 90, 31, 100, 228, 149, 46, 219, 175, 168,
-    77, 4, 143, 38, 128, 76, 97, 0, 0, 0, 2, 0, 0, 255, 8, 153, 192, 0, 2, 27, 0, 0, 0, 1, 0, 0,
-    255, 2, 68, 226, 0, 6, 11, 0, 1, 2, 3, 0, 0, 0, 4, 0, 40, 0, 0, 0, 0, 0, 0, 3, 232, 0, 0, 3,
-    232, 0, 0, 0, 1, 0, 0, 0, 0, 29, 129, 25, 192, 255, 8, 153, 192, 0, 2, 27, 0, 0, 60, 0, 0, 0,
-    0, 0, 0, 0, 1, 0, 0, 0, 100, 0, 0, 2, 224, 0, 0, 0, 0, 58, 85, 116, 216, 0, 29, 0, 0, 0, 1, 0,
-    0, 0, 125, 0, 0, 0, 0, 58, 85, 116, 216, 255, 2, 68, 226, 0, 6, 11, 0, 1, 0, 0, 1,
-];
-
-fn regtest_rgs_snapshot() -> Vec<u8> {
-    let mut data = RGS_SNAPSHOT_TEMPLATE.to_vec();
-    let chain_hash = bitcoin::constants::ChainHash::using_genesis_block(bitcoin::Network::Regtest);
-    data[4..36].copy_from_slice(chain_hash.as_bytes());
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32;
-    data[36..40].copy_from_slice(&now.to_be_bytes());
-    data
+fn start_rgs_stack(ln_peer: &str) {
+    let status = Command::new("docker")
+        .args([
+            "compose",
+            "--profile",
+            "gossip",
+            "up",
+            "-d",
+            "--force-recreate",
+            "--no-build",
+        ])
+        .env("RGS_LN_PEERS", ln_peer)
+        .status()
+        .expect("failed to invoke docker compose");
+    assert!(status.success(), "docker compose up failed");
 }
 
-// Serve the given snapshot bytes over HTTP on an ephemeral port, for any GET path.
-async fn serve_rgs_snapshot(snapshot: Vec<u8>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                return;
-            };
-            let body = snapshot.clone();
-            tokio::spawn(async move {
-                let mut buf = [0u8; 1024];
-                let _ = sock.read(&mut buf).await;
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = sock.write_all(header.as_bytes()).await;
-                let _ = sock.write_all(&body).await;
-                let _ = sock.flush().await;
-            });
+fn stop_rgs_stack() {
+    let _ = Command::new("docker")
+        .args([
+            "compose",
+            "rm",
+            "-fsv",
+            "rgs-server",
+            "rgs-postgres",
+            "rgs-http",
+        ])
+        .status();
+}
+
+async fn wait_for_rgs_snapshot(timeout_secs: f32) {
+    let t_0 = OffsetDateTime::now_utc();
+    let dir = std::path::Path::new("datargs/symlinks");
+    loop {
+        if dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                if entries
+                    .filter_map(Result::ok)
+                    .any(|e| e.file_name().to_string_lossy().ends_with(".bin"))
+                {
+                    return;
+                }
+            }
         }
-    });
-    format!("http://{addr}")
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > timeout_secs {
+            panic!(
+                "no RGS snapshot file appeared in datargs/symlinks/ within {timeout_secs}s; \
+                 check `docker logs gossip-integration-rgs-server-1`"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn rgs_mode_syncs_snapshot() {
+async fn rgs_mode_consumes_real_server_snapshot() {
     initialize();
 
-    let rgs_url = serve_rgs_snapshot(regtest_rgs_snapshot()).await;
+    // Three RLN nodes: A and B open a public channel that the RGS server
+    // crawls from A; C consumes the resulting snapshot in RGS mode and should
+    // observe the A↔B channel in its network graph.
+    let test_dir_a = format!("{TEST_DIR_BASE}node1");
+    let test_dir_b = format!("{TEST_DIR_BASE}node2");
+    let test_dir_c = format!("{TEST_DIR_BASE}node3");
 
-    let test_dir_node1 = format!("{TEST_DIR_BASE}node1");
-    let password = format!("{test_dir_node1}.{NODE1_PEER_PORT}");
-    let node_addr = start_daemon(&test_dir_node1, NODE1_PEER_PORT, None, false).await;
-    init(node_addr, &password, None).await;
+    let (addr_a, _pwd_a) = start_node(&test_dir_a, NODE1_PEER_PORT, false).await;
+    let (addr_b, _pwd_b) = start_node(&test_dir_b, NODE2_PEER_PORT, false).await;
+
+    let pubkey_a = node_info(addr_a).await.pubkey;
+    let pubkey_b = node_info(addr_b).await.pubkey;
+
+    // Fund A and open a public channel A→B.
+    fund_and_create_utxos(addr_a, None).await;
+    let _channel = open_channel(
+        addr_a,
+        &pubkey_b,
+        Some(NODE2_PEER_PORT),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    // Channels become announceable after enough confirmations; mine extra blocks
+    // so both endpoints can broadcast channel_announcement.
+    mine_n_blocks(false, 6);
+    wait_for_usable_channels(addr_a, 1).await;
+    wait_for_usable_channels(addr_b, 1).await;
+
+    // Bring up the gossip stack pointing at node A as the only crawl peer.
+    let ln_peer = format!("{pubkey_a}@host.docker.internal:{NODE1_PEER_PORT}");
+    start_rgs_stack(&ln_peer);
+
+    // The RGS server peers with A, performs initial gossip sync, and writes
+    // its first snapshot file to /srv/cache/symlinks/ (mounted as datargs/).
+    wait_for_rgs_snapshot(30.0).await;
+
+    // Start node C in RGS mode pointing at the nginx that fronts the snapshots.
+    let pwd_c = format!("{test_dir_c}.{NODE3_PEER_PORT}");
+    let addr_c = start_daemon(&test_dir_c, NODE3_PEER_PORT, None, false).await;
+    init(addr_c, &pwd_c, None).await;
     unlock_with_gossip_source(
-        node_addr,
-        &password,
+        addr_c,
+        &pwd_c,
         Some(GossipSourceConfig::RapidGossipSync {
-            server_url: rgs_url,
+            server_url: RGS_HTTP_URL.into(),
         }),
     )
     .await;
 
-    // The background task fires its first tick immediately, so the snapshot is
-    // fetched and applied shortly after unlock.
+    // The background sync task fires immediately on first tick; poll until C
+    // sees both the timestamp and at least one channel learned via RGS.
     let t_0 = OffsetDateTime::now_utc();
     loop {
-        if let Some(ts) = node_info(node_addr).await.latest_rgs_snapshot_timestamp {
-            assert!(ts > 0, "RGS snapshot timestamp should be non-zero");
-            break;
+        let info = node_info(addr_c).await;
+        if info.latest_rgs_snapshot_timestamp.is_some() && info.network_channels >= 1 {
+            stop_rgs_stack();
+            return;
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 15.0 {
-            panic!("RGS snapshot timestamp did not become Some within timeout");
+            stop_rgs_stack();
+            panic!(
+                "node C in RGS mode did not see channel via snapshot within timeout \
+                 (latest_rgs_snapshot_timestamp={:?}, network_channels={})",
+                info.latest_rgs_snapshot_timestamp, info.network_channels
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
