@@ -493,19 +493,25 @@ impl RgbLibWalletWrapper {
     }
 
     pub(crate) fn get_rgb_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {
-        // Recover from poisoning instead of unwrapping: a panic crossing
-        // `extern "C"` frames aborts via `panic_cannot_unwind`, which would
-        // cascade to every subsequent wallet op.
-        match self.wallet.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::error!(
-                    "RgbLibWallet mutex was poisoned by a prior panic; recovering. \
-                     Wallet state may be inconsistent — inspect earlier 'panicked at' lines."
-                );
-                poisoned.into_inner()
+        // In FFI builds a panic crossing `extern "C"` frames aborts via
+        // `panic_cannot_unwind`, cascading to every subsequent wallet op,
+        // so we recover from mutex poisoning instead of propagating.
+        // In pure-Rust builds keep the unwrap so panics surface normally.
+        #[cfg(feature = "uniffi")]
+        {
+            match self.wallet.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::error!(
+                        "RgbLibWallet mutex was poisoned by a prior panic; recovering. \
+                         Wallet state may be inconsistent — inspect earlier 'panicked at' lines."
+                    );
+                    poisoned.into_inner()
+                }
             }
         }
+        #[cfg(not(feature = "uniffi"))]
+        self.wallet.lock().unwrap()
     }
 
     /// Returns the wallet's configured `VssBackupClient`, if any. This is the
