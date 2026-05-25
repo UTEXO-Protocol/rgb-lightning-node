@@ -4,7 +4,7 @@ use lightning::sign::InMemorySigner;
 use lightning::sign::KeysManager;
 use lightning::sign::SpendableOutputDescriptor;
 
-use super::{RgbWalletAccountInfo, RlnChannelSigner, RlnKeysInterface, RlnSignerError};
+use super::{RlnChannelSigner, RlnKeysInterface, RlnSignerError};
 
 impl RlnKeysInterface for KeysManager {
     fn sign_spendable_outputs_psbt(
@@ -24,15 +24,6 @@ impl RlnKeysInterface for KeysManager {
         Err(RlnSignerError::Unsupported(
             "RGB PSBT signing is not implemented via internal signer abstraction yet".to_string(),
         ))
-    }
-
-    fn rgb_wallet_account(&self) -> RgbWalletAccountInfo {
-        RgbWalletAccountInfo {
-            account_xpub_vanilla: String::new(),
-            account_xpub_colored: String::new(),
-            master_fingerprint: String::new(),
-            vanilla_keychain: None,
-        }
     }
 }
 

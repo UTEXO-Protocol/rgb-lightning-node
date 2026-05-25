@@ -30,7 +30,6 @@ use crate::core_types::{HTLCStatus, SwapStatus, FEE_RATE, HTLC_MIN_MSAT};
 use crate::error::{APIError, APIErrorResponse};
 use crate::kv_store::SeaOrmKvStore;
 use crate::ldk::{InboundPaymentInfoStorage, InvoiceType, INBOUND_PAYMENTS_KEY};
-use crate::rgb_kv_store::{RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS};
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetIFA, AssetNIA,
     AssetUDA, Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse,
@@ -58,6 +57,7 @@ use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,
     ELECTRUM_URL_REGTEST, LOGS_DIR, PROXY_ENDPOINT_LOCAL,
 };
+use lightning::rgb_utils::{RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS};
 
 use super::*;
 

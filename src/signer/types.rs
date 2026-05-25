@@ -17,14 +17,6 @@ pub(crate) type ExternalChannelRequest = signer_external::contract::ChannelReque
 pub(crate) type ExternalChannelResponse = signer_external::contract::ChannelResponse;
 pub(crate) type ChannelPublicKeys = signer_external::contract::ChannelPublicKeys;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RgbWalletAccountInfo {
-    pub(crate) account_xpub_vanilla: String,
-    pub(crate) account_xpub_colored: String,
-    pub(crate) master_fingerprint: String,
-    pub(crate) vanilla_keychain: Option<String>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RlnSignerError {
     #[allow(dead_code)]

@@ -1,4 +1,4 @@
-use crate::rgb_kv_store::{write_rgb_payment_info_file, RgbKvStoreExt};
+use crate::ldk::write_rgb_payment_info_file;
 use amplify::s;
 use axum::{
     extract::{Multipart, State},
@@ -16,6 +16,7 @@ use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
 use lightning::rgb_utils::RgbInfo;
+use lightning::rgb_utils::RgbKvStoreExt;
 use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::util::config::ChannelConfig;

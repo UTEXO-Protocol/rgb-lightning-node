@@ -4,10 +4,6 @@ use crate::async_order::{
     AsyncPaymentsPreimageRoot, JsonRpcErrorWire, ASYNC_ERROR_INVOICE_HASH_MISMATCH,
     ASYNC_ERROR_STALE_FLOW,
 };
-use crate::rgb_kv_store::{
-    get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount, RgbKvStoreExt,
-    RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
-};
 use crate::synced_kv_store::SyncedKvStore;
 use amplify::{map, s};
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -35,6 +31,10 @@ use lightning::ln::peer_handler::{
 use lightning::ln::types::ChannelId;
 use lightning::onion_message::messenger::{
     DefaultMessageRouter, OnionMessenger as LdkOnionMessenger,
+};
+use lightning::rgb_utils::{
+    get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount, RgbKvStoreExt,
+    RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
 use lightning::rgb_utils::{RgbPaymentInfo, STATIC_BLINDING};
 use lightning::routing::gossip;
@@ -2613,7 +2613,7 @@ async fn handle_ldk_events(
                     let consignment =
                         RgbTransfer::load(&mut std::io::Cursor::new(consignment_data))
                             .expect("successful consignment load");
-                    let _ = unlocked_state
+                    unlocked_state
                         .kv_store
                         .remove_rgb_consignment(&funding_txid);
 
@@ -2935,17 +2935,14 @@ impl OutputSpender for RgbOutputSpender {
                 .kv_store
                 .read(
                     RGB_PRIMARY_NS,
-                    crate::rgb_kv_store::RGB_TRANSFER_INFO_NS,
+                    lightning::rgb_utils::RGB_TRANSFER_INFO_NS,
                     &txid_str,
                 )
                 .is_ok();
             if !transfer_info_exists {
                 continue;
             }
-            let transfer_info = match self.kv_store.read_rgb_transfer_info(&txid_str) {
-                Ok(info) => info,
-                Err(_) => continue,
-            };
+            let transfer_info = self.kv_store.read_rgb_transfer_info(&txid_str);
             if transfer_info.rgb_amount == 0 {
                 continue;
             }
@@ -4381,6 +4378,33 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
     }
 
     tracing::info!("Stopped LDK");
+}
+
+pub(crate) fn write_rgb_payment_info_file(
+    payment_hash: &PaymentHash,
+    contract_id: ContractId,
+    amount_rgb: u64,
+    swap_payment: bool,
+    inbound: bool,
+    kv_store: &dyn KVStoreSync,
+) {
+    let payment_info = RgbPaymentInfo {
+        contract_id,
+        amount: amount_rgb,
+        local_rgb_amount: 0,
+        remote_rgb_amount: 0,
+        swap_payment,
+        inbound,
+    };
+    let data = bincode::serialize(&payment_info).expect("valid rgb payment info");
+    let ns = if inbound {
+        RGB_PAYMENT_INFO_INBOUND_NS
+    } else {
+        RGB_PAYMENT_INFO_OUTBOUND_NS
+    };
+    let key = payment_hash.0.as_hex().to_string();
+    let _ = kv_store.write(RGB_PRIMARY_NS, ns, &key, data.clone());
+    let _ = kv_store.write(RGB_PRIMARY_NS, ns, &format!("{key}_pending"), data);
 }
 
 pub(crate) fn clear_rgb_payment_pending(payment_hash: &PaymentHash, kv_store: &dyn KVStoreSync) {

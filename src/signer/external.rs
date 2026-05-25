@@ -28,8 +28,8 @@ use super::transport::ExternalSignerTransport;
 use super::types::{
     validate_bootstrap_payload, AsyncPaymentsHashEntry, BootstrapData, DerivedAddressMatch,
     ExternalNodeRequest, ExternalNodeResponse, ExternalSignerRequest, ExternalSignerResponse,
-    RgbWalletAccountInfo, RlnSignerError, SpendableDescriptorKind, SpendableOutputSignInput,
-    WalletDerivationMatch, WalletInputMetadata,
+    RlnSignerError, SpendableDescriptorKind, SpendableOutputSignInput, WalletDerivationMatch,
+    WalletInputMetadata,
 };
 use super::vls_adapter::{ExternalSignerBackend, VlsSignerAdapter};
 use super::RlnEntropySource;
@@ -71,10 +71,6 @@ impl ExternalSigner {
         let backend: Arc<dyn ExternalSignerBackend> =
             Arc::new(VlsSignerAdapter::new(Arc::clone(&attachment.transport)));
         Ok(Self { backend })
-    }
-
-    pub(crate) fn bootstrap(&self) -> Result<BootstrapData, RlnSignerError> {
-        self.backend.bootstrap()
     }
 
     pub(crate) fn generate_channel_keys_id(
@@ -679,22 +675,5 @@ impl RlnKeysInterface for ExternalSigner {
         psbt: String,
     ) -> Result<String, RlnSignerError> {
         self.backend.sign_rgb_psbt(descriptors, psbt)
-    }
-
-    fn rgb_wallet_account(&self) -> RgbWalletAccountInfo {
-        match self.bootstrap() {
-            Ok(bootstrap) => RgbWalletAccountInfo {
-                account_xpub_vanilla: bootstrap.identity.account_xpub_vanilla,
-                account_xpub_colored: bootstrap.identity.account_xpub_colored,
-                master_fingerprint: bootstrap.identity.master_fingerprint,
-                vanilla_keychain: None,
-            },
-            Err(_) => RgbWalletAccountInfo {
-                account_xpub_vanilla: String::new(),
-                account_xpub_colored: String::new(),
-                master_fingerprint: String::new(),
-                vanilla_keychain: None,
-            },
-        }
     }
 }

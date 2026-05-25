@@ -453,7 +453,7 @@ pub(crate) fn wait_for_usable_channel(
             Instant::now() < deadline,
             "timeout waiting for usable channel"
         );
-        if polls.is_multiple_of(5) {
+        if polls % 5 == 0 {
             mine(1);
         }
         sleep(Duration::from_secs(2));
@@ -570,7 +570,7 @@ pub(crate) fn wait_for_usable_channel_counts(nodes: &[(&SdkNode, usize)], timeou
             Instant::now() < deadline,
             "usable channel counts did not reach expected values in time"
         );
-        if polls.is_multiple_of(5) {
+        if polls % 5 == 0 {
             mine(1);
         }
         sleep(Duration::from_secs(1));

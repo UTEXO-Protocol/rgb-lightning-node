@@ -28,9 +28,7 @@ use lightning::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::util::errors::APIError;
 use lightning_invoice::RawBolt11Invoice;
 
-use super::{
-    ExternalSigner, RgbWalletAccountInfo, RlnChannelSigner, RlnKeysInterface, RlnSignerError,
-};
+use super::{ExternalSigner, RlnChannelSigner, RlnKeysInterface, RlnSignerError};
 
 #[derive(Clone)]
 pub(crate) struct DynRlnChannelSigner {
@@ -599,13 +597,6 @@ impl RlnKeysInterface for DynRlnSigner {
         match self {
             Self::Internal(km) => km.sign_rgb_psbt(descriptors, psbt),
             Self::External(es) => es.sign_rgb_psbt(descriptors, psbt),
-        }
-    }
-
-    fn rgb_wallet_account(&self) -> RgbWalletAccountInfo {
-        match self {
-            Self::Internal(km) => km.rgb_wallet_account(),
-            Self::External(es) => es.rgb_wallet_account(),
         }
     }
 }

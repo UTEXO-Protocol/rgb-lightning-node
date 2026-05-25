@@ -2705,7 +2705,6 @@ dependencies = [
 [[package]]
 name = "lightning"
 version = "0.2.2"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bech32 0.11.1",
  "bincode",
@@ -2715,10 +2714,10 @@ dependencies = [
  "hashbrown 0.13.2",
  "libm",
  "lightning-invoice 0.34.0",
- "lightning-macros 0.2.1 (git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility)",
+ "lightning-macros 0.2.1",
  "lightning-types 0.3.1",
  "musig2",
- "possiblyrandom 0.2.0 (git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility)",
+ "possiblyrandom 0.2.0",
  "rgb-lib",
  "serde",
  "tokio",
@@ -2727,7 +2726,6 @@ dependencies = [
 [[package]]
 name = "lightning-background-processor"
 version = "0.2.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bitcoin",
  "bitcoin-io",
@@ -2735,13 +2733,12 @@ dependencies = [
  "lightning 0.2.2",
  "lightning-liquidity",
  "lightning-rapid-gossip-sync",
- "possiblyrandom 0.2.0 (git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility)",
+ "possiblyrandom 0.2.0",
 ]
 
 [[package]]
 name = "lightning-block-sync"
 version = "0.2.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
@@ -2753,7 +2750,6 @@ dependencies = [
 [[package]]
 name = "lightning-dns-resolver"
 version = "0.3.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "dnssec-prover",
  "lightning 0.2.2",
@@ -2775,7 +2771,6 @@ dependencies = [
 [[package]]
 name = "lightning-invoice"
 version = "0.34.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bech32 0.11.1",
  "bitcoin",
@@ -2787,16 +2782,24 @@ dependencies = [
 [[package]]
 name = "lightning-liquidity"
 version = "0.2.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bitcoin",
  "chrono",
  "lightning 0.2.2",
  "lightning-invoice 0.34.0",
- "lightning-macros 0.2.1 (git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility)",
+ "lightning-macros 0.2.1",
  "lightning-types 0.3.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lightning-macros"
+version = "0.2.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2811,19 +2814,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "lightning-macros"
-version = "0.2.1"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "lightning-net-tokio"
 version = "0.2.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bitcoin",
  "lightning 0.2.2",
@@ -2833,7 +2825,6 @@ dependencies = [
 [[package]]
 name = "lightning-persister"
 version = "0.2.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bitcoin",
  "lightning 0.2.2",
@@ -2844,7 +2835,6 @@ dependencies = [
 [[package]]
 name = "lightning-rapid-gossip-sync"
 version = "0.2.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bitcoin",
  "bitcoin-io",
@@ -2864,7 +2854,6 @@ dependencies = [
 [[package]]
 name = "lightning-types"
 version = "0.3.1"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
 dependencies = [
  "bitcoin",
 ]
@@ -3511,8 +3500,6 @@ dependencies = [
 [[package]]
 name = "possiblyrandom"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b122a615d72104fb3d8b26523fdf9232cd8ee06949fb37e4ce3ff964d15dffd"
 dependencies = [
  "getrandom 0.2.17",
 ]
@@ -3520,7 +3507,8 @@ dependencies = [
 [[package]]
 name = "possiblyrandom"
 version = "0.2.0"
-source = "git+https://github.com/UTEXO-Protocol/rust-lightning.git?branch=feat%2Fexternal-signer-compatibility#aa313818b54e873014bc8c429823f1ace1cd8913"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b122a615d72104fb3d8b26523fdf9232cd8ee06949fb37e4ce3ff964d15dffd"
 dependencies = [
  "getrandom 0.2.17",
 ]

@@ -20,7 +20,6 @@ mod kv_store;
 mod ldk;
 mod node;
 mod rgb;
-mod rgb_kv_store;
 mod routes;
 mod runtime;
 mod sdk;

@@ -12,9 +12,9 @@ use crate::core_types::async_order::{
 };
 use crate::core_types::{FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
 use crate::error::APIError;
+use crate::ldk::write_rgb_payment_info_file;
 use crate::ldk::{start_ldk, InvoiceType, PaymentInfo, VirtualChannelSessionStatus};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
-use crate::rgb_kv_store::{write_rgb_payment_info_file, RgbKvStoreExt};
 use crate::signer::{
     read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
     write_key_source_file, BootstrapData, KeySourceFile, SUPPORTED_SIGNER_API_LEVEL,
@@ -42,6 +42,7 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::types::ChannelId;
 use lightning::offers::offer::{self, Offer};
+use lightning::rgb_utils::RgbKvStoreExt;
 use lightning::rgb_utils::{RgbInfo, STATIC_BLINDING};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::gossip::RoutingFees;

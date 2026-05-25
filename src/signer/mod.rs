@@ -47,8 +47,8 @@ pub(crate) use key_source::{
 pub(crate) use transport::ExternalSignerTransport;
 #[allow(unused_imports)]
 pub(crate) use types::{
-    validate_bootstrap_payload, BootstrapData, RgbWalletAccountInfo, RlnSignerError,
-    SignerIdentity, SUPPORTED_SIGNER_API_LEVEL,
+    validate_bootstrap_payload, BootstrapData, RlnSignerError, SignerIdentity,
+    SUPPORTED_SIGNER_API_LEVEL,
 };
 
 /// Active signer type used by the current runtime wiring (internal mnemonic mode).
@@ -71,8 +71,6 @@ pub(crate) trait RlnKeysInterface:
         descriptors: Vec<String>,
         psbt: String,
     ) -> Result<String, RlnSignerError>;
-
-    fn rgb_wallet_account(&self) -> RgbWalletAccountInfo;
 }
 
 pub(crate) trait RlnChannelSigner: EcdsaChannelSigner + Send + Sync {}

@@ -13,7 +13,6 @@ mod fee_mock;
 mod kv_store;
 mod ldk;
 mod rgb;
-mod rgb_kv_store;
 mod routes;
 mod runtime;
 mod signer;

@@ -4,7 +4,7 @@ on:
   push:
     branches: ["master", "dev", "stage"]
   pull_request:
-    # branches: ["master", "dev", "stage"]
+    branches: ["master", "dev", "stage"]
   workflow_dispatch:
 
 env:
@@ -28,7 +28,7 @@ jobs:
           rustflags: ""
 
       - name: Run library-only test suite
-        run: cargo test --features "uniffi,vss,test-utils" --test lib_core
+        run: cargo test --features "uniffi,vls,vss,test-utils" --test lib_core
 
   kotlin-jvm:
     name: Kotlin JVM (Linux host)
@@ -47,7 +47,7 @@ jobs:
           rustflags: ""
 
       - name: Build host cdylib
-        run: cargo build --release --features uniffi,vss --lib
+        run: cargo build --release --features "uniffi,vls,vss" --lib
 
       - name: Generate Kotlin bindings
         run: ./scripts/ci/uniffi_generate_kotlin.sh
@@ -123,7 +123,7 @@ jobs:
           bindgen --version
 
       - name: Build host cdylib with external signer API
-        run: cargo build --release --features "uniffi,vls" --lib
+        run: cargo build --release --features "uniffi,vls,vss" --lib
 
       - name: Generate Kotlin Android bindings
         run: ./scripts/ci/uniffi_generate_from_library.sh kotlin target/uniffi/kotlin-android target/release/librgb_lightning_node.so uniffi-android.toml
@@ -135,7 +135,7 @@ jobs:
           ANDROID_NDK: /usr/local/lib/android/sdk/ndk/27.3.13750724
           AWS_LC_SYS_EXTERNAL_BINDGEN: "1"
           CMAKE: /usr/bin/cmake
-          UNIFFI_CARGO_FEATURES: "uniffi,vls"
+          UNIFFI_CARGO_FEATURES: "uniffi,vls,vss"
         run: |
           echo "Using NDK_HOME=${ANDROID_NDK_HOME}"
           echo "Using NDK_ROOT=${ANDROID_NDK_ROOT}"

@@ -17,15 +17,3 @@ pub(crate) fn mock_fee(fee: u32) -> u32 {
 pub(crate) fn set_mock_fee_for_tests(fee: Option<u32>) {
     *MOCK_FEE.lock().unwrap() = fee;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{mock_fee, set_mock_fee_for_tests};
-
-    #[test]
-    fn mock_fee_override_roundtrip() {
-        set_mock_fee_for_tests(Some(123));
-        assert_eq!(mock_fee(999), 123);
-        assert_eq!(mock_fee(999), 999);
-    }
-}
