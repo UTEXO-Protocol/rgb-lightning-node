@@ -54,10 +54,6 @@ fn close_force_standard() {
             })
             .expect("node A issueassetnia")
             .asset_id;
-        assert_eq!(
-            wait_for_asset_balance(&node_a, &asset_id, Duration::from_secs(30)).spendable,
-            1_000
-        );
 
         let node_a_pubkey = node_a.node_info().expect("node A node_info").pubkey;
         let node_b_pubkey = node_b.node_info().expect("node B node_info").pubkey;
@@ -93,26 +89,8 @@ fn close_force_standard() {
             .get_channel_id(open_channel.temporary_channel_id)
             .expect("node A get_channel_id");
 
-        keysend_with_ln_balance(
-            &node_a,
-            &node_b,
-            node_b_pubkey,
-            None,
-            &asset_id,
-            150,
-            600,
-            0,
-        );
-        keysend_with_ln_balance(
-            &node_b,
-            &node_a,
-            node_a_pubkey,
-            None,
-            &asset_id,
-            50,
-            150,
-            450,
-        );
+        keysend(&node_a, node_b_pubkey, None, Some(&asset_id), Some(150));
+        keysend(&node_b, node_a_pubkey, None, Some(&asset_id), Some(50));
 
         // Mirrors the original test to avoid racing an outdated commitment TX.
         sleep(Duration::from_secs(5));

@@ -1,5 +1,5 @@
 use crate::ldk::write_rgb_payment_info_file;
-use amplify::s;
+use amplify::{map, s};
 use axum::{
     extract::{Multipart, State},
     Json,
@@ -9,14 +9,13 @@ use biscuit_auth::Biscuit;
 use bitcoin::hashes::sha256::{self, Hash as Sha256};
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::Network;
+use bitcoin::{Network, ScriptBuf};
 use hex::DisplayHex;
 use lightning::chain::channelmonitor::Balance;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
-use lightning::rgb_utils::RgbInfo;
-use lightning::rgb_utils::RgbKvStoreExt;
+use lightning::rgb_utils::{RgbInfo, RgbKvStoreExt, STATIC_BLINDING};
 use lightning::routing::gossip::RoutingFees;
 use lightning::routing::router::{Path as LnPath, Route, RouteHint, RouteHintHop};
 use lightning::util::config::ChannelConfig;
@@ -39,6 +38,7 @@ use lightning::{
 };
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description, PaymentSecret};
 use regex::Regex;
+use rgb_lib::utils::recipient_id_from_script_buf;
 use rgb_lib::{
     bdk_wallet::keys::bip39::Mnemonic,
     keys::{generate_keys, WitnessVersion},
@@ -94,8 +94,8 @@ use crate::{
     backup::{do_backup, restore_backup},
     core_types::{
         HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest,
-        DEFAULT_FINAL_CLTV_EXPIRY_DELTA, DUST_LIMIT_MSAT, HTLC_MIN_MSAT, MAX_SWAP_FEE_MSAT,
-        MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
+        DEFAULT_FINAL_CLTV_EXPIRY_DELTA, DUST_LIMIT_MSAT, FEE_RATE, HTLC_MIN_MSAT,
+        MAX_SWAP_FEE_MSAT, MIN_CHANNEL_CONFIRMATIONS, UTXO_SIZE_SAT,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
@@ -3879,13 +3879,6 @@ pub(crate) async fn open_channel(
             if *asset_amount > spendable_rgb_amount {
                 return Err(APIError::InsufficientAssets);
             }
-            let has_uncolored_utxo = unlocked_state
-                .rgb_list_unspents(false)?
-                .into_iter()
-                .any(|unspent| unspent.utxo.colorable && unspent.rgb_allocations.is_empty());
-            if !has_uncolored_utxo {
-                return Err(APIError::NoAvailableUtxos);
-            }
 
             Some(RgbTransport::from_str(&unlocked_state.proxy_endpoint).unwrap())
         } else {
@@ -3897,14 +3890,45 @@ pub(crate) async fn open_channel(
                 .rgb_get_asset_metadata(*contract_id)?
                 .asset_schema;
             if !is_virtual_open {
-                // Keep REST openchannel aligned with SDK open_channel: do not call
-                // rgb_send_begin(dry_run=true) during preflight because current
-                // rgb-lib behavior can still reserve assignments.
-                tracing::info!(
-                    contract_id = %contract_id,
-                    asset_amount = *asset_amount,
-                    "openchannel route: skipping rgb_send_begin dry-run preflight and deferring RGB funding prep to FundingGenerationReady"
-                );
+                let mut fake_p2wsh: [u8; 34] = [0; 34];
+                fake_p2wsh[1] = 32;
+                let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
+                let recipient_id =
+                    recipient_id_from_script_buf(script_buf, state.static_state.network);
+                let asset_id = contract_id.to_string();
+                let assignment = match schema {
+                    RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa => {
+                        RgbLibAssignment::Fungible(*asset_amount)
+                    }
+                    RgbLibAssetSchema::Uda => RgbLibAssignment::NonFungible,
+                };
+
+                let recipient_map = map! {
+                    asset_id => vec![RgbLibRecipient {
+                        recipient_id,
+                        witness_data: Some(RgbLibWitnessData {
+                            amount_sat: payload.capacity_sat,
+                            blinding: Some(STATIC_BLINDING + 1),
+                        }),
+                        assignment,
+                        transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
+                }]};
+
+                let unlocked_state_copy = unlocked_state.clone();
+                tokio::task::spawn_blocking(move || {
+                    unlocked_state_copy.rgb_send_begin(
+                        recipient_map,
+                        true,
+                        FEE_RATE,
+                        MIN_CHANNEL_CONFIRMATIONS,
+                        None,
+                        true,
+                        // Channel-funding dry run: mirror the real funding tx's final locktime.
+                        Some(0),
+                    )
+                })
+                .await
+                .unwrap()?;
             }
             Some(schema)
         } else {
@@ -3934,13 +3958,9 @@ pub(crate) async fn open_channel(
             };
             let temp_id_str = temp_id.0.as_hex().to_string();
             let push_amount = payload.push_asset_amount.unwrap_or(0);
-            let schema_json = serde_json::to_string(schema.as_ref().unwrap())
-                .map_err(|e| APIError::Unexpected(format!("schema serialize failed: {e}")))?;
-            let parsed_schema = serde_json::from_str(&schema_json)
-                .map_err(|e| APIError::Unexpected(format!("schema parse failed: {e}")))?;
             let rgb_info = RgbInfo {
                 contract_id: *contract_id,
-                schema: parsed_schema,
+                schema: schema.unwrap(),
                 local_rgb_amount: *asset_amount - push_amount,
                 remote_rgb_amount: push_amount,
             };
@@ -4182,14 +4202,7 @@ pub(crate) async fn send_btc(
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
 
-        let txid = if payload.skip_sync && !unlocked_state.external_signer_mode {
-            unlocked_state.rgb_send_btc(
-                payload.address,
-                payload.amount,
-                payload.fee_rate,
-                payload.skip_sync,
-            )?
-        } else {
+        let txid = if unlocked_state.external_signer_mode {
             let unsigned_psbt = unlocked_state.rgb_send_btc_begin(
                 payload.address,
                 payload.amount,
@@ -4200,6 +4213,13 @@ pub(crate) async fn send_btc(
                 APIError::from(e)
             })?;
             unlocked_state.rgb_send_btc_end(signed_psbt)?
+        } else {
+            unlocked_state.rgb_send_btc(
+                payload.address,
+                payload.amount,
+                payload.fee_rate,
+                payload.skip_sync,
+            )?
         };
 
         Ok(Json(SendBtcResponse { txid }))
@@ -4439,17 +4459,12 @@ pub(crate) async fn send_payment(
                 );
             }
 
-            let bolt11_retry = if rgb_payment.is_some() {
-                Retry::Timeout(Duration::from_secs(120))
-            } else {
-                Retry::Timeout(Duration::from_secs(10))
-            };
             match unlocked_state.channel_manager.pay_for_bolt11_invoice(
                 &invoice,
                 payment_id,
                 Some(amt_msat),
                 RouteParametersConfig::default(),
-                bolt11_retry,
+                Retry::Timeout(Duration::from_secs(10)),
             ) {
                 Ok(_) => {
                     let payee_pubkey = invoice.recover_payee_pub_key();

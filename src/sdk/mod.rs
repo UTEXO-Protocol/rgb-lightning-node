@@ -2463,14 +2463,7 @@ pub(crate) async fn send_btc(
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let txid = if request.skip_sync && !unlocked_state.external_signer_mode {
-        unlocked_state.rgb_send_btc(
-            request.address,
-            request.amount,
-            request.fee_rate,
-            request.skip_sync,
-        )?
-    } else {
+    let txid = if unlocked_state.external_signer_mode {
         let unsigned_psbt =
             unlocked_state.rgb_send_btc_begin(request.address, request.amount, request.fee_rate)?;
         let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).map_err(|e| {
@@ -2478,6 +2471,13 @@ pub(crate) async fn send_btc(
             APIError::from(e)
         })?;
         unlocked_state.rgb_send_btc_end(signed_psbt)?
+    } else {
+        unlocked_state.rgb_send_btc(
+            request.address,
+            request.amount,
+            request.fee_rate,
+            request.skip_sync,
+        )?
     };
 
     Ok(SendBtcData { txid })
@@ -2752,28 +2752,53 @@ pub(crate) async fn open_channel(
         if *asset_amount > spendable_rgb_amount {
             return Err(APIError::InsufficientAssets);
         }
-        let has_uncolored_utxo = unlocked_state
-            .rgb_list_unspents(false)?
-            .into_iter()
-            .any(|unspent| unspent.utxo.colorable && unspent.rgb_allocations.is_empty());
-        if !has_uncolored_utxo {
-            return Err(APIError::NoAvailableUtxos);
-        }
         Some(RgbTransport::from_str(&unlocked_state.proxy_endpoint).unwrap())
     } else {
         None
     };
 
-    let schema = if let Some((contract_id, _asset_amount)) = &colored_info {
-        // rgb-lib's send_begin(dry_run=true) is expected to be validation-only here,
-        // but current runtime behavior can still reserve assignments and leave the real
-        // FundingGenerationReady path with spendable=0/offchain_outbound=asset_amount.
-        // Defer the real rgb_send_begin call to FundingGenerationReady.
-        Some(
-            unlocked_state
-                .rgb_get_asset_metadata(*contract_id)?
-                .asset_schema,
-        )
+    let schema = if let Some((contract_id, asset_amount)) = &colored_info {
+        let mut fake_p2wsh: [u8; 34] = [0; 34];
+        fake_p2wsh[1] = 32;
+        let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
+        let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network);
+        let asset_id = contract_id.to_string();
+        let schema = unlocked_state
+            .rgb_get_asset_metadata(*contract_id)?
+            .asset_schema;
+        let assignment = match schema {
+            RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa => {
+                RgbLibAssignment::Fungible(*asset_amount)
+            }
+            RgbLibAssetSchema::Uda => RgbLibAssignment::NonFungible,
+        };
+
+        let recipient_map = map! {
+            asset_id => vec![RgbLibRecipient {
+                recipient_id,
+                witness_data: Some(RgbLibWitnessData {
+                    amount_sat: request.capacity_sat,
+                    blinding: Some(STATIC_BLINDING + 1),
+                }),
+                assignment,
+                transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()],
+        }]};
+
+        let unlocked_state_copy = unlocked_state.clone();
+        tokio::task::spawn_blocking(move || {
+            unlocked_state_copy.rgb_send_begin(
+                recipient_map,
+                true,
+                FEE_RATE,
+                MIN_CHANNEL_CONFIRMATIONS,
+                None,
+                true,
+                Some(0),
+            )
+        })
+        .await
+        .unwrap()?;
+        Some(schema)
     } else {
         None
     };
@@ -2799,13 +2824,9 @@ pub(crate) async fn open_channel(
             };
             let temp_id_str = temp_id.0.as_hex().to_string();
             let push_amount = request.push_asset_amount.unwrap_or(0);
-            let schema_json = serde_json::to_string(schema.as_ref().unwrap())
-                .map_err(|e| APIError::Unexpected(format!("schema serialize failed: {e}")))?;
-            let parsed_schema = serde_json::from_str(&schema_json)
-                .map_err(|e| APIError::Unexpected(format!("schema parse failed: {e}")))?;
             let rgb_info = RgbInfo {
                 contract_id: *contract_id,
-                schema: parsed_schema,
+                schema: schema.unwrap(),
                 local_rgb_amount: *asset_amount - push_amount,
                 remote_rgb_amount: push_amount,
             };

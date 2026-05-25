@@ -1,22 +1,3 @@
-//! Lightning / RGB signer wiring for RLN.
-//!
-//! ## Phase D (attached external signer + RGB holder commitments)
-//!
-//! [`channel_signer::ExternalChannelSigner`] sets `commitment_unsigned_tx_hex` on
-//! `ValidateHolderCommitment` when the built holder commitment tx is RGB-colored
-//! ([`lightning::rgb_utils::is_tx_colored`]). The external process (`rln-external-signer`) then uses
-//! the full-tx VLS message path (Phase C there) together with patched **`vls-core`**
-//! (`rgb-commitment-compat`; see `vendor/vls-core-rgb/UTEXO-RGB-PATCH.md`).
-//!
-//! **In-process** `NativeExternalSigner` (see `uniffi_api/native_signer.rs`) still uses the LDK
-//! summary-only VLS path for holder validate; it does not send the wire tx. End-to-end RGB + native
-//! VLS is not supported until that path is aligned or flows use an attached external signer.
-//!
-//! ## Phase E (verification)
-//!
-//! After `rgb-lib` API updates, `cargo check` / `lib_sdk` external-signer tests exercise the wire
-//! contract end-to-end; RGB holder validate with full tx is covered by the attached-signer path
-//! above plus `rln-external-signer` tests with **`with-vls`**.
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{All, Secp256k1};
 use lightning::sign::ecdsa::EcdsaChannelSigner;

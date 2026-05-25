@@ -287,32 +287,14 @@ pub(crate) fn ensure_funded(node: &SdkNode, min_spendable_sat: u64, node_name: &
 
 pub(crate) fn fund_and_create_utxos(node: &SdkNode, node_name: &str) {
     ensure_funded(node, 1, node_name);
-    // `createutxos` can be flaky in CI/regtest environments (races with sync/fee estimation);
-    // allow a few retries before failing the test.
-    let mut last_err = None;
-    for _ in 0..3 {
-        match node.createutxos(SdkCreateUtxosRequest {
-            up_to: false,
-            num: Some(CREATE_UTXOS_NUM),
-            size: None,
-            fee_rate: CREATE_UTXOS_FEE_RATE,
-            skip_sync: false,
-        }) {
-            Ok(_) => {
-                last_err = None;
-                break;
-            }
-            Err(e) => {
-                last_err = Some(e);
-                // Best-effort: sync and wait a bit, then retry.
-                let _ = node.sync();
-                sleep(Duration::from_millis(500));
-            }
-        }
-    }
-    if let Some(e) = last_err {
-        panic!("{node_name}: createutxos: {e:?}");
-    }
+    node.createutxos(SdkCreateUtxosRequest {
+        up_to: false,
+        num: Some(CREATE_UTXOS_NUM),
+        size: None,
+        fee_rate: CREATE_UTXOS_FEE_RATE,
+        skip_sync: false,
+    })
+    .unwrap_or_else(|_| panic!("{node_name}: createutxos"));
     mine(1);
     node.sync()
         .unwrap_or_else(|_| panic!("{node_name}: sync after createutxos"));
@@ -631,14 +613,10 @@ pub(crate) fn wait_for_ln_balance(
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        node.sync()
-            .expect("node sync while waiting for offchain_outbound balance");
         let balance = asset_balance_offchain_outbound(node, asset_id);
         if balance == expected_balance {
             return;
         }
-        node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
-            .expect("refreshtransfers while waiting for offchain_outbound balance");
         assert!(
             Instant::now() < deadline,
             "offchain_outbound balance ({balance}) did not become {expected_balance}"
@@ -655,8 +633,6 @@ pub(crate) fn wait_for_balance(
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        node.sync()
-            .expect("node sync while waiting for spendable balance");
         let balance = asset_balance_spendable(node, asset_id);
         if balance == expected_balance {
             return;
@@ -850,21 +826,7 @@ pub(crate) fn close_channel_with_force(
             .iter()
             .any(|channel| channel.channel_id == channel_id)
         {
-            if force {
-                // Force-close settlement needs the CSV delay to elapse after the commitment
-                // transaction confirms, not merely after the channel disappears locally.
-                // With anchors, LDK may rebroadcast fee-bumped anchor packages for dozens of
-                // blocks before the commitment actually lands. Mine a conservative tail well
-                // past CSV maturity so the delayed sweep has time to become claimable and
-                // confirm before balance assertions run.
-                mine_blocks(true, 288);
-                for _ in 0..6 {
-                    sleep(Duration::from_secs(1));
-                    mine(1);
-                }
-            } else {
-                mine_blocks(true, 6);
-            }
+            mine_blocks(true, if force { 144 } else { 6 });
             return;
         }
         assert!(Instant::now() < deadline, "channel did not close in time");

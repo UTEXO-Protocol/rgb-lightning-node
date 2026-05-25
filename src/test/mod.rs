@@ -5,7 +5,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
-use lightning::rgb_utils::RgbPaymentInfo;
+use lightning::rgb_utils::{RgbPaymentInfo, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS};
 use lightning::util::hash_tables::new_hash_map;
 use lightning::util::persist::KVStoreSync;
 use lightning::util::ser::Readable;
@@ -57,7 +57,6 @@ use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,
     ELECTRUM_URL_REGTEST, LOGS_DIR, PROXY_ENDPOINT_LOCAL,
 };
-use lightning::rgb_utils::{RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS};
 
 use super::*;
 
@@ -200,12 +199,6 @@ async fn start_daemon_with_virtual_options(
     enable_virtual_channels_v0: bool,
     virtual_peer_pubkeys: Vec<PublicKey>,
 ) -> SocketAddr {
-    if let Ok(injected_addr) = std::env::var("RLN_TEST_INJECT_DAEMON_ADDR") {
-        if let Ok(addr) = injected_addr.parse::<SocketAddr>() {
-            return addr;
-        }
-    }
-
     if !keep_node_dir && Path::new(&node_test_dir).is_dir() {
         std::fs::remove_dir_all(node_test_dir).unwrap();
     }

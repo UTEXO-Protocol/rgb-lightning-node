@@ -1,11 +1,3 @@
-//! LDK `ChannelSigner` backed by an attached external process.
-//!
-//! **RGB holder validate (Phase D):** `validate_holder_commitment_with_backend` serializes the built
-//! holder commitment tx into `commitment_unsigned_tx_hex` when
-//! [`lightning::rgb_utils::is_tx_colored`] is true, so the signer can run VLS `ValidateCommitmentTx`
-//! on the same bytes the node holds. Vanilla (non-colored) commitments omit the field (phase-2
-//! summary path). Counterparty commitment signing still rejects colored txs until VLS rebuild
-//! matches RGB wire layout for that operation.
 use super::types::{
     ChannelPublicKeys, ExternalChannelHtlc, ExternalChannelOp, ExternalChannelRequest,
     ExternalSignerRequest, ExternalSignerResponse, RlnSignerError,
