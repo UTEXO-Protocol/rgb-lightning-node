@@ -24,9 +24,9 @@ use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
     connect_peer_if_necessary, encrypt_and_save_mnemonic, get_current_timestamp,
     get_max_local_rgb_amount, get_route, hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec,
-    new_jsonrpc_request_id, parse_peer_info, validate_and_parse_description_hash,
-    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState,
-    UserOnionMessageContents,
+    is_external_signer_mode_configured, new_jsonrpc_request_id, parse_peer_info,
+    validate_and_parse_description_hash, validate_and_parse_payment_hash,
+    validate_and_parse_payment_preimage, AppState, UserOnionMessageContents,
 };
 use amplify::{map, s};
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -185,12 +185,6 @@ async fn update_unlocked_app_state(
 ) {
     let mut unlocked_app_state = state.unlocked_app_state.lock().await;
     *unlocked_app_state = updated;
-}
-
-fn is_external_signer_mode_configured(state: &Arc<AppState>) -> Result<bool, APIError> {
-    Ok(read_key_source_file(&state.static_state.storage_dir_path)
-        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
-        .is_some())
 }
 
 pub(crate) struct NodeInfoData {

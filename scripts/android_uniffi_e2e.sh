@@ -56,9 +56,9 @@ need_env ANDROID_NDK_HOME
 ensure_regtest_available
 ensure_android_device_available
 
-cargo build --release --features "uniffi,vls" --lib
+cargo build --release --features "uniffi,vls,vss" --lib
 ./scripts/ci/uniffi_generate_from_library.sh kotlin target/uniffi/kotlin-android target/release/librgb_lightning_node.so uniffi-android.toml
-UNIFFI_CARGO_FEATURES="uniffi,vls" ./scripts/ci/build_android_jni_x86_64.sh
+UNIFFI_CARGO_FEATURES="uniffi,vls,vss" ./scripts/ci/build_android_jni_x86_64.sh
 
 (
     cd android-e2e

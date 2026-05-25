@@ -55,7 +55,7 @@ if [[ "${EXTERNAL_SIGNER_SCENARIO}" == "mixed-asset-channel-real" ]]; then
 fi
 
 echo "Building UniFFI library..."
-cargo build --release --features uniffi,vls --lib
+cargo build --release --features uniffi,vls,vss --lib
 ./scripts/ci/uniffi_generate_python.sh
 cp target/release/librgb_lightning_node.so target/uniffi/python/librgb_lightning_node.so
 

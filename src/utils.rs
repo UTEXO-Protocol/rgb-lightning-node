@@ -40,7 +40,10 @@ use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
 use crate::core_types::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
-use crate::signer::{ActiveSignerRef, ExternalSigner, ExternalSignerAttachment, RlnEntropySource};
+use crate::signer::{
+    read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment,
+    RlnEntropySource,
+};
 use crate::{
     args::UserArgs,
     disk::FilesystemLogger,
@@ -251,6 +254,12 @@ impl Writeable for UserOnionMessageContents {
     fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
         w.write_all(&self.data)
     }
+}
+
+pub(crate) fn is_external_signer_mode_configured(state: &Arc<AppState>) -> Result<bool, APIError> {
+    Ok(read_key_source_file(&state.static_state.storage_dir_path)
+        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
+        .is_some())
 }
 
 pub(crate) fn check_already_initialized(database: &DatabaseConnection) -> Result<(), APIError> {

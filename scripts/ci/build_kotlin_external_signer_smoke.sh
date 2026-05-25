@@ -26,7 +26,7 @@ need_cmd kotlinc
   exit 1
 }
 
-cargo build --release --features "uniffi,vls" --lib
+cargo build --release --features "uniffi,vls,vss" --lib
 "$ROOT_DIR/scripts/ci/uniffi_generate_from_library.sh" kotlin "$KOTLIN_FROM_LIB"
 
 mkdir -p "$OUT_DIR"

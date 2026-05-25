@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # UniFFI smoke: NativeExternalSigner + initWithNativeExternalSigner + unlockWithNativeExternalSigner.
-# Requires regtest (bitcoind, electrs, proxy). Builds with `uniffi,vls` and generates Swift from the
+# Requires regtest (bitcoind, electrs, proxy). Builds with `uniffi,vls,vss` and generates Swift from the
 # release library so proc-macro exports match the linked binary.
 set -euo pipefail
 
@@ -60,7 +60,7 @@ esac
 rustup target add "$RUST_TARGET"
 
 cd "$ROOT_DIR"
-cargo build --release --features "uniffi,vls" --lib --target "$RUST_TARGET"
+cargo build --release --features "uniffi,vls,vss" --lib --target "$RUST_TARGET"
 
 UNIFFI_LIB=""
 for ext in so dylib; do
