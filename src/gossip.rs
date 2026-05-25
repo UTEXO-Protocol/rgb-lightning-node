@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -121,6 +121,25 @@ impl GossipSource {
         latest_sync_timestamp.store(new_timestamp, Ordering::Release);
         tracing::info!("RGS snapshot applied, new timestamp: {new_timestamp}");
         Ok(new_timestamp)
+    }
+}
+
+pub(crate) async fn run_rgs_sync_loop(
+    gossip_source: Arc<GossipSource>,
+    stop: Arc<AtomicBool>,
+    interval_duration: Duration,
+) {
+    let mut interval = tokio::time::interval(interval_duration);
+    loop {
+        interval.tick().await;
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let started = std::time::Instant::now();
+        match gossip_source.update_rgs_snapshot().await {
+            Ok(_) => tracing::info!("RGS sync finished in {}ms", started.elapsed().as_millis()),
+            Err(e) => tracing::error!("RGS sync failed: {e:?}"),
+        }
     }
 }
 

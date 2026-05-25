@@ -4083,24 +4083,11 @@ pub(crate) async fn start_ldk(
     // Refresh the RGS snapshot on a fixed interval (RGS mode only). The first
     // tick fires immediately, so a freshly unlocked node syncs right away.
     if unlocked_state.gossip_source.is_rgs() {
-        let gossip_source = Arc::clone(&unlocked_state.gossip_source);
-        let stop_gossip = Arc::clone(&stop_processing);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(crate::gossip::RGS_SYNC_INTERVAL);
-            loop {
-                interval.tick().await;
-                if stop_gossip.load(Ordering::Acquire) {
-                    return;
-                }
-                let started = std::time::Instant::now();
-                match gossip_source.update_rgs_snapshot().await {
-                    Ok(_) => {
-                        tracing::info!("RGS sync finished in {}ms", started.elapsed().as_millis())
-                    }
-                    Err(e) => tracing::error!("RGS sync failed: {e:?}"),
-                }
-            }
-        });
+        tokio::spawn(crate::gossip::run_rgs_sync_loop(
+            Arc::clone(&unlocked_state.gossip_source),
+            Arc::clone(&stop_processing),
+            crate::gossip::RGS_SYNC_INTERVAL,
+        ));
     }
 
     let recent_payments_payment_ids = channel_manager
