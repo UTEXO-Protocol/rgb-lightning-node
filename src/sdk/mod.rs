@@ -210,6 +210,7 @@ pub(crate) struct NodeInfoData {
     pub(crate) channel_asset_max_amount: u64,
     pub(crate) network_nodes: usize,
     pub(crate) network_channels: usize,
+    pub(crate) latest_rgs_snapshot_timestamp: Option<u64>,
 }
 
 pub(crate) struct NetworkInfoData {
@@ -1096,6 +1097,10 @@ pub(crate) async fn node_info(state: Arc<AppState>) -> Result<NodeInfoData, APIE
     let graph_lock = unlocked_state.network_graph.read_only();
     let network_nodes = graph_lock.nodes().len();
     let network_channels = graph_lock.channels().len();
+    let latest_rgs_snapshot_timestamp = unlocked_state
+        .network_graph
+        .get_last_rapid_gossip_sync_timestamp()
+        .map(|val| val as u64);
 
     let wallet_data = unlocked_state.rgb_get_keys();
 
@@ -1118,6 +1123,7 @@ pub(crate) async fn node_info(state: Arc<AppState>) -> Result<NodeInfoData, APIE
         channel_asset_max_amount: u64::MAX,
         network_nodes,
         network_channels,
+        latest_rgs_snapshot_timestamp,
     })
 }
 
@@ -1998,6 +2004,9 @@ pub(crate) async fn unlock_with_attached_external_signer(
         return Err(APIError::ExternalSignerMismatch);
     }
 
+    let gossip_source = request
+        .gossip_rgs_server_url
+        .map(|server_url| crate::gossip::GossipSourceConfig::RapidGossipSync { server_url });
     let unlock_request = crate::core_types::UnlockRequest {
         bitcoind_rpc_username: request.bitcoind_rpc_username,
         bitcoind_rpc_password: request.bitcoind_rpc_password,
@@ -2007,6 +2016,7 @@ pub(crate) async fn unlock_with_attached_external_signer(
         proxy_endpoint: request.proxy_endpoint,
         announce_addresses: request.announce_addresses,
         announce_alias: request.announce_alias,
+        gossip_source,
     };
     let (new_ldk_background_services, new_unlocked_app_state) = match start_ldk(
         state.clone(),
@@ -4316,6 +4326,7 @@ mod tests {
             proxy_endpoint: Some("rpc://127.0.0.1:3000/json-rpc".to_string()),
             announce_addresses: vec![],
             announce_alias: None,
+            gossip_rgs_server_url: None,
         }
     }
 

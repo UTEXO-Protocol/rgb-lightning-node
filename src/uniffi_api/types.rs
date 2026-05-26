@@ -79,6 +79,7 @@ pub struct NodeInfo {
     pub channel_asset_max_amount: u64,
     pub network_nodes: u64,
     pub network_channels: u64,
+    pub latest_rgs_snapshot_timestamp: Option<u64>,
 }
 
 pub struct NetworkInfo {
