@@ -120,7 +120,7 @@ jobs:
         env:
           AWS_LC_SYS_EXTERNAL_BINDGEN: "1"
           CMAKE: /usr/bin/cmake
-          UNIFFI_CARGO_FEATURES: "uniffi,vls"
+          UNIFFI_CARGO_FEATURES: "uniffi,vls,vss"
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           export BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi="--sysroot=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
