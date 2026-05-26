@@ -477,6 +477,10 @@ pub struct SdkExternalSignerBootstrap {
     pub api_level: u32,
 }
 
+pub struct SdkVssClearFenceRequest {
+    pub password: String,
+}
+
 pub struct SdkOpenChannelRequest {
     pub peer_pubkey_and_opt_addr: String,
     pub capacity_sat: u64,
