@@ -569,7 +569,7 @@ dictionary SdkUnlockRequest {
     string? proxy_endpoint;
     sequence<string> announce_addresses;
     string? announce_alias;
-    string? gossip_rgs_server_url;
+    string? gossip_rgs_server_url = null;
 };
 
 dictionary SdkExternalSignerBootstrap {
