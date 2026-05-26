@@ -531,7 +531,9 @@ mod tests {
         store_b.delete_fence().expect("delete fence");
 
         // Now B can take over.
-        store_b.acquire_fence().expect("b acquires fence after clear");
+        store_b
+            .acquire_fence()
+            .expect("b acquires fence after clear");
     }
 
     /// `delete_fence` is idempotent: clearing an absent fence must not error,
@@ -544,8 +546,7 @@ mod tests {
         }
 
         let (signing_key, store_id) = generate_test_keys();
-        let store =
-            VssKvStore::new(VSS_URL.to_string(), store_id, signing_key).expect("vss store");
+        let store = VssKvStore::new(VSS_URL.to_string(), store_id, signing_key).expect("vss store");
 
         // No fence has been acquired yet — clear must still succeed.
         store.delete_fence().expect("first delete on empty fence");

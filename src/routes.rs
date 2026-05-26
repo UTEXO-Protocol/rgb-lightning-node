@@ -4684,4 +4684,3 @@ pub(crate) async fn vss_clear_fence(
     })
     .await
 }
-

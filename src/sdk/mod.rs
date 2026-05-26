@@ -1727,9 +1727,9 @@ pub(crate) async fn vss_clear_fence(
     #[cfg(not(feature = "vss"))]
     {
         let _ = request;
-        return Err(APIError::Unexpected(
+        Err(APIError::Unexpected(
             "VSS support is not compiled in".to_string(),
-        ));
+        ))
     }
 
     #[cfg(feature = "vss")]
