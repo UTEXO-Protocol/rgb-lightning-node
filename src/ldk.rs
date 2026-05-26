@@ -227,6 +227,7 @@ fn sync_config_to_kvstore(
 
 pub(crate) struct LdkBackgroundServices {
     stop_processing: Arc<AtomicBool>,
+    gossip_shutdown: Arc<tokio::sync::Notify>,
     peer_manager: Arc<PeerManager>,
     bp_exit: Sender<()>,
     background_processor: Option<JoinHandle<Result<(), io::Error>>>,
@@ -3765,17 +3766,18 @@ pub(crate) async fn start_ldk(
 
     // The UTXO verifier can only attach to a P2P sync, and only after PeerManager
     // is built (the verifier holds an Arc<PeerManager>). RGS mode skips it.
-    let p2p_gossip_sync_for_verifier = match &*gossip_source {
-        GossipSource::P2PNetwork { gossip_sync } => Some(Arc::clone(gossip_sync)),
-        GossipSource::RapidGossipSync { .. } => None,
-    };
-
-    let route_handler: Arc<RoutingMessageHandler> = match gossip_source.as_gossip_sync() {
-        lightning_background_processor::GossipSync::P2P(p2p) => p2p,
-        lightning_background_processor::GossipSync::Rapid(_) => Arc::new(IgnoringMessageHandler {}),
-        lightning_background_processor::GossipSync::None => {
-            unreachable!("gossip source is always set")
-        }
+    let (p2p_gossip_sync_for_verifier, route_handler): (
+        Option<Arc<P2PGossipSync>>,
+        Arc<RoutingMessageHandler>,
+    ) = match &*gossip_source {
+        GossipSource::P2PNetwork { gossip_sync } => (
+            Some(Arc::clone(gossip_sync)),
+            Arc::clone(gossip_sync) as Arc<RoutingMessageHandler>,
+        ),
+        GossipSource::RapidGossipSync { .. } => (
+            None,
+            Arc::new(IgnoringMessageHandler {}) as Arc<RoutingMessageHandler>,
+        ),
     };
 
     // Initialize an OMDomainResolver as a service to other nodes.
@@ -4082,10 +4084,11 @@ pub(crate) async fn start_ldk(
 
     // Refresh the RGS snapshot on a fixed interval (RGS mode only). The first
     // tick fires immediately, so a freshly unlocked node syncs right away.
+    let gossip_shutdown = Arc::new(tokio::sync::Notify::new());
     if unlocked_state.gossip_source.is_rgs() {
         tokio::spawn(crate::gossip::run_rgs_sync_loop(
             Arc::clone(&unlocked_state.gossip_source),
-            Arc::clone(&stop_processing),
+            Arc::clone(&gossip_shutdown),
             crate::gossip::RGS_SYNC_INTERVAL,
         ));
     }
@@ -4244,6 +4247,7 @@ pub(crate) async fn start_ldk(
     Ok((
         LdkBackgroundServices {
             stop_processing,
+            gossip_shutdown,
             peer_manager: peer_manager.clone(),
             bp_exit,
             background_processor: Some(background_processor),
@@ -4289,6 +4293,7 @@ impl AppState {
         ldk_background_services
             .stop_processing
             .store(true, Ordering::Release);
+        ldk_background_services.gossip_shutdown.notify_one();
         ldk_background_services.peer_manager.disconnect_all_peers();
 
         // Stop the background processor.

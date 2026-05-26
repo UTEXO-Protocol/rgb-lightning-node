@@ -327,6 +327,7 @@ impl SdkNode {
                 proxy_endpoint: request.proxy_endpoint,
                 announce_addresses: request.announce_addresses,
                 announce_alias: request.announce_alias,
+                gossip_rgs_server_url: request.gossip_rgs_server_url,
             },
         ))?;
         Ok(())

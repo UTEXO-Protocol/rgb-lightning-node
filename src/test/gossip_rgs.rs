@@ -38,6 +38,14 @@ fn stop_rgs_stack() {
         .status();
 }
 
+// RAII: ensure the docker stack is torn down even if a body assertion panics.
+struct RgsStackGuard;
+impl Drop for RgsStackGuard {
+    fn drop(&mut self) {
+        stop_rgs_stack();
+    }
+}
+
 async fn wait_for_rgs_snapshot(timeout_secs: f32) {
     let t_0 = OffsetDateTime::now_utc();
     let dir = std::path::Path::new("datargs/symlinks");
@@ -103,6 +111,7 @@ async fn rgs_mode_consumes_real_server_snapshot() {
     // Bring up the gossip stack pointing at node A as the only crawl peer.
     let ln_peer = format!("{pubkey_a}@host.docker.internal:{NODE1_PEER_PORT}");
     start_rgs_stack(&ln_peer);
+    let _stack_guard = RgsStackGuard;
 
     // The RGS server peers with A, performs initial gossip sync, and writes
     // its first snapshot file to /srv/cache/symlinks/ (mounted as datargs/).
@@ -127,11 +136,9 @@ async fn rgs_mode_consumes_real_server_snapshot() {
     loop {
         let info = node_info(addr_c).await;
         if info.latest_rgs_snapshot_timestamp.is_some() && info.network_channels >= 1 {
-            stop_rgs_stack();
             return;
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 15.0 {
-            stop_rgs_stack();
             panic!(
                 "node C in RGS mode did not see channel via snapshot within timeout \
                  (latest_rgs_snapshot_timestamp={:?}, network_channels={})",

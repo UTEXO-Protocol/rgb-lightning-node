@@ -368,6 +368,8 @@ pub(crate) struct UnlockRequest {
     pub(crate) proxy_endpoint: Option<String>,
     pub(crate) announce_addresses: Vec<String>,
     pub(crate) announce_alias: Option<String>,
+    // None → P2P gossip (default). Some(url) → Rapid Gossip Sync against url.
+    pub(crate) gossip_rgs_server_url: Option<String>,
 }
 
 fn validate_external_signer_bootstrap(bootstrap: &BootstrapData) -> Result<(), APIError> {
@@ -1896,6 +1898,9 @@ pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Resu
     };
 
     tracing::debug!("Starting LDK...");
+    let gossip_source = request
+        .gossip_rgs_server_url
+        .map(|server_url| crate::gossip::GossipSourceConfig::RapidGossipSync { server_url });
     let unlock_request = crate::core_types::UnlockRequest {
         bitcoind_rpc_username: request.bitcoind_rpc_username,
         bitcoind_rpc_password: request.bitcoind_rpc_password,
@@ -1905,7 +1910,7 @@ pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Resu
         proxy_endpoint: request.proxy_endpoint,
         announce_addresses: request.announce_addresses,
         announce_alias: request.announce_alias,
-        gossip_source: None,
+        gossip_source,
     };
     let (new_ldk_background_services, new_unlocked_app_state) = match start_ldk(
         state.clone(),

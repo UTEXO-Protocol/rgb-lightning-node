@@ -466,6 +466,8 @@ pub struct SdkUnlockRequest {
     pub proxy_endpoint: Option<String>,
     pub announce_addresses: Vec<String>,
     pub announce_alias: Option<String>,
+    // None → P2P gossip (default). Some(url) → Rapid Gossip Sync against url.
+    pub gossip_rgs_server_url: Option<String>,
 }
 
 pub struct SdkExternalSignerBootstrap {
