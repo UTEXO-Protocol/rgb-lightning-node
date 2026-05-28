@@ -491,6 +491,7 @@ impl UnlockedAppState {
             None,
             None,
         );
+        clear_rgb_payment_pending(&payment_hash, true, self.kv_store.as_ref());
     }
 
     fn fail_outbound_pending_payments(&self, recent_payments_payment_ids: Vec<PaymentId>) {
@@ -839,6 +840,10 @@ impl UnlockedAppState {
                         .to_string(),
                 )
             }
+        }
+
+        if let Ok(rgb_state) = kv.read_rgb_channel_info(&channel_id_hex, false) {
+            kv.write_rgb_channel_info(&channel_id_hex, &rgb_state, true);
         }
 
         let final_rgb_state = kv.read_rgb_channel_info(&channel_id_hex, false);
@@ -2178,7 +2183,7 @@ async fn handle_ldk_events(
             ..
         } => {
             if let Some(hash) = payment_hash {
-                clear_rgb_payment_pending(&hash, unlocked_state.kv_store.as_ref());
+                clear_rgb_payment_pending(&hash, false, unlocked_state.kv_store.as_ref());
                 tracing::error!(
                     "EVENT: Failed to send payment to payment ID {}, payment hash {}: {:?}",
                     payment_id,
@@ -2225,7 +2230,8 @@ async fn handle_ldk_events(
             inbound_amount_forwarded_rgb,
             payment_hash,
         } => {
-            clear_rgb_payment_pending(&payment_hash, unlocked_state.kv_store.as_ref());
+            clear_rgb_payment_pending(&payment_hash, true, unlocked_state.kv_store.as_ref());
+            clear_rgb_payment_pending(&payment_hash, false, unlocked_state.kv_store.as_ref());
             let prev_channel_id_str = prev_channel_id.expect("prev_channel_id").to_string();
             let next_channel_id_str = next_channel_id.expect("next_channel_id").to_string();
 
@@ -2968,6 +2974,65 @@ pub(crate) fn derive_vss_identity(
     })
 }
 
+/// Restore the RGB wallet directory from VSS if (a) VSS is configured for this
+/// node, (b) the local wallet directory for `expected_fingerprint` is absent,
+/// and (c) VSS has a backup for the given store. Mirrors the KV-side
+/// auto-restore policy at `start_ldk`'s top: silent no-op when nothing is on
+/// VSS, hard error otherwise unless `allow_empty_restore` is set.
+#[cfg(feature = "vss")]
+pub(crate) async fn maybe_restore_rgb_from_vss(
+    vss_url: &str,
+    rgb_store_id: String,
+    signing_key: rgb_lib::bitcoin::secp256k1::SecretKey,
+    data_dir: &std::path::Path,
+    expected_fingerprint: &str,
+    allow_empty_restore: bool,
+) -> Result<(), APIError> {
+    if data_dir.join(expected_fingerprint).exists() {
+        // Local wallet already present — never clobber it with a VSS copy
+        // that may be stale.
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(data_dir).map_err(|e| {
+        APIError::FailedVssInit(format!(
+            "RGB VSS restore: failed to create data_dir {}: {e}",
+            data_dir.display()
+        ))
+    })?;
+
+    let config =
+        rgb_lib::wallet::vss::VssBackupConfig::new(vss_url.to_string(), rgb_store_id, signing_key)
+            .with_encryption(true);
+    let data_dir_str = data_dir.to_string_lossy().to_string();
+
+    match rgb_lib::wallet::vss::restore_from_vss(config, &data_dir_str).await {
+        Ok(path) => {
+            tracing::info!(restored_path = %path.display(), "Restored RGB wallet from VSS");
+            Ok(())
+        }
+        Err(rgb_lib::Error::VssBackupNotFound) => {
+            tracing::info!("No RGB VSS backup found, starting fresh");
+            Ok(())
+        }
+        Err(e) => {
+            if allow_empty_restore {
+                tracing::warn!(
+                    error = %e,
+                    "RGB VSS restore failed; starting fresh due to --vss-allow-empty-restore"
+                );
+                Ok(())
+            } else {
+                Err(APIError::FailedVssInit(format!(
+                    "RGB VSS restore failed: {e}. Pass --vss-allow-empty-restore \
+                     to start with an empty RGB wallet instead (UNSAFE if you \
+                     previously had RGB assets)."
+                )))
+            }
+        }
+    }
+}
+
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     key_source: NodeKeySource,
@@ -3424,6 +3489,26 @@ pub(crate) async fn start_ldk(
         .clone()
         .to_string_lossy()
         .to_string();
+
+    // Pull the RGB wallet down from VSS before constructing it locally, when
+    // VSS is configured and the local wallet directory for this mnemonic's
+    // fingerprint is absent. Mirrors the KV-side auto-restore at the top of
+    // this function — together they make `unlock` recover the full node
+    // state (channels + assets + on-chain) on a fresh device.
+    #[cfg(feature = "vss")]
+    if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
+        let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
+        maybe_restore_rgb_from_vss(
+            vss_url,
+            rgb_store_id,
+            identity.signing_key,
+            &static_state.storage_dir_path,
+            &master_fingerprint.to_string(),
+            static_state.vss_allow_empty_restore,
+        )
+        .await?;
+    }
+
     let keys = SinglesigKeys {
         account_xpub_vanilla: account_xpub_vanilla.clone(),
         account_xpub_colored: account_xpub_colored.clone(),
@@ -4208,17 +4293,23 @@ pub(crate) fn write_rgb_payment_info_file(
     let _ = kv_store.write(RGB_PRIMARY_NS, ns, &format!("{key}_pending"), data);
 }
 
-pub(crate) fn clear_rgb_payment_pending(payment_hash: &PaymentHash, kv_store: &dyn KVStoreSync) {
+pub(crate) fn clear_rgb_payment_pending(
+    payment_hash: &PaymentHash,
+    inbound: bool,
+    kv_store: &dyn KVStoreSync,
+) {
     let payment_hash_str = hex_str(&payment_hash.0);
-    let raw_pending_key = format!("{payment_hash_str}_pending");
-    let pending_suffix = format!("{payment_hash_str}_pending");
-    for namespace in [RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS] {
-        let _ = kv_store.remove(RGB_PRIMARY_NS, namespace, &raw_pending_key, false);
-        if let Ok(keys) = kv_store.list(RGB_PRIMARY_NS, namespace) {
-            for key in keys {
-                if key.ends_with(&pending_suffix) && key.len() > pending_suffix.len() {
-                    let _ = kv_store.remove(RGB_PRIMARY_NS, namespace, &key, false);
-                }
+    let pending_key = format!("{payment_hash_str}_pending");
+    let namespace = if inbound {
+        RGB_PAYMENT_INFO_INBOUND_NS
+    } else {
+        RGB_PAYMENT_INFO_OUTBOUND_NS
+    };
+    let _ = kv_store.remove(RGB_PRIMARY_NS, namespace, &pending_key, false);
+    if let Ok(keys) = kv_store.list(RGB_PRIMARY_NS, namespace) {
+        for key in keys {
+            if key.ends_with(&pending_key) && key.len() > pending_key.len() {
+                let _ = kv_store.remove(RGB_PRIMARY_NS, namespace, &key, false);
             }
         }
     }

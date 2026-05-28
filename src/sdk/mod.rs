@@ -14,8 +14,10 @@ use crate::core_types::{FEE_RATE, MIN_CHANNEL_CONFIRMATIONS};
 use crate::error::APIError;
 #[cfg(feature = "vss")]
 use crate::ldk::derive_vss_identity;
-use crate::ldk::write_rgb_payment_info_file;
-use crate::ldk::{start_ldk, InvoiceType, PaymentInfo, VirtualChannelSessionStatus};
+use crate::ldk::{
+    clear_rgb_payment_pending, start_ldk, write_rgb_payment_info_file, InvoiceType, PaymentInfo,
+    VirtualChannelSessionStatus,
+};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
 use crate::signer::{
     read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
@@ -1778,6 +1780,46 @@ pub(crate) async fn init_with_external_signer(
     Ok(())
 }
 
+/// Triggers a synchronous RGB-wallet backup to VSS, returning the
+/// server-side version of the uploaded backup. Mirrors `/vssbackup`.
+///
+/// The auto-backup path runs asynchronously, so this entry point is what
+/// callers reach for when they need a *deterministic* push — e.g. before
+/// shutting a node down or in tests that verify VSS restore.
+pub(crate) async fn vss_backup(state: Arc<AppState>) -> Result<i64, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap().clone();
+    drop(guard);
+
+    #[cfg(not(feature = "vss"))]
+    {
+        let _ = unlocked_state;
+        Err(APIError::Unexpected(
+            "VSS support is not compiled in".to_string(),
+        ))
+    }
+
+    #[cfg(feature = "vss")]
+    {
+        let vss_client = unlocked_state
+            .rgb_wallet_wrapper
+            .vss_client()
+            .ok_or_else(|| APIError::Unexpected("VSS is not configured".to_string()))?;
+
+        let wrapper = unlocked_state.rgb_wallet_wrapper.clone();
+        let version = tokio::task::spawn_blocking(move || {
+            let wallet = wrapper.get_rgb_wallet();
+            let rt = vss_client.handle().clone();
+            rt.block_on(wallet.vss_backup(&vss_client))
+        })
+        .await
+        .map_err(|e| APIError::Unexpected(format!("VSS backup task failed: {e}")))?
+        .map_err(|e| APIError::Unexpected(format!("VSS backup failed: {e}")))?;
+
+        Ok(version)
+    }
+}
+
 /// Clears the VSS single-writer fence so a fresh instance can take over a
 /// store whose previous owner did not release it (the normal case after any
 /// shutdown — `acquire_fence` writes the fence but no code path deletes it).
@@ -2498,6 +2540,7 @@ pub(crate) async fn keysend(
         }
         Err(e) => {
             tracing::error!("ERROR: failed to send payment: {:?}", e);
+            clear_rgb_payment_pending(&payment_hash, false, unlocked_state.kv_store.as_ref());
             unlocked_state.update_outbound_payment_status(payment_id, HtlcStatus::Failed);
             HtlcStatus::Failed
         }
@@ -3129,6 +3172,7 @@ pub(crate) async fn send_payment(
             }
             Err(e) => {
                 tracing::error!("ERROR: failed to send payment: {:?}", e);
+                clear_rgb_payment_pending(&payment_hash, false, unlocked_state.kv_store.as_ref());
                 status = HtlcStatus::Failed;
                 unlocked_state.update_outbound_payment_status(payment_id, status);
             }
@@ -3362,6 +3406,11 @@ pub(crate) async fn maker_execute(
     match err {
         None => Ok(()),
         Some(e) => {
+            clear_rgb_payment_pending(
+                &swapstring.payment_hash,
+                false,
+                unlocked_state.kv_store.as_ref(),
+            );
             unlocked_state.update_maker_swap_status(&swapstring.payment_hash, SwapStatus::Failed);
             Err(APIError::FailedPayment(format!("{e:?}")))
         }
@@ -3873,7 +3922,7 @@ pub(crate) async fn claim_hodl_invoice(
     let payment_hash = validate_and_parse_payment_hash(&request.payment_hash)?;
     let preimage = validate_and_parse_payment_preimage(&request.payment_preimage, &payment_hash)?;
 
-    {
+    let terminal_error = {
         let mut inbound = unlocked_state.get_inbound_payments();
         let Some(existing_payment_mut) = inbound.payments.get_mut(&payment_hash) else {
             return Err(APIError::UnknownLNInvoice);
@@ -3906,22 +3955,35 @@ pub(crate) async fn claim_hodl_invoice(
 
         let current_height = unlocked_state.channel_manager.current_best_block().height;
         let now_ts = get_current_timestamp();
+        let mut terminal_error = None;
 
         if let Some(deadline_height) = existing_payment_mut.claim_deadline_height {
             if current_height >= deadline_height {
-                return Err(APIError::ClaimDeadlineExceeded);
+                terminal_error = Some(APIError::ClaimDeadlineExceeded);
             }
         }
 
-        if let Some(expiry) = existing_payment_mut.expires_at {
-            if now_ts >= expiry {
-                return Err(APIError::InvoiceExpired);
+        if terminal_error.is_none() {
+            if let Some(expiry) = existing_payment_mut.expires_at {
+                if now_ts >= expiry {
+                    terminal_error = Some(APIError::InvoiceExpired);
+                }
             }
         }
 
-        existing_payment_mut.status = HtlcStatus::Claiming;
-        existing_payment_mut.updated_at = now_ts;
-        unlocked_state.save_inbound_payments(inbound);
+        if terminal_error.is_none() {
+            existing_payment_mut.status = HtlcStatus::Claiming;
+            existing_payment_mut.updated_at = now_ts;
+            unlocked_state.save_inbound_payments(inbound);
+        }
+
+        terminal_error
+    };
+
+    if let Some(terminal_error) = terminal_error {
+        unlocked_state
+            .fail_htlc_backwards_and_update_inbound_payment(payment_hash, HtlcStatus::Failed);
+        return Err(terminal_error);
     }
 
     unlocked_state.channel_manager.claim_funds(preimage);
