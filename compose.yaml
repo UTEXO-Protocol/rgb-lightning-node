@@ -22,6 +22,19 @@ services:
       - bitcoind
     ports:
       - 50001:50001
+  esplora:
+    image: mempool/electrs:v3.1.0
+    profiles: ['esplora']
+    command:
+      - --network=regtest
+      - --daemon-rpc-addr=bitcoind:18443
+      - --cookie=user:password
+      - --electrum-rpc-addr=0.0.0.0:60001
+      - --http-addr=0.0.0.0:3002
+    depends_on:
+      - bitcoind
+    ports:
+      - 3002:3002
   proxy:
     image: ghcr.io/rgb-tools/rgb-proxy-server:0.3.0
     ports:

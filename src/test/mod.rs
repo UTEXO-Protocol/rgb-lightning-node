@@ -2342,6 +2342,7 @@ mod hodl_invoice;
 mod htlc_amount_checks;
 mod inflate;
 mod init;
+mod init_esplora;
 mod invoice;
 mod issue;
 mod lock_unlock_changepassword;
