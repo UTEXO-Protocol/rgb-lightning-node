@@ -4223,6 +4223,7 @@ dependencies = [
  "rgb-lib",
  "rgb-psbt-utils",
  "rln-migration",
+ "rustls 0.23.40",
  "scrypt",
  "sea-orm",
  "serde",
