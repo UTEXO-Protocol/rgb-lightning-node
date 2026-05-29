@@ -22,7 +22,10 @@ pub(crate) const MIN_FEERATE: u32 = 253;
 
 pub(crate) fn default_fee_buckets() -> HashMap<ConfirmationTarget, AtomicU32> {
     let mut fees = HashMap::new();
-    fees.insert(ConfirmationTarget::MaximumFeeEstimate, AtomicU32::new(50000));
+    fees.insert(
+        ConfirmationTarget::MaximumFeeEstimate,
+        AtomicU32::new(50000),
+    );
     fees.insert(ConfirmationTarget::UrgentOnChainSweep, AtomicU32::new(5000));
     fees.insert(
         ConfirmationTarget::MinAllowedAnchorChannelRemoteFee,
@@ -36,7 +39,10 @@ pub(crate) fn default_fee_buckets() -> HashMap<ConfirmationTarget, AtomicU32> {
         ConfirmationTarget::AnchorChannelFee,
         AtomicU32::new(MIN_FEERATE),
     );
-    fees.insert(ConfirmationTarget::NonAnchorChannelFee, AtomicU32::new(2000));
+    fees.insert(
+        ConfirmationTarget::NonAnchorChannelFee,
+        AtomicU32::new(2000),
+    );
     fees.insert(
         ConfirmationTarget::ChannelCloseMinimum,
         AtomicU32::new(MIN_FEERATE),
@@ -64,12 +70,12 @@ impl EsploraIndexerClient {
         logger: Arc<FilesystemLogger>,
     ) -> io::Result<Self> {
         let client = Arc::new(EsploraBuilder::new(&server_url).build_blocking());
-        client.get_tip_hash().map_err(|e| {
-            io::Error::other(format!("failed to connect to esplora server: {e}"))
-        })?;
-        client.get_height().map_err(|e| {
-            io::Error::other(format!("failed to query esplora tip height: {e}"))
-        })?;
+        client
+            .get_tip_hash()
+            .map_err(|e| io::Error::other(format!("failed to connect to esplora server: {e}")))?;
+        client
+            .get_height()
+            .map_err(|e| io::Error::other(format!("failed to query esplora tip height: {e}")))?;
         let fees = Arc::new(default_fee_buckets());
         poll_esplora_fee_estimates(fees.clone(), client.clone(), logger.clone(), handle.clone());
         Ok(Self {
@@ -152,10 +158,7 @@ pub(crate) fn estimate_fee_rate_sat_per_kw(
     std::cmp::max((sat_per_vb * 250.0).round() as u32, MIN_FEERATE)
 }
 
-pub(crate) fn interpolate_fee_rate(
-    fee_estimates: &HashMap<u16, f64>,
-    blocks: u16,
-) -> Option<f64> {
+pub(crate) fn interpolate_fee_rate(fee_estimates: &HashMap<u16, f64>, blocks: u16) -> Option<f64> {
     if blocks == 0 || fee_estimates.is_empty() {
         return None;
     }

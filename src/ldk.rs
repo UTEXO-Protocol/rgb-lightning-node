@@ -17,7 +17,6 @@ use bitcoin_bech32::WitnessProgram;
 use hex::DisplayHex;
 use lightning::chain::{chainmonitor, transaction::OutPoint, ChannelMonitorUpdateStatus};
 use lightning::chain::{BestBlock, Confirm, Filter};
-use lightning_transaction_sync::EsploraSyncClient;
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose, ReplayEvent};
 use lightning::ln::channel_state::ChannelDetails;
@@ -65,6 +64,7 @@ use lightning_block_sync::UnboundedCache;
 use lightning_dns_resolver::OMDomainResolver;
 use lightning_invoice::{Bolt11InvoiceDescription, PaymentSecret};
 use lightning_net_tokio::SocketDescriptor;
+use lightning_transaction_sync::EsploraSyncClient;
 use rand::RngCore;
 use rgb_lib::{
     bdk_wallet::keys::{DerivableKey, ExtendedKey},
@@ -102,7 +102,6 @@ use tokio::task::JoinHandle;
 
 use crate::bitcoind::BitcoindClient;
 use crate::chain_backend::ChainBackend;
-use crate::indexer::EsploraIndexerClient;
 use crate::core_types::{
     HTLCStatus, NodeKeySource, SwapStatus, UnlockRequest, DUST_LIMIT_MSAT, FEE_RATE, HTLC_MIN_MSAT,
     MIN_CHANNEL_CONFIRMATIONS,
@@ -110,6 +109,7 @@ use crate::core_types::{
 use crate::database::RlnDatabase;
 use crate::disk::{self, FilesystemLogger};
 use crate::gossip::{GossipSource, GossipSourceConfig};
+use crate::indexer::EsploraIndexerClient;
 
 pub(crate) const INBOUND_PAYMENTS_KEY: &str = "inbound_payments";
 const OUTBOUND_PAYMENTS_KEY: &str = "outbound_payments";
@@ -3117,7 +3117,9 @@ pub(crate) fn select_chain_backend(
                 .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
             match proto {
                 rgb_lib::wallet::rust_only::IndexerProtocol::Esplora => {
-                    Ok(ChainBackendSelection::Esplora { url: url.to_string() })
+                    Ok(ChainBackendSelection::Esplora {
+                        url: url.to_string(),
+                    })
                 }
                 rgb_lib::wallet::rust_only::IndexerProtocol::Electrum => {
                     Err(APIError::MissingChainBackend)
@@ -3275,7 +3277,6 @@ pub(crate) async fn start_ldk(
     // EsploraSyncClient/Confirm flow. We populate the same locals from either
     // branch so the rest of start_ldk is shared.
     let bitcoind_client_opt: Option<Arc<BitcoindClient>>;
-    let esplora_client_opt: Option<Arc<EsploraIndexerClient>>;
     let tx_sync_opt: Option<Arc<EsploraSyncClient<Arc<FilesystemLogger>>>>;
     let chain_source: Option<Arc<dyn Filter + Send + Sync>>;
     let chain_backend: Arc<ChainBackend>;
@@ -3320,7 +3321,6 @@ pub(crate) async fn start_ldk(
             seed_best_block = polled.to_best_block();
             chain_backend = Arc::new(ChainBackend::Bitcoind(client.clone()));
             bitcoind_client_opt = Some(client);
-            esplora_client_opt = None;
             tx_sync_opt = None;
             chain_source = None;
             polled_chain_tip_opt = Some(polled);
@@ -3345,9 +3345,8 @@ pub(crate) async fn start_ldk(
                 .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
             let tx_sync = Arc::new(EsploraSyncClient::new(url, Arc::clone(&logger)));
             seed_best_block = BestBlock::new(tip_hash, tip_height);
-            chain_backend = Arc::new(ChainBackend::Esplora(esplora.clone()));
+            chain_backend = Arc::new(ChainBackend::Esplora(esplora));
             chain_source = Some(Arc::clone(&tx_sync) as Arc<dyn Filter + Send + Sync>);
-            esplora_client_opt = Some(esplora);
             tx_sync_opt = Some(tx_sync);
             bitcoind_client_opt = None;
             polled_chain_tip_opt = None;
@@ -3811,8 +3810,8 @@ pub(crate) async fn start_ldk(
     }
     let chain_tip_opt: Option<lightning_block_sync::poll::ValidatedBlockHeader> =
         if let Some(bc) = bitcoind_client_opt.as_ref() {
-            let polled_chain_tip = polled_chain_tip_opt
-                .expect("bitcoind branch populates polled_chain_tip_opt");
+            let polled_chain_tip =
+                polled_chain_tip_opt.expect("bitcoind branch populates polled_chain_tip_opt");
             let chain_tip = if restarting_node {
                 let mut chain_listeners = vec![
                     (
@@ -4032,8 +4031,7 @@ pub(crate) async fn start_ldk(
     let output_sweeper: Arc<OutputSweeper> = Arc::new(output_sweeper);
     let stop_listen = Arc::clone(&stop_processing);
     if let Some(bitcoind_client) = bitcoind_client_opt.clone() {
-        let chain_tip =
-            chain_tip_opt.expect("bitcoind branch populates chain_tip_opt");
+        let chain_tip = chain_tip_opt.expect("bitcoind branch populates chain_tip_opt");
         let channel_manager_listener = channel_manager.clone();
         let chain_monitor_listener = chain_monitor.clone();
         let output_sweeper_listener = output_sweeper.clone();

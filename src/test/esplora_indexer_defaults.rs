@@ -17,7 +17,10 @@ fn default_fee_buckets_populates_all_targets() {
         ConfirmationTarget::ChannelCloseMinimum,
         ConfirmationTarget::OutputSpendingFee,
     ] {
-        assert!(buckets.contains_key(&target), "missing default for {target:?}");
+        assert!(
+            buckets.contains_key(&target),
+            "missing default for {target:?}"
+        );
     }
 }
 

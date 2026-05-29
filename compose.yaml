@@ -22,19 +22,27 @@ services:
       - bitcoind
     ports:
       - 50001:50001
+  # blockstream/esplora is self-contained (bundles its own bitcoind) and does
+  # not share state with the bitcoind+electrs+proxy stack above. Wiring it to
+  # the integration test would require either pointing this service's internal
+  # bitcoind at the shared volume or running parallel chains — both out of
+  # scope for this PR. The init_esplora test stays #[ignore]-gated; to run it,
+  # spin up an esplora endpoint pointed at the regtest chain manually and set
+  # ESPLORA_URL_REGTEST in src/utils.rs accordingly.
   esplora:
-    image: mempool/electrs:v3.1.0
+    build:
+      context: ./docker/esplora
+      dockerfile: ./Dockerfile.notor
+    image: rln-esplora:latest-notor
     profiles: ['esplora']
-    command:
-      - --network=regtest
-      - --daemon-rpc-addr=bitcoind:18443
-      - --cookie=user:password
-      - --electrum-rpc-addr=0.0.0.0:60001
-      - --http-addr=0.0.0.0:3002
-    depends_on:
-      - bitcoind
+    command: /srv/explorer/run.sh bitcoin-regtest explorer
+    environment:
+      DEBUG: verbose
+      NO_PRECACHE: 1
+      NO_ADDRESS_SEARCH: 1
+      NO_REGTEST_MINING: 1
     ports:
-      - 3002:3002
+      - 3002:80
   proxy:
     image: ghcr.io/rgb-tools/rgb-proxy-server:0.3.0
     ports:

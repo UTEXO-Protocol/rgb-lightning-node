@@ -47,5 +47,8 @@ async fn init_esplora_path_unlocks_without_bitcoind() {
     );
 
     let info = node_info(node1_addr).await;
-    assert!(!info.pubkey.is_empty(), "node has no pubkey after esplora unlock");
+    assert!(
+        !info.pubkey.is_empty(),
+        "node has no pubkey after esplora unlock"
+    );
 }

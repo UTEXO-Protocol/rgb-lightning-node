@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use bitcoin::blockdata::transaction::Transaction;
-use lightning::chain::chaininterface::{
-    BroadcasterInterface, ConfirmationTarget, FeeEstimator,
-};
+use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
 use crate::bitcoind::BitcoindClient;
 use crate::indexer::EsploraIndexerClient;

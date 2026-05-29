@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use lightning::chain::chaininterface::{
-    BroadcasterInterface, ConfirmationTarget, FeeEstimator,
-};
+use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
 use crate::chain_backend::ChainBackend;
 
