@@ -2322,6 +2322,7 @@ pub fn set_mock_fee(fee: u32) {
 mod auth_db_persistence;
 mod authentication;
 mod backup_and_restore;
+mod chain_backend_bitcoind_dispatch;
 mod close_coop_nobtc_acceptor;
 mod close_coop_other_side;
 mod close_coop_standard;

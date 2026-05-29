@@ -3,6 +3,7 @@ mod async_order;
 mod auth;
 mod backup;
 mod bitcoind;
+mod chain_backend;
 mod core_types;
 mod database;
 mod disk;

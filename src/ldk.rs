@@ -100,6 +100,7 @@ use tokio::sync::watch::Sender;
 use tokio::task::JoinHandle;
 
 use crate::bitcoind::BitcoindClient;
+use crate::chain_backend::ChainBackend;
 use crate::core_types::{
     HTLCStatus, NodeKeySource, SwapStatus, UnlockRequest, DUST_LIMIT_MSAT, FEE_RATE, HTLC_MIN_MSAT,
     MIN_CHANNEL_CONFIRMATIONS,
@@ -932,8 +933,8 @@ impl UnlockedAppState {
 pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
     DynRlnChannelSigner,
     Arc<dyn Filter + Send + Sync>,
-    Arc<BitcoindClient>,
-    Arc<BitcoindClient>,
+    Arc<ChainBackend>,
+    Arc<ChainBackend>,
     Arc<FilesystemLogger>,
     Arc<
         MonitorUpdatingPersister<
@@ -941,8 +942,8 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
             Arc<FilesystemLogger>,
             ActiveSignerRef,
             ActiveSignerRef,
-            Arc<BitcoindClient>,
-            Arc<BitcoindClient>,
+            Arc<ChainBackend>,
+            Arc<ChainBackend>,
         >,
     >,
     ActiveSignerRef,
@@ -981,11 +982,11 @@ pub(crate) type Router = DefaultRouter<
 
 pub(crate) type ChannelManager = channelmanager::ChannelManager<
     Arc<ChainMonitor>,
-    Arc<BitcoindClient>,
+    Arc<ChainBackend>,
     Arc<LightningEntropySource>,
     ActiveSignerRef,
     ActiveSignerRef,
-    Arc<BitcoindClient>,
+    Arc<ChainBackend>,
     Arc<Router>,
     Arc<
         DefaultMessageRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>, Arc<LightningEntropySource>>,
@@ -1027,7 +1028,7 @@ pub(crate) type OnionMessenger = LdkOnionMessenger<
 >;
 
 pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
-    Arc<BitcoindClient>,
+    Arc<ChainBackend>,
     Arc<Wallet<Arc<RgbBumpWalletSource>, Arc<FilesystemLogger>>>,
     ActiveSignerRef,
     Arc<FilesystemLogger>,
@@ -1045,9 +1046,9 @@ pub(crate) struct RgbOutputSpender {
 }
 
 pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
-    Arc<BitcoindClient>,
+    Arc<ChainBackend>,
     Arc<RgbLibWalletWrapper>,
-    Arc<BitcoindClient>,
+    Arc<ChainBackend>,
     Arc<dyn Filter + Send + Sync>,
     KVStoreSyncWrapper<Arc<SyncedKvStore>>,
     Arc<FilesystemLogger>,
@@ -3302,14 +3303,11 @@ pub(crate) async fn start_ldk(
         &bitcoin_network.to_string(),
     )?;
 
-    // Initialize the FeeEstimator
-    // BitcoindClient implements the FeeEstimator trait, so it'll act as our fee estimator.
-    let fee_estimator = bitcoind_client.clone();
-
-    // Initialize the BroadcasterInterface
-    // BitcoindClient implements the BroadcasterInterface trait, so it'll act as our transaction
-    // broadcaster.
-    let broadcaster = bitcoind_client.clone();
+    // Wrap the bitcoind client in the polymorphic ChainBackend so LDK can
+    // accept either chain source uniformly. Task 7 wires the esplora variant.
+    let chain_backend = Arc::new(ChainBackend::Bitcoind(bitcoind_client.clone()));
+    let fee_estimator = chain_backend.clone();
+    let broadcaster = chain_backend.clone();
 
     // LDK signing: internal mode uses `KeysManager` from the mnemonic-derived LDK seed (BIP32 child
     // 535 of the master xpriv). External mode uses `ExternalSigner` only; inbound / peer_storage /
@@ -3359,8 +3357,8 @@ pub(crate) async fn start_ldk(
         1000,
         Arc::clone(&keys_manager),
         Arc::clone(&keys_manager),
-        Arc::clone(&bitcoind_client),
-        Arc::clone(&bitcoind_client),
+        Arc::clone(&chain_backend),
+        Arc::clone(&chain_backend),
     ));
 
     // Initialize the ChainMonitor
