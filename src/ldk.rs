@@ -64,7 +64,7 @@ use lightning_block_sync::UnboundedCache;
 use lightning_dns_resolver::OMDomainResolver;
 use lightning_invoice::{Bolt11InvoiceDescription, PaymentSecret};
 use lightning_net_tokio::SocketDescriptor;
-use lightning_transaction_sync::EsploraSyncClient;
+use lightning_transaction_sync::{ElectrumSyncClient, EsploraSyncClient};
 use rand::RngCore;
 use rgb_lib::{
     bdk_wallet::keys::{DerivableKey, ExtendedKey},
@@ -109,7 +109,7 @@ use crate::core_types::{
 use crate::database::RlnDatabase;
 use crate::disk::{self, FilesystemLogger};
 use crate::gossip::{GossipSource, GossipSourceConfig};
-use crate::indexer::EsploraIndexerClient;
+use crate::indexer::{ElectrumIndexerClient, EsploraIndexerClient};
 
 pub(crate) const INBOUND_PAYMENTS_KEY: &str = "inbound_payments";
 const OUTBOUND_PAYMENTS_KEY: &str = "outbound_payments";
@@ -3068,6 +3068,9 @@ pub(crate) enum ChainBackendSelection {
     Esplora {
         url: String,
     },
+    Electrum {
+        url: String,
+    },
 }
 
 pub(crate) fn select_chain_backend(
@@ -3122,7 +3125,9 @@ pub(crate) fn select_chain_backend(
                     })
                 }
                 rgb_lib::wallet::rust_only::IndexerProtocol::Electrum => {
-                    Err(APIError::MissingChainBackend)
+                    Ok(ChainBackendSelection::Electrum {
+                        url: url.to_string(),
+                    })
                 }
             }
         }
@@ -3278,6 +3283,7 @@ pub(crate) async fn start_ldk(
     // branch so the rest of start_ldk is shared.
     let bitcoind_client_opt: Option<Arc<BitcoindClient>>;
     let tx_sync_opt: Option<Arc<EsploraSyncClient<Arc<FilesystemLogger>>>>;
+    let electrum_tx_sync_opt: Option<Arc<ElectrumSyncClient<Arc<FilesystemLogger>>>>;
     let chain_source: Option<Arc<dyn Filter + Send + Sync>>;
     let chain_backend: Arc<ChainBackend>;
     let seed_best_block: BestBlock;
@@ -3322,6 +3328,7 @@ pub(crate) async fn start_ldk(
             chain_backend = Arc::new(ChainBackend::Bitcoind(client.clone()));
             bitcoind_client_opt = Some(client);
             tx_sync_opt = None;
+            electrum_tx_sync_opt = None;
             chain_source = None;
             polled_chain_tip_opt = Some(polled);
         }
@@ -3348,6 +3355,34 @@ pub(crate) async fn start_ldk(
             chain_backend = Arc::new(ChainBackend::Esplora(esplora));
             chain_source = Some(Arc::clone(&tx_sync) as Arc<dyn Filter + Send + Sync>);
             tx_sync_opt = Some(tx_sync);
+            electrum_tx_sync_opt = None;
+            bitcoind_client_opt = None;
+            polled_chain_tip_opt = None;
+        }
+        ChainBackendSelection::Electrum { url } => {
+            use electrum_client::ElectrumApi;
+            let electrum = Arc::new(
+                ElectrumIndexerClient::new(
+                    url.clone(),
+                    network,
+                    tokio::runtime::Handle::current(),
+                    Arc::clone(&logger),
+                )
+                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
+            );
+            let tip = electrum
+                .client
+                .block_headers_subscribe()
+                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
+            let tx_sync = Arc::new(
+                ElectrumSyncClient::new(url, Arc::clone(&logger))
+                    .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
+            );
+            seed_best_block = BestBlock::new(tip.header.block_hash(), tip.height as u32);
+            chain_backend = Arc::new(ChainBackend::Electrum(electrum));
+            chain_source = Some(Arc::clone(&tx_sync) as Arc<dyn Filter + Send + Sync>);
+            electrum_tx_sync_opt = Some(tx_sync);
+            tx_sync_opt = None;
             bitcoind_client_opt = None;
             polled_chain_tip_opt = None;
         }
@@ -4054,10 +4089,7 @@ pub(crate) async fn start_ldk(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });
-    } else {
-        let tx_sync = tx_sync_opt
-            .clone()
-            .expect("esplora branch populates tx_sync_opt");
+    } else if let Some(tx_sync) = tx_sync_opt.clone() {
         let confirmables: Vec<Arc<dyn Confirm + Send + Sync>> = vec![
             channel_manager.clone(),
             chain_monitor.clone(),
@@ -4073,6 +4105,31 @@ pub(crate) async fn start_ldk(
                 }
                 if let Err(e) = sync_chain_data(tx_sync.clone(), confirmables.clone()).await {
                     tracing::error!("Error while syncing via esplora: {:?}", e);
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    } else {
+        let tx_sync = electrum_tx_sync_opt
+            .clone()
+            .expect("electrum branch populates electrum_tx_sync_opt");
+        let confirmables: Vec<Arc<dyn Confirm + Send + Sync>> = vec![
+            channel_manager.clone(),
+            chain_monitor.clone(),
+            output_sweeper.clone(),
+        ];
+        sync_chain_data_electrum(tx_sync.clone(), confirmables.clone())
+            .await
+            .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
+        tokio::spawn(async move {
+            loop {
+                if stop_listen.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Err(e) =
+                    sync_chain_data_electrum(tx_sync.clone(), confirmables.clone()).await
+                {
+                    tracing::error!("Error while syncing via electrum: {:?}", e);
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -4433,6 +4490,16 @@ pub(crate) fn attach_external_signer_transport(
 
 async fn sync_chain_data(
     tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
+    confirmables: Vec<Arc<dyn Confirm + Send + Sync>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tokio::task::spawn_blocking(move || tx_sync.sync(confirmables))
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+}
+
+async fn sync_chain_data_electrum(
+    tx_sync: Arc<ElectrumSyncClient<Arc<FilesystemLogger>>>,
     confirmables: Vec<Arc<dyn Confirm + Send + Sync>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::task::spawn_blocking(move || tx_sync.sync(confirmables))

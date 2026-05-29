@@ -2847,6 +2847,7 @@ name = "lightning-transaction-sync"
 version = "0.2.1"
 dependencies = [
  "bitcoin",
+ "electrum-client 0.24.1",
  "esplora-client",
  "lightning 0.2.2",
  "lightning-macros 0.2.1",

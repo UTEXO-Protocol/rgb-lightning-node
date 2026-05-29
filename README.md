@@ -65,18 +65,17 @@ specifying:
 - LN peer listening port
 - network
 
-Bitcoind RPC credentials and the esplora `indexer_url` are supplied at
-`/unlock` time, not on the CLI. The `/unlock` body must include **exactly
-one** of:
-- all four `bitcoind_rpc_*` fields — the node syncs LDK chain data via
-  bitcoind RPC. An electrum `indexer_url` may additionally be supplied and
-  is forwarded to rgb-lib only.
-- `indexer_url` pointing at an esplora HTTP endpoint and no `bitcoind_rpc_*`
-  fields — the node syncs LDK chain data over esplora and forwards the same
-  URL to rgb-lib.
+Chain-backend credentials are supplied at `/unlock` time, not on the CLI. The
+body must include exactly one of:
+- all four `bitcoind_rpc_*` fields — LDK chain sync runs via bitcoind RPC.
+  An optional electrum `indexer_url` is forwarded to rgb-lib only.
+- esplora `indexer_url` (no `bitcoind_rpc_*` fields) — LDK chain sync runs
+  over esplora, same URL forwarded to rgb-lib.
+- electrum `indexer_url` (no `bitcoind_rpc_*` fields) — LDK chain sync runs
+  over electrum, same URL forwarded to rgb-lib.
 
-Supplying both bitcoind credentials and an esplora `indexer_url`, or neither,
-fails with `400` (`AmbiguousChainBackend` / `MissingChainBackend`).
+`bitcoind + esplora` returns `400 AmbiguousChainBackend`. No credentials at
+all returns `400 MissingChainBackend`.
 
 ### Regtest
 

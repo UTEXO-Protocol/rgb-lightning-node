@@ -101,6 +101,15 @@ fn select_both_electrum_allowed() {
 }
 
 #[test]
+fn select_electrum_only_returns_electrum() {
+    let r = req(false, Some("ssl://electrum.iriswallet.com:50013"));
+    assert!(matches!(
+        select_chain_backend(&r, BitcoinNetwork::Testnet),
+        Ok(ChainBackendSelection::Electrum { .. })
+    ));
+}
+
+#[test]
 fn select_partial_bitcoind_errors() {
     let mut r = req(true, None);
     r.bitcoind_rpc_host = None;
