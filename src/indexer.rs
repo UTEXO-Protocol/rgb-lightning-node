@@ -69,8 +69,7 @@ impl EsploraIndexerClient {
         handle: tokio::runtime::Handle,
         logger: Arc<FilesystemLogger>,
     ) -> io::Result<Self> {
-        // 10s socket timeout so a hung esplora endpoint (e.g. mempool/electrs
-        // /fee-estimates never responding) cannot block runtime shutdown.
+        // Bounded socket timeout so a hung endpoint doesn't block runtime shutdown.
         let client = Arc::new(EsploraBuilder::new(&server_url).timeout(10).build_blocking());
         client
             .get_tip_hash()
