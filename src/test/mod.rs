@@ -1918,10 +1918,10 @@ async fn taker(node_address: SocketAddr, swapstring: String) -> EmptyResponse {
 fn unlock_req(password: &str) -> UnlockRequest {
     UnlockRequest {
         password: password.to_string(),
-        bitcoind_rpc_username: s!("user"),
-        bitcoind_rpc_password: s!("password"),
-        bitcoind_rpc_host: s!("localhost"),
-        bitcoind_rpc_port: 18443,
+        bitcoind_rpc_username: Some(s!("user")),
+        bitcoind_rpc_password: Some(s!("password")),
+        bitcoind_rpc_host: Some(s!("localhost")),
+        bitcoind_rpc_port: Some(18443),
         indexer_url: Some(ELECTRUM_URL_REGTEST.to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
         announce_addresses: vec![],
@@ -2371,6 +2371,7 @@ mod swap_roundtrip_multihop_asset_asset;
 mod swap_roundtrip_multihop_buy;
 mod swap_roundtrip_multihop_sell;
 mod swap_roundtrip_sell;
+mod unlock_request_optional_bitcoind;
 mod upload_asset_media;
 mod vanilla_payment_on_rgb_channel;
 mod virtual_channels;

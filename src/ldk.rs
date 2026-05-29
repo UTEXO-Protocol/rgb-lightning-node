@@ -3197,10 +3197,35 @@ pub(crate) async fn start_ldk(
 
     // Initialize our bitcoind client.
     let bitcoind_client = match BitcoindClient::new(
-        unlock_request.bitcoind_rpc_host.clone(),
-        unlock_request.bitcoind_rpc_port,
-        unlock_request.bitcoind_rpc_username.clone(),
-        unlock_request.bitcoind_rpc_password.clone(),
+        unlock_request
+            .bitcoind_rpc_host
+            .clone()
+            .ok_or_else(|| {
+                APIError::InvalidIndexer(s!(
+                    "bitcoind_rpc_host is required (esplora path not yet wired)"
+                ))
+            })?,
+        unlock_request.bitcoind_rpc_port.ok_or_else(|| {
+            APIError::InvalidIndexer(s!(
+                "bitcoind_rpc_port is required (esplora path not yet wired)"
+            ))
+        })?,
+        unlock_request
+            .bitcoind_rpc_username
+            .clone()
+            .ok_or_else(|| {
+                APIError::InvalidIndexer(s!(
+                    "bitcoind_rpc_username is required (esplora path not yet wired)"
+                ))
+            })?,
+        unlock_request
+            .bitcoind_rpc_password
+            .clone()
+            .ok_or_else(|| {
+                APIError::InvalidIndexer(s!(
+                    "bitcoind_rpc_password is required (esplora path not yet wired)"
+                ))
+            })?,
         tokio::runtime::Handle::current(),
         Arc::clone(&logger),
     )
