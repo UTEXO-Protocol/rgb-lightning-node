@@ -6,15 +6,18 @@ use lightning::chain::chaininterface::{
 };
 
 use crate::bitcoind::BitcoindClient;
+use crate::indexer::EsploraIndexerClient;
 
 pub(crate) enum ChainBackend {
     Bitcoind(Arc<BitcoindClient>),
+    Esplora(Arc<EsploraIndexerClient>),
 }
 
 impl FeeEstimator for ChainBackend {
     fn get_est_sat_per_1000_weight(&self, target: ConfirmationTarget) -> u32 {
         match self {
             ChainBackend::Bitcoind(c) => c.get_est_sat_per_1000_weight(target),
+            ChainBackend::Esplora(c) => c.get_est_sat_per_1000_weight(target),
         }
     }
 }
@@ -23,6 +26,7 @@ impl BroadcasterInterface for ChainBackend {
     fn broadcast_transactions(&self, txs: &[&Transaction]) {
         match self {
             ChainBackend::Bitcoind(c) => c.broadcast_transactions(txs),
+            ChainBackend::Esplora(c) => c.broadcast_transactions(txs),
         }
     }
 }

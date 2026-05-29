@@ -17,3 +17,8 @@ fn chain_backend_implements_required_traits() {
         let _ = b.get_est_sat_per_1000_weight(ConfirmationTarget::AnchorChannelFee);
     }
 }
+
+#[test]
+fn chain_backend_esplora_variant_exists() {
+    fn _accept(_: crate::chain_backend::ChainBackend) {}
+}
