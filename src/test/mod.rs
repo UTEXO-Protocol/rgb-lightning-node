@@ -2331,6 +2331,7 @@ mod close_coop_zero_balance;
 mod close_force_nobtc_acceptor;
 mod close_force_other_side;
 mod close_force_standard;
+mod esplora_indexer_defaults;
 mod concurrent_btc_payments;
 mod concurrent_openchannel;
 mod fail_transfers;

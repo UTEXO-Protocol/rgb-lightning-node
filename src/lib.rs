@@ -18,6 +18,7 @@ mod fee_mock;
 #[cfg(feature = "uniffi")]
 pub mod ffi;
 mod gossip;
+mod indexer;
 mod kv_store;
 mod ldk;
 mod node;

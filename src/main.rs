@@ -12,6 +12,7 @@ mod error;
 #[path = "test/fee_mock.rs"]
 mod fee_mock;
 mod gossip;
+mod indexer;
 mod kv_store;
 mod ldk;
 mod rgb;
