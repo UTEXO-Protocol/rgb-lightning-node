@@ -2,14 +2,11 @@ use super::*;
 
 const TEST_DIR_BASE: &str = "tmp/init_esplora/";
 
-// To run locally:
-//   docker compose --profile esplora up -d
-//   cargo test --no-fail-fast init_esplora -- --ignored --test-threads=1
-//   docker compose --profile esplora down
+// Requires `docker compose --profile esplora up -d` (adds the mempool/electrs
+// esplora REST endpoint at :3002).
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-#[ignore = "requires docker compose --profile esplora up"]
 async fn init_esplora_path_unlocks_without_bitcoind() {
     initialize();
 

@@ -69,7 +69,9 @@ impl EsploraIndexerClient {
         handle: tokio::runtime::Handle,
         logger: Arc<FilesystemLogger>,
     ) -> io::Result<Self> {
-        let client = Arc::new(EsploraBuilder::new(&server_url).build_blocking());
+        // 10s socket timeout so a hung esplora endpoint (e.g. mempool/electrs
+        // /fee-estimates never responding) cannot block runtime shutdown.
+        let client = Arc::new(EsploraBuilder::new(&server_url).timeout(10).build_blocking());
         client
             .get_tip_hash()
             .map_err(|e| io::Error::other(format!("failed to connect to esplora server: {e}")))?;
