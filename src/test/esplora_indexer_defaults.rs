@@ -42,3 +42,9 @@ fn interpolation_falls_back_to_default_when_empty() {
     let m: HashMap<u16, f64> = HashMap::new();
     assert_eq!(estimate_fee_rate_sat_per_kw(&m, 6, 5000), 5000);
 }
+
+#[test]
+fn esplora_gossip_verifier_impls_utxo_lookup() {
+    fn _accepts<T: lightning::routing::utxo::UtxoLookup>(_: &T) {}
+    let _ = std::marker::PhantomData::<crate::indexer::EsploraGossipVerifier>;
+}

@@ -958,6 +958,14 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
 pub(crate) type RoutingMessageHandler =
     dyn lightning::ln::msgs::RoutingMessageHandler + Send + Sync;
 
+// Reserved for a future esplora-typed gossip sync (Task 5 follow-up).
+#[allow(dead_code)]
+pub(crate) type PeerGossipSync = P2PGossipSync<
+    Arc<NetworkGraph>,
+    Arc<dyn lightning::routing::utxo::UtxoLookup + Send + Sync>,
+    Arc<FilesystemLogger>,
+>;
+
 pub(crate) type PeerManager = LdkPeerManager<
     SocketDescriptor,
     Arc<ChannelManager>,

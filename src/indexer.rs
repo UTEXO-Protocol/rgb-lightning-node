@@ -5,8 +5,10 @@ use esplora_client::blocking::BlockingClient as EsploraBlockingClient;
 use esplora_client::Builder as EsploraBuilder;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::log_warn;
-use lightning::routing::utxo::{UtxoLookup, UtxoLookupError, UtxoResult};
+use lightning::routing::utxo::{UtxoFuture, UtxoLookup, UtxoLookupError, UtxoResult};
 use lightning::util::logger::Logger;
+
+use crate::ldk::PeerGossipSync;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -242,5 +244,46 @@ impl EsploraIndexerClient {
 impl UtxoLookup for EsploraIndexerClient {
     fn get_utxo(&self, chain_hash: &ChainHash, short_channel_id: u64) -> UtxoResult {
         UtxoResult::Sync(self.lookup_utxo(*chain_hash, short_channel_id))
+    }
+}
+
+pub(crate) struct EsploraGossipVerifier {
+    client: Arc<EsploraIndexerClient>,
+    gossiper: Arc<PeerGossipSync>,
+    peer_manager_wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl EsploraGossipVerifier {
+    pub(crate) fn new(
+        client: Arc<EsploraIndexerClient>,
+        gossiper: Arc<PeerGossipSync>,
+        peer_manager_wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self {
+            client,
+            gossiper,
+            peer_manager_wake,
+        }
+    }
+}
+
+impl UtxoLookup for EsploraGossipVerifier {
+    fn get_utxo(&self, chain_hash: &ChainHash, short_channel_id: u64) -> UtxoResult {
+        let result = UtxoFuture::new();
+        let future = result.clone();
+        let chain_hash = *chain_hash;
+        let client = self.client.clone();
+        let gossiper = self.gossiper.clone();
+        let peer_manager_wake = self.peer_manager_wake.clone();
+        self.client.handle.spawn(async move {
+            let lookup = tokio::task::spawn_blocking(move || {
+                client.lookup_utxo(chain_hash, short_channel_id)
+            })
+            .await
+            .unwrap_or(Err(UtxoLookupError::UnknownTx));
+            future.resolve(gossiper.network_graph(), &*gossiper, lookup);
+            peer_manager_wake();
+        });
+        UtxoResult::Async(result)
     }
 }
