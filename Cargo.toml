@@ -31,6 +31,7 @@ chacha20 = "0.9.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = "4.5.20"
 dirs = "5.0.1"
+esplora-client = { version = "0.12", default-features = false, features = ["blocking-https-rustls"] }
 futures = "0.3"
 hex = { package = "hex-conservative", version = "0.3.0", default-features = false }
 lightning = { version = "0.2.0", features = ["dnssec"] }
@@ -42,6 +43,7 @@ lightning-macros = { version = "0.2.0" }
 lightning-net-tokio = { version = "0.2.0" }
 lightning-persister = { version = "0.2.0", features = ["tokio"] }
 lightning-rapid-gossip-sync = { version = "0.2.0" }
+lightning-transaction-sync = { version = "0.2.0", features = ["esplora-blocking"] }
 magic-crypt = "4.0.1"
 rand = "0.8.5"
 regex = { version = "1.11", default-features = false }
@@ -109,6 +111,7 @@ lightning-invoice = { path = "./rust-lightning/lightning-invoice" }
 lightning-net-tokio = { path = "./rust-lightning/lightning-net-tokio" }
 lightning-persister = { path = "./rust-lightning/lightning-persister" }
 lightning-rapid-gossip-sync = { path = "./rust-lightning/lightning-rapid-gossip-sync" }
+lightning-transaction-sync = { path = "./rust-lightning/lightning-transaction-sync" }
 # Use the UTEXO RGB compatibility branches; no sibling local checkout required.
 vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
 vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
