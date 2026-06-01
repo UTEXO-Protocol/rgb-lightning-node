@@ -4022,10 +4022,7 @@ pub(crate) async fn start_ldk(
     // GossipVerifier needs both bitcoind (UtxoSource) and P2P gossip mode.
     // On esplora/electrum or RGS modes the UtxoLookup stays unset — gossip
     // routing still works but channel-announcement UTXOs aren't verified P2P.
-    if let (Some(bc), Some(p2p)) = (
-        bitcoind_client_opt.as_ref(),
-        &p2p_gossip_sync_for_verifier,
-    ) {
+    if let (Some(bc), Some(p2p)) = (bitcoind_client_opt.as_ref(), &p2p_gossip_sync_for_verifier) {
         let utxo_lookup = GossipVerifier::new(
             Arc::clone(&bc.bitcoind_rpc_client),
             TokioSpawner,

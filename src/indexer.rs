@@ -14,9 +14,8 @@ use esplora_client::blocking::BlockingClient as EsploraBlockingClient;
 use esplora_client::Builder as EsploraBuilder;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::log_warn;
-use lightning::routing::utxo::{UtxoFuture, UtxoLookup, UtxoLookupError, UtxoResult};
+use lightning::routing::utxo::{UtxoLookup, UtxoLookupError, UtxoResult};
 use lightning::util::logger::Logger;
-
 
 use crate::disk::FilesystemLogger;
 #[cfg(test)]

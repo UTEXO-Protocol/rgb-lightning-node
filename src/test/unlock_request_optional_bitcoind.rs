@@ -50,6 +50,7 @@ fn req(bitcoind: bool, indexer: Option<&str>) -> CoreUnlockRequest {
         proxy_endpoint: None,
         announce_addresses: vec![],
         announce_alias: None,
+        gossip_source: None,
     }
 }
 

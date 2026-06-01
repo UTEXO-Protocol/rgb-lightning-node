@@ -28,6 +28,7 @@ async fn init_electrum_path_unlocks_without_bitcoind() {
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
         announce_addresses: vec![],
         announce_alias: None,
+        gossip_source: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node1_addr}/unlock"))
