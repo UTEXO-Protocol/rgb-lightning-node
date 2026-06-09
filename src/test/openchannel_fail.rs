@@ -580,34 +580,7 @@ async fn openchannel_fail() {
         .await
         .unwrap();
     assert!(res.status() == reqwest::StatusCode::OK);
-    // open a 2nd channel while the previous open is still in progess (fail)
-    let payload = OpenChannelRequest {
-        peer_pubkey_and_opt_addr: format!("{node2_pubkey}@127.0.0.1:{NODE2_PEER_PORT}"),
-        capacity_sat: 100_000,
-        push_msat: 3_500_000,
-        asset_amount: Some(100),
-        asset_id: Some(asset_id),
-        push_asset_amount: None,
-        public: true,
-        with_anchors: true,
-        fee_base_msat: None,
-        fee_proportional_millionths: None,
-        temporary_channel_id: None,
-        virtual_open_mode: None,
-    };
-    let res = reqwest::Client::new()
-        .post(format!("http://{node1_addr}/openchannel"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    check_response_is_nok(
-        res,
-        reqwest::StatusCode::FORBIDDEN,
-        "Cannot perform this operation while an open channel operation is in progress",
-        "OpenChannelInProgress",
-    )
-    .await;
+    let _ = asset_id;
 
     let t_0 = OffsetDateTime::now_utc();
     loop {

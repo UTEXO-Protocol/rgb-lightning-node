@@ -313,9 +313,6 @@ pub enum APIError {
     #[error("No valid transport endpoint found")]
     NoValidTransportEndpoint,
 
-    #[error("Cannot perform this operation while an open channel operation is in progress")]
-    OpenChannelInProgress,
-
     #[error("Output below the dust limit")]
     OutputBelowDustLimit,
 
@@ -588,7 +585,6 @@ impl IntoResponse for APIError {
             | APIError::NoAvailableUtxos
             | APIError::NoRoute
             | APIError::NotInitialized
-            | APIError::OpenChannelInProgress
             | APIError::PaymentNotFound(_)
             | APIError::RecipientIDAlreadyUsed
             | APIError::SwapNotFound(_)

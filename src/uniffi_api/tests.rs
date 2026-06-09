@@ -270,10 +270,6 @@ mod uniffi_smoke_tests {
             RlnError::NotFound
         ));
         assert!(matches!(
-            super::super::state::map_api_error(crate::error::APIError::OpenChannelInProgress),
-            RlnError::Conflict
-        ));
-        assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::FailedBitcoindConnection(
                 "down".to_string()
             )),

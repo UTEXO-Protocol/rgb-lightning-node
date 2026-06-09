@@ -144,7 +144,6 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::CannotCloseChannel(_)
         | APIError::CannotEstimateFees
         | APIError::ChangingState
-        | APIError::OpenChannelInProgress
         | APIError::InsufficientAssets
         | APIError::InvalidIndexer(_)
         | APIError::InvalidProxyEndpoint

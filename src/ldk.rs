@@ -1428,7 +1428,6 @@ fn normalize_funding_psbt_locktime(
 // FundingGenerationReady. Returns the value to propagate from the event handler: `Err(ReplayEvent)`
 // to retry the event (for transient network errors), or `Ok(())` after force-closing the channel
 // (for terminal errors).
-#[allow(dead_code)]
 fn handle_funding_prepare_err(
     e: RgbLibError,
     channel_manager: &ChannelManager,
@@ -1556,7 +1555,6 @@ async fn handle_ldk_events(
                         false,
                     );
                     unlocked_state.virtual_channel_draft_delete(&temporary_channel_id);
-                    *unlocked_state.rgb_send_lock.lock().unwrap() = false;
                 };
 
                 let mut virtual_funding_txo = virtual_channel_synthetic_outpoint(
@@ -1757,7 +1755,6 @@ async fn handle_ldk_events(
                             updated_at: get_current_timestamp(),
                         });
                         unlocked_state.virtual_channel_draft_delete(&temporary_channel_id);
-                        *unlocked_state.rgb_send_lock.lock().unwrap() = false;
                         tracing::info!(
                             "EVENT: registered trusted no-broadcast funding {} for virtual channel {}",
                             virtual_funding_txo,
@@ -1777,7 +1774,6 @@ async fn handle_ldk_events(
                             false,
                         );
                         unlocked_state.virtual_channel_draft_delete(&temporary_channel_id);
-                        *unlocked_state.rgb_send_lock.lock().unwrap() = false;
                     }
                 }
                 return Ok(());
@@ -1814,29 +1810,21 @@ async fn handle_ldk_events(
 
                 let unlocked_state_copy = unlocked_state.clone();
                 let res = tokio::task::spawn_blocking(
-                    move || -> Result<(String, Option<i32>), String> {
-                        let res = unlocked_state_copy
-                            .rgb_send_begin(
-                                recipient_map,
-                                true,
-                                FEE_RATE,
-                                MIN_CHANNEL_CONFIRMATIONS,
-                                None,
-                                false,
-                                // Final locktime: this colored tx funds an LN channel.
-                                Some(0),
-                            )
-                            .map_err(|e| e.to_string())?;
-                        let fascia_str = fs::read_to_string(&res.details.fascia_path)
-                            .map_err(|e| e.to_string())?;
-                        let fascia: Fascia =
-                            serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
-                        unlocked_state_copy
-                            .rgb_consume_fascia(fascia, None)
-                            .map_err(|e| e.to_string())?;
-                        unlocked_state_copy
-                            .rgb_create_consignments(res.psbt.clone())
-                            .map_err(|e| e.to_string())?;
+                    move || -> Result<(String, Option<i32>), RgbLibError> {
+                        let res = unlocked_state_copy.rgb_send_begin(
+                            recipient_map,
+                            true,
+                            FEE_RATE,
+                            MIN_CHANNEL_CONFIRMATIONS,
+                            None,
+                            false,
+                            // Final locktime: this colored tx funds an LN channel.
+                            Some(0),
+                        )?;
+                        let fascia_str = fs::read_to_string(&res.details.fascia_path).unwrap();
+                        let fascia: Fascia = serde_json::from_str(&fascia_str).unwrap();
+                        unlocked_state_copy.rgb_consume_fascia(fascia, None)?;
+                        unlocked_state_copy.rgb_create_consignments(res.psbt.clone())?;
                         Ok((res.psbt, res.batch_transfer_idx))
                     },
                 )
@@ -1844,9 +1832,18 @@ async fn handle_ldk_events(
                 .unwrap();
                 let (unsigned_psbt, batch_transfer_idx) = match res {
                     Ok(result) => result,
+                    // A failed funding preparation (e.g. the asset allocation is
+                    // momentarily reserved by a concurrent open) must fail the
+                    // channel so the caller can retry, not retry the event
+                    // forever. handle_open_chan_fail (on ChannelClosed) then
+                    // releases any reserved allocation.
                     Err(e) => {
-                        tracing::error!("cannot prepare channel funding transfer: {e}");
-                        return Err(ReplayEvent());
+                        return handle_funding_prepare_err(
+                            e,
+                            &unlocked_state.channel_manager,
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                        );
                     }
                 };
                 // Record the batch transfer index on the channel's RGB info so a failed
@@ -1866,9 +1863,25 @@ async fn handle_ldk_events(
                 }
                 (unsigned_psbt, Some(asset_id))
             } else {
-                let raw_psbt = unlocked_state
-                    .rgb_send_btc_begin(addr.to_address(), channel_value_satoshis, FEE_RATE)
-                    .unwrap();
+                // Mirror the colored path: a failed funding preparation must fail
+                // the channel (so the caller can retry) rather than panic the event
+                // task. handle_funding_prepare_err force-closes on terminal errors
+                // and replays the event on transient network errors.
+                let raw_psbt = match unlocked_state.rgb_send_btc_begin(
+                    addr.to_address(),
+                    channel_value_satoshis,
+                    FEE_RATE,
+                ) {
+                    Ok(psbt) => psbt,
+                    Err(e) => {
+                        return handle_funding_prepare_err(
+                            e,
+                            &unlocked_state.channel_manager,
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                        );
+                    }
+                };
                 let current_best_height =
                     unlocked_state.channel_manager.current_best_block().height;
                 let unsigned_psbt =
@@ -1985,7 +1998,6 @@ async fn handle_ldk_events(
                 tracing::error!(
                     "ERROR: Channel went away before we could fund it. The peer disconnected or refused the channel.",
                 );
-                *unlocked_state.rgb_send_lock.lock().unwrap() = false;
             }
         }
         Event::FundingTxBroadcastSafe { .. } => {
@@ -2577,7 +2589,6 @@ async fn handle_ldk_events(
                 .virtual_channel_session_store()
                 .contains_key(&channel_id)
             {
-                *unlocked_state.rgb_send_lock.lock().unwrap() = false;
                 tracing::info!(
                     "EVENT: virtual channel {} is pending in trusted no-broadcast mode",
                     channel_id,
@@ -2610,8 +2621,6 @@ async fn handle_ldk_events(
                         }
                     })
                     .await;
-
-                    *unlocked_state.rgb_send_lock.lock().unwrap() = false;
 
                     let finalize_result = join_result.map_err(|join_err| {
                         tracing::error!("Channel opening finalization task failed: {join_err:?}");
@@ -2696,8 +2705,6 @@ async fn handle_ldk_events(
                 reason
             );
 
-            *unlocked_state.rgb_send_lock.lock().unwrap() = false;
-
             // Release any funds locked for a funding tx that was never broadcast.
             handle_open_chan_fail(&channel_id, unlocked_state.clone()).await;
 
@@ -2729,7 +2736,6 @@ async fn handle_ldk_events(
                     &format!("virtual_channel_{}", channel_id),
                     false,
                 );
-                *unlocked_state.rgb_send_lock.lock().unwrap() = false;
 
                 tracing::warn!(
                     "EVENT: cleaned up failed virtual open draft {} after channel close {}",
@@ -4537,7 +4543,6 @@ pub(crate) async fn start_ldk(
         taker_swaps,
         router: Arc::clone(&router),
         output_sweeper: Arc::clone(&output_sweeper),
-        rgb_send_lock: Arc::new(Mutex::new(false)),
         channel_ids_map,
         proxy_endpoint: proxy_endpoint.to_string(),
         external_signer_mode,

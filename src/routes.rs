@@ -3885,10 +3885,6 @@ pub(crate) async fn open_channel(
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
 
-        if *unlocked_state.rgb_send_lock.lock().unwrap() {
-            return Err(APIError::OpenChannelInProgress);
-        }
-
         let is_virtual_open = match payload.virtual_open_mode.as_deref() {
             None => false,
             Some(VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST) => true,
@@ -4180,14 +4176,6 @@ pub(crate) async fn open_channel(
             (temporary_channel_id, None)
         };
 
-        // Only colored opens perform an RGB send during funding, so only they need
-        // the RGB send lock. Vanilla opens that stall (e.g. an unresponsive peer)
-        // must not hold it, or they would block all subsequent opens indefinitely.
-        if colored_info.is_some() {
-            *unlocked_state.rgb_send_lock.lock().unwrap() = true;
-            tracing::debug!("RGB send lock set to true");
-        }
-
         let temporary_channel_id = unlocked_state
             .channel_manager
             .create_channel(
@@ -4201,8 +4189,6 @@ pub(crate) async fn open_channel(
                 payload.push_asset_amount,
             )
             .map_err(|e| {
-                *unlocked_state.rgb_send_lock.lock().unwrap() = false;
-                tracing::debug!("RGB send lock set to false (open channel failure: {e:?})");
                 if let Some(temp_id_str) = rgb_metadata_temp_id_str.as_deref() {
                     let _ = unlocked_state
                         .kv_store

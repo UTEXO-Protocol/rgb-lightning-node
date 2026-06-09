@@ -202,7 +202,7 @@ Detailed structure:
 - User/input/domain validation failures are surfaced as `RlnError::InvalidRequest`.
 - Missing resources (`PaymentNotFound`, `SwapNotFound`, `Unknown*`) map to
   `RlnError::NotFound`.
-- State conflicts (`OpenChannelInProgress`, `Already*`, etc.) map to
+- State conflicts (`Already*`, `ChangingState`, etc.) map to
   `RlnError::Conflict`.
 - Initialization/locked-state situations return `RlnError::NotInitialized`.
 

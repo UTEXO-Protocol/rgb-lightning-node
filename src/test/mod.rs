@@ -1626,7 +1626,13 @@ async fn open_channel_raw(
             }
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 50.0 {
-            panic!("cannot find funding TX")
+            // The channel may have been force-closed before reaching
+            // ChannelPending (e.g. a colored funding preparation failed because
+            // the asset allocation was momentarily reserved by a concurrent
+            // open). Surface a retryable error so open_channel_with_retry tries
+            // again once the contending open has settled.
+            println!("cannot find funding TX for channel to {dest_peer_pubkey}");
+            return Err(reqwest::StatusCode::FORBIDDEN);
         }
     }
     let channel_id = channel_id.unwrap();
