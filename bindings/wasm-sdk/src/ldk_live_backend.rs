@@ -4,10 +4,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 use bitcoin_hashes::sha256::Hash as Sha256;
 use bitcoin_hashes::Hash as _;
@@ -36,6 +37,7 @@ use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
     ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
 };
+use lightning::rgb_utils::{RgbInfo, RgbKvStoreExt};
 use lightning::sign::KeysManager;
 use lightning::sign::{InMemorySigner, NodeSigner, Recipient};
 use lightning::util::config::UserConfig;
@@ -56,100 +58,57 @@ use crate::wasm_node_persistence::{
     WASM_LDK_BROADCAST_QUEUE_STORAGE_PREFIX, WASM_LDK_MONITORS_STORAGE_PREFIX,
     WASM_LDK_RUNTIME_STORAGE_PREFIX,
 };
-use crate::wasm_runtime_paths::ldk_data_dir_for_runtime;
 
-#[derive(Default)]
-struct InMemoryKvStore {
-    inner: Mutex<HashMap<(String, String, String), Vec<u8>>>,
+thread_local! {
+    /// Maps LDK runtime_key → shared RGB wallet handle.
+    /// Populated by `register_rgb_wallet_for_runtime`; consumed by `ensure_object_graph`.
+    static RGB_WALLET_REGISTRY: RefCell<HashMap<String, Rc<RefCell<rgb_lib_wasm::Wallet>>>> =
+        RefCell::new(HashMap::new());
 }
 
-impl KVStoreSync for InMemoryKvStore {
-    fn read(
-        &self,
-        primary_namespace: &str,
-        secondary_namespace: &str,
-        key: &str,
-    ) -> Result<Vec<u8>, lightning::io::Error> {
-        let guard = self.inner.lock().map_err(|_| {
-            lightning::io::Error::new(
-                lightning::io::ErrorKind::Other,
-                "InMemoryKvStore lock poisoned",
-            )
-        })?;
-        guard
-            .get(&(
-                primary_namespace.to_string(),
-                secondary_namespace.to_string(),
-                key.to_string(),
-            ))
-            .cloned()
-            .ok_or_else(|| {
-                lightning::io::Error::new(lightning::io::ErrorKind::NotFound, "key not found")
-            })
-    }
+/// Register the RGB wallet for a given LDK runtime key.
+///
+/// Must be called (with a wallet that has already called `go_online`) before the LDK object
+/// graph is first built for that runtime.  Called automatically from `attach_wallet_shared`.
+pub fn register_rgb_wallet_for_runtime(
+    runtime_key: &str,
+    wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>,
+) {
+    RGB_WALLET_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(runtime_key.to_string(), wallet);
+    });
+}
 
-    fn write(
-        &self,
-        primary_namespace: &str,
-        secondary_namespace: &str,
-        key: &str,
-        buf: Vec<u8>,
-    ) -> Result<(), lightning::io::Error> {
-        let mut guard = self.inner.lock().map_err(|_| {
-            lightning::io::Error::new(
-                lightning::io::ErrorKind::Other,
-                "InMemoryKvStore lock poisoned",
-            )
-        })?;
-        guard.insert(
-            (
-                primary_namespace.to_string(),
-                secondary_namespace.to_string(),
-                key.to_string(),
-            ),
-            buf,
-        );
-        Ok(())
-    }
+/// Pending RGB open intent keyed by `user_channel_id`.
+/// Stored when `open_channel_non_virtual` is called with an `asset_id`; consumed on
+/// `FundingGenerationReady` in Phase E.
+#[derive(Clone)]
+struct PendingRgbOpenIntent {
+    contract_id: lightning::rgb_utils::ContractId,
+    schema: lightning::rgb_utils::AssetSchema,
+    asset_amount: u64,
+    consignment_endpoint: lightning::rgb_utils::RgbTransport,
+    fee_rate: u64,
+    min_confirmations: u8,
+}
 
-    fn remove(
-        &self,
-        primary_namespace: &str,
-        secondary_namespace: &str,
-        key: &str,
-        _lazy: bool,
-    ) -> Result<(), lightning::io::Error> {
-        let mut guard = self.inner.lock().map_err(|_| {
-            lightning::io::Error::new(
-                lightning::io::ErrorKind::Other,
-                "InMemoryKvStore lock poisoned",
-            )
-        })?;
-        guard.remove(&(
-            primary_namespace.to_string(),
-            secondary_namespace.to_string(),
-            key.to_string(),
-        ));
-        Ok(())
-    }
-
-    fn list(
-        &self,
-        primary_namespace: &str,
-        secondary_namespace: &str,
-    ) -> Result<Vec<String>, lightning::io::Error> {
-        let guard = self.inner.lock().map_err(|_| {
-            lightning::io::Error::new(
-                lightning::io::ErrorKind::Other,
-                "InMemoryKvStore lock poisoned",
-            )
-        })?;
-        Ok(guard
-            .keys()
-            .filter(|(p, s, _k)| p == primary_namespace && s == secondary_namespace)
-            .map(|(_p, _s, k)| k.clone())
-            .collect())
-    }
+#[derive(Clone)]
+enum PendingRgbFundingWork {
+    Prepare {
+        user_channel_id: u128,
+        temporary_channel_id: lightning::ln::types::ChannelId,
+        counterparty_node_id: SecpPublicKey,
+        output_script_hex: String,
+        channel_value_satoshis: u64,
+    },
+    Complete {
+        temporary_channel_id_hex: String,
+        signed_psbt: String,
+    },
+    ValidateFunding {
+        temporary_channel_id: lightning::ln::types::ChannelId,
+    },
+    ProcessPendingTransactions,
 }
 
 pub trait LdkLiveBackend {
@@ -198,6 +157,18 @@ pub trait LdkLiveBackend {
     fn chain_apply_unconfirmed_tx(&self, _txid: &str) -> Result<(), JsValue> {
         Ok(())
     }
+
+    fn drive_rgb_funding_work_boxed(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn process_pending_rgb_transactions_boxed(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -222,6 +193,7 @@ fn ldk_live_debug(msg: &str) {
 pub struct WasmLdkLiveBackend {
     runtime_key: String,
     node_seed32: Option<[u8; 32]>,
+    self_weak: RefCell<Weak<WasmLdkLiveBackend>>,
     connected_peers: RefCell<HashSet<String>>,
     active_peer_pubkey: RefCell<Option<String>>,
     inbound_frames: RefCell<VecDeque<String>>,
@@ -229,6 +201,9 @@ pub struct WasmLdkLiveBackend {
     disconnected: Cell<bool>,
     descriptor_nonce: Cell<u64>,
     pending_funding_requests: RefCell<HashMap<String, LdkRuntimeFundingRequestData>>,
+    pending_rgb_open_intents: RefCell<HashMap<u128, PendingRgbOpenIntent>>,
+    pending_rgb_funding_work: RefCell<VecDeque<PendingRgbFundingWork>>,
+    pending_rgb_prepare_results: RefCell<HashMap<String, String>>,
     submitted_funding_txids: RefCell<HashSet<Txid>>,
     object_graph: RefCell<Option<LdkObjectGraph>>,
 }
@@ -244,6 +219,8 @@ struct LdkObjectGraph {
     peer_manager: RefCell<WasmPeerManager>,
     chain_monitor: Arc<WasmChainMonitor>,
     channel_manager: Arc<WasmChannelManager>,
+    rgb_backend: Arc<lightning::rgb_utils::RgbBackend>,
+    rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
     active_descriptor: RefCell<Option<LiveSocketDescriptor>>,
     channel_manager_restored: bool,
     monitors_restored: bool,
@@ -740,6 +717,7 @@ impl WasmLdkLiveBackend {
         Self {
             runtime_key,
             node_seed32,
+            self_weak: RefCell::new(Weak::new()),
             connected_peers: RefCell::new(HashSet::new()),
             active_peer_pubkey: RefCell::new(None),
             inbound_frames: RefCell::new(VecDeque::new()),
@@ -747,6 +725,9 @@ impl WasmLdkLiveBackend {
             disconnected: Cell::new(false),
             descriptor_nonce: Cell::new(1),
             pending_funding_requests: RefCell::new(HashMap::new()),
+            pending_rgb_open_intents: RefCell::new(HashMap::new()),
+            pending_rgb_funding_work: RefCell::new(VecDeque::new()),
+            pending_rgb_prepare_results: RefCell::new(HashMap::new()),
             submitted_funding_txids: RefCell::new(HashSet::new()),
             object_graph: RefCell::new(None),
         }
@@ -766,14 +747,32 @@ impl WasmLdkLiveBackend {
             runtime_key: self.runtime_key.clone(),
         });
         let chain_source = Arc::new(WasmFilter::new());
-        let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> = Arc::new(InMemoryKvStore::default());
-        let ldk_data_dir: PathBuf = ldk_data_dir_for_runtime(&self.runtime_key);
+        let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> =
+            crate::browser_kv_store::ldk_browser_kv_store(&self.runtime_key);
+        let rgb_backend: Arc<lightning::rgb_utils::RgbBackend> = {
+            let wallet_rc = RGB_WALLET_REGISTRY
+                .with(|reg| reg.borrow().get(&self.runtime_key).cloned())
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "no RGB wallet attached; call node.attachWallet() before starting LDK",
+                    )
+                })?;
+            let online = wallet_rc.borrow().get_online().ok_or_else(|| {
+                JsValue::from_str(
+                    "RGB wallet not online; call wallet.goOnline() before starting LDK",
+                )
+            })?;
+            Arc::new(lightning::rgb_utils::WasmRgbBackend::new(
+                Rc::clone(&wallet_rc),
+                online,
+            ))
+        };
         let keys_manager = Arc::new(KeysManager::new(
             &seed,
             unix_now_secs(),
             unix_now_nanos(),
             true,
-            ldk_data_dir.clone(),
+            Arc::clone(&rgb_backend),
             Arc::clone(&rgb_kv_store),
         ));
         let chain_monitor: Arc<WasmChainMonitor> = Arc::new(chainmonitor::ChainMonitor::new(
@@ -831,7 +830,7 @@ impl WasmLdkLiveBackend {
                 Arc::clone(&logger),
                 user_config.clone(),
                 monitor_refs,
-                ldk_data_dir.clone(),
+                Arc::clone(&rgb_backend),
                 Arc::clone(&rgb_kv_store),
             );
             let mut cursor = std::io::Cursor::new(bytes);
@@ -861,7 +860,7 @@ impl WasmLdkLiveBackend {
                 user_config,
                 chain_params,
                 unix_now_secs() as u32,
-                ldk_data_dir,
+                Arc::clone(&rgb_backend),
                 Arc::clone(&rgb_kv_store),
             ))
         };
@@ -897,6 +896,8 @@ impl WasmLdkLiveBackend {
             peer_manager: RefCell::new(peer_manager),
             chain_monitor,
             channel_manager,
+            rgb_backend,
+            rgb_kv_store,
             active_descriptor: RefCell::new(None),
             channel_manager_restored,
             monitors_restored,
@@ -954,25 +955,80 @@ impl WasmLdkLiveBackend {
             Ok::<(), ReplayEvent>(())
         });
         for event in collected_events.into_inner().into_iter() {
-            if let Event::FundingGenerationReady {
+            self.handle_ldk_event_sync(event);
+        }
+    }
+
+    fn handle_ldk_event_sync(&self, event: Event) {
+        match event {
+            Event::FundingGenerationReady {
                 temporary_channel_id: ev_temp,
                 counterparty_node_id,
                 channel_value_satoshis,
                 output_script,
-                ..
-            } = event
-            {
+                user_channel_id,
+            } => {
                 let temporary_channel_id_hex = format!("{ev_temp}");
-                self.pending_funding_requests.borrow_mut().insert(
-                    temporary_channel_id_hex.clone(),
-                    LdkRuntimeFundingRequestData {
-                        temporary_channel_id: temporary_channel_id_hex,
-                        counterparty_node_id: hex::encode(counterparty_node_id.serialize()),
-                        channel_value_satoshis,
-                        output_script_hex: hex::encode(output_script.as_bytes()),
-                    },
-                );
+                let is_rgb = self
+                    .pending_rgb_open_intents
+                    .borrow()
+                    .contains_key(&user_channel_id);
+                if is_rgb {
+                    self.pending_rgb_funding_work
+                        .borrow_mut()
+                        .push_back(PendingRgbFundingWork::Prepare {
+                            user_channel_id,
+                            temporary_channel_id: ev_temp,
+                            counterparty_node_id,
+                            output_script_hex: hex::encode(output_script.as_bytes()),
+                            channel_value_satoshis,
+                        });
+                } else {
+                    self.pending_funding_requests.borrow_mut().insert(
+                        temporary_channel_id_hex.clone(),
+                        LdkRuntimeFundingRequestData {
+                            temporary_channel_id: temporary_channel_id_hex,
+                            counterparty_node_id: hex::encode(counterparty_node_id.serialize()),
+                            channel_value_satoshis,
+                            output_script_hex: hex::encode(output_script.as_bytes()),
+                        },
+                    );
+                }
             }
+            Event::ChannelPending {
+                former_temporary_channel_id: Some(former_temp),
+                ..
+            } => {
+                let former_temp_hex = format!("{former_temp}");
+                let signed_psbt = self
+                    .pending_rgb_prepare_results
+                    .borrow()
+                    .get(&former_temp_hex)
+                    .cloned();
+                if let Some(signed_psbt) = signed_psbt {
+                    self.pending_rgb_funding_work
+                        .borrow_mut()
+                        .push_back(PendingRgbFundingWork::Complete {
+                            temporary_channel_id_hex: former_temp_hex,
+                            signed_psbt,
+                        });
+                }
+            }
+            Event::RgbFundingValidationRequired {
+                temporary_channel_id, ..
+            } => {
+                self.pending_rgb_funding_work
+                    .borrow_mut()
+                    .push_back(PendingRgbFundingWork::ValidateFunding {
+                        temporary_channel_id,
+                    });
+            }
+            Event::RgbTransactionPersistenceRequired => {
+                self.pending_rgb_funding_work
+                    .borrow_mut()
+                    .push_back(PendingRgbFundingWork::ProcessPendingTransactions);
+            }
+            _ => {}
         }
     }
 
@@ -990,43 +1046,22 @@ impl WasmLdkLiveBackend {
             Ok::<(), ReplayEvent>(())
         });
         for event in collected_events.into_inner().into_iter() {
-            match event {
-                Event::FundingGenerationReady {
-                    temporary_channel_id: ev_temp,
-                    counterparty_node_id,
-                    channel_value_satoshis,
-                    output_script,
-                    ..
-                } if format!("{ev_temp}") == temporary_channel_id_hex => {
-                    self.pending_funding_requests.borrow_mut().insert(
-                        temporary_channel_id_hex.to_string(),
-                        LdkRuntimeFundingRequestData {
-                            temporary_channel_id: temporary_channel_id_hex.to_string(),
-                            counterparty_node_id: hex::encode(counterparty_node_id.serialize()),
-                            channel_value_satoshis,
-                            output_script_hex: hex::encode(output_script.as_bytes()),
-                        },
-                    );
-                }
+            match &event {
                 Event::ChannelPending {
                     channel_id,
-                    former_temporary_channel_id,
+                    former_temporary_channel_id: Some(former_temp),
                     ..
-                } => {
-                    let matches = former_temporary_channel_id
-                        .map(|id| format!("{id}") == temporary_channel_id_hex)
-                        .unwrap_or(false);
-                    if matches {
-                        resolved_channel_id = format!("{channel_id}");
-                    }
+                } if format!("{former_temp}") == temporary_channel_id_hex => {
+                    resolved_channel_id = format!("{channel_id}");
                 }
-                Event::ChannelReady { channel_id, .. } => {
-                    if format!("{channel_id}") == temporary_channel_id_hex {
-                        is_ready = true;
-                    }
+                Event::ChannelReady { channel_id, .. }
+                    if format!("{channel_id}") == temporary_channel_id_hex =>
+                {
+                    is_ready = true;
                 }
                 _ => {}
             }
+            self.handle_ldk_event_sync(event);
         }
 
         if let Some(details) = g
@@ -1156,12 +1191,21 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             .as_ref()
             .cloned()
             .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_ACTIVE_PEER_DESCRIPTOR_MISSING))?;
-        g.peer_manager
-            .borrow_mut()
+        let Ok(peer_manager) = g.peer_manager.try_borrow_mut() else {
+            // Peer-manager callbacks can synchronously release outbound frames and receive the
+            // counterparty's response before the current `process_events` borrow is released.
+            // Queue that reentrant frame and drain it on the next processing pass.
+            self.inbound_frames
+                .borrow_mut()
+                .push_back(payload_hex.to_string());
+            return Ok(());
+        };
+        peer_manager
             .read_event(&mut desc, &bytes)
             .map_err(|_e: PeerHandleError| {
                 JsValue::from_str(sdk_contracts::ERR_PEER_MANAGER_READ_EVENT_FAILED)
             })?;
+        drop(peer_manager);
         persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         Ok(())
     }
@@ -1179,7 +1223,33 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED,
             ));
         };
-        g.peer_manager.borrow().process_events();
+        // Process queued reentrant inbound frames in bounded passes. Calls to `process_events`
+        // may synchronously cause more inbound frames, which `read_event` queues while the peer
+        // manager is borrowed.
+        for _ in 0..64 {
+            let queued: Vec<String> = self.inbound_frames.borrow_mut().drain(..).collect();
+            let peer_manager = g.peer_manager.borrow_mut();
+            if !queued.is_empty() {
+                let mut desc = g.active_descriptor.borrow().as_ref().cloned().ok_or_else(|| {
+                    JsValue::from_str(sdk_contracts::ERR_ACTIVE_PEER_DESCRIPTOR_MISSING)
+                })?;
+                for payload_hex in queued {
+                    let bytes = hex::decode(payload_hex).map_err(|e| {
+                        JsValue::from_str(&format!("invalid queued payload_hex: {e}"))
+                    })?;
+                    peer_manager
+                        .read_event(&mut desc, &bytes)
+                        .map_err(|_e: PeerHandleError| {
+                            JsValue::from_str(sdk_contracts::ERR_PEER_MANAGER_READ_EVENT_FAILED)
+                        })?;
+                }
+            }
+            peer_manager.process_events();
+            drop(peer_manager);
+            if self.inbound_frames.borrow().is_empty() {
+                break;
+            }
+        }
         self.ingest_funding_generation_ready_events(g);
         persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         ldk_live_debug("[rln-wasm-sdk ldk-live] process_events");
@@ -1381,11 +1451,39 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         if request.capacity_sat == 0 {
             return Err(JsValue::from_str("capacity_sat must be > 0"));
         }
-        if request.asset_id.is_some() || request.asset_local_amount.is_some() {
-            return Err(JsValue::from_str(
-                "native non-virtual RGB funding path is not wired yet; BTC-only channel open is currently supported",
-            ));
-        }
+        // Parse RGB open params when an asset is specified.
+        let rgb_open: Option<(lightning::rgb_utils::ContractId, u64, lightning::rgb_utils::RgbTransport)> =
+            if request.asset_id.is_some() {
+                let contract_id_str = request.contract_id.as_deref().unwrap_or("").trim();
+                let endpoint_str = request.consignment_endpoint.as_deref().unwrap_or("").trim();
+                let asset_amount = request.asset_local_amount.unwrap_or(0);
+                if contract_id_str.is_empty() {
+                    return Err(JsValue::from_str(
+                        "contract_id is required for RGB channel open",
+                    ));
+                }
+                if endpoint_str.is_empty() {
+                    return Err(JsValue::from_str(
+                        "consignment_endpoint is required for RGB channel open",
+                    ));
+                }
+                if asset_amount == 0 {
+                    return Err(JsValue::from_str(
+                        "asset_local_amount must be > 0 for RGB channel open",
+                    ));
+                }
+                let contract_id = contract_id_str
+                    .parse::<lightning::rgb_utils::ContractId>()
+                    .map_err(|e| JsValue::from_str(&format!("invalid contract_id: {e}")))?;
+                let endpoint = endpoint_str
+                    .parse::<lightning::rgb_utils::RgbTransport>()
+                    .map_err(|e| {
+                        JsValue::from_str(&format!("invalid consignment_endpoint: {e}"))
+                    })?;
+                Some((contract_id, asset_amount, endpoint))
+            } else {
+                None
+            };
 
         let their_node_id = SecpPublicKey::from_slice(
             &hex::decode(request.peer_pubkey.trim())
@@ -1438,6 +1536,13 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
 
         let mut create_err: Option<JsValue> = None;
         let mut temporary_channel_id_opt = None;
+        let user_channel_id = self.next_user_channel_id();
+        let (rgb_endpoint, rgb_push_amount) = rgb_open
+            .as_ref()
+            // `asset_local_amount` remains on the opener's side. LDK's RGB amount field is
+            // the amount pushed to the counterparty, so this channel opens with a zero push.
+            .map(|(_, _, ep)| (Some(ep.clone()), Some(0)))
+            .unwrap_or((None, None));
         for attempt in 1..=20 {
             let peer_ids = g
                 .peer_manager
@@ -1454,11 +1559,11 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 their_node_id,
                 request.capacity_sat,
                 0,
-                self.next_user_channel_id(),
+                user_channel_id,
                 None,
                 None,
-                None,
-                None,
+                rgb_endpoint.clone(),
+                rgb_push_amount,
             ) {
                 Ok(id) => {
                     temporary_channel_id_opt = Some(id);
@@ -1495,6 +1600,34 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             return Err(create_err
                 .unwrap_or_else(|| JsValue::from_str("create_channel failed after retry")));
         };
+
+        // Store the RGB open intent and temporary channel RGB state before peer processing.
+        // LDK renames this state to the funding channel ID when funding is generated.
+        if let Some((contract_id, asset_amount, consignment_endpoint)) = rgb_open {
+            let temp_id = format!("{temporary_channel_id}");
+            let rgb_info = RgbInfo {
+                contract_id,
+                schema: lightning::rgb_utils::AssetSchema::Nia,
+                local_rgb_amount: asset_amount,
+                remote_rgb_amount: 0,
+                batch_transfer_idx: None,
+            };
+            g.rgb_kv_store
+                .write_rgb_channel_info(&temp_id, &rgb_info, false);
+            g.rgb_kv_store
+                .write_rgb_channel_info(&temp_id, &rgb_info, true);
+            self.pending_rgb_open_intents.borrow_mut().insert(
+                user_channel_id,
+                PendingRgbOpenIntent {
+                    contract_id,
+                    schema: lightning::rgb_utils::AssetSchema::Nia,
+                    asset_amount,
+                    consignment_endpoint,
+                    fee_rate: 1,
+                    min_confirmations: 0,
+                },
+            );
+        }
 
         let temp_id = format!("{temporary_channel_id}");
         g.peer_manager.borrow().process_events();
@@ -1631,6 +1764,222 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             .collect();
         Ok(channels)
     }
+
+    fn drive_rgb_funding_work_boxed(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
+        let maybe_this = self.self_weak.borrow().upgrade();
+        Box::pin(async move {
+            if let Some(this) = maybe_this {
+                WasmLdkLiveBackend::drive_rgb_funding_work_impl(this).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn process_pending_rgb_transactions_boxed(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
+        let maybe_this = self.self_weak.borrow().upgrade();
+        Box::pin(async move {
+            if let Some(this) = maybe_this {
+                this.run_process_pending_rgb_transactions().await?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl WasmLdkLiveBackend {
+    async fn drive_rgb_funding_work_impl(this: Rc<Self>) -> Result<(), JsValue> {
+        loop {
+            let work_item = this.pending_rgb_funding_work.borrow_mut().pop_front();
+            let Some(item) = work_item else { break };
+            // Keep a copy so a transient failure does not permanently strand the channel.
+            // LDK emits `FundingGenerationReady` (the source of a `Prepare` item) exactly once,
+            // so a dropped item would never be re-ingested and the channel would hang in
+            // "opening" forever. Re-queue on error and let the next drive tick retry it once
+            // the transient condition clears (e.g. BDK catching up to a freshly mined colored
+            // UTXO after esplora's incremental sync briefly evicted it from its tx graph).
+            let retry_item = item.clone();
+            if let Err(e) = Self::process_funding_work_item(&this, item).await {
+                // Refresh the shared RGB wallet's chain view before the next attempt. The
+                // dominant transient failure is a freshly mined colored UTXO that esplora's
+                // incremental sync briefly evicted from BDK's tx graph, surfacing as
+                // "UTXO not found in the internal database" during funding. A re-sync re-adds
+                // the now-confirmed transaction so the re-queued item can succeed.
+                Self::resync_rgb_wallet_best_effort(&this).await;
+                this.pending_rgb_funding_work
+                    .borrow_mut()
+                    .push_front(retry_item);
+                return Err(e);
+            }
+        }
+        // Phase F: after draining all queued work, flush any pending RGB transaction
+        // fascia (covers commitment, HTLC, and cooperative-close coloring in addition
+        // to funding). This is a no-op when there is nothing to flush.
+        if let Some(channel_manager) = this
+            .object_graph
+            .borrow()
+            .as_ref()
+            .map(|g| Arc::clone(&g.channel_manager))
+        {
+            channel_manager
+                .process_pending_rgb_transactions()
+                .await
+                .map_err(|e| {
+                    JsValue::from_str(&format!("RGB pending transactions failed: {e:?}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Processes a single queued RGB funding work item.
+    ///
+    /// On failure this returns an error before any durable, non-idempotent state is mutated
+    /// (the fallible `prepare`/`complete`/`validate` calls run first), so the caller can safely
+    /// re-queue and retry the same item on a later drive tick.
+    async fn process_funding_work_item(
+        this: &Rc<Self>,
+        item: PendingRgbFundingWork,
+    ) -> Result<(), JsValue> {
+        match item {
+            PendingRgbFundingWork::Prepare {
+                user_channel_id,
+                temporary_channel_id,
+                counterparty_node_id,
+                output_script_hex,
+                channel_value_satoshis,
+            } => {
+                let intent = this
+                    .pending_rgb_open_intents
+                    .borrow()
+                    .get(&user_channel_id)
+                    .cloned();
+                let Some(intent) = intent else { return Ok(()) };
+                let (rgb_backend, channel_manager) = {
+                    let graph = this.object_graph.borrow();
+                    let g = graph.as_ref().ok_or_else(|| {
+                        JsValue::from_str(
+                            sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED,
+                        )
+                    })?;
+                    (Arc::clone(&g.rgb_backend), Arc::clone(&g.channel_manager))
+                };
+                let output_script = bitcoin::ScriptBuf::from_bytes(
+                    hex::decode(&output_script_hex).map_err(|e| {
+                        JsValue::from_str(&format!("invalid output_script_hex: {e}"))
+                    })?,
+                );
+                let request = lightning::rgb_utils::RgbFundingTransferRequest {
+                    contract_id: intent.contract_id,
+                    schema: intent.schema,
+                    amount: intent.asset_amount,
+                    output_script,
+                    channel_value_satoshis,
+                    consignment_endpoint: intent.consignment_endpoint,
+                    network: bitcoin::Network::Regtest,
+                    fee_rate: intent.fee_rate,
+                    min_confirmations: intent.min_confirmations,
+                };
+                let prepared = rgb_backend
+                    .prepare_funding_transfer(request)
+                    .await
+                    .map_err(|e| {
+                        JsValue::from_str(&format!("RGB prepare funding failed: {e:?}"))
+                    })?;
+                let temp_hex = format!("{temporary_channel_id}");
+                this.pending_rgb_prepare_results
+                    .borrow_mut()
+                    .insert(temp_hex, prepared.signed_psbt);
+                channel_manager
+                    .funding_transaction_generated(
+                        temporary_channel_id,
+                        counterparty_node_id,
+                        prepared.transaction,
+                    )
+                    .map_err(|e| {
+                        JsValue::from_str(&format!(
+                            "funding_transaction_generated failed: {e:?}"
+                        ))
+                    })?;
+            }
+            PendingRgbFundingWork::Complete {
+                temporary_channel_id_hex,
+                signed_psbt,
+            } => {
+                let rgb_backend = {
+                    let graph = this.object_graph.borrow();
+                    let g = graph.as_ref().ok_or_else(|| {
+                        JsValue::from_str(
+                            sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED,
+                        )
+                    })?;
+                    Arc::clone(&g.rgb_backend)
+                };
+                let txid = rgb_backend
+                    .complete_funding_transfer(signed_psbt)
+                    .await
+                    .map_err(|e| {
+                        JsValue::from_str(&format!("RGB complete funding failed: {e:?}"))
+                    })?;
+                this.pending_rgb_prepare_results
+                    .borrow_mut()
+                    .remove(&temporary_channel_id_hex);
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk ldk-live] drive_rgb_funding_work: txid={txid}"
+                ));
+            }
+            PendingRgbFundingWork::ValidateFunding { temporary_channel_id } => {
+                let channel_manager = {
+                    let graph = this.object_graph.borrow();
+                    let g = graph.as_ref().ok_or_else(|| {
+                        JsValue::from_str(
+                            sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED,
+                        )
+                    })?;
+                    Arc::clone(&g.channel_manager)
+                };
+                channel_manager
+                    .process_pending_rgb_funding_validation(temporary_channel_id)
+                    .await
+                    .map_err(|e| {
+                        JsValue::from_str(&format!(
+                            "RGB funding validation failed: {e:?}"
+                        ))
+                    })?;
+            }
+            PendingRgbFundingWork::ProcessPendingTransactions => {
+                // handled by the unconditional sweep in drive_rgb_funding_work_impl
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-syncs the shared RGB wallet's BDK chain view. Best-effort: any error is swallowed so
+    /// the caller's own (re-queued) error remains the surfaced failure.
+    async fn resync_rgb_wallet_best_effort(this: &Rc<Self>) {
+        let wallet_rc =
+            RGB_WALLET_REGISTRY.with(|reg| reg.borrow().get(&this.runtime_key).cloned());
+        let Some(wallet_rc) = wallet_rc else { return };
+        let online = wallet_rc.borrow().get_online();
+        let Some(online) = online else { return };
+        let _ = wallet_rc.borrow_mut().sync(online).await;
+    }
+
+    pub(crate) async fn run_process_pending_rgb_transactions(&self) -> Result<(), JsValue> {
+        let channel_manager = {
+            let graph = self.object_graph.borrow();
+            let g = graph.as_ref().ok_or_else(|| {
+                JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
+            })?;
+            Arc::clone(&g.channel_manager)
+        };
+        channel_manager
+            .process_pending_rgb_transactions()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("RGB pending transactions failed: {e:?}")))
+    }
 }
 
 pub fn create_wasm_ldk_live_backend(
@@ -1640,7 +1989,9 @@ pub fn create_wasm_ldk_live_backend(
     if runtime_key.trim().is_empty() {
         return Err(JsValue::from_str("runtime_key cannot be empty"));
     }
-    Ok(Rc::new(WasmLdkLiveBackend::new(runtime_key, node_seed32)))
+    let backend = Rc::new(WasmLdkLiveBackend::new(runtime_key, node_seed32));
+    *backend.self_weak.borrow_mut() = Rc::downgrade(&backend);
+    Ok(backend)
 }
 
 fn unix_now_secs() -> u64 {

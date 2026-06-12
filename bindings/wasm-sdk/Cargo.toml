@@ -11,9 +11,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 debug-manual-events = []
+real-wasm-rgb = ["lightning/rgb-wasm"]
 
 [dependencies]
-rgb-lib-wasm = { git = "https://github.com/UTEXO-Protocol/rgb-lib-wasm", branch = "dev", package = "rgb-lib-wasm" }
+rgb-lib-wasm = { path = "../../../rgb-lib-wasm", package = "rgb-lib-wasm" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
@@ -21,6 +22,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 futures = "0.3"
+base64 = "0.22"
 hex = "0.4"
 gloo-net = { version = "0.5", features = ["websocket", "http"] }
 web-sys = { version = "0.3", features = ["console", "Window", "Storage"] }
@@ -28,8 +30,11 @@ lightning-invoice = { version = "0.34.0", features = ["std"] }
 bitcoin_hashes = "0.14"
 secp256k1 = "0.29"
 urlencoding = "2.1"
-lightning = { version = "0.2.0", path = "../../rust-lightning/lightning", default-features = false, features = ["std"] }
+lightning = { path = "../../../rust-lightning/lightning", default-features = false, features = ["std"] }
 sdk-contracts = { path = "../../src/sdk/contracts" }
+
+[patch.crates-io]
+lightning-invoice = { path = "../../../rust-lightning/lightning-invoice" }
 
 [profile.reldebug]
 inherits = "release"

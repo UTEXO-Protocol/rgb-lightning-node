@@ -565,6 +565,10 @@ impl RlnWasmNode {
     }
 
     pub(crate) fn attach_wallet_shared(&self, wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>) {
+        crate::ldk_live_backend::register_rgb_wallet_for_runtime(
+            &self.persistence_keys.ldk_manager_registry_key,
+            Rc::clone(&wallet),
+        );
         *self.wallet.borrow_mut() = Some(wallet);
     }
 
@@ -2778,6 +2782,8 @@ impl RlnWasmNode {
             asset_id,
             asset_local_amount,
             None,
+            None,
+            None,
         )
     }
 
@@ -2790,6 +2796,8 @@ impl RlnWasmNode {
         asset_id: Option<String>,
         asset_local_amount: Option<u64>,
         virtual_open_mode: Option<String>,
+        contract_id: Option<String>,
+        consignment_endpoint: Option<String>,
     ) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
         self.ensure_stable_identity_for_channel_operations()?;
@@ -2904,6 +2912,8 @@ impl RlnWasmNode {
                         public,
                         asset_id: asset_id.clone(),
                         asset_local_amount,
+                        contract_id: contract_id.clone(),
+                        consignment_endpoint: consignment_endpoint.clone(),
                     })?;
             let temp = opened.temporary_channel_id.trim().to_string();
             let chan = opened.channel_id.trim().to_string();
@@ -3037,6 +3047,8 @@ impl RlnWasmNode {
             asset_id,
             asset_local_amount,
             None,
+            None,
+            None,
         )?;
         let parsed: serde_json::Value = crate::js_from(value)?;
         crate::js_to_json(&parsed)
@@ -3059,9 +3071,46 @@ impl RlnWasmNode {
             asset_id,
             asset_local_amount,
             virtual_open_mode,
+            None,
+            None,
         )?;
         let parsed: serde_json::Value = crate::js_from(value)?;
         crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = openChannelRgbJson)]
+    pub fn open_channel_rgb_json(
+        &self,
+        peer_pubkey: String,
+        capacity_sat: u64,
+        public: bool,
+        asset_id: String,
+        asset_local_amount: u64,
+        contract_id: String,
+        consignment_endpoint: String,
+    ) -> Result<String, JsValue> {
+        let value = self.open_channel_value_with_options(
+            peer_pubkey,
+            capacity_sat,
+            public,
+            Some(asset_id),
+            Some(asset_local_amount),
+            None,
+            Some(contract_id),
+            Some(consignment_endpoint),
+        )?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = driveRgbFundingWork)]
+    pub async fn drive_rgb_funding_work(&self) -> Result<(), JsValue> {
+        self.ldk_runtime.drive_rgb_funding_work_boxed().await
+    }
+
+    #[wasm_bindgen(js_name = processPendingRgbTransactions)]
+    pub async fn process_pending_rgb_transactions(&self) -> Result<(), JsValue> {
+        self.ldk_runtime.process_pending_rgb_transactions_boxed().await
     }
 
     #[wasm_bindgen(js_name = closeChannel)]

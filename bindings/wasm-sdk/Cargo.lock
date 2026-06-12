@@ -1289,12 +1289,16 @@ dependencies = [
  "dnssec-prover",
  "hashbrown 0.13.2",
  "libm",
- "lightning-invoice 0.34.0",
+ "lightning-invoice",
  "lightning-macros",
- "lightning-types 0.3.1",
+ "lightning-types",
  "musig2",
  "possiblyrandom",
+ "rgb-invoicing",
+ "rgb-lib-wasm",
  "serde",
+ "serde_json",
+ "web-time",
 ]
 
 [[package]]
@@ -1303,18 +1307,8 @@ version = "0.34.0"
 dependencies = [
  "bech32",
  "bitcoin",
- "lightning-types 0.3.1",
-]
-
-[[package]]
-name = "lightning-invoice"
-version = "0.34.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b85e5e14bcdb30d746e9785b04f27938292e8944f78f26517e01e91691f6b3f2"
-dependencies = [
- "bech32",
- "bitcoin",
- "lightning-types 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lightning-types",
+ "rgb-ops",
 ]
 
 [[package]]
@@ -1329,15 +1323,6 @@ dependencies = [
 [[package]]
 name = "lightning-types"
 version = "0.3.1"
-dependencies = [
- "bitcoin",
-]
-
-[[package]]
-name = "lightning-types"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb1aac93f22f2c2eac8a0ee83bb1a1ea58673caa2c82847302710b83364d04e6"
 dependencies = [
  "bitcoin",
 ]
@@ -1888,9 +1873,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-aluvm"
-version = "0.11.1-rc.2"
+version = "0.11.1-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b9e41006564b48551e52e001181898982b11732348100216097033b3e536a2"
+checksum = "b60686e4f1701ca4f73b77660777a49e651f3c611461ab62ef718db47a5a6caa"
 dependencies = [
  "amplify",
  "baid64",
@@ -1922,9 +1907,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-consensus"
-version = "0.11.1-rc.9"
+version = "0.11.1-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e6e0da534613ed77953976b9be54c7db66bd5a6c66773bd5866b1bacdbfb41d"
+checksum = "535483ee9143782e33ddebd3eda465de0184061fc3c480e24990e42fefc58bb0"
 dependencies = [
  "amplify",
  "baid64",
@@ -1949,9 +1934,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-invoicing"
-version = "0.11.1-rc.9"
+version = "0.11.1-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a22f7125c70fd8e959d85d29c0bdbeecb173d6aed9a72eae71f1e43bade383f"
+checksum = "10400124af86de579b0f13603e014512b6166ad94ea791212b71579ffb91dd8a"
 dependencies = [
  "amplify",
  "baid64",
@@ -1969,7 +1954,6 @@ dependencies = [
 [[package]]
 name = "rgb-lib-wasm"
 version = "0.3.0-beta.5"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib-wasm?branch=dev#e1f99c42f07bc18b0f5cdf5e714f5c088cc11d20"
 dependencies = [
  "amplify",
  "base64 0.22.1",
@@ -2012,9 +1996,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-ops"
-version = "0.11.1-rc.9"
+version = "0.11.1-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bb298dfc6cddd4367c850bf621fca6b2b77a16c2ce472bc4e576811fe5b29be"
+checksum = "3782a5ff1e5408e23c2d14fc556347684f5c8f72d96c4ca357527a3dbffb7378"
 dependencies = [
  "amplify",
  "baid64",
@@ -2031,14 +2015,15 @@ dependencies = [
  "rgb-strict-encoding",
  "rgb-strict-types",
  "serde",
+ "serde_json",
  "wasm-bindgen",
 ]
 
 [[package]]
 name = "rgb-psbt-utils"
-version = "0.11.1-rc.9"
+version = "0.11.1-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9faab66bd883c85ffcb35f8dfa9d676184c5924f5076ffd9c72943bdf5b3df3c"
+checksum = "0107634634c424a8b268ec6549df08da676768ec6ddbcda51f12e7882daeeee6"
 dependencies = [
  "amplify",
  "baid64",
@@ -2051,9 +2036,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-schemas"
-version = "0.11.1-rc.9"
+version = "0.11.1-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1a80e2f45e850293c97d0e4fcd9b1c066a666b52b66617f4476365346c92111"
+checksum = "1903961c836cc3f6963b06c69cb47491a815309f265439f20c932e0a3aa16a78"
 dependencies = [
  "amplify",
  "rgb-aluvm",
@@ -2133,13 +2118,14 @@ dependencies = [
 name = "rln-wasm-sdk"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bitcoin_hashes",
  "futures",
  "gloo-net 0.5.0",
  "hex",
  "js-sys",
  "lightning",
- "lightning-invoice 0.34.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lightning-invoice",
  "rgb-lib-wasm",
  "sdk-contracts",
  "secp256k1",
@@ -3001,6 +2987,16 @@ name = "web-sys"
 version = "0.3.94"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd70027e39b12f0849461e08ffc50b9cd7688d942c1c8e3c7b22273236b4dd0a"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

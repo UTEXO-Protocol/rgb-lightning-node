@@ -43,6 +43,7 @@ services:
         exec /root/electrs --network regtest -vvv --cookie admin:passw --jsonrpc-import --electrum-rpc-addr=0.0.0.0:60401 --http-addr 0.0.0.0:3002 --cors '*'
     ports:
       - "3002:3002"
+      - "18444:18443"
 
   wasm-proxy-gateway:
     image: rust:1.88

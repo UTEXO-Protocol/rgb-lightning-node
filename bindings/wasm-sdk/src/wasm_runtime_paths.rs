@@ -19,6 +19,7 @@ fn runtime_descriptor_slug(descriptor: &str) -> String {
 }
 
 /// Directory passed to LDK `KeysManager::new` / `ChannelManager::new` RGB transfer scratch paths.
+#[allow(dead_code)]
 pub(crate) fn ldk_data_dir_for_runtime(runtime_key: &str) -> PathBuf {
     let slug = runtime_descriptor_slug(runtime_key);
     #[cfg(target_arch = "wasm32")]

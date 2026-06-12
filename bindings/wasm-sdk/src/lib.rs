@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
+mod browser_kv_store;
 mod chain_sync;
 mod ldk_event_applier;
 #[path = "ldk_live_backend.rs"]

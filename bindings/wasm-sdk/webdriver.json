@@ -1,0 +1,11 @@
+{
+  "goog:chromeOptions": {
+    "args": [
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--headless=new",
+      "--disable-gpu",
+      "--remote-debugging-port=0"
+    ]
+  }
+}

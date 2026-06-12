@@ -38,15 +38,16 @@
     </style>
   </head>
   <body>
-    <h1>RLN WASM Virtual Channel SDK Flow</h1>
+    <h1>RLN WASM Virtual Channel SDK Flow (legacy)</h1>
     <p>
-      Runs the same high-level sequence as the Python virtual-channel SDK example:
-      init/unlock, connect peers, open `trusted_no_broadcast` virtual channel,
-      keysend A->B, keysend B->A, close channel (with host/fallback close retry).
+      Legacy demonstration using the <code>RlnWasmSdk</code> high-level wrapper
+      with <code>trusted_no_broadcast</code> virtual channels.  See
+      <a href="./rgb_asset_transfer_flow.html">rgb_asset_transfer_flow.html</a>
+      for the updated <strong>WasmRgbBackend</strong> real on-chain channel flow.
     </p>
     <p>
-      Note: this is the wasm runtime flow, so settlement statuses are driven via
-      wasm status APIs/events instead of native LDK daemon callbacks.
+      Runs the high-level sequence: init/unlock, connect peers, open virtual
+      channel, keysend A-&gt;B, keysend B-&gt;A, close channel.
     </p>
     <p>
       Optional: set relay auth values below if your proxy requires auth.

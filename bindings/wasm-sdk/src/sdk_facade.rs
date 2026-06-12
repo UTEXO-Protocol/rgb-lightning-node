@@ -1435,6 +1435,11 @@ impl RlnWasmSdk {
 
 #[wasm_bindgen]
 impl RlnWasmSdkNodeHandle {
+    #[wasm_bindgen(js_name = attachWallet)]
+    pub fn attach_wallet(&self, wallet: &crate::RlnWasmWallet) -> Result<(), JsValue> {
+        self.inner.attach_wallet(wallet)
+    }
+
     #[wasm_bindgen(js_name = nodeInfoValue)]
     pub fn node_info_value(&self) -> Result<JsValue, JsValue> {
         self.inner.node_info_value()
@@ -1899,6 +1904,8 @@ impl RlnWasmSdkNodeHandle {
             asset_id,
             asset_local_amount,
             virtual_open_mode,
+            None,
+            None,
         )
     }
 
@@ -2596,6 +2603,8 @@ impl RlnWasmWallet {
                 request.donation,
                 request.fee_rate,
                 request.min_confirmations,
+                // Regular RGB send: keep BDK's default (anti-fee-sniping) locktime.
+                None,
             )
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2906,7 +2915,7 @@ impl RlnWasmWallet {
                 .map_err(|e| JsValue::from_str(&format!("Invalid recipient map: {e}")))?;
         let mut wallet = self.inner.borrow_mut();
         wallet
-            .send_begin(online, recipient_map, donation, fee_rate, min_confirmations)
+            .send_begin(online, recipient_map, donation, fee_rate, min_confirmations, None)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }

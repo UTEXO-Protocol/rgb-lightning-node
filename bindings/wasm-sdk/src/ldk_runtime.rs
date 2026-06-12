@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 
 use bitcoin_hashes::sha256::Hash as Sha256;
@@ -201,6 +203,12 @@ pub struct LdkRuntimeOpenChannelRequestData {
     pub public: bool,
     pub asset_id: Option<String>,
     pub asset_local_amount: Option<u64>,
+    /// baid58-encoded RGB `ContractId`. Required when `asset_id` is `Some`.
+    #[serde(default)]
+    pub contract_id: Option<String>,
+    /// RGB transport endpoint string (e.g. `rpc://…`). Required when `asset_id` is `Some`.
+    #[serde(default)]
+    pub consignment_endpoint: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -375,6 +383,18 @@ pub trait LdkRuntimeManager {
 
     fn chain_apply_unconfirmed_tx(&self, _txid: &str) -> Result<(), JsValue> {
         Ok(())
+    }
+
+    fn drive_rgb_funding_work_boxed(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn process_pending_rgb_transactions_boxed(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -952,6 +972,30 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
     fn chain_apply_unconfirmed_tx(&self, txid: &str) -> Result<(), JsValue> {
         let backend = self.ensure_live_backend()?;
         backend.chain_apply_unconfirmed_tx(txid)
+    }
+
+    fn drive_rgb_funding_work_boxed(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
+        let maybe_backend = self.live_backend.borrow().as_ref().map(Rc::clone);
+        Box::pin(async move {
+            if let Some(backend) = maybe_backend {
+                backend.drive_rgb_funding_work_boxed().await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn process_pending_rgb_transactions_boxed(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
+        let maybe_backend = self.live_backend.borrow().as_ref().map(Rc::clone);
+        Box::pin(async move {
+            if let Some(backend) = maybe_backend {
+                backend.process_pending_rgb_transactions_boxed().await?;
+            }
+            Ok(())
+        })
     }
 
     fn upsert_channel(&self, channel: LdkRuntimeChannelStateData) {

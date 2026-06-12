@@ -1632,6 +1632,8 @@ fn bridge_backend_trusted_virtual_keysend_finalizes_via_runtime_virtual_payment_
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open channel");
     let opened: serde_json::Value = crate::js_from(opened_js).expect("parse opened");
@@ -2525,6 +2527,8 @@ fn open_channel_rejects_unknown_virtual_mode_contract() {
             None,
             None,
             Some("wrong_mode".to_string()),
+            None,
+            None,
         )
         .expect_err("should fail");
     assert_eq!(
@@ -2545,6 +2549,8 @@ fn open_channel_rejects_virtual_public_contract() {
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect_err("should fail");
     assert_eq!(
@@ -2579,6 +2585,8 @@ fn open_channel_non_virtual_rejects_without_mutating_state_contract() {
             peer_pubkey,
             SDK_OPENCHANNEL_MIN_SAT,
             false,
+            None,
+            None,
             None,
             None,
             None,
@@ -2621,6 +2629,8 @@ fn open_channel_non_virtual_rgb_rejected_with_explicit_contract_message() {
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
             Some(SDK_OPENCHANNEL_MIN_RGB_AMT),
             None,
+            None,
+            None,
         )
         .expect_err("RGB non-virtual open must be hard-rejected for now");
     assert_eq!(
@@ -2651,6 +2661,8 @@ fn open_channel_virtual_mode_is_persisted_in_runtime_contract() {
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -2685,6 +2697,8 @@ fn open_channel_virtual_becomes_usable_only_after_runtime_event_contract() {
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -2735,6 +2749,8 @@ fn open_channel_virtual_rejected_when_feature_disabled_contract() {
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect_err("should fail");
     assert_eq!(
@@ -2802,6 +2818,8 @@ fn close_channel_virtual_requires_peer_pubkey_contract() {
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open virtual channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -2842,6 +2860,8 @@ fn close_channel_rejects_force_for_virtual_channel_contract() {
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open virtual channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -2882,6 +2902,8 @@ fn close_channel_virtual_rejected_when_feature_disabled_contract() {
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open virtual channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -2923,6 +2945,8 @@ fn close_channel_rejects_virtual_cleanup_when_counterparty_btc_value_remains_con
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open virtual channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -2974,6 +2998,8 @@ fn close_channel_allows_virtual_cleanup_after_btc_roundtrip_contract() {
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open virtual channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -3108,6 +3134,8 @@ fn close_channel_allows_virtual_cleanup_after_authoritative_peer_keysend_roundtr
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open virtual channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -3177,6 +3205,8 @@ fn close_channel_rejects_virtual_cleanup_after_non_authoritative_inbound_credit_
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open virtual channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
@@ -3239,6 +3269,8 @@ fn close_channel_rejects_virtual_cleanup_when_claimable_invoice_exists_contract(
             None,
             None,
             Some("trusted_no_broadcast".to_string()),
+            None,
+            None,
         )
         .expect("open virtual channel");
     let opened_json: serde_json::Value = crate::js_from(opened).expect("parse opened channel");
