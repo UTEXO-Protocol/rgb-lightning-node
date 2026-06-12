@@ -20,9 +20,7 @@ async fn transfers_pagination_and_filter() {
 
     let sends = 3u64;
     for _ in 0..sends {
-        let recipient_id = rgb_invoice(node2_addr, Some(asset_id.clone()), false)
-            .await
-            .recipient_id;
+        let recipient_id = rgb_invoice(node2_addr, None, false).await.recipient_id;
         send_asset(
             node1_addr,
             &asset_id,

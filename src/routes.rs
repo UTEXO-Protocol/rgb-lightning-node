@@ -834,7 +834,7 @@ fn resolve_page_size(max: Option<u64>, default: u64) -> u64 {
 
 /// Inclusive `[after, before]` timestamp filter; an absent bound is open-ended.
 fn in_time_range(ts: u64, after: Option<u64>, before: Option<u64>) -> bool {
-    after.map_or(true, |a| ts >= a) && before.map_or(true, |b| ts <= b)
+    after.is_none_or(|a| ts >= a) && before.is_none_or(|b| ts <= b)
 }
 
 /// Newest-first cursor pagination over `(index, value)` pairs. `index_offset`
@@ -3208,10 +3208,10 @@ pub(crate) async fn list_payments(
     }
 
     all.retain(|(_, p)| {
-        params.status.map_or(true, |s| p.status == s)
+        params.status.is_none_or(|s| p.status == s)
             && params
                 .direction
-                .map_or(true, |d| p.payment_type.direction() == d)
+                .is_none_or(|d| p.payment_type.direction() == d)
             && in_time_range(p.created_at, params.created_after, params.created_before)
     });
 
@@ -3402,7 +3402,7 @@ pub(crate) async fn list_transfers(
     }
 
     transfers.retain(|t| {
-        payload.status.as_ref().map_or(true, |s| &t.status == s)
+        payload.status.as_ref().is_none_or(|s| &t.status == s)
             && in_time_range(
                 t.created_at as u64,
                 payload.created_after,
