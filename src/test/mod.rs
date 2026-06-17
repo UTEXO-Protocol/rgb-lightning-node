@@ -2702,6 +2702,7 @@ mod close_coop_zero_balance;
 mod close_force_nobtc_acceptor;
 mod close_force_other_side;
 mod close_force_standard;
+mod colored_channel_electrum;
 mod concurrent_btc_payments;
 mod concurrent_openchannel;
 mod drop_funding_signed;
