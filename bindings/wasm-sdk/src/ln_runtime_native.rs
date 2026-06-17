@@ -88,6 +88,10 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+// Cloneable so the autonomous drive loop can hold its own handle to the same runtime queue. The
+// `snapshot` is an `Rc<RefCell<..>>`, so a clone shares the underlying queue/state — draining from
+// either handle drains the same events.
+#[derive(Clone)]
 pub struct NativeLnRuntimeCore {
     storage_key_base: String,
     snapshot: Rc<RefCell<NativeLnRuntimeCoreSnapshot>>,

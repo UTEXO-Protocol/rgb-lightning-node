@@ -167,7 +167,9 @@ impl RlnWasmSdk {
                 }
                 let existing = state
                     .mnemonic()
-                    .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_SDK_LIFECYCLE_INCONSISTENT))?
+                    .ok_or_else(|| {
+                        JsValue::from_str(sdk_contracts::ERR_SDK_LIFECYCLE_INCONSISTENT)
+                    })?
                     .to_string();
                 sync_runtime_session_authority_from_lifecycle(&state);
                 return Ok(RlnWasmInitData { mnemonic: existing });
@@ -366,6 +368,24 @@ impl RlnWasmSdk {
         node.issue_asset_cfa_json(request_js)
     }
 
+    #[wasm_bindgen(js_name = issueAssetIfaValue)]
+    pub fn issue_asset_ifa_value(
+        &self,
+        node: &RlnWasmNode,
+        request_js: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        node.issue_asset_ifa_value(request_js)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetIfaJson)]
+    pub fn issue_asset_ifa_json(
+        &self,
+        node: &RlnWasmNode,
+        request_js: JsValue,
+    ) -> Result<String, JsValue> {
+        node.issue_asset_ifa_json(request_js)
+    }
+
     #[wasm_bindgen(js_name = issueAssetUdaValue)]
     pub async fn issue_asset_uda_value(&self, _request_json: String) -> Result<JsValue, JsValue> {
         Err(JsValue::from_str(
@@ -394,9 +414,8 @@ impl RlnWasmSdk {
         if bytes_hex.is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_BYTES_HEX_EMPTY));
         }
-        let bytes =
-            hex::decode(bytes_hex)
-                .map_err(|_| JsValue::from_str(sdk_contracts::ERR_BYTES_HEX_INVALID))?;
+        let bytes = hex::decode(bytes_hex)
+            .map_err(|_| JsValue::from_str(sdk_contracts::ERR_BYTES_HEX_INVALID))?;
         if bytes.is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_MEDIA_FILE_EMPTY));
         }
@@ -1193,6 +1212,44 @@ impl RlnWasmSdk {
         node.reconnect_manager_on_resume();
     }
 
+    #[wasm_bindgen(js_name = autoDriveStartValue)]
+    pub fn auto_drive_start_value(
+        &self,
+        node: &RlnWasmNode,
+        interval_ms: u32,
+    ) -> Result<JsValue, JsValue> {
+        node.auto_drive_start_value(interval_ms)
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStartJson)]
+    pub fn auto_drive_start_json(
+        &self,
+        node: &RlnWasmNode,
+        interval_ms: u32,
+    ) -> Result<String, JsValue> {
+        node.auto_drive_start_json(interval_ms)
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStopValue)]
+    pub fn auto_drive_stop_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.auto_drive_stop_value()
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStopJson)]
+    pub fn auto_drive_stop_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.auto_drive_stop_json()
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStatusValue)]
+    pub fn auto_drive_status_value(&self, node: &RlnWasmNode) -> Result<JsValue, JsValue> {
+        node.auto_drive_status_value()
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStatusJson)]
+    pub fn auto_drive_status_json(&self, node: &RlnWasmNode) -> Result<String, JsValue> {
+        node.auto_drive_status_json()
+    }
+
     #[wasm_bindgen(js_name = openChannelValue)]
     pub fn open_channel_value(
         &self,
@@ -1629,7 +1686,8 @@ impl RlnWasmSdkNodeHandle {
         indexer_url: String,
         poll_interval_ms: Option<u32>,
     ) -> Result<JsValue, JsValue> {
-        self.inner.chain_sync_start_value(indexer_url, poll_interval_ms)
+        self.inner
+            .chain_sync_start_value(indexer_url, poll_interval_ms)
     }
 
     #[wasm_bindgen(js_name = chainSyncStartJson)]
@@ -1638,7 +1696,8 @@ impl RlnWasmSdkNodeHandle {
         indexer_url: String,
         poll_interval_ms: Option<u32>,
     ) -> Result<String, JsValue> {
-        self.inner.chain_sync_start_json(indexer_url, poll_interval_ms)
+        self.inner
+            .chain_sync_start_json(indexer_url, poll_interval_ms)
     }
 
     #[wasm_bindgen(js_name = chainSyncStopValue)]
@@ -1750,7 +1809,10 @@ impl RlnWasmSdkNodeHandle {
     }
 
     #[wasm_bindgen(js_name = ingestReadEventPayloadHexJson)]
-    pub fn ingest_read_event_payload_hex_json(&self, payload_hex: String) -> Result<String, JsValue> {
+    pub fn ingest_read_event_payload_hex_json(
+        &self,
+        payload_hex: String,
+    ) -> Result<String, JsValue> {
         self.inner.ingest_read_event_payload_hex_json(payload_hex)
     }
 
@@ -2017,7 +2079,8 @@ impl RlnWasmSdkNodeHandle {
         invoice: String,
         status: String,
     ) -> Result<String, JsValue> {
-        self.inner.update_payment_status_by_invoice_json(invoice, status)
+        self.inner
+            .update_payment_status_by_invoice_json(invoice, status)
     }
 
     #[wasm_bindgen(js_name = issueAssetNiaValue)]
@@ -2314,7 +2377,9 @@ impl RlnWasmWallet {
     ) -> Result<RlnWasmRgbProxyTransportConfigData, JsValue> {
         let endpoint = endpoint.trim().to_string();
         if endpoint.is_empty() {
-            return Err(JsValue::from_str(sdk_contracts::ERR_RGB_PROXY_ENDPOINT_EMPTY));
+            return Err(JsValue::from_str(
+                sdk_contracts::ERR_RGB_PROXY_ENDPOINT_EMPTY,
+            ));
         }
         let lower = endpoint.to_ascii_lowercase();
         if !lower.starts_with("http://") && !lower.starts_with("https://") {
@@ -2332,13 +2397,19 @@ impl RlnWasmWallet {
                 let token = token.trim().to_string();
                 let node_id = node_id.trim().to_string();
                 if token.is_empty() {
-                    return Err(JsValue::from_str(sdk_contracts::ERR_RGB_PROXY_AUTH_TOKEN_EMPTY));
+                    return Err(JsValue::from_str(
+                        sdk_contracts::ERR_RGB_PROXY_AUTH_TOKEN_EMPTY,
+                    ));
                 }
                 if node_id.is_empty() {
-                    return Err(JsValue::from_str(sdk_contracts::ERR_RGB_PROXY_NODE_ID_EMPTY));
+                    return Err(JsValue::from_str(
+                        sdk_contracts::ERR_RGB_PROXY_NODE_ID_EMPTY,
+                    ));
                 }
                 if SecpPublicKey::from_str(&node_id).is_err() {
-                    return Err(JsValue::from_str(sdk_contracts::ERR_RGB_PROXY_NODE_ID_INVALID));
+                    return Err(JsValue::from_str(
+                        sdk_contracts::ERR_RGB_PROXY_NODE_ID_INVALID,
+                    ));
                 }
                 Ok(RlnWasmRgbProxyTransportConfigData {
                     endpoint,
@@ -2548,9 +2619,8 @@ impl RlnWasmWallet {
             return Err(JsValue::from_str(sdk_contracts::ERR_ASSET_ID_EMPTY));
         }
         let digest = normalize_media_digest(&asset_id)?;
-        let media =
-            media_store_get(&digest)
-                .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_MEDIA_DIGEST_INVALID))?;
+        let media = media_store_get(&digest)
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_MEDIA_DIGEST_INVALID))?;
         let _mime_hint = media.mime;
         js_obj(&WasmAssetMediaData {
             bytes_hex: media.bytes_hex,
@@ -2592,7 +2662,9 @@ impl RlnWasmWallet {
         request_js: JsValue,
     ) -> Result<JsValue, JsValue> {
         let request: WasmSendRgbFromGroupsRequest = serde_wasm_bindgen::from_value(request_js)
-            .map_err(|e| JsValue::from_str(&format!("Invalid send_rgb_from_groups request: {e}")))?;
+            .map_err(|e| {
+                JsValue::from_str(&format!("Invalid send_rgb_from_groups request: {e}"))
+            })?;
         let recipient_map = recipient_map_from_groups(request.recipient_groups)?;
 
         let mut wallet = self.inner.borrow_mut();
@@ -2915,7 +2987,14 @@ impl RlnWasmWallet {
                 .map_err(|e| JsValue::from_str(&format!("Invalid recipient map: {e}")))?;
         let mut wallet = self.inner.borrow_mut();
         wallet
-            .send_begin(online, recipient_map, donation, fee_rate, min_confirmations, None)
+            .send_begin(
+                online,
+                recipient_map,
+                donation,
+                fee_rate,
+                min_confirmations,
+                None,
+            )
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -3022,9 +3101,8 @@ impl RlnWasmWallet {
         if trimmed_script.is_empty() {
             return Err(JsValue::from_str("output_script_hex must not be empty"));
         }
-        let script_bytes = hex::decode(trimmed_script).map_err(|e| {
-            JsValue::from_str(&format!("invalid output_script_hex: {e}"))
-        })?;
+        let script_bytes = hex::decode(trimmed_script)
+            .map_err(|e| JsValue::from_str(&format!("invalid output_script_hex: {e}")))?;
         let script = lightning::bitcoin::ScriptBuf::from_bytes(script_bytes);
 
         // Derive the address from the script for the wallet's network. LDK only
@@ -3089,9 +3167,8 @@ impl RlnWasmWallet {
             .map_err(|e| JsValue::from_str(&format!("sign_psbt failed: {e}")))?;
 
         // extract the raw transaction bytes for LDK.
-        let psbt = lightning::bitcoin::Psbt::from_str(&signed_psbt).map_err(|e| {
-            JsValue::from_str(&format!("invalid signed psbt: {e}"))
-        })?;
+        let psbt = lightning::bitcoin::Psbt::from_str(&signed_psbt)
+            .map_err(|e| JsValue::from_str(&format!("invalid signed psbt: {e}")))?;
         let funding_tx = psbt
             .clone()
             .extract_tx()
@@ -3426,7 +3503,6 @@ impl RlnWasmWallet {
     }
 }
 
-
 #[wasm_bindgen]
 pub struct RlnWasmInvoice {
     inner: rgb_lib_wasm::wallet::Invoice,
@@ -3516,4 +3592,3 @@ pub async fn check_ln_peer_websocket_json(
     let parsed: serde_json::Value = js_from(value)?;
     js_to_json(&parsed)
 }
-

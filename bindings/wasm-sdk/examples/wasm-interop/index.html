@@ -3,77 +3,66 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>RLN WASM Interop Example</title>
+    <title>RLN WASM Interop Examples</title>
     <style>
       body {
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
           "Liberation Mono", "Courier New", monospace;
         margin: 2rem;
+        line-height: 1.5;
+        max-width: 52rem;
       }
-      .row {
-        display: flex;
-        gap: 0.5rem;
-        margin-bottom: 1rem;
-        flex-wrap: wrap;
-      }
-      input {
-        min-width: 340px;
-        padding: 0.4rem 0.6rem;
-      }
-      button {
-        padding: 0.4rem 0.8rem;
-      }
-      #out {
-        border: 1px solid #bbb;
-        padding: 0.8rem;
+      code {
+        background: #f2f2f2;
+        padding: 0.1rem 0.3rem;
+        border-radius: 3px;
       }
       pre {
-        margin: 0.4rem 0;
+        background: #f2f2f2;
+        padding: 0.8rem;
+        border-radius: 4px;
         white-space: pre-wrap;
       }
     </style>
   </head>
   <body>
-    <h1>RLN WASM Interop Example</h1>
+    <h1>RLN WASM Interop Examples</h1>
     <p>
-      Runs a minimal browser flow for key generation/restore and API error
-      contract checks.
-    </p>
-    <p>
-      Other examples:
-      <a href="./rgb_asset_transfer_flow.html">Real RGB channel flow</a>
-      &middot;
-      <a href="./wasm_e2e_harness.html?freshRuntime=1">E2E harness</a>
-      &middot;
-      <a href="./virtual_channels_flow.html">Virtual channels (legacy)</a>
+      These examples are automated, end-to-end RGB-over-Lightning flows that run
+      headless against a native <code>rgb-native-phase5-node</code> peer. They are
+      driven from Node (not opened directly in a browser) — each driver boots the
+      native node(s), serves this directory, launches headless Chrome via
+      <code>puppeteer-core</code>, runs the in-browser flow, and asserts success.
     </p>
 
-    <div class="row">
-      <label for="proxyUrl">Proxy URL</label>
-      <input
-        id="proxyUrl"
-        type="text"
-        value="ws://127.0.0.1:3001"
-      />
-    </div>
+    <h2>Flows</h2>
+    <ul>
+      <li>
+        <strong>Full RGB-over-Lightning flow</strong> —
+        <code>run_e2e_full_flow.mjs</code>
+        (page <code>rgb_e2e_full_flow.html</code> +
+        <code>manual_js_rgb_e2e_full_flow.js</code>): vanilla + RGB channels, real
+        BTC/BOLT11/HODL/RGB payments both directions, keysend, close, and
+        persistence-restore verify.
+      </li>
+      <li>
+        <strong>Multi-hop forwarding</strong> —
+        <code>run_multihop_flow.mjs</code>
+        (page <code>rgb_multihop_flow.html</code> +
+        <code>manual_js_rgb_multihop_flow.js</code>):
+        native-A&nbsp;&rarr;&nbsp;WASM&nbsp;&rarr;&nbsp;native-B (boots two native
+        nodes).
+      </li>
+    </ul>
 
-    <div class="row">
-      <label for="peerAddr">Peer Addr</label>
-      <input id="peerAddr" type="text" value="127.0.0.1:9746" />
-    </div>
-
-    <div class="row">
-      <label for="peerPubkey">Peer Pubkey</label>
-      <input
-        id="peerPubkey"
-        type="text"
-        value="02399514a480a9b9d041651fd408c1483a2a3dff33a74a158dc948d120930fa011"
-      />
-      <button id="run">Run Example</button>
-    </div>
-
-    <div id="out"></div>
-
-    <script type="module" src="./manual_js_wasm_interop.js?v=20260422-1"></script>
+    <h2>Run</h2>
+    <p>
+      Prereqs: <code>compose.wasm.yaml</code> infra running, the wasm
+      <code>pkg/</code> built, and the <code>rgb-native-phase5-node</code> harness
+      binary available. See <code>README.md</code> for full instructions. Example:
+    </p>
+    <pre>PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome \
+E2E_PUPPETEER=/tmp/e2e-driver/node_modules/puppeteer-core \
+node bindings/wasm-sdk/examples/wasm-interop/run_e2e_full_flow.mjs</pre>
   </body>
 </html>

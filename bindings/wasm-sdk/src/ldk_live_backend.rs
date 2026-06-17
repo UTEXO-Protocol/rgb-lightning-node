@@ -26,31 +26,37 @@ use lightning::chain::{BestBlock, ChannelMonitorUpdateStatus};
 use lightning::events::Event;
 use lightning::events::{EventsProvider, ReplayEvent};
 use lightning::ln::channelmanager::{
-    ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+    Bolt11InvoiceParameters, ChainParameters, ChannelManagerReadArgs, PaymentId,
+    RecipientOnionFields, Retry, SimpleArcChannelManager,
 };
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerHandleError, PeerManager, SocketDescriptor,
 };
 use lightning::onion_message::messenger::DefaultMessageRouter;
+use lightning::rgb_utils::{
+    update_rgb_channel_amount, write_rgb_payment_info_file, ContractId, RgbInfo, RgbKvStoreExt,
+    RgbPaymentInfo, RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
+};
 use lightning::routing::gossip::NetworkGraph;
-use lightning::routing::router::DefaultRouter;
+use lightning::routing::router::{DefaultRouter, PaymentParameters, RouteParameters};
 use lightning::routing::scoring::{
     ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
 };
-use lightning::rgb_utils::{RgbInfo, RgbKvStoreExt};
 use lightning::sign::KeysManager;
-use lightning::sign::{InMemorySigner, NodeSigner, Recipient};
+use lightning::sign::{EntropySource, InMemorySigner, NodeSigner, Recipient};
+use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::UserConfig;
 use lightning::util::errors::APIError;
 use lightning::util::logger::{Logger, Record};
 use lightning::util::persist::KVStoreSync;
 use lightning::util::persist::MonitorName;
 use lightning::util::ser::{ReadableArgs, Writeable};
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use secp256k1::PublicKey as SecpPublicKey;
 use wasm_bindgen::prelude::JsValue;
 
 use crate::ldk_runtime::{
-    LdkRuntimeFundingRequestData, LdkRuntimeFundingTxSubmissionData,
+    LdkRuntimeFundingRequestData, LdkRuntimeFundingTxSubmissionData, LdkRuntimeLivePaymentData,
     LdkRuntimeOpenChannelRequestData, LdkRuntimeOpenChannelResultData,
 };
 use crate::runtime_store::{browser_persistent_state_store, RuntimeStateStore};
@@ -114,9 +120,18 @@ enum PendingRgbFundingWork {
 pub trait LdkLiveBackend {
     fn new_outbound_connection(&self, peer_pubkey: &str) -> Result<String, JsValue>;
     fn read_event(&self, payload_hex: &str) -> Result<(), JsValue>;
+    fn read_event_for_peer(&self, _peer_pubkey: &str, payload_hex: &str) -> Result<(), JsValue> {
+        self.read_event(payload_hex)
+    }
     fn process_events(&self) -> Result<(), JsValue>;
     fn take_outbound_frames(&self) -> Result<Vec<String>, JsValue>;
+    fn take_outbound_frames_for_peer(&self, _peer_pubkey: &str) -> Result<Vec<String>, JsValue> {
+        self.take_outbound_frames()
+    }
     fn socket_disconnected(&self) -> Result<(), JsValue>;
+    fn socket_disconnected_for_peer(&self, _peer_pubkey: &str) -> Result<(), JsValue> {
+        self.socket_disconnected()
+    }
     fn is_peer_handshake_complete(&self, peer_pubkey: &str) -> Result<bool, JsValue>;
     fn open_channel_non_virtual(
         &self,
@@ -129,6 +144,89 @@ pub trait LdkLiveBackend {
     ) -> Result<(), JsValue>;
     fn list_live_channels(&self) -> Result<Vec<LdkRuntimeOpenChannelResultData>, JsValue>;
     fn local_node_pubkey(&self) -> Result<String, JsValue>;
+    fn close_live_channel(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+        force: bool,
+    ) -> Result<(), JsValue> {
+        let _ = (channel_id, peer_pubkey, force);
+        Err(JsValue::from_str(
+            "close_live_channel is not supported by this backend",
+        ))
+    }
+    /// Send a real keysend (spontaneous) HTLC over a live channel, optionally carrying RGB.
+    fn keysend_live(
+        &self,
+        _dest_pubkey: &str,
+        _amt_msat: u64,
+        _contract_id: Option<String>,
+        _asset_amount: Option<u64>,
+    ) -> Result<LdkRuntimeLivePaymentData, JsValue> {
+        Err(JsValue::from_str(
+            "keysend_live is not supported by this backend",
+        ))
+    }
+    fn send_bolt11_live(
+        &self,
+        _invoice: &str,
+        _amt_msat: Option<u64>,
+        _contract_id: Option<String>,
+        _asset_amount: Option<u64>,
+    ) -> Result<LdkRuntimeLivePaymentData, JsValue> {
+        Err(JsValue::from_str(
+            "send_bolt11_live is not supported by this backend",
+        ))
+    }
+    fn create_bolt11_invoice_live(
+        &self,
+        _amt_msat: Option<u64>,
+        _expiry_sec: u32,
+        _contract_id: Option<String>,
+        _asset_amount: Option<u64>,
+    ) -> Result<String, JsValue> {
+        Err(JsValue::from_str(
+            "create_bolt11_invoice_live is not supported by this backend",
+        ))
+    }
+    fn create_hodl_bolt11_invoice_live(
+        &self,
+        _amt_msat: Option<u64>,
+        _expiry_sec: u32,
+        _contract_id: Option<String>,
+        _asset_amount: Option<u64>,
+        _payment_hash: &str,
+    ) -> Result<String, JsValue> {
+        Err(JsValue::from_str(
+            "create_hodl_bolt11_invoice_live is not supported by this backend",
+        ))
+    }
+    fn claim_hodl_invoice_live(
+        &self,
+        _payment_hash: &str,
+        _payment_preimage: &str,
+    ) -> Result<bool, JsValue> {
+        Err(JsValue::from_str(
+            "claim_hodl_invoice_live is not supported by this backend",
+        ))
+    }
+    fn cancel_hodl_invoice_live(&self, _payment_hash: &str) -> Result<(), JsValue> {
+        Err(JsValue::from_str(
+            "cancel_hodl_invoice_live is not supported by this backend",
+        ))
+    }
+    /// All real payments tracked from the live `ChannelManager` event stream.
+    fn live_payments(&self) -> Vec<LdkRuntimeLivePaymentData> {
+        Vec::new()
+    }
+    /// One real payment by hex payment hash, if known.
+    fn live_payment(&self, _payment_hash: &str) -> Option<LdkRuntimeLivePaymentData> {
+        None
+    }
+    /// Drain channel ids the live `ChannelManager` reported closed since the last call.
+    fn take_closed_live_channels(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn persist_state(&self) -> Result<(), JsValue> {
         Ok(())
     }
@@ -189,14 +287,124 @@ fn ldk_live_debug(msg: &str) {
     let _ = msg;
 }
 
+/// As the final hop, project the authoritative per-HTLC RGB inbound record (written by
+/// `color_commitment` under `chan_id || payment_hash`) onto the bare `<payment_hash>` key that
+/// `finalize_rgb_channel_payment` and `get_payment` consume. Mirrors the native node's
+/// `PaymentClaimable` handling. A plain byte copy — no decode needed.
+fn project_inbound_rgb_payment_info(
+    kv_store: &Arc<dyn KVStoreSync + Send + Sync>,
+    receiving_channel_ids: &[(lightning::ln::types::ChannelId, Option<u128>)],
+    payment_hash_hex: &str,
+) {
+    for (chan_id, _) in receiving_channel_ids {
+        let chan_id_hex = hex::encode(chan_id.0);
+        let scoped = format!("{chan_id_hex}{payment_hash_hex}");
+        if let Ok(data) = kv_store.read(RGB_PRIMARY_NS, RGB_PAYMENT_INFO_INBOUND_NS, &scoped) {
+            if kv_store
+                .write(
+                    RGB_PRIMARY_NS,
+                    RGB_PAYMENT_INFO_INBOUND_NS,
+                    payment_hash_hex,
+                    data,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+}
+
+/// Settle the RGB amount of a now-confirmed HTLC into the channel's RGB split.
+///
+/// Ported from rgb-lightning-node's `_finalize_rgb_channel_payment`: it walks the per-channel
+/// scoped `<channel_id><payment_hash>_pending` payment-info records and moves the RGB amount as
+/// offered (sender) or received (receiver). No-op for plain-BTC payments (no RGB records exist).
+fn finalize_rgb_channel_payment(
+    payment_hash: &PaymentHash,
+    receiver: bool,
+    kv_store: &Arc<dyn KVStoreSync + Send + Sync>,
+) -> lightning::io::Result<()> {
+    let payment_hash_str = hex::encode(payment_hash.0);
+    let pending_suffix = format!("{payment_hash_str}_pending");
+    let mut applied_any = false;
+
+    for inbound in [true, false] {
+        let namespace = if inbound {
+            RGB_PAYMENT_INFO_INBOUND_NS
+        } else {
+            RGB_PAYMENT_INFO_OUTBOUND_NS
+        };
+        let keys = kv_store.list(RGB_PRIMARY_NS, namespace)?;
+        let mut applied_keys = Vec::new();
+        for key in &keys {
+            if !key.ends_with(&pending_suffix) || key.len() <= pending_suffix.len() {
+                continue;
+            }
+            let channel_id_str = &key[..key.len() - pending_suffix.len()];
+            if channel_id_str.len() != 64 {
+                continue;
+            }
+            let data = match kv_store.read(RGB_PRIMARY_NS, namespace, key) {
+                Ok(data) => data,
+                Err(e) if e.kind() == lightning::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            let rgb_payment_info: RgbPaymentInfo = match bincode::deserialize(&data) {
+                Ok(info) => info,
+                Err(_) => continue,
+            };
+            if rgb_payment_info.swap_payment && receiver != rgb_payment_info.inbound {
+                continue;
+            }
+            let (offered, received) = if receiver {
+                (0, rgb_payment_info.amount)
+            } else {
+                (rgb_payment_info.amount, 0)
+            };
+            // Only update channels with existing RGB info; skip otherwise.
+            if kv_store
+                .read_rgb_channel_info(channel_id_str, false)
+                .is_ok()
+            {
+                update_rgb_channel_amount(
+                    channel_id_str,
+                    offered,
+                    received,
+                    false,
+                    kv_store.as_ref(),
+                );
+                applied_keys.push(key.clone());
+                applied_any = true;
+            }
+        }
+        for key in &applied_keys {
+            let _ = kv_store.remove(RGB_PRIMARY_NS, namespace, key, false);
+        }
+    }
+
+    if applied_any {
+        let raw_pending_key = format!("{payment_hash_str}_pending");
+        for namespace in [RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS] {
+            let keys = kv_store.list(RGB_PRIMARY_NS, namespace)?;
+            let remaining = keys
+                .iter()
+                .any(|k| k.ends_with(&pending_suffix) && k.len() > pending_suffix.len());
+            if !remaining {
+                let _ = kv_store.remove(RGB_PRIMARY_NS, namespace, &raw_pending_key, false);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub struct WasmLdkLiveBackend {
     runtime_key: String,
     node_seed32: Option<[u8; 32]>,
     self_weak: RefCell<Weak<WasmLdkLiveBackend>>,
     connected_peers: RefCell<HashSet<String>>,
-    active_peer_pubkey: RefCell<Option<String>>,
-    inbound_frames: RefCell<VecDeque<String>>,
+    inbound_frames: RefCell<VecDeque<(String, String)>>,
     outbound_frames: RefCell<VecDeque<String>>,
     disconnected: Cell<bool>,
     descriptor_nonce: Cell<u64>,
@@ -205,6 +413,13 @@ pub struct WasmLdkLiveBackend {
     pending_rgb_funding_work: RefCell<VecDeque<PendingRgbFundingWork>>,
     pending_rgb_prepare_results: RefCell<HashMap<String, String>>,
     submitted_funding_txids: RefCell<HashSet<Txid>>,
+    /// Real payments tracked from the live `ChannelManager` event stream, keyed by hex payment hash.
+    live_payments: RefCell<HashMap<String, LdkRuntimeLivePaymentData>>,
+    /// Invoice hashes whose claimable HTLCs must be held until explicitly claimed or cancelled.
+    hodl_payment_hashes: RefCell<HashSet<String>>,
+    /// Channel ids the live `ChannelManager` reported closed via `Event::ChannelClosed`, pending
+    /// propagation to the runtime channel view (drained by `take_closed_live_channels`).
+    closed_channels: RefCell<Vec<String>>,
     object_graph: RefCell<Option<LdkObjectGraph>>,
 }
 
@@ -221,7 +436,7 @@ struct LdkObjectGraph {
     channel_manager: Arc<WasmChannelManager>,
     rgb_backend: Arc<lightning::rgb_utils::RgbBackend>,
     rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
-    active_descriptor: RefCell<Option<LiveSocketDescriptor>>,
+    peer_descriptors: RefCell<HashMap<String, LiveSocketDescriptor>>,
     channel_manager_restored: bool,
     monitors_restored: bool,
 }
@@ -306,13 +521,28 @@ impl Logger for WasmLdkLogger {
 
 struct FixedFeeEstimator;
 
+// Regtest channel/on-chain feerate. The indexer derives its feerate from bitcoind's
+// `-fallbackfee=0.0002` (≈ 20 sat/vB ≈ 5000 sat/kw) because regtest has no fee market, and a
+// counterparty reading that estimate rejects a channel opened at the protocol floor (253 sat/kw)
+// with "Peer's feerate much too low". So we must open at a realistic feerate, not the floor.
+const REGTEST_CHANNEL_FEERATE_SATS_PER_KW: u32 = 5000;
+
 impl FeeEstimator for FixedFeeEstimator {
     fn get_est_sat_per_1000_weight(
         &self,
-        _confirmation_target: lightning::chain::chaininterface::ConfirmationTarget,
+        confirmation_target: lightning::chain::chaininterface::ConfirmationTarget,
     ) -> u32 {
-        // Keep at least protocol floor for deterministic bootstrap behavior.
-        FEERATE_FLOOR_SATS_PER_KW
+        use lightning::chain::chaininterface::ConfirmationTarget::*;
+        match confirmation_target {
+            // Lower bounds we enforce on a peer's feerate, and the minimum we'll use for our own
+            // cooperative-close / mempool txs. Keep these at the protocol floor so we still accept
+            // whatever commitment feerate the counterparty chose.
+            MinAllowedAnchorChannelRemoteFee
+            | MinAllowedNonAnchorChannelRemoteFee
+            | ChannelCloseMinimum => FEERATE_FLOOR_SATS_PER_KW,
+            // Commitment and on-chain feerates: use the regtest network rate so opens are accepted.
+            _ => REGTEST_CHANNEL_FEERATE_SATS_PER_KW,
+        }
     }
 }
 
@@ -719,7 +949,6 @@ impl WasmLdkLiveBackend {
             node_seed32,
             self_weak: RefCell::new(Weak::new()),
             connected_peers: RefCell::new(HashSet::new()),
-            active_peer_pubkey: RefCell::new(None),
             inbound_frames: RefCell::new(VecDeque::new()),
             outbound_frames: RefCell::new(VecDeque::new()),
             disconnected: Cell::new(false),
@@ -729,6 +958,9 @@ impl WasmLdkLiveBackend {
             pending_rgb_funding_work: RefCell::new(VecDeque::new()),
             pending_rgb_prepare_results: RefCell::new(HashMap::new()),
             submitted_funding_txids: RefCell::new(HashSet::new()),
+            live_payments: RefCell::new(HashMap::new()),
+            hodl_payment_hashes: RefCell::new(HashSet::new()),
+            closed_channels: RefCell::new(Vec::new()),
             object_graph: RefCell::new(None),
         }
     }
@@ -804,7 +1036,13 @@ impl WasmLdkLiveBackend {
             Arc::clone(&network_graph),
             Arc::clone(&keys_manager),
         ));
-        let user_config = UserConfig::default();
+        let mut user_config = UserConfig::default();
+        // Act as a routing intermediary for multi-hop payments (Phase 4): forward HTLCs whose
+        // outgoing hop is one of our *private* (unannounced) channels. With the default `false`,
+        // LDK returns `PrivateChannelForward` and refuses to forward over private channels
+        // (`can_forward_htlc_to_outgoing_channel`), which would break native-A -> WASM -> native-B
+        // where the WASM->payee channel is private and reached via an invoice route hint.
+        user_config.accept_forwards_to_priv_channels = true;
         let chain_params = ChainParameters {
             network: bitcoin::Network::Regtest,
             best_block: BestBlock::from_network(bitcoin::Network::Regtest),
@@ -898,7 +1136,7 @@ impl WasmLdkLiveBackend {
             channel_manager,
             rgb_backend,
             rgb_kv_store,
-            active_descriptor: RefCell::new(None),
+            peer_descriptors: RefCell::new(HashMap::new()),
             channel_manager_restored,
             monitors_restored,
         });
@@ -955,11 +1193,11 @@ impl WasmLdkLiveBackend {
             Ok::<(), ReplayEvent>(())
         });
         for event in collected_events.into_inner().into_iter() {
-            self.handle_ldk_event_sync(event);
+            self.handle_ldk_event_sync(g, event);
         }
     }
 
-    fn handle_ldk_event_sync(&self, event: Event) {
+    fn handle_ldk_event_sync(&self, g: &LdkObjectGraph, event: Event) {
         match event {
             Event::FundingGenerationReady {
                 temporary_channel_id: ev_temp,
@@ -974,15 +1212,15 @@ impl WasmLdkLiveBackend {
                     .borrow()
                     .contains_key(&user_channel_id);
                 if is_rgb {
-                    self.pending_rgb_funding_work
-                        .borrow_mut()
-                        .push_back(PendingRgbFundingWork::Prepare {
+                    self.pending_rgb_funding_work.borrow_mut().push_back(
+                        PendingRgbFundingWork::Prepare {
                             user_channel_id,
                             temporary_channel_id: ev_temp,
                             counterparty_node_id,
                             output_script_hex: hex::encode(output_script.as_bytes()),
                             channel_value_satoshis,
-                        });
+                        },
+                    );
                 } else {
                     self.pending_funding_requests.borrow_mut().insert(
                         temporary_channel_id_hex.clone(),
@@ -1006,30 +1244,173 @@ impl WasmLdkLiveBackend {
                     .get(&former_temp_hex)
                     .cloned();
                 if let Some(signed_psbt) = signed_psbt {
-                    self.pending_rgb_funding_work
-                        .borrow_mut()
-                        .push_back(PendingRgbFundingWork::Complete {
+                    self.pending_rgb_funding_work.borrow_mut().push_back(
+                        PendingRgbFundingWork::Complete {
                             temporary_channel_id_hex: former_temp_hex,
                             signed_psbt,
-                        });
+                        },
+                    );
                 }
             }
             Event::RgbFundingValidationRequired {
-                temporary_channel_id, ..
+                temporary_channel_id,
+                ..
             } => {
-                self.pending_rgb_funding_work
-                    .borrow_mut()
-                    .push_back(PendingRgbFundingWork::ValidateFunding {
+                self.pending_rgb_funding_work.borrow_mut().push_back(
+                    PendingRgbFundingWork::ValidateFunding {
                         temporary_channel_id,
-                    });
+                    },
+                );
             }
             Event::RgbTransactionPersistenceRequired => {
                 self.pending_rgb_funding_work
                     .borrow_mut()
                     .push_back(PendingRgbFundingWork::ProcessPendingTransactions);
             }
+            // ---- Channel closed (cooperative or force): record for runtime-view removal ----
+            // The live ChannelManager is authoritative for close completion; we propagate this to
+            // the SDK channel view via reconcile (event-driven), instead of removing optimistically
+            // on the close request (which would hide a still-open channel if the close stalls).
+            Event::ChannelClosed { channel_id, .. } => {
+                let id_hex = format!("{channel_id}");
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk ldk-live] ChannelClosed channel_id={id_hex}"
+                ));
+                self.closed_channels.borrow_mut().push(id_hex);
+            }
+            // ---- Real payment lifecycle (outbound, this node is the payer) ----
+            Event::PaymentSent {
+                payment_hash,
+                payment_preimage,
+                ..
+            } => {
+                let hash_hex = hex::encode(payment_hash.0);
+                // Settle the RGB channel split for the now-confirmed outbound HTLC.
+                let _ = finalize_rgb_channel_payment(&payment_hash, false, &g.rgb_kv_store);
+                self.mark_live_payment(
+                    &hash_hex,
+                    "succeeded",
+                    Some(hex::encode(payment_preimage.0)),
+                );
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk ldk-live] PaymentSent hash={hash_hex}"
+                ));
+            }
+            Event::PaymentFailed {
+                payment_hash: Some(payment_hash),
+                ..
+            } => {
+                let hash_hex = hex::encode(payment_hash.0);
+                self.mark_live_payment(&hash_hex, "failed", None);
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk ldk-live] PaymentFailed hash={hash_hex}"
+                ));
+            }
+            // ---- Real payment lifecycle (inbound, this node is the payee) ----
+            Event::PaymentClaimable {
+                payment_hash,
+                purpose,
+                amount_msat,
+                receiving_channel_ids,
+                ..
+            } => {
+                let hash_hex = hex::encode(payment_hash.0);
+                // Project the per-HTLC scoped inbound RGB record (chan_id||hash) onto the bare
+                // payment-hash key so finalize can find it after the claim settles.
+                project_inbound_rgb_payment_info(
+                    &g.rgb_kv_store,
+                    &receiving_channel_ids,
+                    &hash_hex,
+                );
+                let (preimage, external_hash_invoice) = match purpose {
+                    lightning::events::PaymentPurpose::SpontaneousPayment(preimage) => {
+                        (Some(preimage), false)
+                    }
+                    lightning::events::PaymentPurpose::Bolt11InvoicePayment {
+                        payment_preimage,
+                        ..
+                    } => (payment_preimage, payment_preimage.is_none()),
+                    _ => (None, false),
+                };
+                if external_hash_invoice || self.hodl_payment_hashes.borrow().contains(&hash_hex) {
+                    self.hodl_payment_hashes
+                        .borrow_mut()
+                        .insert(hash_hex.clone());
+                    self.upsert_inbound_live_payment(&hash_hex, "claimable", amount_msat);
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] PaymentClaimable held hash={hash_hex}"
+                    ));
+                    return;
+                }
+                if let Some(preimage) = preimage {
+                    g.channel_manager.claim_funds(preimage);
+                    self.upsert_inbound_live_payment(&hash_hex, "pending", amount_msat);
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] PaymentClaimable claimed hash={hash_hex}"
+                    ));
+                }
+            }
+            Event::PaymentClaimed {
+                payment_hash,
+                amount_msat,
+                ..
+            } => {
+                let hash_hex = hex::encode(payment_hash.0);
+                let _ = finalize_rgb_channel_payment(&payment_hash, true, &g.rgb_kv_store);
+                self.upsert_inbound_live_payment(&hash_hex, "succeeded", amount_msat);
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk ldk-live] PaymentClaimed hash={hash_hex}"
+                ));
+            }
             _ => {}
         }
+    }
+
+    /// Update an existing (outbound) live-payment record's status/preimage.
+    fn mark_live_payment(&self, hash_hex: &str, status: &str, preimage: Option<String>) {
+        let now = unix_now_secs();
+        let mut map = self.live_payments.borrow_mut();
+        let entry = map
+            .entry(hash_hex.to_string())
+            .or_insert_with(|| LdkRuntimeLivePaymentData {
+                payment_hash: hash_hex.to_string(),
+                status: "pending".to_string(),
+                amt_msat: None,
+                asset_id: None,
+                asset_amount: None,
+                inbound: false,
+                preimage: None,
+                created_at: now,
+                updated_at: now,
+            });
+        entry.status = status.to_string();
+        if preimage.is_some() {
+            entry.preimage = preimage;
+        }
+        entry.updated_at = now;
+    }
+
+    /// Insert/update an inbound live-payment record observed via PaymentClaimable/Claimed.
+    fn upsert_inbound_live_payment(&self, hash_hex: &str, status: &str, amt_msat: u64) {
+        let now = unix_now_secs();
+        let mut map = self.live_payments.borrow_mut();
+        let entry = map
+            .entry(hash_hex.to_string())
+            .or_insert_with(|| LdkRuntimeLivePaymentData {
+                payment_hash: hash_hex.to_string(),
+                status: status.to_string(),
+                amt_msat: Some(amt_msat),
+                asset_id: None,
+                asset_amount: None,
+                inbound: true,
+                preimage: None,
+                created_at: now,
+                updated_at: now,
+            });
+        entry.inbound = true;
+        entry.status = status.to_string();
+        entry.amt_msat = Some(amt_msat);
+        entry.updated_at = now;
     }
 
     fn derive_channel_status_from_live(
@@ -1061,7 +1442,7 @@ impl WasmLdkLiveBackend {
                 }
                 _ => {}
             }
-            self.handle_ldk_event_sync(event);
+            self.handle_ldk_event_sync(g, event);
         }
 
         if let Some(details) = g
@@ -1132,9 +1513,8 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             ));
         };
 
-        if let Some(prev) = g.active_descriptor.borrow().as_ref().cloned() {
+        if let Some(prev) = g.peer_descriptors.borrow_mut().remove(peer_pubkey) {
             g.peer_manager.borrow().socket_disconnected(&prev);
-            g.active_descriptor.borrow_mut().take();
         }
 
         let descriptor = LiveSocketDescriptor {
@@ -1153,16 +1533,26 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             peer_pubkey,
             act_one.len()
         ));
-        g.active_descriptor.borrow_mut().replace(descriptor);
-        self.active_peer_pubkey
+        g.peer_descriptors
             .borrow_mut()
-            .replace(peer_pubkey.to_string());
+            .insert(peer_pubkey.to_string(), descriptor);
         Ok(hex::encode(act_one))
     }
 
     fn read_event(&self, payload_hex: &str) -> Result<(), JsValue> {
+        let peer_pubkey = self
+            .connected_peers
+            .borrow()
+            .iter()
+            .next()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_ACTIVE_PEER_DESCRIPTOR_MISSING))?;
+        self.read_event_for_peer(&peer_pubkey, payload_hex)
+    }
+
+    fn read_event_for_peer(&self, peer_pubkey: &str, payload_hex: &str) -> Result<(), JsValue> {
         self.ensure_phase1_runtime_ready()?;
-        if self.disconnected.get() {
+        if !self.connected_peers.borrow().contains(peer_pubkey) {
             return Err(JsValue::from_str(
                 sdk_contracts::ERR_PEER_TRANSPORT_DISCONNECTED,
             ));
@@ -1186,9 +1576,9 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             ));
         };
         let mut desc = g
-            .active_descriptor
+            .peer_descriptors
             .borrow()
-            .as_ref()
+            .get(peer_pubkey)
             .cloned()
             .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_ACTIVE_PEER_DESCRIPTOR_MISSING))?;
         let Ok(peer_manager) = g.peer_manager.try_borrow_mut() else {
@@ -1197,7 +1587,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             // Queue that reentrant frame and drain it on the next processing pass.
             self.inbound_frames
                 .borrow_mut()
-                .push_back(payload_hex.to_string());
+                .push_back((peer_pubkey.to_string(), payload_hex.to_string()));
             return Ok(());
         };
         peer_manager
@@ -1227,13 +1617,11 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         // may synchronously cause more inbound frames, which `read_event` queues while the peer
         // manager is borrowed.
         for _ in 0..64 {
-            let queued: Vec<String> = self.inbound_frames.borrow_mut().drain(..).collect();
+            let queued: Vec<(String, String)> =
+                self.inbound_frames.borrow_mut().drain(..).collect();
             let peer_manager = g.peer_manager.borrow_mut();
-            if !queued.is_empty() {
-                let mut desc = g.active_descriptor.borrow().as_ref().cloned().ok_or_else(|| {
-                    JsValue::from_str(sdk_contracts::ERR_ACTIVE_PEER_DESCRIPTOR_MISSING)
-                })?;
-                for payload_hex in queued {
+            for (peer_pubkey, payload_hex) in queued {
+                if let Some(mut desc) = g.peer_descriptors.borrow().get(&peer_pubkey).cloned() {
                     let bytes = hex::decode(payload_hex).map_err(|e| {
                         JsValue::from_str(&format!("invalid queued payload_hex: {e}"))
                     })?;
@@ -1250,6 +1638,9 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 break;
             }
         }
+        // Advance received/forwarded HTLCs (no PendingHTLCsForwardable event exists in this LDK;
+        // it must be driven explicitly) so inbound payments reach PaymentClaimable.
+        g.channel_manager.process_pending_htlc_forwards();
         self.ingest_funding_generation_ready_events(g);
         persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         ldk_live_debug("[rln-wasm-sdk ldk-live] process_events");
@@ -1257,8 +1648,19 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
     }
 
     fn take_outbound_frames(&self) -> Result<Vec<String>, JsValue> {
+        let peer_pubkey = self
+            .connected_peers
+            .borrow()
+            .iter()
+            .next()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_ACTIVE_PEER_DESCRIPTOR_MISSING))?;
+        self.take_outbound_frames_for_peer(&peer_pubkey)
+    }
+
+    fn take_outbound_frames_for_peer(&self, peer_pubkey: &str) -> Result<Vec<String>, JsValue> {
         self.ensure_phase1_runtime_ready()?;
-        if self.disconnected.get() {
+        if !self.connected_peers.borrow().contains(peer_pubkey) {
             return Ok(Vec::new());
         }
         let graph = self.object_graph.borrow();
@@ -1268,9 +1670,9 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             ));
         };
         let desc = g
-            .active_descriptor
+            .peer_descriptors
             .borrow()
-            .as_ref()
+            .get(peer_pubkey)
             .cloned()
             .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_ACTIVE_PEER_DESCRIPTOR_MISSING))?;
         let mut q = desc
@@ -1289,17 +1691,31 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
     }
 
     fn socket_disconnected(&self) -> Result<(), JsValue> {
+        let peers = self
+            .connected_peers
+            .borrow()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for peer_pubkey in peers {
+            self.socket_disconnected_for_peer(&peer_pubkey)?;
+        }
+        Ok(())
+    }
+
+    fn socket_disconnected_for_peer(&self, peer_pubkey: &str) -> Result<(), JsValue> {
         self.ensure_phase1_runtime_ready()?;
-        self.disconnected.set(true);
-        self.active_peer_pubkey.borrow_mut().take();
-        self.inbound_frames.borrow_mut().clear();
-        self.outbound_frames.borrow_mut().clear();
+        self.connected_peers.borrow_mut().remove(peer_pubkey);
+        self.disconnected
+            .set(self.connected_peers.borrow().is_empty());
+        self.inbound_frames
+            .borrow_mut()
+            .retain(|(queued_peer, _)| queued_peer != peer_pubkey);
         let graph = self.object_graph.borrow();
         if let Some(g) = graph.as_ref() {
-            if let Some(desc) = g.active_descriptor.borrow().as_ref().cloned() {
+            if let Some(desc) = g.peer_descriptors.borrow_mut().remove(peer_pubkey) {
                 g.peer_manager.borrow().socket_disconnected(&desc);
             }
-            g.active_descriptor.borrow_mut().take();
             persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
         }
         Ok(())
@@ -1344,6 +1760,478 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             .get_node_id(Recipient::Node)
             .map_err(|_| JsValue::from_str("failed to derive live backend node id"))?;
         Ok(node_id.to_string())
+    }
+
+    fn close_live_channel(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+        force: bool,
+    ) -> Result<(), JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        let channel_id_bytes = hex::decode(channel_id)
+            .map_err(|e| JsValue::from_str(&format!("invalid channel id: {e}")))?;
+        let channel_id_bytes: [u8; 32] = channel_id_bytes
+            .try_into()
+            .map_err(|_| JsValue::from_str("invalid channel id length"))?;
+        let channel_id = lightning::ln::types::ChannelId::from_bytes(channel_id_bytes);
+        let peer_pubkey_bytes = hex::decode(peer_pubkey)
+            .map_err(|e| JsValue::from_str(&format!("invalid peer pubkey: {e}")))?;
+        let peer_pubkey = SecpPublicKey::from_slice(&peer_pubkey_bytes)
+            .map_err(|e| JsValue::from_str(&format!("invalid peer pubkey: {e}")))?;
+
+        self.with_graph(|g| {
+            if force {
+                // Matches the reference rgb-lightning-node SDK (routes.rs close_channel force path):
+                // broadcast the latest commitment immediately rather than negotiating a coop close.
+                g.channel_manager
+                    .force_close_broadcasting_latest_txn(
+                        &channel_id,
+                        &peer_pubkey,
+                        "Manually force-closed".to_string(),
+                    )
+                    .map_err(|e| {
+                        JsValue::from_str(&format!("live channel force-close failed: {e:?}"))
+                    })?;
+            } else {
+                g.channel_manager
+                    .close_channel(&channel_id, &peer_pubkey)
+                    .map_err(|e| JsValue::from_str(&format!("live channel close failed: {e:?}")))?;
+            }
+            g.peer_manager.borrow().process_events();
+            persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
+            Ok(())
+        })
+    }
+
+    fn keysend_live(
+        &self,
+        dest_pubkey: &str,
+        amt_msat: u64,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<LdkRuntimeLivePaymentData, JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        if self.disconnected.get() {
+            return Err(JsValue::from_str(
+                sdk_contracts::ERR_PEER_TRANSPORT_DISCONNECTED,
+            ));
+        }
+        let dest = SecpPublicKey::from_slice(
+            &hex::decode(dest_pubkey.trim())
+                .map_err(|_| JsValue::from_str(sdk_contracts::ERR_DEST_PUBKEY_INVALID))?,
+        )
+        .map_err(|_| JsValue::from_str(sdk_contracts::ERR_DEST_PUBKEY_INVALID))?;
+
+        let rgb_payment = match (contract_id.as_ref(), asset_amount) {
+            (Some(cid), Some(amount)) => {
+                let contract = cid
+                    .trim()
+                    .parse::<ContractId>()
+                    .map_err(|e| JsValue::from_str(&format!("invalid asset_id: {e}")))?;
+                Some((contract, amount))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(JsValue::from_str(
+                    "asset_id and asset_amount must be provided together",
+                ));
+            }
+        };
+
+        let graph = self.object_graph.borrow();
+        let Some(g) = graph.as_ref() else {
+            return Err(JsValue::from_str(
+                sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED,
+            ));
+        };
+
+        // Real spontaneous (keysend) payment: derive a random preimage; hash is its SHA-256.
+        let mut preimage_bytes = [0u8; 32];
+        preimage_bytes.copy_from_slice(&g.keys_manager.get_secure_random_bytes()[..32]);
+        let payment_preimage = PaymentPreimage(preimage_bytes);
+        let payment_hash = PaymentHash(
+            <Sha256 as bitcoin_hashes::Hash>::hash(&payment_preimage.0).to_byte_array(),
+        );
+        let payment_id = PaymentId(payment_hash.0);
+        let hash_hex = hex::encode(payment_hash.0);
+
+        if let Some((contract, amount)) = rgb_payment {
+            // Tells the RGB HTLC machinery how much asset rides this payment (mirrors native send).
+            write_rgb_payment_info_file(
+                &payment_hash,
+                contract,
+                amount,
+                false,
+                false,
+                &g.rgb_kv_store,
+            );
+        }
+
+        let route_params = RouteParameters::from_payment_params_and_value(
+            PaymentParameters::for_keysend(dest, 40, false),
+            amt_msat,
+            rgb_payment,
+        );
+
+        g.channel_manager
+            .send_spontaneous_payment(
+                Some(payment_preimage),
+                RecipientOnionFields::spontaneous_empty(),
+                payment_id,
+                route_params,
+                // Duration-based Retry uses std::time::Instant, which panics on wasm; use attempts.
+                Retry::Attempts(3),
+            )
+            .map_err(|e| JsValue::from_str(&format!("keysend failed: {e:?}")))?;
+
+        // Flush the freshly-queued commitment messages to the outbound frame queue.
+        g.peer_manager.borrow().process_events();
+
+        let now = unix_now_secs();
+        let record = LdkRuntimeLivePaymentData {
+            payment_hash: hash_hex.clone(),
+            status: "pending".to_string(),
+            amt_msat: Some(amt_msat),
+            asset_id: contract_id,
+            asset_amount,
+            inbound: false,
+            preimage: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.live_payments
+            .borrow_mut()
+            .insert(hash_hex, record.clone());
+        Ok(record)
+    }
+
+    fn send_bolt11_live(
+        &self,
+        invoice: &str,
+        amt_msat: Option<u64>,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<LdkRuntimeLivePaymentData, JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        if self.disconnected.get() {
+            return Err(JsValue::from_str(
+                sdk_contracts::ERR_PEER_TRANSPORT_DISCONNECTED,
+            ));
+        }
+        let invoice = invoice
+            .parse::<Bolt11Invoice>()
+            .map_err(|e| JsValue::from_str(&format!("invalid invoice: {e}")))?;
+        let resolved_amt_msat = match (invoice.amount_milli_satoshis(), amt_msat) {
+            (Some(invoice_amt), Some(requested)) if invoice_amt != requested => {
+                return Err(JsValue::from_str(&format!(
+                    "amount didn't match invoice value of {invoice_amt}msat"
+                )));
+            }
+            (Some(invoice_amt), _) => invoice_amt,
+            (None, Some(requested)) => requested,
+            (None, None) => {
+                return Err(JsValue::from_str(
+                    "need an amount for the given 0-value invoice",
+                ));
+            }
+        };
+        let invoice_rgb = invoice.rgb_contract_id().zip(invoice.rgb_amount());
+        let requested_rgb = match (contract_id.as_ref(), asset_amount) {
+            (Some(contract_id), Some(amount)) => Some((
+                contract_id
+                    .parse::<ContractId>()
+                    .map_err(|e| JsValue::from_str(&format!("invalid asset_id: {e}")))?,
+                amount,
+            )),
+            (None, None) => None,
+            _ => {
+                return Err(JsValue::from_str(
+                    "asset_id and asset_amount must be provided together",
+                ));
+            }
+        };
+        if invoice_rgb.is_some() && requested_rgb.is_some() && invoice_rgb != requested_rgb {
+            return Err(JsValue::from_str(
+                "invoice RGB payment does not match the requested asset payment",
+            ));
+        }
+        let rgb_payment = invoice_rgb.or(requested_rgb);
+        let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+        let payment_id = PaymentId(payment_hash.0);
+        let hash_hex = hex::encode(payment_hash.0);
+
+        let graph = self.object_graph.borrow();
+        let g = graph.as_ref().ok_or_else(|| {
+            JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
+        })?;
+        if let Some((contract, amount)) = rgb_payment {
+            write_rgb_payment_info_file(
+                &payment_hash,
+                contract,
+                amount,
+                false,
+                false,
+                &g.rgb_kv_store,
+            );
+        }
+        let mut recipient_onion = RecipientOnionFields::secret_only(*invoice.payment_secret());
+        recipient_onion.payment_metadata = invoice.payment_metadata().cloned();
+        let payment_params = PaymentParameters::from_bolt11_invoice(&invoice);
+        let route_params = RouteParameters::from_payment_params_and_value(
+            payment_params,
+            resolved_amt_msat,
+            rgb_payment,
+        );
+        g.channel_manager
+            .send_payment(
+                payment_hash,
+                recipient_onion,
+                payment_id,
+                route_params,
+                Retry::Attempts(3),
+            )
+            .map_err(|e| JsValue::from_str(&format!("invoice payment failed: {e:?}")))?;
+        g.peer_manager.borrow().process_events();
+
+        let now = unix_now_secs();
+        let record = LdkRuntimeLivePaymentData {
+            payment_hash: hash_hex.clone(),
+            status: "pending".to_string(),
+            amt_msat: Some(resolved_amt_msat),
+            asset_id: rgb_payment.map(|(contract, _)| contract.to_string()),
+            asset_amount: rgb_payment.map(|(_, amount)| amount),
+            inbound: false,
+            preimage: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.live_payments
+            .borrow_mut()
+            .insert(hash_hex, record.clone());
+        Ok(record)
+    }
+
+    fn create_bolt11_invoice_live(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<String, JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        let contract_id = contract_id
+            .map(|id| {
+                id.parse::<ContractId>()
+                    .map_err(|e| JsValue::from_str(&format!("invalid asset_id: {e}")))
+            })
+            .transpose()?;
+        let graph = self.object_graph.borrow();
+        let g = graph.as_ref().ok_or_else(|| {
+            JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
+        })?;
+        let invoice = g
+            .channel_manager
+            .create_bolt11_invoice(Bolt11InvoiceParameters {
+                amount_msats: amt_msat,
+                description: Bolt11InvoiceDescription::Direct(Description::empty()),
+                invoice_expiry_delta_secs: Some(expiry_sec),
+                contract_id,
+                asset_amount,
+                ..Default::default()
+            })
+            .map_err(|e| JsValue::from_str(&format!("failed to create invoice: {e}")))?;
+        let hash_hex = invoice.payment_hash().to_string();
+        let now = unix_now_secs();
+        self.live_payments.borrow_mut().insert(
+            hash_hex.clone(),
+            LdkRuntimeLivePaymentData {
+                payment_hash: hash_hex,
+                status: "pending".to_string(),
+                amt_msat,
+                asset_id: contract_id.map(|contract| contract.to_string()),
+                asset_amount,
+                inbound: true,
+                preimage: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
+        Ok(invoice.to_string())
+    }
+
+    fn create_hodl_bolt11_invoice_live(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: &str,
+    ) -> Result<String, JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        let payment_hash_bytes = hex::decode(payment_hash)
+            .map_err(|_| JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_INVALID))?;
+        let payment_hash = PaymentHash(
+            payment_hash_bytes
+                .try_into()
+                .map_err(|_| JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_INVALID))?,
+        );
+        let hash_hex = hex::encode(payment_hash.0);
+        if self.hodl_payment_hashes.borrow().contains(&hash_hex)
+            || self.live_payments.borrow().contains_key(&hash_hex)
+        {
+            return Err(JsValue::from_str(
+                sdk_contracts::ERR_PAYMENT_HASH_ALREADY_USED,
+            ));
+        }
+        let contract_id = contract_id
+            .map(|id| {
+                id.parse::<ContractId>()
+                    .map_err(|e| JsValue::from_str(&format!("invalid asset_id: {e}")))
+            })
+            .transpose()?;
+        let graph = self.object_graph.borrow();
+        let g = graph.as_ref().ok_or_else(|| {
+            JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
+        })?;
+        let invoice = g
+            .channel_manager
+            .create_bolt11_invoice(Bolt11InvoiceParameters {
+                amount_msats: amt_msat,
+                description: Bolt11InvoiceDescription::Direct(Description::empty()),
+                invoice_expiry_delta_secs: Some(expiry_sec),
+                payment_hash: Some(payment_hash),
+                contract_id,
+                asset_amount,
+                ..Default::default()
+            })
+            .map_err(|e| JsValue::from_str(&format!("failed to create HODL invoice: {e}")))?;
+        let now = unix_now_secs();
+        self.hodl_payment_hashes
+            .borrow_mut()
+            .insert(hash_hex.clone());
+        self.live_payments.borrow_mut().insert(
+            hash_hex.clone(),
+            LdkRuntimeLivePaymentData {
+                payment_hash: hash_hex,
+                status: "pending".to_string(),
+                amt_msat,
+                asset_id: contract_id.map(|contract| contract.to_string()),
+                asset_amount,
+                inbound: true,
+                preimage: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
+        Ok(invoice.to_string())
+    }
+
+    fn claim_hodl_invoice_live(
+        &self,
+        payment_hash: &str,
+        payment_preimage: &str,
+    ) -> Result<bool, JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        if !self.hodl_payment_hashes.borrow().contains(payment_hash) {
+            return Err(JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN));
+        }
+        let preimage_bytes = hex::decode(payment_preimage)
+            .map_err(|_| JsValue::from_str(sdk_contracts::ERR_PAYMENT_PREIMAGE_INVALID))?;
+        let preimage = PaymentPreimage(
+            preimage_bytes
+                .try_into()
+                .map_err(|_| JsValue::from_str(sdk_contracts::ERR_PAYMENT_PREIMAGE_INVALID))?,
+        );
+        let expected_hash: [u8; 32] = hex::decode(payment_hash)
+            .map_err(|_| JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_INVALID))?
+            .try_into()
+            .map_err(|_| JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_INVALID))?;
+        if <Sha256 as bitcoin_hashes::Hash>::hash(&preimage.0).to_byte_array() != expected_hash {
+            return Err(JsValue::from_str(
+                sdk_contracts::ERR_PAYMENT_PREIMAGE_INVALID,
+            ));
+        }
+        let status = self
+            .live_payments
+            .borrow()
+            .get(payment_hash)
+            .map(|payment| payment.status.clone())
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN))?;
+        match status.as_str() {
+            "succeeded" => return Ok(false),
+            "claiming" => return Err(JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_SETTLING)),
+            "claimable" => {}
+            _ => {
+                return Err(JsValue::from_str(
+                    sdk_contracts::ERR_LN_INVOICE_NOT_CLAIMABLE,
+                ))
+            }
+        }
+        let graph = self.object_graph.borrow();
+        let g = graph.as_ref().ok_or_else(|| {
+            JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
+        })?;
+        g.channel_manager.claim_funds(preimage);
+        self.mark_live_payment(payment_hash, "claiming", Some(payment_preimage.to_string()));
+        g.peer_manager.borrow().process_events();
+        Ok(true)
+    }
+
+    fn cancel_hodl_invoice_live(&self, payment_hash: &str) -> Result<(), JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        if !self.hodl_payment_hashes.borrow().contains(payment_hash) {
+            return Err(JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN));
+        }
+        let status = self
+            .live_payments
+            .borrow()
+            .get(payment_hash)
+            .map(|payment| payment.status.clone())
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN))?;
+        match status.as_str() {
+            "succeeded" => {
+                return Err(JsValue::from_str(
+                    sdk_contracts::ERR_LN_INVOICE_ALREADY_CLAIMED,
+                ))
+            }
+            "claiming" => return Err(JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_SETTLING)),
+            "claimable" => {}
+            _ => {
+                return Err(JsValue::from_str(
+                    sdk_contracts::ERR_LN_INVOICE_NOT_CLAIMABLE,
+                ))
+            }
+        }
+        let payment_hash_bytes = hex::decode(payment_hash)
+            .map_err(|_| JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_INVALID))?;
+        let payment_hash = PaymentHash(
+            payment_hash_bytes
+                .try_into()
+                .map_err(|_| JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_INVALID))?,
+        );
+        let graph = self.object_graph.borrow();
+        let g = graph.as_ref().ok_or_else(|| {
+            JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
+        })?;
+        g.channel_manager.fail_htlc_backwards(&payment_hash);
+        self.mark_live_payment(&hex::encode(payment_hash.0), "cancelled", None);
+        g.peer_manager.borrow().process_events();
+        Ok(())
+    }
+
+    fn live_payments(&self) -> Vec<LdkRuntimeLivePaymentData> {
+        self.live_payments.borrow().values().cloned().collect()
+    }
+
+    fn live_payment(&self, payment_hash: &str) -> Option<LdkRuntimeLivePaymentData> {
+        self.live_payments.borrow().get(payment_hash).cloned()
+    }
+
+    fn take_closed_live_channels(&self) -> Vec<String> {
+        std::mem::take(&mut *self.closed_channels.borrow_mut())
     }
 
     fn persist_state(&self) -> Result<(), JsValue> {
@@ -1393,6 +2281,13 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             .map_err(|e| JsValue::from_str(&format!("header decode: {e}")))?;
 
         self.with_graph(|g| {
+            let current_height = g.channel_manager.current_best_block().height;
+            if height < current_height {
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk chain-sync] refusing regressed best block height={height} current={current_height}"
+                ));
+                return Ok(());
+            }
             g.chain_monitor.best_block_updated(&header, height);
             g.channel_manager.best_block_updated(&header, height);
             persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
@@ -1452,38 +2347,39 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             return Err(JsValue::from_str("capacity_sat must be > 0"));
         }
         // Parse RGB open params when an asset is specified.
-        let rgb_open: Option<(lightning::rgb_utils::ContractId, u64, lightning::rgb_utils::RgbTransport)> =
-            if request.asset_id.is_some() {
-                let contract_id_str = request.contract_id.as_deref().unwrap_or("").trim();
-                let endpoint_str = request.consignment_endpoint.as_deref().unwrap_or("").trim();
-                let asset_amount = request.asset_local_amount.unwrap_or(0);
-                if contract_id_str.is_empty() {
-                    return Err(JsValue::from_str(
-                        "contract_id is required for RGB channel open",
-                    ));
-                }
-                if endpoint_str.is_empty() {
-                    return Err(JsValue::from_str(
-                        "consignment_endpoint is required for RGB channel open",
-                    ));
-                }
-                if asset_amount == 0 {
-                    return Err(JsValue::from_str(
-                        "asset_local_amount must be > 0 for RGB channel open",
-                    ));
-                }
-                let contract_id = contract_id_str
-                    .parse::<lightning::rgb_utils::ContractId>()
-                    .map_err(|e| JsValue::from_str(&format!("invalid contract_id: {e}")))?;
-                let endpoint = endpoint_str
-                    .parse::<lightning::rgb_utils::RgbTransport>()
-                    .map_err(|e| {
-                        JsValue::from_str(&format!("invalid consignment_endpoint: {e}"))
-                    })?;
-                Some((contract_id, asset_amount, endpoint))
-            } else {
-                None
-            };
+        let rgb_open: Option<(
+            lightning::rgb_utils::ContractId,
+            u64,
+            lightning::rgb_utils::RgbTransport,
+        )> = if request.asset_id.is_some() {
+            let contract_id_str = request.contract_id.as_deref().unwrap_or("").trim();
+            let endpoint_str = request.consignment_endpoint.as_deref().unwrap_or("").trim();
+            let asset_amount = request.asset_local_amount.unwrap_or(0);
+            if contract_id_str.is_empty() {
+                return Err(JsValue::from_str(
+                    "contract_id is required for RGB channel open",
+                ));
+            }
+            if endpoint_str.is_empty() {
+                return Err(JsValue::from_str(
+                    "consignment_endpoint is required for RGB channel open",
+                ));
+            }
+            if asset_amount == 0 {
+                return Err(JsValue::from_str(
+                    "asset_local_amount must be > 0 for RGB channel open",
+                ));
+            }
+            let contract_id = contract_id_str
+                .parse::<lightning::rgb_utils::ContractId>()
+                .map_err(|e| JsValue::from_str(&format!("invalid contract_id: {e}")))?;
+            let endpoint = endpoint_str
+                .parse::<lightning::rgb_utils::RgbTransport>()
+                .map_err(|e| JsValue::from_str(&format!("invalid consignment_endpoint: {e}")))?;
+            Some((contract_id, asset_amount, endpoint))
+        } else {
+            None
+        };
 
         let their_node_id = SecpPublicKey::from_slice(
             &hex::decode(request.peer_pubkey.trim())
@@ -1860,17 +2756,14 @@ impl WasmLdkLiveBackend {
                 let (rgb_backend, channel_manager) = {
                     let graph = this.object_graph.borrow();
                     let g = graph.as_ref().ok_or_else(|| {
-                        JsValue::from_str(
-                            sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED,
-                        )
+                        JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
                     })?;
                     (Arc::clone(&g.rgb_backend), Arc::clone(&g.channel_manager))
                 };
-                let output_script = bitcoin::ScriptBuf::from_bytes(
-                    hex::decode(&output_script_hex).map_err(|e| {
-                        JsValue::from_str(&format!("invalid output_script_hex: {e}"))
-                    })?,
-                );
+                let output_script =
+                    bitcoin::ScriptBuf::from_bytes(hex::decode(&output_script_hex).map_err(
+                        |e| JsValue::from_str(&format!("invalid output_script_hex: {e}")),
+                    )?);
                 let request = lightning::rgb_utils::RgbFundingTransferRequest {
                     contract_id: intent.contract_id,
                     schema: intent.schema,
@@ -1899,9 +2792,7 @@ impl WasmLdkLiveBackend {
                         prepared.transaction,
                     )
                     .map_err(|e| {
-                        JsValue::from_str(&format!(
-                            "funding_transaction_generated failed: {e:?}"
-                        ))
+                        JsValue::from_str(&format!("funding_transaction_generated failed: {e:?}"))
                     })?;
             }
             PendingRgbFundingWork::Complete {
@@ -1911,9 +2802,7 @@ impl WasmLdkLiveBackend {
                 let rgb_backend = {
                     let graph = this.object_graph.borrow();
                     let g = graph.as_ref().ok_or_else(|| {
-                        JsValue::from_str(
-                            sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED,
-                        )
+                        JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
                     })?;
                     Arc::clone(&g.rgb_backend)
                 };
@@ -1930,13 +2819,13 @@ impl WasmLdkLiveBackend {
                     "[rln-wasm-sdk ldk-live] drive_rgb_funding_work: txid={txid}"
                 ));
             }
-            PendingRgbFundingWork::ValidateFunding { temporary_channel_id } => {
+            PendingRgbFundingWork::ValidateFunding {
+                temporary_channel_id,
+            } => {
                 let channel_manager = {
                     let graph = this.object_graph.borrow();
                     let g = graph.as_ref().ok_or_else(|| {
-                        JsValue::from_str(
-                            sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED,
-                        )
+                        JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
                     })?;
                     Arc::clone(&g.channel_manager)
                 };
@@ -1944,9 +2833,7 @@ impl WasmLdkLiveBackend {
                     .process_pending_rgb_funding_validation(temporary_channel_id)
                     .await
                     .map_err(|e| {
-                        JsValue::from_str(&format!(
-                            "RGB funding validation failed: {e:?}"
-                        ))
+                        JsValue::from_str(&format!("RGB funding validation failed: {e:?}"))
                     })?;
             }
             PendingRgbFundingWork::ProcessPendingTransactions => {

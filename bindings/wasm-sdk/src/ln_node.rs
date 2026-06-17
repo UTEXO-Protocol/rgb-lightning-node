@@ -39,7 +39,8 @@ use crate::peer_session::{
 use crate::runtime_store::{browser_persistent_state_store, RuntimeStateStore};
 use crate::wasm_node_persistence::{JsonRuntimeStateStore, RuntimeScopeKeys};
 use crate::{
-    derive_cfa_ticker, WasmAssetCfaData, WasmIssueAssetCfaRequest, WasmIssueAssetNiaRequest,
+    derive_cfa_ticker, WasmAssetCfaData, WasmIssueAssetCfaRequest, WasmIssueAssetIfaRequest,
+    WasmIssueAssetNiaRequest,
 };
 
 #[inline]
@@ -317,6 +318,12 @@ struct RuntimeReconnectManagerStatusData {
     current_backoff_ms: u32,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct RlnWasmNodeAutoDriveStatusData {
+    running: bool,
+    interval_ms: u32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct WasmFundingTxSubmissionRequest {
     temporary_channel_id: String,
@@ -347,6 +354,11 @@ thread_local! {
 const RUNTIME_EVENT_LOG_PERSIST_WINDOW: usize = 512;
 const RECONNECT_MANAGER_INITIAL_DELAY_MS: u32 = 500;
 const RECONNECT_MANAGER_MAX_DELAY_MS: u32 = 15_000;
+/// Default cadence of the autonomous drive loop (`autoDriveStart`) when no interval is supplied.
+const AUTO_DRIVE_DEFAULT_INTERVAL_MS: u32 = 1_000;
+/// Lower bound on the autonomous drive interval, so a caller cannot spin the loop into a tight
+/// busy-loop that starves the single-threaded wasm executor.
+const AUTO_DRIVE_MIN_INTERVAL_MS: u32 = 200;
 
 #[cfg(test)]
 #[path = "tests/ln_node_test_utils.rs"]
@@ -377,6 +389,8 @@ pub struct RlnWasmNode {
     enable_virtual_channels_v0: RefCell<bool>,
     reconnect_manager_running: Rc<RefCell<bool>>,
     reconnect_manager_backoff_ms: Rc<RefCell<u32>>,
+    auto_drive_running: Rc<RefCell<bool>>,
+    auto_drive_interval_ms: Rc<RefCell<u32>>,
 }
 
 #[wasm_bindgen]
@@ -528,6 +542,8 @@ impl RlnWasmNode {
             enable_virtual_channels_v0: RefCell::new(enable_virtual_channels_v0),
             reconnect_manager_running: Rc::new(RefCell::new(false)),
             reconnect_manager_backoff_ms: Rc::new(RefCell::new(RECONNECT_MANAGER_INITIAL_DELAY_MS)),
+            auto_drive_running: Rc::new(RefCell::new(false)),
+            auto_drive_interval_ms: Rc::new(RefCell::new(AUTO_DRIVE_DEFAULT_INTERVAL_MS)),
         };
         // Keep live LDK backend identity aligned with node_signing_identity pubkey.
         let (node_secret_key, _) = node.node_signing_identity()?;
@@ -729,6 +745,42 @@ impl RlnWasmNode {
         crate::js_to_json(&parsed)
     }
 
+    #[wasm_bindgen(js_name = issueAssetIfaValue)]
+    pub fn issue_asset_ifa_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let request: WasmIssueAssetIfaRequest = serde_wasm_bindgen::from_value(request_js)
+            .map_err(|e| JsValue::from_str(&format!("Invalid issue_asset_ifa request: {e}")))?;
+        if request.amounts.is_empty() {
+            return Err(JsValue::from_str(sdk_contracts::ERR_AMOUNTS_EMPTY));
+        }
+        if request.ticker.trim().is_empty() {
+            return Err(JsValue::from_str(sdk_contracts::ERR_TICKER_EMPTY));
+        }
+        if request.name.trim().is_empty() {
+            return Err(JsValue::from_str(sdk_contracts::ERR_NAME_EMPTY));
+        }
+        let asset = self.with_attached_wallet(|wallet| {
+            wallet
+                .issue_asset_ifa(
+                    request.ticker,
+                    request.name,
+                    request.precision,
+                    request.amounts,
+                    request.inflation_amounts,
+                    request.reject_list_url,
+                )
+                .map_err(|e| JsValue::from_str(&e.to_string()))
+        })?;
+        crate::js_obj(&asset)
+    }
+
+    #[wasm_bindgen(js_name = issueAssetIfaJson)]
+    pub fn issue_asset_ifa_json(&self, request_js: JsValue) -> Result<String, JsValue> {
+        let value = self.issue_asset_ifa_value(request_js)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = connectPeer)]
     pub async fn connect_peer(
         &self,
@@ -775,7 +827,9 @@ impl RlnWasmNode {
         }
         self.peers.borrow_mut().remove(&peer_pubkey);
         if self.use_runtime_state_for_ln_views() {
-            let _ = self.ldk_runtime.peer_socket_disconnected();
+            let _ = self
+                .ldk_runtime
+                .peer_socket_disconnected_for_peer(&peer_pubkey);
             let _ = self.ldk_runtime.remove_peer(&peer_pubkey);
         }
 
@@ -1067,6 +1121,108 @@ impl RlnWasmNode {
         crate::js_to_json(&parsed)
     }
 
+    /// Start the autonomous drive loop: a self-scheduling timer that runs `node_drive_tick_once`
+    /// (chain sync → live LDK → event draining → authoritative channel reconcile) every
+    /// `interval_ms` (clamped to a sane minimum; `0` selects the default cadence). This lets apps
+    /// receive invoices / progress channels / settle HTLCs without hand-driving `chainSyncTick`,
+    /// mirroring the native daemon's background processor (PARITY_PLAN 0.2). Idempotent: calling it
+    /// while already running just returns the current status.
+    #[wasm_bindgen(js_name = autoDriveStartValue)]
+    pub fn auto_drive_start_value(&self, interval_ms: u32) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        if *self.auto_drive_running.borrow() {
+            return self.auto_drive_status_value();
+        }
+        let interval = if interval_ms == 0 {
+            AUTO_DRIVE_DEFAULT_INTERVAL_MS
+        } else {
+            interval_ms.max(AUTO_DRIVE_MIN_INTERVAL_MS)
+        };
+        *self.auto_drive_running.borrow_mut() = true;
+        *self.auto_drive_interval_ms.borrow_mut() = interval;
+
+        let chain_sync = self.chain_sync.clone();
+        let ldk_runtime = Rc::clone(&self.ldk_runtime);
+        let runtime_core = self.runtime_core.clone();
+        let peers = Rc::clone(&self.peers);
+        let channels = Rc::clone(&self.channels);
+        let payments = Rc::clone(&self.payments);
+        let pending_peer_hook_events = Rc::clone(&self.pending_peer_hook_events);
+        let runtime_events = Rc::clone(&self.runtime_events);
+        let next_runtime_event_seq = Rc::clone(&self.next_runtime_event_seq);
+        let runtime_events_storage_key = self.persistence_keys.runtime_events_storage_key.clone();
+        let running = Rc::clone(&self.auto_drive_running);
+        let interval_ref = Rc::clone(&self.auto_drive_interval_ms);
+
+        spawn_local(async move {
+            while *running.borrow() {
+                let delay = *interval_ref.borrow();
+                sleep_ms(delay).await;
+                if !*running.borrow() {
+                    break;
+                }
+                if let Err(err) = node_drive_tick_once(
+                    &chain_sync,
+                    &ldk_runtime,
+                    &runtime_core,
+                    &peers,
+                    &channels,
+                    &payments,
+                    &pending_peer_hook_events,
+                    &runtime_events,
+                    &next_runtime_event_seq,
+                    &runtime_events_storage_key,
+                    "auto_drive",
+                )
+                .await
+                {
+                    // Keep the loop alive across transient indexer/peer errors; surface for debugging.
+                    wasm_debug(&format!(
+                        "[rln-wasm-sdk auto-drive] drive tick error (continuing): {}",
+                        err.as_string()
+                            .unwrap_or_else(|| "unknown auto-drive error".to_string())
+                    ));
+                }
+            }
+        });
+        self.auto_drive_status_value()
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStartJson)]
+    pub fn auto_drive_start_json(&self, interval_ms: u32) -> Result<String, JsValue> {
+        let value = self.auto_drive_start_value(interval_ms)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStopValue)]
+    pub fn auto_drive_stop_value(&self) -> Result<JsValue, JsValue> {
+        *self.auto_drive_running.borrow_mut() = false;
+        self.auto_drive_status_value()
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStopJson)]
+    pub fn auto_drive_stop_json(&self) -> Result<String, JsValue> {
+        let value = self.auto_drive_stop_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStatusValue)]
+    pub fn auto_drive_status_value(&self) -> Result<JsValue, JsValue> {
+        crate::js_obj(&RlnWasmNodeAutoDriveStatusData {
+            running: *self.auto_drive_running.borrow(),
+            interval_ms: *self.auto_drive_interval_ms.borrow(),
+        })
+    }
+
+    #[wasm_bindgen(js_name = autoDriveStatusJson)]
+    pub fn auto_drive_status_json(&self) -> Result<String, JsValue> {
+        let value = self.auto_drive_status_value()?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = reconnectManagerOnResume)]
     pub fn reconnect_manager_on_resume(&self) {
         if !*self.reconnect_manager_running.borrow() {
@@ -1302,34 +1458,23 @@ impl RlnWasmNode {
     #[wasm_bindgen(js_name = chainSyncTickValue)]
     pub async fn chain_sync_tick_value(&self) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
-        self.chain_sync.tick().await?;
-        self.chain_sync_apply_to_live_ldk().await?;
-        // Refresh runtime channel snapshot from live backend (wasm_native_ldk).
-        let _ = self.ldk_runtime.reconcile_channels_from_live();
-        // Drive event ingestion so channel/payment state progresses in WASM.
-        //
-        // In the browser E2E we can observe situations where the regular node reaches lock-in and
-        // sends `channel_ready`, but the WASM side never updates its channel view unless we
-        // actively drain both:
-        // - the native runtime queue (`runtime_core.enqueue_event(...)`), and
-        // - peer-manager hook payloads buffered in `pending_peer_hook_events`.
-        //
-        // This tick is already part of the E2E polling loop, so it is the most reliable place to
-        // ensure progress without requiring extra JS-side calls.
-        self.process_native_runtime_queue_value()?;
-        self.ldk_runtime.peer_process_events()?;
-        let _ = drain_pending_peer_hook_events(
+        // One full drive pass (chain sync → live LDK → event draining → authoritative reconcile).
+        // The autonomous loop (`autoDriveStart`) runs the exact same `node_drive_tick_once`, so a
+        // manually-ticked and a self-driven node progress identically.
+        node_drive_tick_once(
+            &self.chain_sync,
             &self.ldk_runtime,
-            self.use_runtime_state_for_ln_views(),
+            &self.runtime_core,
             &self.peers,
             &self.channels,
             &self.payments,
             &self.pending_peer_hook_events,
             &self.runtime_events,
             &self.next_runtime_event_seq,
+            &self.persistence_keys.runtime_events_storage_key,
             "chain_sync_tick",
-        )?;
-        self.persist_runtime_event_log_state();
+        )
+        .await?;
         crate::js_obj(&self.chain_sync.status())
     }
 
@@ -1348,109 +1493,6 @@ impl RlnWasmNode {
     ) -> Result<(), JsValue> {
         self.ensure_runtime_ready()?;
         self.chain_sync.enqueue_rebroadcast_tx(txid, tx_hex)
-    }
-
-    async fn chain_sync_apply_to_live_ldk(&self) -> Result<(), JsValue> {
-        let status = self.chain_sync.status();
-        let Some(indexer_url) = status.indexer_url else {
-            return Ok(());
-        };
-        let Some(tip_height) = status.latest_tip_height else {
-            return Ok(());
-        };
-        if tip_height == 0 {
-            return Ok(());
-        }
-
-        let relevant = self.ldk_runtime.chain_relevant_txids()?;
-        if relevant.is_empty() {
-            return Ok(());
-        }
-
-        let mut header_cache: HashMap<String, String> = HashMap::new();
-        let tip_header_hex = fetch_block_header_hex_by_height(&indexer_url, tip_height).await?;
-
-        #[derive(Clone)]
-        struct ConfirmedTx {
-            txid: String,
-            height: u32,
-            block_hash: String,
-        }
-
-        let max_txids = 128usize;
-        let mut confirmed: Vec<ConfirmedTx> = Vec::new();
-        for txid in relevant.into_iter().take(max_txids) {
-            match fetch_tx_status(&indexer_url, &txid).await? {
-                None => {
-                    self.ldk_runtime.chain_apply_unconfirmed_tx(&txid)?;
-                }
-                Some((height, block_hash)) => {
-                    confirmed.push(ConfirmedTx {
-                        txid,
-                        height,
-                        block_hash,
-                    });
-                }
-            }
-        }
-
-        // LDK requires confirmations in chain order; within a block, txs should follow block order
-        // (and ideally topological order — we approximate via Esplora tx index).
-        confirmed.sort_by(|a, b| {
-            a.height
-                .cmp(&b.height)
-                .then_with(|| a.block_hash.cmp(&b.block_hash))
-                .then_with(|| a.txid.cmp(&b.txid))
-        });
-
-        let mut cursor = 0usize;
-        while cursor < confirmed.len() {
-            let height = confirmed[cursor].height;
-            let block_hash = confirmed[cursor].block_hash.clone();
-
-            let header_hex = if let Some(cached) = header_cache.get(&block_hash) {
-                cached.clone()
-            } else {
-                let hdr = fetch_block_header_hex(&indexer_url, &block_hash).await?;
-                header_cache.insert(block_hash.clone(), hdr.clone());
-                hdr
-            };
-
-            let mut end = cursor + 1;
-            while end < confirmed.len()
-                && confirmed[end].height == height
-                && confirmed[end].block_hash == block_hash
-            {
-                end += 1;
-            }
-
-            let mut with_pos: Vec<(usize, String)> = Vec::with_capacity(end.saturating_sub(cursor));
-            for ct in confirmed[cursor..end].iter() {
-                let tx_index = fetch_tx_index_in_block(&indexer_url, &block_hash, &ct.txid).await?;
-                with_pos.push((tx_index, ct.txid.clone()));
-            }
-            with_pos.sort_by_key(|(pos, _)| *pos);
-
-            for (tx_index, txid) in with_pos {
-                let tx_hex = fetch_tx_hex(&indexer_url, &txid).await?;
-                self.ldk_runtime.chain_apply_confirmed_tx(
-                    height,
-                    &header_hex,
-                    tx_index,
-                    &tx_hex,
-                )?;
-            }
-            self.ldk_runtime
-                .chain_apply_best_block(height, &header_hex)?;
-
-            cursor = end;
-        }
-        // LDK expects tx confirmations to be applied before advancing the best block.
-        // Advancing to the tip first can make a later historical funding confirmation fail to
-        // drive the channel lock-in transition.
-        self.ldk_runtime
-            .chain_apply_best_block(tip_height, &tip_header_hex)?;
-        Ok(())
     }
 
     #[wasm_bindgen(js_name = ldkRuntimeStatusValue)]
@@ -1668,8 +1710,8 @@ impl RlnWasmNode {
             read_event: Rc::new({
                 let ldk_runtime = ldk_runtime.clone();
                 let pending_peer_hook_events = pending_peer_hook_events.clone();
-                move |payload_hex| {
-                    ldk_runtime.peer_read_event(payload_hex)?;
+                move |peer_pubkey, payload_hex| {
+                    ldk_runtime.peer_read_event_for_peer(peer_pubkey, payload_hex)?;
                     pending_peer_hook_events
                         .borrow_mut()
                         .push(PendingPeerHookEvent::Payload(payload_hex.to_string()));
@@ -1707,13 +1749,13 @@ impl RlnWasmNode {
             }),
             take_outbound_frames: Rc::new({
                 let ldk_runtime = ldk_runtime.clone();
-                move || ldk_runtime.peer_take_outbound_frames()
+                move |peer_pubkey| ldk_runtime.peer_take_outbound_frames_for_peer(peer_pubkey)
             }),
             socket_disconnected: Rc::new({
                 let ldk_runtime = ldk_runtime.clone();
                 let pending_peer_hook_events = pending_peer_hook_events.clone();
-                move || {
-                    ldk_runtime.peer_socket_disconnected()?;
+                move |peer_pubkey| {
+                    ldk_runtime.peer_socket_disconnected_for_peer(peer_pubkey)?;
                     pending_peer_hook_events
                         .borrow_mut()
                         .push(PendingPeerHookEvent::SocketDisconnected);
@@ -2082,6 +2124,133 @@ impl RlnWasmNode {
         crate::js_to_json(&parsed)
     }
 
+    /// Send a REAL keysend (spontaneous) HTLC over a live channel via the wasm `ChannelManager`.
+    ///
+    /// Unlike [`keysend_value`], which records a parity-model payment that settles from the
+    /// event-stream, this constructs and routes an actual HTLC to `dest_pubkey` over the wire. The
+    /// returned record starts `pending`; poll [`live_payment_value`] until it becomes `succeeded`
+    /// (driven by a real `PaymentSent` event). Pass `asset_id`/`asset_amount` to ride RGB on it.
+    #[wasm_bindgen(js_name = keysendLiveValue)]
+    pub fn keysend_live_value(
+        &self,
+        dest_pubkey: String,
+        amt_msat: u64,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let dest_pubkey = dest_pubkey.trim().to_string();
+        if dest_pubkey.is_empty() {
+            return Err(JsValue::from_str(sdk_contracts::ERR_DEST_PUBKEY_EMPTY));
+        }
+        if SecpPublicKey::from_str(&dest_pubkey).is_err() {
+            return Err(JsValue::from_str(sdk_contracts::ERR_DEST_PUBKEY_INVALID));
+        }
+        if amt_msat < SDK_HTLC_MIN_MSAT {
+            return Err(JsValue::from_str(&format!(
+                "amt_msat cannot be less than {SDK_HTLC_MIN_MSAT}"
+            )));
+        }
+        if (asset_id.is_some() && asset_amount.is_none())
+            || (asset_id.is_none() && asset_amount.is_some())
+        {
+            return Err(JsValue::from_str(
+                "asset_id and asset_amount must be provided together",
+            ));
+        }
+        if let Some(id) = &asset_id {
+            validate_asset_id_format(id)?;
+        }
+        let record =
+            self.ldk_runtime
+                .keysend_live(&dest_pubkey, amt_msat, asset_id, asset_amount)?;
+        crate::js_obj(&record)
+    }
+
+    #[wasm_bindgen(js_name = keysendLiveJson)]
+    pub fn keysend_live_json(
+        &self,
+        dest_pubkey: String,
+        amt_msat: u64,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<String, JsValue> {
+        let value = self.keysend_live_value(dest_pubkey, amt_msat, asset_id, asset_amount)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    /// Pay a BOLT11 invoice using the real live `ChannelManager`.
+    #[wasm_bindgen(js_name = sendPaymentLiveValue)]
+    pub fn send_payment_live_value(
+        &self,
+        invoice: String,
+        amt_msat: Option<u64>,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let invoice = invoice.trim().to_string();
+        if invoice.is_empty() {
+            return Err(JsValue::from_str(sdk_contracts::ERR_INVOICE_EMPTY));
+        }
+        let parsed = Bolt11Invoice::from_str(&invoice)
+            .map_err(|e| JsValue::from_str(&format!("invalid invoice: {e}")))?;
+        if (asset_id.is_some() && asset_amount.is_none())
+            || (asset_id.is_none() && asset_amount.is_some())
+        {
+            return Err(JsValue::from_str(
+                "asset_id and asset_amount must be provided together",
+            ));
+        }
+        if let Some(id) = &asset_id {
+            validate_asset_id_format(id)?;
+        }
+        if amt_msat == Some(0) {
+            return Err(JsValue::from_str(sdk_contracts::ERR_AMT_MSAT_NONPOSITIVE));
+        }
+        let record =
+            self.ldk_runtime
+                .send_bolt11_live(&invoice, amt_msat, asset_id, asset_amount)?;
+        crate::js_obj(&RlnWasmNodeSendPaymentResult {
+            payment_id: record.payment_hash.clone(),
+            payment_hash: Some(record.payment_hash),
+            payment_secret: Some(hex::encode(parsed.payment_secret().0)),
+            status: record.status,
+        })
+    }
+
+    #[wasm_bindgen(js_name = sendPaymentLiveJson)]
+    pub fn send_payment_live_json(
+        &self,
+        invoice: String,
+        amt_msat: Option<u64>,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<String, JsValue> {
+        let value = self.send_payment_live_value(invoice, amt_msat, asset_id, asset_amount)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    /// Status of a single REAL payment by hex payment hash (from the live event stream), or null.
+    #[wasm_bindgen(js_name = livePaymentValue)]
+    pub fn live_payment_value(&self, payment_hash: String) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        match self.ldk_runtime.live_payment(payment_hash.trim()) {
+            Some(record) => crate::js_obj(&record),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    /// Snapshot of all REAL payments tracked from the live `ChannelManager` event stream.
+    #[wasm_bindgen(js_name = livePaymentsValue)]
+    pub fn live_payments_value(&self) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let data = self.ldk_runtime.live_payments();
+        crate::js_obj(&data)
+    }
+
     #[wasm_bindgen(js_name = listPaymentsValue)]
     pub fn list_payments_value(&self) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
@@ -2413,6 +2582,56 @@ impl RlnWasmNode {
         crate::js_to_json(&parsed)
     }
 
+    /// Create a BOLT11 invoice registered with the real live `ChannelManager`.
+    #[wasm_bindgen(js_name = createLnInvoiceLiveValue)]
+    pub fn create_ln_invoice_live_value(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        if expiry_sec == 0 {
+            return Err(JsValue::from_str(sdk_contracts::ERR_EXPIRY_SEC_NONPOSITIVE));
+        }
+        if amt_msat == Some(0) {
+            return Err(JsValue::from_str(sdk_contracts::ERR_AMT_MSAT_NONPOSITIVE));
+        }
+        if (asset_id.is_some() && asset_amount.is_none())
+            || (asset_id.is_none() && asset_amount.is_some())
+        {
+            return Err(JsValue::from_str(
+                "asset_id and asset_amount must be provided together",
+            ));
+        }
+        if let Some(id) = &asset_id {
+            validate_asset_id_format(id)?;
+        }
+        let invoice = self.ldk_runtime.create_bolt11_invoice_live(
+            amt_msat,
+            expiry_sec,
+            asset_id,
+            asset_amount,
+        )?;
+        self.ldk_runtime.record_invoice_created();
+        crate::js_obj(&RlnWasmNodeCreateLnInvoiceData { invoice })
+    }
+
+    #[wasm_bindgen(js_name = createLnInvoiceLiveJson)]
+    pub fn create_ln_invoice_live_json(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        asset_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<String, JsValue> {
+        let value =
+            self.create_ln_invoice_live_value(amt_msat, expiry_sec, asset_id, asset_amount)?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = createHodlLnInvoiceValue)]
     pub fn create_hodl_ln_invoice_value(
         &self,
@@ -2422,6 +2641,41 @@ impl RlnWasmNode {
         asset_amount: Option<u64>,
         payment_hash: String,
     ) -> Result<JsValue, JsValue> {
+        if self.use_runtime_state_for_ln_views() {
+            self.ensure_runtime_ready()?;
+            if expiry_sec == 0 {
+                return Err(JsValue::from_str(sdk_contracts::ERR_EXPIRY_SEC_NONPOSITIVE));
+            }
+            if amt_msat == Some(0) {
+                return Err(JsValue::from_str(sdk_contracts::ERR_AMT_MSAT_NONPOSITIVE));
+            }
+            if (asset_id.is_some() && asset_amount.is_none())
+                || (asset_id.is_none() && asset_amount.is_some())
+            {
+                return Err(JsValue::from_str(
+                    "asset_id and asset_amount must be provided together",
+                ));
+            }
+            if let Some(id) = &asset_id {
+                validate_asset_id_format(id)?;
+            }
+            if asset_id.is_some() && amt_msat.unwrap_or(0) < SDK_INVOICE_MIN_MSAT {
+                return Err(JsValue::from_str(&format!(
+                    "amt_msat cannot be less than {SDK_INVOICE_MIN_MSAT} when transferring an RGB asset"
+                )));
+            }
+            let payment_hash = payment_hash.trim().to_string();
+            decode_fixed_hex::<32>(&payment_hash, "invalid payment_hash")?;
+            let invoice = self.ldk_runtime.create_hodl_bolt11_invoice_live(
+                amt_msat,
+                expiry_sec,
+                asset_id,
+                asset_amount,
+                &payment_hash,
+            )?;
+            self.ldk_runtime.record_invoice_created();
+            return crate::js_obj(&RlnWasmNodeCreateLnInvoiceData { invoice });
+        }
         self.create_ln_invoice_value_internal(
             amt_msat,
             expiry_sec,
@@ -2460,6 +2714,10 @@ impl RlnWasmNode {
             return Err(JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_EMPTY));
         }
         decode_fixed_hex::<32>(&payment_hash, "invalid payment_hash")?;
+        if self.use_runtime_state_for_ln_views() {
+            self.ldk_runtime.cancel_hodl_invoice_live(&payment_hash)?;
+            return crate::js_obj(&serde_json::json!({}));
+        }
         let mut payment = if self.use_runtime_state_for_ln_views() {
             self.ldk_runtime
                 .get_payment(&payment_hash)
@@ -2534,6 +2792,12 @@ impl RlnWasmNode {
             return Err(JsValue::from_str(
                 sdk_contracts::ERR_PAYMENT_PREIMAGE_INVALID,
             ));
+        }
+        if self.use_runtime_state_for_ln_views() {
+            let changed = self
+                .ldk_runtime
+                .claim_hodl_invoice_live(&payment_hash, &payment_preimage)?;
+            return crate::js_obj(&RlnWasmNodeClaimHodlInvoiceData { changed });
         }
 
         let mut payment = if self.use_runtime_state_for_ln_views() {
@@ -3110,7 +3374,9 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = processPendingRgbTransactions)]
     pub async fn process_pending_rgb_transactions(&self) -> Result<(), JsValue> {
-        self.ldk_runtime.process_pending_rgb_transactions_boxed().await
+        self.ldk_runtime
+            .process_pending_rgb_transactions_boxed()
+            .await
     }
 
     #[wasm_bindgen(js_name = closeChannel)]
@@ -3242,12 +3508,41 @@ impl RlnWasmNode {
                 ));
             }
         }
-        if is_virtual_channel {
-            let _ = self.ldk_runtime.virtual_channel_session_update_status(
-                &channel_id,
-                LdkRuntimeVirtualChannelSessionStatusData::AbandonPending,
-            );
+        if !is_virtual_channel {
+            // Real (on-chain) channel: initiate the close on the live ChannelManager (cooperative
+            // when `force` is false, force-close — broadcasting the latest commitment — when true,
+            // matching the reference rgb-lightning-node SDK) and mark the cached view as closing. Do
+            // NOT remove it here — the live ChannelManager removes it when it fires
+            // `Event::ChannelClosed`, which `reconcile_channels_from_live` propagates (event-driven).
+            // Removing optimistically on the request would report the channel as gone while it is
+            // still open on-chain (funds locked) whenever the close stalls (e.g. an RGB colored-close
+            // negotiation that has not produced `closing_signed` yet).
+            self.ldk_runtime
+                .close_live_channel(&channel_id, &channel.peer_pubkey, force)?;
+            let mut closing = channel.clone();
+            closing.status = if force {
+                "force_closing".to_string()
+            } else {
+                "closing".to_string()
+            };
+            closing.ready = false;
+            closing.is_usable = false;
+            if self.use_runtime_state_for_ln_views() {
+                self.ldk_runtime
+                    .upsert_channel(Self::channel_runtime_state_from_data(&closing));
+            } else if let Some(entry) = self.channels.borrow_mut().get_mut(&channel_id) {
+                entry.data = closing;
+            }
+            self.ldk_runtime.record_channel_closed();
+            self.persist_runtime_event_log_state();
+            return Ok(());
         }
+
+        // ---- trusted virtual channel close (host-authoritative; removal is immediate) ----
+        let _ = self.ldk_runtime.virtual_channel_session_update_status(
+            &channel_id,
+            LdkRuntimeVirtualChannelSessionStatusData::AbandonPending,
+        );
         let applied = self
             .apply_and_record_transport_event(
                 RuntimeTransportEvent::ChannelClosed {
@@ -3257,44 +3552,39 @@ impl RlnWasmNode {
             )?
             .applied;
         if !applied {
-            if is_virtual_channel {
-                let live_virtual_channel_still_exists = if self.use_runtime_state_for_ln_views() {
-                    self.ldk_runtime.list_channels().into_iter().any(|entry| {
-                        entry.channel_id == channel_id
-                            && entry.virtual_open_mode.as_deref()
-                                == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
-                    })
-                } else {
-                    self.channels.borrow().values().any(|entry| {
-                        entry.data.channel_id == channel_id
-                            && entry.data.virtual_open_mode.as_deref()
-                                == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
-                    })
-                };
-                if live_virtual_channel_still_exists {
-                    let _ = self.ldk_runtime.virtual_channel_session_update_status(
-                        &channel_id,
-                        LdkRuntimeVirtualChannelSessionStatusData::Active,
-                    );
-                    return Err(JsValue::from_str(sdk_contracts::ERR_CHANNEL_NOT_FOUND));
-                }
+            let live_virtual_channel_still_exists = if self.use_runtime_state_for_ln_views() {
+                self.ldk_runtime.list_channels().into_iter().any(|entry| {
+                    entry.channel_id == channel_id
+                        && entry.virtual_open_mode.as_deref()
+                            == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
+                })
+            } else {
+                self.channels.borrow().values().any(|entry| {
+                    entry.data.channel_id == channel_id
+                        && entry.data.virtual_open_mode.as_deref()
+                            == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
+                })
+            };
+            if live_virtual_channel_still_exists {
                 let _ = self.ldk_runtime.virtual_channel_session_update_status(
                     &channel_id,
-                    LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+                    LdkRuntimeVirtualChannelSessionStatusData::Active,
                 );
-                self.unregister_trusted_virtual_scope_channel(&channel_id);
-                self.persist_runtime_event_log_state();
-                return Ok(());
+                return Err(JsValue::from_str(sdk_contracts::ERR_CHANNEL_NOT_FOUND));
             }
-            return Err(JsValue::from_str(sdk_contracts::ERR_CHANNEL_NOT_FOUND));
-        }
-        if is_virtual_channel {
             let _ = self.ldk_runtime.virtual_channel_session_update_status(
                 &channel_id,
                 LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
             );
             self.unregister_trusted_virtual_scope_channel(&channel_id);
+            self.persist_runtime_event_log_state();
+            return Ok(());
         }
+        let _ = self.ldk_runtime.virtual_channel_session_update_status(
+            &channel_id,
+            LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+        );
+        self.unregister_trusted_virtual_scope_channel(&channel_id);
         self.ldk_runtime.record_channel_closed();
         self.persist_runtime_event_log_state();
         Ok(())
@@ -4643,7 +4933,15 @@ impl RlnWasmNode {
                     self.ldk_runtime.has_peer(peer_pubkey)
                 }
                 RuntimeTransportEvent::ChannelClosed { channel_id } => {
-                    let removed = self.ldk_runtime.remove_channel(channel_id);
+                    let removed_runtime = self.ldk_runtime.remove_channel(channel_id);
+                    let mut local_channels = self.channels.borrow_mut();
+                    let local_before = local_channels.len();
+                    local_channels.retain(|_, entry| {
+                        entry.data.channel_id != *channel_id
+                            && entry.data.temporary_channel_id != *channel_id
+                    });
+                    let removed_local = local_channels.len() != local_before;
+                    let removed = removed_runtime || removed_local;
                     if removed {
                         self.unregister_trusted_virtual_scope_channel(channel_id);
                     }
@@ -5243,6 +5541,210 @@ fn apply_runtime_event_payload(
         },
     );
     Ok(payment)
+}
+
+/// Apply the latest indexer chain state to the live LDK backend.
+///
+/// Free-function form of the chain-sync→LDK bridge so it can be driven from both the manual
+/// `chainSyncTick` (`&self` wrapper) and the autonomous drive loop (cloned `Rc` handles), without
+/// duplicating the confirmation-ordering logic. Behavior is identical to the previous `&self`
+/// method; only `self.chain_sync`/`self.ldk_runtime` became explicit parameters.
+async fn apply_chain_sync_to_live_ldk(
+    chain_sync: &WasmChainSyncDriver,
+    ldk_runtime: &Rc<dyn LdkRuntimeManager>,
+) -> Result<(), JsValue> {
+    let status = chain_sync.status();
+    let Some(indexer_url) = status.indexer_url else {
+        return Ok(());
+    };
+    let Some(tip_height) = status.latest_tip_height else {
+        return Ok(());
+    };
+    if tip_height == 0 {
+        return Ok(());
+    }
+    // A lower Esplora tip cannot be applied with `best_block_updated`; LDK requires explicit
+    // block-disconnect notifications for a real reorg. Electrs can briefly serve an older tip
+    // while indexing freshly mined regtest blocks, and applying it directly makes a locked-in
+    // funding transaction appear to have zero confirmations.
+    if status.tip_regressed {
+        wasm_debug(&format!(
+            "[rln-wasm-sdk chain-sync] indexer tip regressed to {tip_height}; skipping live LDK chain application until the tip catches up"
+        ));
+        return Ok(());
+    }
+
+    let relevant = ldk_runtime.chain_relevant_txids()?;
+    if relevant.is_empty() {
+        return Ok(());
+    }
+
+    let mut header_cache: HashMap<String, String> = HashMap::new();
+
+    #[derive(Clone)]
+    struct ConfirmedTx {
+        txid: String,
+        height: u32,
+        block_hash: String,
+    }
+
+    let max_txids = 128usize;
+    let mut confirmed: Vec<ConfirmedTx> = Vec::new();
+    for txid in relevant.into_iter().take(max_txids) {
+        match fetch_tx_status(&indexer_url, &txid).await? {
+            None => {
+                // Do NOT mark the tx unconfirmed on a single negative lookup. Esplora/electrs
+                // routinely reports a freshly confirmed tx as missing for a tick or two right
+                // after a block is mined (indexing lag). Feeding that transient miss to LDK as
+                // `transaction_unconfirmed` force-closes the channel with
+                // "Locked at 6 confs, now have 0 confs". A genuine reorg is still reflected via
+                // the best-block/confirmed-tx updates below, so skipping the spurious unconfirm
+                // is safe (and there are no reorgs on regtest).
+                wasm_debug(&format!(
+                    "[rln-wasm-sdk chain-sync] relevant tx {txid} not reported confirmed by indexer this tick; skipping unconfirm (likely indexing lag)"
+                ));
+            }
+            Some((height, block_hash)) => {
+                confirmed.push(ConfirmedTx {
+                    txid,
+                    height,
+                    block_hash,
+                });
+            }
+        }
+    }
+    // Esplora endpoints are not indexed atomically. `/tx/:txid/status` may already report a
+    // confirmation at height N while `/blocks/tip/height` still reports N-1. Never advance LDK
+    // to a height below a confirmation applied in this same tick, or the channel immediately
+    // force-closes as "Locked at 6 confs, now have 0 confs".
+    let effective_tip_height = confirmed
+        .iter()
+        .map(|tx| tx.height)
+        .max()
+        .unwrap_or(tip_height)
+        .max(tip_height);
+    let tip_header_hex =
+        fetch_block_header_hex_by_height(&indexer_url, effective_tip_height).await?;
+
+    // LDK requires confirmations in chain order; within a block, txs should follow block order
+    // (and ideally topological order — we approximate via Esplora tx index).
+    confirmed.sort_by(|a, b| {
+        a.height
+            .cmp(&b.height)
+            .then_with(|| a.block_hash.cmp(&b.block_hash))
+            .then_with(|| a.txid.cmp(&b.txid))
+    });
+
+    let mut cursor = 0usize;
+    while cursor < confirmed.len() {
+        let height = confirmed[cursor].height;
+        let block_hash = confirmed[cursor].block_hash.clone();
+
+        let header_hex = if let Some(cached) = header_cache.get(&block_hash) {
+            cached.clone()
+        } else {
+            let hdr = fetch_block_header_hex(&indexer_url, &block_hash).await?;
+            header_cache.insert(block_hash.clone(), hdr.clone());
+            hdr
+        };
+
+        let mut end = cursor + 1;
+        while end < confirmed.len()
+            && confirmed[end].height == height
+            && confirmed[end].block_hash == block_hash
+        {
+            end += 1;
+        }
+
+        let mut with_pos: Vec<(usize, String)> = Vec::with_capacity(end.saturating_sub(cursor));
+        for ct in confirmed[cursor..end].iter() {
+            let tx_index = fetch_tx_index_in_block(&indexer_url, &block_hash, &ct.txid).await?;
+            with_pos.push((tx_index, ct.txid.clone()));
+        }
+        with_pos.sort_by_key(|(pos, _)| *pos);
+
+        for (tx_index, txid) in with_pos {
+            let tx_hex = fetch_tx_hex(&indexer_url, &txid).await?;
+            ldk_runtime.chain_apply_confirmed_tx(height, &header_hex, tx_index, &tx_hex)?;
+        }
+        ldk_runtime.chain_apply_best_block(height, &header_hex)?;
+
+        cursor = end;
+    }
+    // LDK expects tx confirmations to be applied before advancing the best block.
+    // Advancing to the tip first can make a later historical funding confirmation fail to
+    // drive the channel lock-in transition.
+    ldk_runtime.chain_apply_best_block(effective_tip_height, &tip_header_hex)?;
+    Ok(())
+}
+
+/// Run one full node "drive" pass: advance chain sync, apply it to the live LDK backend, drain the
+/// native runtime queue and buffered peer-manager hook payloads, process peer events, and reconcile
+/// the cached channel snapshot from the live `ChannelManager` *last* (so the authoritative live set
+/// is the final word and pre-funding temp-id "ghost" entries are purged — PARITY_PLAN 0.1).
+///
+/// This is the shared body of `chainSyncTick` and the autonomous drive loop (`autoDriveStart`), so
+/// both paths progress channel/payment state identically with no manual JS ticking required
+/// (PARITY_PLAN 0.2).
+#[allow(clippy::too_many_arguments)]
+async fn node_drive_tick_once(
+    chain_sync: &WasmChainSyncDriver,
+    ldk_runtime: &Rc<dyn LdkRuntimeManager>,
+    runtime_core: &NativeLnRuntimeCore,
+    peers: &Rc<RefCell<HashMap<String, PeerEntry>>>,
+    channels: &Rc<RefCell<HashMap<String, ChannelEntry>>>,
+    payments: &Rc<RefCell<HashMap<String, PaymentEntry>>>,
+    pending_peer_hook_events: &Rc<RefCell<Vec<PendingPeerHookEvent>>>,
+    runtime_events: &Rc<RefCell<Vec<RlnWasmNodeRuntimeEventData>>>,
+    next_runtime_event_seq: &Rc<RefCell<u64>>,
+    runtime_events_storage_key: &str,
+    label: &str,
+) -> Result<(), JsValue> {
+    let use_runtime_state_for_ln_views = ldk_runtime.status().backend == "wasm_native_ldk";
+
+    chain_sync.tick().await?;
+    apply_chain_sync_to_live_ldk(chain_sync, ldk_runtime).await?;
+
+    // Drive event ingestion so channel/payment state progresses in WASM. The regular node can reach
+    // lock-in and send `channel_ready`, but the WASM side only updates its channel view once we
+    // drain both the native runtime queue and the buffered peer-manager hook payloads.
+    let drained = runtime_core.drain_events();
+    for queued in drained.iter() {
+        apply_runtime_hook_payload(
+            ldk_runtime,
+            use_runtime_state_for_ln_views,
+            peers,
+            channels,
+            payments,
+            runtime_events,
+            next_runtime_event_seq,
+            queued.payload_hex.clone(),
+            "native_runtime_queue",
+        )?;
+    }
+    ldk_runtime.peer_process_events()?;
+    let _ = drain_pending_peer_hook_events(
+        ldk_runtime,
+        use_runtime_state_for_ln_views,
+        peers,
+        channels,
+        payments,
+        pending_peer_hook_events,
+        runtime_events,
+        next_runtime_event_seq,
+        label,
+    )?;
+
+    // Reconcile the cached channel snapshot from the live backend LAST, so the authoritative live
+    // `ChannelManager` set is the final word for this pass and purges any pre-funding temporary-id
+    // "ghost" entry the draining steps above may have (re-)inserted (PARITY_PLAN 0.1).
+    let _ = ldk_runtime.reconcile_channels_from_live();
+    persist_runtime_event_log_state(
+        runtime_events_storage_key,
+        runtime_events,
+        next_runtime_event_seq,
+    );
+    Ok(())
 }
 
 fn apply_runtime_hook_payload(

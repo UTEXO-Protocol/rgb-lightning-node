@@ -115,8 +115,14 @@ struct WasmUnlockRequest {
 enum WasmSdkLifecycleState {
     #[default]
     Uninitialized,
-    InitializedLocked { password: String, mnemonic: String },
-    Unlocked { password: String, mnemonic: String },
+    InitializedLocked {
+        password: String,
+        mnemonic: String,
+    },
+    Unlocked {
+        password: String,
+        mnemonic: String,
+    },
 }
 
 impl WasmSdkLifecycleState {
@@ -345,6 +351,18 @@ pub struct WasmIssueAssetCfaRequest {
     pub details: Option<String>,
     pub precision: u8,
     pub file_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WasmIssueAssetIfaRequest {
+    pub amounts: Vec<u64>,
+    #[serde(default)]
+    pub inflation_amounts: Vec<u64>,
+    pub ticker: String,
+    pub name: String,
+    pub precision: u8,
+    #[serde(default)]
+    pub reject_list_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -627,11 +645,7 @@ fn detect_wasm_indexer_protocol(indexer_url: &str) -> Result<&'static str, JsVal
         if remainder.trim().is_empty() {
             return Err(JsValue::from_str("invalid indexer_url format"));
         }
-        let host_candidate = remainder
-            .split(['/', '?', '#'])
-            .next()
-            .unwrap_or("")
-            .trim();
+        let host_candidate = remainder.split(['/', '?', '#']).next().unwrap_or("").trim();
         if host_candidate.is_empty()
             || host_candidate.contains('@')
             || host_candidate.chars().any(char::is_whitespace)

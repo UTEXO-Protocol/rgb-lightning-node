@@ -79,11 +79,10 @@ Serve repository files (from repo root):
 python3 -m http.server 8080
 ```
 
-Open examples:
-
-- `http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/`
-- `http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/virtual_channels_flow.html`
-- `http://localhost:8080/bindings/wasm-sdk/examples/wasm-interop/rgb_asset_transfer_flow.html`
+Examples are automated, headless end-to-end flows (see
+`examples/wasm-interop/README.md`): `run_e2e_full_flow.mjs` (full
+RGB-over-Lightning flow) and `run_multihop_flow.mjs` (native → WASM → native
+forwarding).
 
 Stop local infra:
 

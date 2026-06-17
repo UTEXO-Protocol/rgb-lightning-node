@@ -113,10 +113,10 @@ pub struct RustPeerManagerCallbacks {
 
 pub struct RlnLdkPeerManagerHooks {
     pub new_outbound_connection: Rc<dyn Fn(&str) -> Result<String, JsValue>>,
-    pub read_event: Rc<dyn Fn(&str) -> Result<(), JsValue>>,
+    pub read_event: Rc<dyn Fn(&str, &str) -> Result<(), JsValue>>,
     pub process_events: Rc<dyn Fn() -> Result<(), JsValue>>,
-    pub socket_disconnected: Rc<dyn Fn() -> Result<(), JsValue>>,
-    pub take_outbound_frames: Rc<dyn Fn() -> Result<Vec<String>, JsValue>>,
+    pub socket_disconnected: Rc<dyn Fn(&str) -> Result<(), JsValue>>,
+    pub take_outbound_frames: Rc<dyn Fn(&str) -> Result<Vec<String>, JsValue>>,
     pub report_error: Rc<dyn Fn(&str) -> Result<(), JsValue>>,
 }
 
@@ -160,7 +160,7 @@ pub fn install_peer_manager_hooks_from_js(
                 JsValue::from_str(sdk_contracts::ERR_NEW_OUTBOUND_CONNECTION_CB_HEX_STRING)
             })
         }),
-        read_event: Rc::new(move |payload_hex| {
+        read_event: Rc::new(move |_peer_pubkey, payload_hex| {
             let _ = read_event_cb.call1(&JsValue::NULL, &JsValue::from_str(payload_hex))?;
             Ok(())
         }),
@@ -168,14 +168,14 @@ pub fn install_peer_manager_hooks_from_js(
             let _ = process_events_cb.call0(&JsValue::NULL)?;
             Ok(())
         }),
-        socket_disconnected: Rc::new(move || {
+        socket_disconnected: Rc::new(move |_peer_pubkey| {
             let _ = socket_disconnected_cb.call0(&JsValue::NULL)?;
             Ok(())
         }),
         // Legacy installer has no outbound-drain callback parameter.
         // Keep this as a hard error so production flows cannot silently run
         // without real outbound frame progression.
-        take_outbound_frames: Rc::new(move || {
+        take_outbound_frames: Rc::new(move |_peer_pubkey| {
             Err(JsValue::from_str(
                 "installPeerManagerHooksFromJs is incomplete: missing take_outbound_frames callback; use installPeerManagerHooksFromJsV2",
             ))
@@ -204,7 +204,7 @@ pub fn install_peer_manager_hooks_from_js_v2(
                 JsValue::from_str(sdk_contracts::ERR_NEW_OUTBOUND_CONNECTION_CB_HEX_STRING)
             })
         }),
-        read_event: Rc::new(move |payload_hex| {
+        read_event: Rc::new(move |_peer_pubkey, payload_hex| {
             let _ = read_event_cb.call1(&JsValue::NULL, &JsValue::from_str(payload_hex))?;
             Ok(())
         }),
@@ -212,7 +212,7 @@ pub fn install_peer_manager_hooks_from_js_v2(
             let _ = process_events_cb.call0(&JsValue::NULL)?;
             Ok(())
         }),
-        take_outbound_frames: Rc::new(move || {
+        take_outbound_frames: Rc::new(move |_peer_pubkey| {
             let value = take_outbound_frames_cb.call0(&JsValue::NULL)?;
             if value.is_null() || value.is_undefined() {
                 return Ok(Vec::new());
@@ -237,7 +237,7 @@ pub fn install_peer_manager_hooks_from_js_v2(
             }
             Ok(frames)
         }),
-        socket_disconnected: Rc::new(move || {
+        socket_disconnected: Rc::new(move |_peer_pubkey| {
             let _ = socket_disconnected_cb.call0(&JsValue::NULL)?;
             Ok(())
         }),
@@ -294,7 +294,10 @@ impl PeerManagerAdapter for RustPeerManagerAdapter {
     }
 }
 
-fn callbacks_from_hooks(hooks: Rc<RlnLdkPeerManagerHooks>) -> RustPeerManagerCallbacks {
+fn callbacks_from_hooks(
+    hooks: Rc<RlnLdkPeerManagerHooks>,
+    peer_pubkey: String,
+) -> RustPeerManagerCallbacks {
     RustPeerManagerCallbacks {
         new_outbound_connection: Box::new({
             let hooks = hooks.clone();
@@ -302,7 +305,8 @@ fn callbacks_from_hooks(hooks: Rc<RlnLdkPeerManagerHooks>) -> RustPeerManagerCal
         }),
         read_event: Box::new({
             let hooks = hooks.clone();
-            move |payload_hex| (hooks.read_event)(payload_hex)
+            let peer_pubkey = peer_pubkey.clone();
+            move |payload_hex| (hooks.read_event)(&peer_pubkey, payload_hex)
         }),
         process_events: Box::new({
             let hooks = hooks.clone();
@@ -310,11 +314,13 @@ fn callbacks_from_hooks(hooks: Rc<RlnLdkPeerManagerHooks>) -> RustPeerManagerCal
         }),
         socket_disconnected: Box::new({
             let hooks = hooks.clone();
-            move || (hooks.socket_disconnected)()
+            let peer_pubkey = peer_pubkey.clone();
+            move || (hooks.socket_disconnected)(&peer_pubkey)
         }),
         take_outbound_frames: Box::new({
             let hooks = hooks.clone();
-            move || (hooks.take_outbound_frames)()
+            let peer_pubkey = peer_pubkey.clone();
+            move || (hooks.take_outbound_frames)(&peer_pubkey)
         }),
         report_error: Box::new(move |error_message| (hooks.report_error)(error_message)),
     }
@@ -892,7 +898,7 @@ impl RlnWasmRustPeerManagerBridge {
         peer_pubkey: String,
     ) -> Result<RlnWasmPeerSession, JsValue> {
         if let Some(hooks) = get_rln_ldk_peer_manager_hooks() {
-            let callbacks = callbacks_from_hooks(hooks);
+            let callbacks = callbacks_from_hooks(hooks, peer_pubkey.clone());
             return peer_session_connect_rust_callbacks(
                 proxy_url,
                 peer_addr,
@@ -958,7 +964,7 @@ impl RlnWasmRustPeerManagerBridge {
         options_js: JsValue,
     ) -> Result<RlnWasmPeerSession, JsValue> {
         if let Some(hooks) = get_rln_ldk_peer_manager_hooks() {
-            let callbacks = callbacks_from_hooks(hooks);
+            let callbacks = callbacks_from_hooks(hooks, peer_pubkey.clone());
             return peer_session_connect_with_adapter_rust_callbacks(
                 proxy_url,
                 peer_addr,

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RLN WASM ↔ Native RGB E2E Full Flow</title>
+    <style>
+      body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 1.5rem; }
+      button { padding: 0.5rem 0.9rem; font-size: 1rem; }
+      #out { border: 1px solid #bbb; padding: 0.8rem; margin-top: 1rem; max-height: 80vh; overflow: auto; }
+      pre { margin: 0.3rem 0; white-space: pre-wrap; }
+      .hint { color: #666; font-size: 0.85em; }
+    </style>
+  </head>
+  <body>
+    <h1>WASM ↔ Native — Real RGB-over-Lightning E2E</h1>
+    <p class="hint">
+      Open vanilla + RGB channels &rarr; real BTC keysend HTLC &rarr; real RGB keysend HTLC
+      &rarr; close &rarr; reopen &amp; verify persisted state. Requires compose.wasm.yaml infra
+      and <code>rgb-native-phase5-node</code> on 19735/19737. Driven headlessly by
+      <code>run_e2e_full_flow.mjs</code> (auto-runs when <code>?phase=</code> is present).
+    </p>
+    <button id="run">Run E2E Full Flow</button>
+    <div id="out"></div>
+    <script type="module" src="./manual_js_rgb_e2e_full_flow.js"></script>
+  </body>
+</html>

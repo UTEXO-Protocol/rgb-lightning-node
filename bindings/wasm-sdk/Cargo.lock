@@ -2119,6 +2119,7 @@ name = "rln-wasm-sdk"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bincode",
  "bitcoin_hashes",
  "futures",
  "gloo-net 0.5.0",

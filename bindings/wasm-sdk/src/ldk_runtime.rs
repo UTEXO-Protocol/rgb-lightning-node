@@ -266,6 +266,26 @@ pub struct LdkRuntimePaymentStateData {
     pub payee_pubkey: String,
 }
 
+/// A real (live-LDK) payment as tracked by the wasm `ChannelManager`.
+///
+/// Unlike [`LdkRuntimePaymentStateData`], whose status is driven by the event-stream parity model,
+/// the `status` here is updated strictly from real LDK `PaymentSent`/`PaymentFailed`/`PaymentClaimed`
+/// events, so it reflects an actual settled HTLC over the wire.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LdkRuntimeLivePaymentData {
+    pub payment_hash: String,
+    /// `pending` | `succeeded` | `failed`
+    pub status: String,
+    pub amt_msat: Option<u64>,
+    pub asset_id: Option<String>,
+    pub asset_amount: Option<u64>,
+    pub inbound: bool,
+    #[serde(default)]
+    pub preimage: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LdkRuntimeFundingRequestData {
     pub temporary_channel_id: String,
@@ -297,14 +317,36 @@ pub trait LdkRuntimeManager {
     fn list_peers(&self) -> Vec<LdkRuntimePeerStateData>;
     fn peer_new_outbound_connection(&self, peer_pubkey: &str) -> Result<String, JsValue>;
     fn peer_read_event(&self, payload_hex: &str) -> Result<(), JsValue>;
+    fn peer_read_event_for_peer(
+        &self,
+        _peer_pubkey: &str,
+        payload_hex: &str,
+    ) -> Result<(), JsValue> {
+        self.peer_read_event(payload_hex)
+    }
     fn peer_process_events(&self) -> Result<(), JsValue>;
     fn peer_take_outbound_frames(&self) -> Result<Vec<String>, JsValue>;
+    fn peer_take_outbound_frames_for_peer(
+        &self,
+        _peer_pubkey: &str,
+    ) -> Result<Vec<String>, JsValue> {
+        self.peer_take_outbound_frames()
+    }
     fn peer_socket_disconnected(&self) -> Result<(), JsValue>;
+    fn peer_socket_disconnected_for_peer(&self, _peer_pubkey: &str) -> Result<(), JsValue> {
+        self.peer_socket_disconnected()
+    }
     fn peer_is_handshake_complete(&self, peer_pubkey: &str) -> Result<bool, JsValue>;
     fn set_live_node_seed_hex(&self, seed_hex: String) -> Result<(), JsValue>;
     fn set_identity_stable(&self, stable: bool);
     fn live_node_pubkey(&self) -> Result<String, JsValue>;
     fn persist_live_state(&self) -> Result<(), JsValue>;
+    fn close_live_channel(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+        force: bool,
+    ) -> Result<(), JsValue>;
     fn upsert_channel(&self, channel: LdkRuntimeChannelStateData);
     fn remove_channel(&self, channel_id: &str) -> bool;
     fn remove_channels_by_peer(&self, peer_pubkey: &str) -> usize;
@@ -324,6 +366,47 @@ pub trait LdkRuntimeManager {
     fn upsert_payment(&self, payment: LdkRuntimePaymentStateData);
     fn get_payment(&self, payment_hash: &str) -> Option<LdkRuntimePaymentStateData>;
     fn list_payments(&self) -> Vec<LdkRuntimePaymentStateData>;
+    /// Send a real keysend (spontaneous) payment over a live channel via the wasm `ChannelManager`.
+    /// When `contract_id`/`asset_amount` are set, an RGB amount rides the HTLC.
+    fn keysend_live(
+        &self,
+        dest_pubkey: &str,
+        amt_msat: u64,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<LdkRuntimeLivePaymentData, JsValue>;
+    fn send_bolt11_live(
+        &self,
+        invoice: &str,
+        amt_msat: Option<u64>,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<LdkRuntimeLivePaymentData, JsValue>;
+    fn create_bolt11_invoice_live(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<String, JsValue>;
+    fn create_hodl_bolt11_invoice_live(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: &str,
+    ) -> Result<String, JsValue>;
+    fn claim_hodl_invoice_live(
+        &self,
+        payment_hash: &str,
+        payment_preimage: &str,
+    ) -> Result<bool, JsValue>;
+    fn cancel_hodl_invoice_live(&self, payment_hash: &str) -> Result<(), JsValue>;
+    /// Snapshot of all real payments tracked by the live `ChannelManager` event stream.
+    fn live_payments(&self) -> Vec<LdkRuntimeLivePaymentData>;
+    /// Status of a single real payment by hex payment hash, if known.
+    fn live_payment(&self, payment_hash: &str) -> Option<LdkRuntimeLivePaymentData>;
     fn virtual_channel_add_intent(
         &self,
         peer_pubkey: &str,
@@ -827,6 +910,27 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
         backend.read_event(payload_hex)
     }
 
+    fn peer_read_event_for_peer(
+        &self,
+        peer_pubkey: &str,
+        payload_hex: &str,
+    ) -> Result<(), JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.read_event_for_peer(peer_pubkey, payload_hex)
+    }
+
     fn peer_process_events(&self) -> Result<(), JsValue> {
         if self.live_backend.borrow().is_none() {
             let backend = create_wasm_ldk_live_backend(
@@ -863,6 +967,26 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
         backend.take_outbound_frames()
     }
 
+    fn peer_take_outbound_frames_for_peer(
+        &self,
+        peer_pubkey: &str,
+    ) -> Result<Vec<String>, JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.take_outbound_frames_for_peer(peer_pubkey)
+    }
+
     fn peer_socket_disconnected(&self) -> Result<(), JsValue> {
         if self.live_backend.borrow().is_none() {
             let backend = create_wasm_ldk_live_backend(
@@ -878,6 +1002,23 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
             .cloned()
             .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
         backend.socket_disconnected()
+    }
+
+    fn peer_socket_disconnected_for_peer(&self, peer_pubkey: &str) -> Result<(), JsValue> {
+        if self.live_backend.borrow().is_none() {
+            let backend = create_wasm_ldk_live_backend(
+                self.runtime_key.clone(),
+                *self.live_node_seed.borrow(),
+            )?;
+            self.live_backend.borrow_mut().replace(backend);
+        }
+        let backend = self
+            .live_backend
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
+        backend.socket_disconnected_for_peer(peer_pubkey)
     }
 
     fn peer_is_handshake_complete(&self, peer_pubkey: &str) -> Result<bool, JsValue> {
@@ -946,6 +1087,16 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
             .cloned()
             .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
         backend.persist_state()
+    }
+
+    fn close_live_channel(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+        force: bool,
+    ) -> Result<(), JsValue> {
+        let backend = self.ensure_live_backend()?;
+        backend.close_live_channel(channel_id, peer_pubkey, force)
     }
 
     fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
@@ -1176,6 +1327,9 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
             .ok_or_else(|| JsValue::from_str("failed to initialize ldk live backend"))?;
 
         let live_channels = backend.list_live_channels()?;
+        // Snapshot the set of live (funding-derived) channel ids before consuming the vec, so we
+        // can purge pre-migration "ghost" entries below.
+        let live_ids: Vec<String> = live_channels.iter().map(|c| c.channel_id.clone()).collect();
         let mut updated = 0usize;
         for ch in live_channels.into_iter() {
             // Find the cache entry this live channel should supersede.
@@ -1240,6 +1394,34 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
             self.upsert_channel(state);
             updated += 1;
         }
+        // Authoritative reconcile: the live `ChannelManager` is the source of truth for which real
+        // (non-virtual) channels exist. Remove any non-virtual cached channel that is not in the
+        // live set. This purges, in one rule:
+        //   - closed channels (gone from the manager once it fires Event::ChannelClosed), so the
+        //     close API never has to remove optimistically (which would report a still-open channel
+        //     as gone — a funds-locked hazard — if the cooperative close stalls), and
+        //   - pre-migration temp-id "ghosts" (the live channel migrated to its funding-derived id,
+        //     so its temporary id is no longer in the live set).
+        // Virtual (off-ledger) channels are not tracked by the ChannelManager, so they are kept.
+        // A real channel is added to the live manager synchronously at open (`create_channel`), so a
+        // non-virtual cached channel absent from the live set is always stale, never merely "not yet
+        // opened".
+        let stale_ids: Vec<String> = self
+            .channels
+            .borrow()
+            .iter()
+            .filter(|(id, ch)| {
+                ch.virtual_open_mode.is_none() && !live_ids.iter().any(|live| live == *id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for stale_id in stale_ids {
+            if self.remove_channel(&stale_id) {
+                updated += 1;
+            }
+        }
+        // Drained for completeness; removal is handled authoritatively by the live-set diff above.
+        let _ = backend.take_closed_live_channels();
         Ok(updated)
     }
 
@@ -1256,6 +1438,94 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
 
     fn list_payments(&self) -> Vec<LdkRuntimePaymentStateData> {
         self.payments.borrow().values().cloned().collect()
+    }
+
+    fn keysend_live(
+        &self,
+        dest_pubkey: &str,
+        amt_msat: u64,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<LdkRuntimeLivePaymentData, JsValue> {
+        self.ensure_started()?;
+        let backend = self.ensure_live_backend()?;
+        backend.keysend_live(dest_pubkey, amt_msat, contract_id, asset_amount)
+    }
+
+    fn send_bolt11_live(
+        &self,
+        invoice: &str,
+        amt_msat: Option<u64>,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<LdkRuntimeLivePaymentData, JsValue> {
+        self.ensure_started()?;
+        self.ensure_live_backend()?
+            .send_bolt11_live(invoice, amt_msat, contract_id, asset_amount)
+    }
+
+    fn create_bolt11_invoice_live(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+    ) -> Result<String, JsValue> {
+        self.ensure_started()?;
+        self.ensure_live_backend()?.create_bolt11_invoice_live(
+            amt_msat,
+            expiry_sec,
+            contract_id,
+            asset_amount,
+        )
+    }
+
+    fn create_hodl_bolt11_invoice_live(
+        &self,
+        amt_msat: Option<u64>,
+        expiry_sec: u32,
+        contract_id: Option<String>,
+        asset_amount: Option<u64>,
+        payment_hash: &str,
+    ) -> Result<String, JsValue> {
+        self.ensure_started()?;
+        self.ensure_live_backend()?.create_hodl_bolt11_invoice_live(
+            amt_msat,
+            expiry_sec,
+            contract_id,
+            asset_amount,
+            payment_hash,
+        )
+    }
+
+    fn claim_hodl_invoice_live(
+        &self,
+        payment_hash: &str,
+        payment_preimage: &str,
+    ) -> Result<bool, JsValue> {
+        self.ensure_started()?;
+        self.ensure_live_backend()?
+            .claim_hodl_invoice_live(payment_hash, payment_preimage)
+    }
+
+    fn cancel_hodl_invoice_live(&self, payment_hash: &str) -> Result<(), JsValue> {
+        self.ensure_started()?;
+        self.ensure_live_backend()?
+            .cancel_hodl_invoice_live(payment_hash)
+    }
+
+    fn live_payments(&self) -> Vec<LdkRuntimeLivePaymentData> {
+        match self.live_backend.borrow().as_ref() {
+            Some(backend) => backend.live_payments(),
+            None => Vec::new(),
+        }
+    }
+
+    fn live_payment(&self, payment_hash: &str) -> Option<LdkRuntimeLivePaymentData> {
+        self.live_backend
+            .borrow()
+            .as_ref()
+            .and_then(|backend| backend.live_payment(payment_hash))
     }
 
     fn virtual_channel_add_intent(
