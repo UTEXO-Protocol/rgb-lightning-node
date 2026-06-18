@@ -5120,7 +5120,7 @@ dependencies = [
 [[package]]
 name = "signer-external"
 version = "0.1.0-alpha"
-source = "git+https://github.com/UTEXO-Protocol/rln-external-signer.git?branch=main#545ed83597a1dd89925ed472b3a2b192c17de9ea"
+source = "git+https://github.com/UTEXO-Protocol/rln-external-signer.git?branch=main#594d8c08e812aa9d237a177391ea6f56b7c58e8f"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
