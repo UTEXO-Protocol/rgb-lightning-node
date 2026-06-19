@@ -422,6 +422,7 @@ pub struct Utxo {
 pub struct Unspent {
     pub utxo: Utxo,
     pub rgb_allocations: Vec<RgbAllocation>,
+    pub pending_blinded: u32,
 }
 
 pub struct LnInvoiceRequest {

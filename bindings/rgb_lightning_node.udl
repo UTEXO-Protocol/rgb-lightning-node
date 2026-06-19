@@ -508,6 +508,7 @@ dictionary Utxo {
 dictionary Unspent {
     Utxo utxo;
     sequence<RgbAllocation> rgb_allocations;
+    u32 pending_blinded;
 };
 
 dictionary LnInvoiceRequest {

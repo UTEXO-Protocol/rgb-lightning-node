@@ -3946,6 +3946,7 @@ components:
       required:
         - utxo
         - rgb_allocations
+        - pending_blinded
       properties:
         utxo:
           $ref: '#/components/schemas/Utxo'
@@ -3953,6 +3954,13 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RgbAllocation'
+        pending_blinded:
+          type: integer
+          description: >-
+            Number of pending blind receive operations reserving this UTXO. A
+            colorable UTXO with empty rgb_allocations but pending_blinded > 0 is
+            already reserved and is not allocatable.
+          example: 0
     Utxo:
       type: object
       required:

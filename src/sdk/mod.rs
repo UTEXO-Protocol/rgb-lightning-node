@@ -676,6 +676,10 @@ pub(crate) struct UtxoData {
 pub(crate) struct UnspentData {
     pub(crate) utxo: UtxoData,
     pub(crate) rgb_allocations: Vec<RgbAllocationData>,
+    /// Number of pending blind receive operations reserving this UTXO. A
+    /// colorable UTXO with empty `rgb_allocations` but `pending_blinded > 0` is
+    /// already reserved and is not allocatable.
+    pub(crate) pending_blinded: u32,
 }
 
 pub(crate) struct PeerData {
@@ -4240,6 +4244,7 @@ pub(crate) async fn list_unspents(
                     settled: a.settled,
                 })
                 .collect(),
+            pending_blinded: unspent.pending_blinded,
         });
     }
     Ok(unspents)

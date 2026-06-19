@@ -1324,6 +1324,7 @@ impl SdkNode {
                             })
                         })
                         .collect::<Result<Vec<_>, RlnError>>()?,
+                    pending_blinded: u.pending_blinded,
                 })
             })
             .collect()
