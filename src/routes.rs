@@ -4297,6 +4297,7 @@ pub(crate) async fn open_channel(
                 Some(config),
                 consignment_endpoint,
                 payload.push_asset_amount,
+                is_virtual_open,
             )
             .map_err(|e| {
                 if let Some(temp_id_str) = rgb_metadata_temp_id_str.as_deref() {
