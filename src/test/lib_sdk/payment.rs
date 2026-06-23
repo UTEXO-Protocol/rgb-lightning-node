@@ -140,7 +140,7 @@ fn success() {
                 fee_base_msat: None,
                 fee_proportional_millionths: None,
                 temporary_channel_id: None,
-                asset_id: Some(asset_id.clone()),
+                asset_id: Some(asset_id),
                 asset_amount: Some(OPEN_CHANNEL_ASSET_AMOUNT),
                 push_asset_amount: None,
                 virtual_open_mode: None,
@@ -168,10 +168,11 @@ fn success() {
             .ln_invoice(LnInvoiceRequest {
                 amt_msat: Some(PAYMENT_MSAT),
                 expiry_sec: 900,
-                asset_id: Some(asset_id.clone()),
+                asset_id: Some(asset_id),
                 asset_amount: Some(asset_amount),
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("node B ln_invoice")
             .invoice;
@@ -203,14 +204,14 @@ fn success() {
         let sender_payment =
             wait_for_payment_status(&node_a, &decoded.payment_hash, Duration::from_secs(60));
         assert!(matches!(sender_payment.status, HtlcStatus::Succeeded));
-        assert_eq!(sender_payment.asset_id, Some(asset_id.clone()));
+        assert_eq!(sender_payment.asset_id, Some(asset_id));
         assert_eq!(sender_payment.asset_amount, Some(asset_amount));
         check_preimage_matches_hash(&sender_payment, &decoded.payment_hash);
 
         let receiver_payment =
             wait_for_payment_status(&node_b, &decoded.payment_hash, Duration::from_secs(60));
         assert!(matches!(receiver_payment.status, HtlcStatus::Succeeded));
-        assert_eq!(receiver_payment.asset_id, Some(asset_id.clone()));
+        assert_eq!(receiver_payment.asset_id, Some(asset_id));
         assert_eq!(receiver_payment.asset_amount, Some(asset_amount));
         check_preimage_matches_hash(&receiver_payment, &decoded.payment_hash);
 
@@ -234,10 +235,11 @@ fn success() {
             .ln_invoice(LnInvoiceRequest {
                 amt_msat: Some(PAYMENT_MSAT),
                 expiry_sec: 900,
-                asset_id: Some(asset_id.clone()),
+                asset_id: Some(asset_id),
                 asset_amount: Some(asset_amount),
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("node A ln_invoice second")
             .invoice;
@@ -256,12 +258,12 @@ fn success() {
             .expect("node A decode_ln_invoice second");
         let payment =
             wait_for_payment_status(&node_a, &decoded.payment_hash, Duration::from_secs(60));
-        assert_eq!(payment.asset_id, Some(asset_id.clone()));
+        assert_eq!(payment.asset_id, Some(asset_id));
         assert_eq!(payment.asset_amount, Some(asset_amount));
         check_preimage_matches_hash(&payment, &decoded.payment_hash);
         let payment =
             wait_for_payment_status(&node_b, &decoded.payment_hash, Duration::from_secs(60));
-        assert_eq!(payment.asset_id, Some(asset_id.clone()));
+        assert_eq!(payment.asset_id, Some(asset_id));
         assert_eq!(payment.asset_amount, Some(asset_amount));
         check_preimage_matches_hash(&payment, &decoded.payment_hash);
 
@@ -269,10 +271,11 @@ fn success() {
             .ln_invoice(LnInvoiceRequest {
                 amt_msat: Some(PAYMENT_MSAT),
                 expiry_sec: 900,
-                asset_id: Some(asset_id.clone()),
+                asset_id: Some(asset_id),
                 asset_amount: Some(asset_amount),
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("node B ln_invoice third")
             .invoice;
@@ -289,12 +292,12 @@ fn success() {
             .expect("node A decode_ln_invoice third");
         let payment =
             wait_for_payment_status(&node_a, &decoded.payment_hash, Duration::from_secs(60));
-        assert_eq!(payment.asset_id, Some(asset_id.clone()));
+        assert_eq!(payment.asset_id, Some(asset_id));
         assert_eq!(payment.asset_amount, Some(asset_amount));
         check_preimage_matches_hash(&payment, &decoded.payment_hash);
         let payment =
             wait_for_payment_status(&node_b, &decoded.payment_hash, Duration::from_secs(60));
-        assert_eq!(payment.asset_id, Some(asset_id.clone()));
+        assert_eq!(payment.asset_id, Some(asset_id));
         assert_eq!(payment.asset_amount, Some(asset_amount));
         check_preimage_matches_hash(&payment, &decoded.payment_hash);
 
@@ -302,10 +305,11 @@ fn success() {
             .ln_invoice(LnInvoiceRequest {
                 amt_msat: Some(PAYMENT_MSAT),
                 expiry_sec: 900,
-                asset_id: Some(asset_id.clone()),
+                asset_id: Some(asset_id),
                 asset_amount: Some(asset_amount),
                 payment_hash: None,
                 description_hash: None,
+                min_final_cltv_expiry_delta: None,
             })
             .expect("node A ln_invoice fourth")
             .invoice;
@@ -322,12 +326,12 @@ fn success() {
             .expect("node A decode_ln_invoice fourth");
         let payment =
             wait_for_payment_status(&node_a, &decoded.payment_hash, Duration::from_secs(60));
-        assert_eq!(payment.asset_id, Some(asset_id.clone()));
+        assert_eq!(payment.asset_id, Some(asset_id));
         assert_eq!(payment.asset_amount, Some(asset_amount));
         check_preimage_matches_hash(&payment, &decoded.payment_hash);
         let payment =
             wait_for_payment_status(&node_b, &decoded.payment_hash, Duration::from_secs(60));
-        assert_eq!(payment.asset_id, Some(asset_id.clone()));
+        assert_eq!(payment.asset_id, Some(asset_id));
         assert_eq!(payment.asset_amount, Some(asset_amount));
         check_preimage_matches_hash(&payment, &decoded.payment_hash);
 
@@ -384,9 +388,8 @@ fn success() {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
-                skip_sync: false,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id: asset_id.clone(),
+                    asset_id,
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id.0),
                         witness_data: None,
@@ -420,9 +423,8 @@ fn success() {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
-                skip_sync: false,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id: asset_id.clone(),
+                    asset_id,
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id.0),
                         witness_data: None,
@@ -459,7 +461,10 @@ fn success() {
             .iter()
             .find(|tx| tx.sent == 128_000)
             .expect("rgb send transaction");
-        assert!(matches!(tx_user.transaction_type, TransactionType::User));
+        assert!(matches!(
+            tx_user.transaction_type,
+            TransactionType::Incoming
+        ));
         assert!(matches!(
             tx_utxos.transaction_type,
             TransactionType::CreateUtxos
@@ -468,7 +473,7 @@ fn success() {
         assert!(tx_utxos.confirmation_time.is_some());
 
         let transfers = node_a
-            .list_transfers(asset_id.clone())
+            .list_transfers(asset_id)
             .expect("node A list_transfers");
         let xfer_1 = transfers
             .iter()

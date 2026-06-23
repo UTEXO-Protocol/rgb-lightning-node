@@ -23,7 +23,9 @@ _is_port_bound() {
     local port=$1
     case "$(uname)" in
         "Linux")
-            [ -n "$(ss -HOlnt "sport = :$port")" ] && return 0
+            [ -n "$(ss -HOant "sport = :$port")" ] && return 0
+            ss -Oant "sport = :$port"
+            return 1
             ;;
         "Darwin")
             lsof -i "tcp:${port}" -sTCP:LISTEN -t >/dev/null && return 0
@@ -66,7 +68,7 @@ _wait_for_electrs() {
 _start_services() {
     _stop_services
 
-    mkdir -p data{core,index,ldk0,ldk1,ldk2}
+    mkdir -p data{core,index,ldk0,ldk1,ldk2,rgs}
     # see compose.yaml for the exposed ports
     EXPOSED_PORTS=(3000 50001)
     for port in "${EXPOSED_PORTS[@]}"; do
@@ -83,11 +85,18 @@ _start_services() {
     $COMPOSE up -d
     echo "waiting for electrs to have completed startup"
     _wait_for_electrs
+
+    # optionally start VSS server
+    if [ "${VSS:-}" = "1" ]; then
+        echo "starting VSS server..."
+        $COMPOSE --profile vss up -d
+        echo "VSS server available at http://localhost:8081/vss"
+    fi
 }
 
 _stop_services() {
-    $COMPOSE down -v --remove-orphans
-    rm -rf data{core,index,ldk0,ldk1,ldk2} 2>/dev/null || sudo rm -rf data{core,index,ldk0,ldk1,ldk2}
+    $COMPOSE --profile gossip down -v --remove-orphans
+    rm -rf data{core,index,ldk0,ldk1,ldk2,rgs} 2>/dev/null || sudo rm -rf data{core,index,ldk0,ldk1,ldk2,rgs}
 }
 
 _mine() {

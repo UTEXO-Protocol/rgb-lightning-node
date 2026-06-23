@@ -14,22 +14,21 @@ dedicated extra output containing the anchor to the RGB state transition.
 More context on how RGB works on the Lightning Network can be found
 [here](https://docs.rgb.info/lightning-network-compatibility).
 
-The RGB functionality for now can be tested only in regtest or testnet
-environments, but an advanced user may be able to apply changes in order to use
-it also on other networks.
+The node supports the regtest, signet, testnet3, testnet4 and mainnet networks,
+selected at startup via the `--network` flag (accepted values: `regtest`,
+`signet`, `signetcustom`, `testnet`/`testnet3`, `testnet4`, `mainnet`/`bitcoin`).
 Please be careful, this software is early alpha, we do not take any
 responsibility for loss of funds or any other issue you may encounter.
 
 Also note that [rust-lightning] has been changed in order to support RGB
-channels,
-[here](https://github.com/RGB-Tools/rust-lightning/compare/v0.2...rgb)
-a comparison with `v0.2`, the version we applied the changes to.
+channels; the node builds against the UTEXO-Protocol fork, tracked as a git
+submodule on branch `dev`.
 
 ## Install
 
 Clone the project, including (shallow) submodules:
 ```sh
-git clone https://github.com/RGB-Tools/rgb-lightning-node --recurse-submodules --shallow-submodules
+git clone https://github.com/UTEXO-Protocol/rgb-lightning-node --recurse-submodules --shallow-submodules
 ```
 
 Then, from the project root, install the `rgb-lightning-node` binary by
@@ -52,18 +51,31 @@ See [SDK WASM notes](src/sdk/README.md) for wasm architecture and validation com
 ## Run
 
 In order to operate, the node will need:
-- a bitcoind node
-- an indexer instance (electrum or esplora)
+- a chain backend, either:
+  - a bitcoind node (drives LDK chain sync via RPC), or
+  - an esplora server (drives LDK chain sync over HTTP)
+- an indexer instance for RGB (electrum or esplora — forwarded to rgb-lib)
 - an [RGB proxy server] instance
 
 Once services are running, daemons can be started.
 Each daemon needs to be started in a separate shell with `rgb-lightning-node`,
 specifying:
-- bitcoind user, password, host and port
 - node data directory
 - node listening port
 - LN peer listening port
 - network
+
+Chain-backend credentials are supplied at `/unlock` time, not on the CLI. The
+body must include exactly one of:
+- all four `bitcoind_rpc_*` fields — LDK chain sync runs via bitcoind RPC.
+  An optional electrum `indexer_url` is forwarded to rgb-lib only.
+- esplora `indexer_url` (no `bitcoind_rpc_*` fields) — LDK chain sync runs
+  over esplora, same URL forwarded to rgb-lib.
+- electrum `indexer_url` (no `bitcoind_rpc_*` fields) — LDK chain sync runs
+  over electrum, same URL forwarded to rgb-lib.
+
+`bitcoind + esplora` returns `400 AmbiguousChainBackend`. No credentials at
+all returns `400 MissingChainBackend`.
 
 ### Regtest
 
@@ -138,7 +150,7 @@ When unlocking regtest nodes use the following local services:
 - bitcoind_rpc_username: user
 - bitcoind_rpc_password: password
 - bitcoind_rpc_host: localhost
-- bitcoind_rpc_port: 18433
+- bitcoind_rpc_port: 18443
 - indexer_url: 127.0.0.1:50001
 - proxy_endpoint: rpc://127.0.0.1:3000/json-rpc
 
@@ -146,7 +158,7 @@ To unlock a regtest nodes running in docker use the following local services:
 - bitcoind_rpc_username: user
 - bitcoind_rpc_password: password
 - bitcoind_rpc_host: bitcoind
-- bitcoind_rpc_port: 18433
+- bitcoind_rpc_port: 18443
 - indexer_url: electrs:50001
 - proxy_endpoint: rpc://proxy:3000/json-rpc
 
@@ -206,6 +218,7 @@ curl -X POST -H "Content-type: application/json" \
 The node currently exposes the following APIs:
 - `/address` (POST)
 - `/apay/new` (POST)
+- `/apay/outboundinvoice` (POST)
 - `/assetbalance` (POST)
 - `/assetmetadata` (POST)
 - `/backup` (POST)
@@ -220,6 +233,7 @@ The node currently exposes the following APIs:
 - `/createutxos` (POST)
 - `/decodelninvoice` (POST)
 - `/decodergbinvoice` (POST)
+- `/decodeswapstring` (POST)
 - `/disconnectpeer` (POST)
 - `/estimatefee` (POST)
 - `/failtransfers` (POST)
@@ -264,14 +278,18 @@ The node currently exposes the following APIs:
 - `/sync` (POST)
 - `/taker` (POST)
 - `/unlock` (POST)
+- `/vssbackup` (POST) — requires the `vss` feature
+- `/vssbackupinfo` (GET) — requires the `vss` feature
+- `/vssclearfence` (POST) — requires the `vss` feature
+
 
 To get more details about the available APIs see the [OpenAPI specification].
 A Swagger UI for the `master` branch is generated from the specification and
-available at https://rgb-tools.github.io/rgb-lightning-node.
+available at https://utexo-protocol.github.io/rgb-lightning-node.
 Otherwise a local copy can be exposed. To do so, from the project root, run:
 
 ```sh
-docker run -it \
+docker run --rm -it \
   -p 8246:8080 \
   -e SWAGGER_JSON=/var/specs/openapi.yaml \
   -v $PWD/openapi.yaml:/var/specs/openapi.yaml \
@@ -395,12 +413,102 @@ Here is a list of projects using RLN, in alphabetical order:
 - [Tiramisu Wallet]
 
 
+## VSS Cloud Backup (optional)
+
+The node supports optional cloud backup via [VSS] (Versioned Storage Service).
+When enabled, the node replicates its state to a remote VSS server so it can be
+recovered on a new device. The feature is fully opt-in: it must be compiled in
+with `--features vss` and turned on at runtime with `--vss-url`. Without both,
+the node behaves exactly as before.
+
+Two independent data streams are backed up:
+
+- **Node KV state** — channel manager, channel monitors, payment info, swap
+  data and RGB channel info. Every update is written to both the local SQLite
+  database and the remote VSS server.
+- **RGB wallet data** — the wallet files managed by rgb-lib, backed up
+  automatically after every state-changing wallet operation.
+
+### Setup
+
+Start the VSS server alongside regtest services:
+```sh
+VSS=1 ./regtest.sh start
+```
+
+Or manually:
+```sh
+docker compose --profile vss up -d
+```
+
+### Usage
+
+Pass `--vss-url` when starting the node:
+```sh
+cargo run --features vss -- /tmp/rlndata --vss-url https://example.com/vss
+```
+
+Options:
+- `--vss-url <URL>` — VSS server URL; enables VSS backup. For non-loopback
+  hosts an `https://` URL is required (see `--vss-allow-http`).
+- `--vss-allow-http` — allow an `http://` `--vss-url` for non-loopback hosts.
+  By default only `https://` URLs and loopback HTTP URLs (e.g.
+  `http://localhost:8081/vss`) are accepted. Use only on a network you trust
+  out-of-band.
+- `--vss-allow-empty-restore` — on a fresh device, if a VSS restore fails
+  (server unreachable, wrong key, etc.), start with empty local state instead
+  of aborting unlock. **Use with care:** starting fresh with no channel
+  monitors can lose funds if the node had active channels. The default
+  (abort on restore failure) is the safe choice.
+
+### Encryption
+
+The KV stream is always encrypted at rest on VSS using XChaCha20-Poly1305 with
+a key derived from the VSS signing key. There is no option to disable it. The
+VSS signing key is derived from the wallet mnemonic, so backups can only be
+read and restored by a node initialized with the same mnemonic.
+
+### Recovery
+
+On a fresh start `unlock` restores both replicated streams from VSS before
+the node finishes coming up:
+
+- the **KV stream** (channel manager, monitors, payments, scorer, swap data,
+  RGB channel info) is restored when the local database has no
+  channel-manager state;
+- the **RGB wallet directory** (assets, transfers, allocations) is restored
+  when the local wallet directory for this mnemonic's fingerprint is absent.
+
+Together these recover BTC balance, channels, and RGB assets without any
+extra calls — `unlock` is the only entry point. Each VSS store is owned by a
+single running node instance, so a second node pointed at the same store
+refuses to start to avoid corrupting state. After a previous owner shuts
+down its fence is intentionally left behind; on a legitimate device wipe and
+restore the operator must call `POST /vssclearfence` (or
+`SdkNode::vss_clear_fence`) once between `init` and `unlock` to take over
+the store. In internal-mnemonic mode this is authenticated by the wallet
+password; in external-signer mode (no mnemonic on the node) the password is
+ignored and the VSS identity is reconstructed from the persisted
+`key_source.json`, matching the identity the node acquires the fence under.
+
+VSS replication is best-effort: a write that fails to reach the server is
+queued and retried on later successful writes. The number of pending writes is
+reported by `GET /vssbackupinfo` so monitoring can alert on persistent
+staleness.
+
+### API endpoints (when VSS is enabled)
+- `POST /vssbackup` — trigger a manual RGB wallet backup
+- `GET /vssbackupinfo` — check backup status (includes pending write count)
+- `POST /vssclearfence` — clear the single-writer fence to take over a store
+  after a previous owner shut down without releasing it
+
+[VSS]: https://github.com/lightningdevkit/vss-server
 [Biscuit tokens]: https://www.biscuitsec.org/
 [RGB proxy server]: https://github.com/RGB-Tools/rgb-proxy-server
 [ldk-sample]: https://github.com/lightningdevkit/ldk-sample
 [OpenAPI specification]: /openapi.yaml
 [rgb-lightning-sample]: https://github.com/RGB-Tools/rgb-lightning-sample
-[rust-lightning]: https://github.com/lightningdevkit/rust-lightning
+[rust-lightning]: https://github.com/UTEXO-Protocol/rust-lightning
 [Iris Wallet desktop]: https://github.com/RGB-Tools/iris-wallet-desktop
 [KaleidoSwap]: https://kaleidoswap.com/
 [Lnfi]: https://www.lnfi.network/

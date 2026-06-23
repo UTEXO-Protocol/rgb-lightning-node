@@ -106,7 +106,7 @@ fn close_coop_standard() {
                 fee_base_msat: None,
                 fee_proportional_millionths: None,
                 temporary_channel_id: None,
-                asset_id: Some(asset_id.clone()),
+                asset_id: Some(asset_id),
                 asset_amount: Some(600),
                 push_asset_amount: None,
                 virtual_open_mode: None,
@@ -159,9 +159,8 @@ fn close_coop_standard() {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
-                skip_sync: false,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id: asset_id.clone(),
+                    asset_id,
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id.0),
                         witness_data: None,
@@ -215,9 +214,8 @@ fn close_coop_standard() {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
-                skip_sync: false,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id: asset_id.clone(),
+                    asset_id,
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id.0),
                         witness_data: None,
@@ -251,9 +249,8 @@ fn close_coop_standard() {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
-                skip_sync: false,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id: asset_id.clone(),
+                    asset_id,
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id.0),
                         witness_data: None,

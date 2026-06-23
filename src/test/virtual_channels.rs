@@ -51,7 +51,7 @@ async fn issue_asset_nia_with_amounts(node_address: SocketAddr, amounts: Vec<u64
         .send()
         .await
         .unwrap();
-    _check_response_is_ok(res)
+    check_response_is_ok(res)
         .await
         .json::<IssueAssetNIAResponse>()
         .await
@@ -575,6 +575,105 @@ async fn virtual_reconciliation_ignores_orphan_pending_rgb_entries() {
 #[tokio::test]
 #[traced_test]
 #[serial_test::serial]
+async fn virtual_hodl_invoice_cancel_clears_pending_artifacts_and_allows_close() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}hodl_cancel_cleanup/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_pubkey = node_info(host_node_address).await.pubkey;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let issued_asset_id = issue_asset_nia_with_amounts(host_node_address, vec![500, 500])
+        .await
+        .asset_id;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_pubkey).unwrap()],
+    )
+    .await;
+    let client_node_pubkey = node_info(client_node_address).await.pubkey;
+
+    let channel_id = open_virtual_channel(
+        host_node_address,
+        &client_node_pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(0),
+        Some(200),
+        Some(&issued_asset_id),
+        None,
+    )
+    .await
+    .channel_id;
+
+    let asset_payment_amount = 10;
+    let (_, payment_hash) = random_preimage_and_hash();
+    let LNInvoiceResponse {
+        invoice: hodl_invoice,
+    } = ln_invoice_hodl(
+        client_node_address,
+        Some(HTLC_MIN_MSAT),
+        Some(&issued_asset_id),
+        Some(asset_payment_amount),
+        3600,
+        Some(payment_hash.clone()),
+    )
+    .await;
+    let decoded_invoice = decode_ln_invoice(host_node_address, &hodl_invoice).await;
+    assert_eq!(decoded_invoice.payment_hash, payment_hash);
+
+    send_payment_with_status(host_node_address, hodl_invoice.clone(), HTLCStatus::Pending).await;
+    wait_for_ln_payment(client_node_address, &payment_hash, HTLCStatus::Claimable).await;
+
+    cancel_hodl_invoice(client_node_address, payment_hash.clone()).await;
+
+    wait_for_no_rgb_payment_pending_artifacts(
+        &format!("{test_storage_root}host_node"),
+        &payment_hash,
+        false,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("wait for host RGB pending artifacts to clear: {err}"));
+    wait_for_no_rgb_payment_pending_artifacts(
+        &format!("{test_storage_root}client_node"),
+        &payment_hash,
+        true,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("wait for client RGB pending artifacts to clear: {err}"));
+
+    let payer_failed =
+        wait_for_ln_payment(host_node_address, &payment_hash, HTLCStatus::Failed).await;
+    assert_eq!(payer_failed.asset_id, Some(issued_asset_id.clone()));
+    assert_eq!(payer_failed.asset_amount, Some(asset_payment_amount));
+
+    close_channel(host_node_address, &channel_id, &client_node_pubkey, false).await;
+
+    assert!(matches!(
+        invoice_status(client_node_address, &hodl_invoice).await,
+        InvoiceStatus::Cancelled
+    ));
+
+    shutdown(&[host_node_address, client_node_address]).await;
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
 async fn virtual_trusted_no_broadcast_survives_funding_timeout_and_routes_btc_and_rgb_payments() {
     initialize();
 
@@ -1032,7 +1131,7 @@ async fn virtual_close_succeeds_without_remote_value_and_is_idempotent() {
         false,
     )
     .await;
-    _check_response_is_ok(response)
+    check_response_is_ok(response)
         .await
         .json::<EmptyResponse>()
         .await
@@ -1328,4 +1427,138 @@ async fn virtual_close_succeeds_after_client_returns_full_btc_and_rgb() {
         false,
     )
     .await;
+}
+
+#[tokio::test]
+#[traced_test]
+#[serial_test::serial]
+async fn virtual_one_sat_htlc_routes_both_directions() {
+    initialize();
+
+    let test_storage_root = format!("{TEST_DIR_BASE}one_sat_htlc/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_info = node_info(host_node_address).await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let issued_asset_id = issue_asset_nia_with_amounts(host_node_address, vec![500, 500])
+        .await
+        .asset_id;
+
+    let negative_payload = LNInvoiceRequest {
+        amt_msat: Some(VIRTUAL_HTLC_MIN_MSAT),
+        expiry_sec: 3600,
+        asset_id: Some(issued_asset_id.clone()),
+        asset_amount: Some(1),
+        payment_hash: None,
+        description_hash: None,
+        min_final_cltv_expiry_delta: None,
+    };
+    let negative_response = reqwest::Client::new()
+        .post(format!("http://{host_node_address}/lninvoice"))
+        .json(&negative_payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        negative_response,
+        reqwest::StatusCode::BAD_REQUEST,
+        &format!("cannot be less than {HTLC_MIN_MSAT}"),
+        "InvalidAmount",
+    )
+    .await;
+
+    let (client_node_address, _client_node_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+    let client_node_info = node_info(client_node_address).await;
+
+    let funded_rgb_amount = 100;
+    let opened_virtual_channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(10_000),
+        Some(funded_rgb_amount),
+        Some(&issued_asset_id),
+        None,
+    )
+    .await;
+    assert_eq!(
+        opened_virtual_channel.virtual_open_mode.as_deref(),
+        Some("trusted_no_broadcast")
+    );
+    assert!(opened_virtual_channel.ready);
+    assert!(opened_virtual_channel.is_usable);
+
+    let host_to_client_rgb_amount = 50;
+    let rgb_invoice_in = ln_invoice(
+        client_node_address,
+        Some(VIRTUAL_HTLC_MIN_MSAT),
+        Some(&issued_asset_id),
+        Some(host_to_client_rgb_amount),
+        3600,
+    )
+    .await
+    .invoice;
+
+    let decoded_in = Bolt11Invoice::from_str(&rgb_invoice_in).unwrap();
+    assert_eq!(
+        decoded_in.amount_milli_satoshis(),
+        Some(VIRTUAL_HTLC_MIN_MSAT)
+    );
+    send_payment_with_status(host_node_address, rgb_invoice_in, HTLCStatus::Succeeded).await;
+    wait_for_ln_balance(
+        host_node_address,
+        &issued_asset_id,
+        funded_rgb_amount - host_to_client_rgb_amount,
+    )
+    .await;
+    wait_for_ln_balance(
+        client_node_address,
+        &issued_asset_id,
+        host_to_client_rgb_amount,
+    )
+    .await;
+
+    let client_to_host_rgb_amount = 30;
+    let rgb_invoice_out = ln_invoice(
+        host_node_address,
+        Some(VIRTUAL_HTLC_MIN_MSAT),
+        Some(&issued_asset_id),
+        Some(client_to_host_rgb_amount),
+        3600,
+    )
+    .await
+    .invoice;
+    send_payment_with_status(client_node_address, rgb_invoice_out, HTLCStatus::Succeeded).await;
+    wait_for_ln_balance(
+        host_node_address,
+        &issued_asset_id,
+        funded_rgb_amount - host_to_client_rgb_amount + client_to_host_rgb_amount,
+    )
+    .await;
+    wait_for_ln_balance(
+        client_node_address,
+        &issued_asset_id,
+        host_to_client_rgb_amount - client_to_host_rgb_amount,
+    )
+    .await;
+
+    shutdown(&[host_node_address, client_node_address]).await;
 }

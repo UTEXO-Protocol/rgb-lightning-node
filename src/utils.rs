@@ -1,5 +1,5 @@
 use crate::database::RlnDatabase;
-use crate::kv_store::SeaOrmKvStore;
+use crate::synced_kv_store::SyncedKvStore;
 use amplify::s;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -12,9 +12,9 @@ use lightning::routing::router::{
     Payee, PaymentParameters, Route, RouteHint, RouteParameters, Router as _,
     DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA, MAX_PATH_LENGTH_ESTIMATE,
 };
+use lightning::sign::NodeSigner;
 use lightning::{
     onion_message::packet::OnionMessageContents,
-    sign::KeysManager,
     types::payment::{PaymentHash, PaymentPreimage},
     util::persist::KVStoreSync,
     util::ser::{Writeable, Writer},
@@ -30,16 +30,20 @@ use std::{
     path::Path,
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
     time::{Duration, SystemTime},
 };
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
-use crate::core_types::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
+use crate::core_types::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT, VIRTUAL_HTLC_MIN_MSAT};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
+use crate::signer::{
+    read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment,
+    RlnEntropySource,
+};
 use crate::{
     args::UserArgs,
     disk::FilesystemLogger,
@@ -54,6 +58,8 @@ use crate::{
 pub(crate) const LDK_DIR: &str = ".ldk";
 pub(crate) const LOGS_DIR: &str = "logs";
 pub(crate) const ELECTRUM_URL_REGTEST: &str = "127.0.0.1:50001";
+#[cfg(test)]
+pub(crate) const ESPLORA_URL_REGTEST: &str = "http://127.0.0.1:3002";
 pub(crate) const ELECTRUM_URL_SIGNET: &str = "ssl://electrum.iriswallet.com:50033";
 pub(crate) const ELECTRUM_URL_TESTNET: &str = "ssl://electrum.iriswallet.com:50013";
 pub(crate) const ELECTRUM_URL_TESTNET4: &str = "ssl://electrum.iriswallet.com:50053";
@@ -67,14 +73,20 @@ pub(crate) struct AppState {
     pub(crate) cancel_token: CancellationToken,
     pub(crate) unlocked_app_state: Arc<TokioMutex<Option<Arc<UnlockedAppState>>>>,
     pub(crate) ldk_background_services: Arc<Mutex<Option<LdkBackgroundServices>>>,
+    #[allow(dead_code)]
+    pub(crate) attached_external_signer: Arc<Mutex<Option<ExternalSignerAttachment>>>,
     pub(crate) changing_state: Mutex<bool>,
     pub(crate) root_public_key: Option<biscuit_auth::PublicKey>,
     pub(crate) revoked_tokens: Arc<Mutex<HashSet<Vec<u8>>>>,
 }
 
 impl AppState {
+    pub(crate) fn db(&self) -> Arc<DatabaseConnection> {
+        self.static_state.db()
+    }
+
     pub(crate) fn get_db(&self) -> RlnDatabase {
-        RlnDatabase::new((*self.static_state.database).clone())
+        RlnDatabase::new((*self.db()).clone())
     }
 
     pub(crate) fn get_changing_state(&self) -> MutexGuard<'_, bool> {
@@ -87,6 +99,19 @@ impl AppState {
         self.ldk_background_services.lock().unwrap()
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn get_attached_external_signer(
+        &self,
+    ) -> MutexGuard<'_, Option<ExternalSignerAttachment>> {
+        self.attached_external_signer.lock().unwrap()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_attached_external_signer(&self, updated: Option<ExternalSignerAttachment>) {
+        let mut attached_external_signer = self.get_attached_external_signer();
+        *attached_external_signer = updated;
+    }
+
     pub(crate) async fn get_unlocked_app_state(
         &self,
     ) -> TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>> {
@@ -94,6 +119,12 @@ impl AppState {
     }
 }
 
+// VSS-related fields below are always present on `StaticState` regardless of
+// the `vss` feature flag — they ride the same SDK / NodeConfig surface as the
+// non-VSS knobs. With `vss` off the implementation never reads them, so we
+// silence the dead-code warning at the field level (the older
+// `cfg_attr(dead_code)` annotations made the fields look optional; they
+// aren't, only their consumers are gated).
 pub(crate) struct StaticState {
     pub(crate) enable_virtual_channels_v0: bool,
     pub(crate) ldk_peer_listening_port: u16,
@@ -103,15 +134,31 @@ pub(crate) struct StaticState {
     pub(crate) logger: Arc<FilesystemLogger>,
     pub(crate) max_media_upload_size_mb: u16,
     pub(crate) virtual_peer_pubkeys: Vec<PublicKey>,
-    pub(crate) database: Arc<DatabaseConnection>,
+    pub(crate) database: RwLock<Arc<DatabaseConnection>>,
     pub(crate) lsp_base_url: Option<String>,
     pub(crate) lsp_bearer_token: Option<String>,
+    /// VSS server URL (None = VSS disabled). Populated regardless of the
+    /// `vss` feature flag; only the consumer in `start_ldk` is feature-gated.
+    #[cfg_attr(not(feature = "vss"), allow(dead_code))]
+    pub(crate) vss_url: Option<String>,
+    /// When true, a failed VSS restore on a fresh device logs a warning and
+    /// continues with empty local state instead of aborting unlock.
+    #[cfg_attr(not(feature = "vss"), allow(dead_code))]
+    pub(crate) vss_allow_empty_restore: bool,
+}
+
+impl StaticState {
+    pub(crate) fn db(&self) -> Arc<DatabaseConnection> {
+        self.database.read().unwrap().clone()
+    }
 }
 
 pub(crate) struct UnlockedAppState {
     pub(crate) channel_manager: Arc<ChannelManager>,
+    pub(crate) gossip_source: Arc<crate::gossip::GossipSource>,
     pub(crate) inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
-    pub(crate) keys_manager: Arc<KeysManager>,
+    pub(crate) signer: ActiveSignerRef,
+    pub(crate) entropy_source: Arc<dyn RlnEntropySource>,
     pub(crate) network_graph: Arc<NetworkGraph>,
     pub(crate) chain_monitor: Arc<ChainMonitor>,
     pub(crate) onion_messenger: Arc<OnionMessenger>,
@@ -119,21 +166,70 @@ pub(crate) struct UnlockedAppState {
     pub(crate) peer_manager: Arc<PeerManager>,
     pub(crate) async_order_handler: Arc<AsyncOrderMessageHandler>,
     pub(crate) async_payments_preimage_root: Arc<AsyncPaymentsPreimageRoot>,
-    pub(crate) kv_store: Arc<SeaOrmKvStore>,
+    pub(crate) kv_store: Arc<SyncedKvStore>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) rgb_wallet_wrapper: Arc<RgbLibWalletWrapper>,
     pub(crate) router: Arc<Router>,
     pub(crate) output_sweeper: Arc<OutputSweeper>,
-    pub(crate) rgb_send_lock: Arc<Mutex<bool>>,
     pub(crate) channel_ids_map: Arc<Mutex<ChannelIdsMap>>,
     pub(crate) proxy_endpoint: String,
+    pub(crate) external_signer_mode: bool,
+    pub(crate) external_signer: Option<Arc<ExternalSigner>>,
+    pub(crate) external_node_id: Option<String>,
     pub(crate) virtual_channel_draft_store: Arc<Mutex<VirtualChannelDraftStore>>,
     pub(crate) virtual_channel_session_store: Arc<Mutex<VirtualChannelSessionStore>>,
+    pub(crate) next_payment_idx: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl UnlockedAppState {
+    pub(crate) fn attach_apay_signatures(
+        &self,
+        mut params: crate::async_order::AsyncOrderNewParamsWire,
+        host_pubkey_hex: &str,
+        first_hash_index: u64,
+        username: Option<&str>,
+        domain: Option<&str>,
+    ) -> Result<crate::async_order::AsyncOrderNewParamsWire, APIError> {
+        if username.is_some() != domain.is_some() {
+            return Err(APIError::InvalidRequest(
+                "username and domain must be supplied together".to_string(),
+            ));
+        }
+
+        let recipient_pubkey = self.runtime_node_pubkey();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let expires_at = created_at.saturating_add(crate::async_order::APAY_BATCH_EXPIRY_SECS);
+        let batch = crate::async_order::build_apay_batch_commitment(
+            &recipient_pubkey,
+            host_pubkey_hex,
+            first_hash_index,
+            &params.hashes,
+            created_at,
+            expires_at,
+            |msg| self.sign_node_message(msg).map_err(|_| ()),
+        )
+        .map_err(|err| APIError::InvalidRequest(err.message))?;
+        params.batch = Some(batch);
+
+        if let (Some(username), Some(domain)) = (username, domain) {
+            let address_sig = crate::async_order::build_apay_address_attestation(
+                &recipient_pubkey,
+                domain,
+                username,
+                0,
+                |msg| self.sign_node_message(msg).map_err(|_| ()),
+            )
+            .map_err(|err| APIError::InvalidRequest(err.message))?;
+            params.address_sig = Some(address_sig);
+        }
+        Ok(params)
+    }
+
     pub(crate) fn get_inbound_payments(&self) -> MutexGuard<'_, InboundPaymentInfoStorage> {
         self.inbound_payments.lock().unwrap()
     }
@@ -165,6 +261,95 @@ impl UnlockedAppState {
     ) -> MutexGuard<'_, VirtualChannelSessionStore> {
         self.virtual_channel_session_store.lock().unwrap()
     }
+
+    pub(crate) fn htlc_min_msat_for_asset(&self, contract_id: &ContractId) -> u64 {
+        self.channel_manager
+            .list_channels()
+            .iter()
+            .filter(|chan_info| {
+                get_rgb_channel_info_optional(&chan_info.channel_id, false, self.kv_store.as_ref())
+                    .is_some_and(|rgb_info| rgb_info.contract_id == *contract_id)
+            })
+            .filter_map(|chan_info| chan_info.inbound_htlc_minimum_msat)
+            .min()
+            .unwrap_or(HTLC_MIN_MSAT)
+    }
+
+    pub(crate) fn htlc_min_msat_for_peer(&self, peer: PublicKey) -> u64 {
+        let has_virtual =
+            self.channel_manager.list_channels().iter().any(|channel| {
+                channel.trusted_no_broadcast && channel.counterparty.node_id == peer
+            });
+        if has_virtual {
+            VIRTUAL_HTLC_MIN_MSAT
+        } else {
+            HTLC_MIN_MSAT
+        }
+    }
+
+    pub(crate) fn prepare_apay_order_params(
+        &self,
+        host_node_id: &PublicKey,
+    ) -> Result<crate::async_order::AsyncOrderNewParamsWire, APIError> {
+        let start_index = crate::async_order::read_async_payments_next_hash_index(
+            self.kv_store.as_ref(),
+            host_node_id,
+        )
+        .map_err(|err| APIError::Unexpected(err.message))?;
+        if self.external_signer_mode {
+            let external_signer = self
+                .external_signer
+                .as_ref()
+                .ok_or_else(|| APIError::Unexpected("external signer missing".to_string()))?;
+            let hashes = external_signer
+                .prepare_async_payments_hashes(
+                    hex_str(&host_node_id.serialize()),
+                    start_index,
+                    crate::async_order::ASYNC_ORDER_MAX_HASH_BATCH_SIZE as u32,
+                )
+                .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
+            Ok(crate::async_order::AsyncOrderNewParamsWire {
+                protocol_version: 1,
+                hashes: hashes
+                    .into_iter()
+                    .map(|entry| crate::async_order::AsyncOrderNewHashWire {
+                        hash_index: entry.hash_index,
+                        payment_hash: entry.payment_hash_hex,
+                    })
+                    .collect(),
+                batch: None,
+                address_sig: None,
+            })
+        } else {
+            self.async_payments_preimage_root
+                .prepare_async_order_new_params(
+                    start_index,
+                    crate::async_order::ASYNC_ORDER_MAX_HASH_BATCH_SIZE,
+                )
+                .map_err(|err| APIError::InvalidRequest(err.message))
+        }
+    }
+
+    pub(crate) fn sign_node_message(&self, message: &[u8]) -> Result<String, APIError> {
+        self.signer
+            .sign_message(message)
+            .map_err(|_| APIError::Unexpected("failed to sign message".to_string()))
+    }
+
+    pub(crate) fn runtime_node_pubkey(&self) -> String {
+        self.external_node_id
+            .clone()
+            .unwrap_or_else(|| self.channel_manager.get_our_node_id().to_string())
+    }
+
+    pub(crate) fn runtime_node_id(&self) -> PublicKey {
+        if let Some(node_id) = &self.external_node_id {
+            if let Ok(pubkey) = PublicKey::from_str(node_id) {
+                return pubkey;
+            }
+        }
+        self.channel_manager.get_our_node_id()
+    }
 }
 
 #[derive(Debug)]
@@ -186,6 +371,12 @@ impl Writeable for UserOnionMessageContents {
     fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
         w.write_all(&self.data)
     }
+}
+
+pub(crate) fn is_external_signer_mode_configured(state: &Arc<AppState>) -> Result<bool, APIError> {
+    Ok(read_key_source_file(&state.static_state.storage_dir_path)
+        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
+        .is_some())
 }
 
 pub(crate) fn check_already_initialized(database: &DatabaseConnection) -> Result<(), APIError> {
@@ -237,6 +428,44 @@ pub(crate) fn check_port_is_available(port: u16) -> Result<(), AppError> {
         return Err(AppError::UnavailablePort(port));
     }
     Ok(())
+}
+
+/// Validate a VSS URL. By default only `https://` URLs and loopback HTTP
+/// URLs (`http://localhost`, `http://127.0.0.1`, `http://[::1]`) are
+/// accepted; pass `allow_http = true` to allow `http://` on any host (for
+/// private networks with out-of-band trust).
+pub(crate) fn validate_vss_url(url: &str, allow_http: bool) -> Result<(), AppError> {
+    let trimmed = url.trim();
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        if rest.is_empty() {
+            return Err(AppError::InvalidVssConfig(format!(
+                "VSS URL `{url}` has no host"
+            )));
+        }
+        return Ok(());
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        // Strip any optional userinfo (`user:pass@`) and trailing path/query.
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host_with_port = authority
+            .rsplit_once('@')
+            .map(|(_, after)| after)
+            .unwrap_or(authority);
+        let is_loopback_host = ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]
+            .iter()
+            .any(|h| host_with_port == *h || host_with_port.starts_with(&format!("{h}:")));
+        if is_loopback_host || allow_http {
+            return Ok(());
+        }
+        return Err(AppError::InvalidVssConfig(format!(
+            "VSS URL `{url}` uses http:// on non-loopback host `{host_with_port}`. \
+             Use https:// in production, or pass --vss-allow-http to allow http:// \
+             on a private network you trust out-of-band."
+        )));
+    }
+    Err(AppError::InvalidVssConfig(format!(
+        "VSS URL `{url}` must start with http:// or https://"
+    )))
 }
 
 pub(crate) fn get_db_path(storage_dir_path: &Path) -> PathBuf {
@@ -376,13 +605,10 @@ pub(crate) fn parse_peer_info(
     Ok((pubkey.unwrap(), peer_addr))
 }
 
-pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppError> {
-    // Initialize the Logger (creates ldk_data_dir and its logs directory)
-    let ldk_data_dir = args.storage_dir_path.join(LDK_DIR);
-    let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
-
-    // Initialize the shared database connection
-    let db_path = get_db_path(&args.storage_dir_path);
+pub(crate) async fn open_database_pool(
+    storage_dir_path: &Path,
+) -> Result<DatabaseConnection, AppError> {
+    let db_path = get_db_path(storage_dir_path);
     let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
     let mut opt = ConnectOptions::new(connection_string);
     // Use single connection to avoid deadlocks
@@ -391,12 +617,25 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         .connect_timeout(Duration::from_secs(8))
         .idle_timeout(Duration::from_secs(8))
         .max_lifetime(Duration::from_secs(8));
-
-    let database = crate::runtime::block_on(Database::connect(opt)).map_err(|e| {
+    Database::connect(opt).await.map_err(|e| {
         AppError::IO(std::io::Error::other(format!(
             "Database connection failed: {e}"
         )))
-    })?;
+    })
+}
+
+pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppError> {
+    // rustls 0.23 (via rgb-lib/reqwest 0.13) needs a process-level provider
+    // before any TLS use, and rgb-lib only installs one inside `go_online`.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Initialize the Logger (creates ldk_data_dir and its logs directory)
+    let ldk_data_dir = args.storage_dir_path.join(LDK_DIR);
+    let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
+
+    // Initialize the shared database connection
+    let database = crate::runtime::block_on(open_database_pool(&args.storage_dir_path))?;
+    let db_path = get_db_path(&args.storage_dir_path);
 
     crate::runtime::block_on(Migrator::up(&database, None))
         .map_err(|e| AppError::IO(std::io::Error::other(format!("Migration failed: {e}"))))?;
@@ -404,6 +643,10 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
     tracing::info!(db_path = %db_path.display(), "Shared database initialized");
 
     let cancel_token = CancellationToken::new();
+
+    if args.vss_url.is_some() {
+        tracing::info!(vss_url = ?args.vss_url, "VSS cloud backup enabled");
+    }
 
     let static_state = Arc::new(StaticState {
         enable_virtual_channels_v0: args.enable_virtual_channels_v0,
@@ -414,9 +657,11 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         logger,
         max_media_upload_size_mb: args.max_media_upload_size_mb,
         virtual_peer_pubkeys: args.virtual_peer_pubkeys.clone(),
-        database: Arc::new(database),
+        database: RwLock::new(Arc::new(database)),
         lsp_base_url: args.lsp_base_url.clone(),
         lsp_bearer_token: args.lsp_bearer_token.clone(),
+        vss_url: args.vss_url.clone(),
+        vss_allow_empty_restore: args.vss_allow_empty_restore,
     });
 
     let app_state = Arc::new(AppState {
@@ -424,6 +669,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         cancel_token,
         unlocked_app_state: Arc::new(TokioMutex::new(None)),
         ldk_background_services: Arc::new(Mutex::new(None)),
+        attached_external_signer: Arc::new(Mutex::new(None)),
         changing_state: Mutex::new(false),
         root_public_key: args.root_public_key,
         revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
@@ -464,9 +710,11 @@ pub(crate) fn get_max_local_rgb_amount<'r>(
     max_balance
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn get_route(
     channel_manager: &crate::ldk::ChannelManager,
     router: &crate::ldk::Router,
+    kv_store: &dyn KVStoreSync,
     start: PublicKey,
     dest: PublicKey,
     final_value_msat: Option<u64>,
@@ -474,6 +722,27 @@ pub(crate) fn get_route(
     hints: Vec<RouteHint>,
 ) -> Option<Route> {
     let inflight_htlcs = channel_manager.compute_inflight_htlcs();
+    // When routing from our own node, pass our usable channels as `first_hops` so
+    // the router can route over channels that are not in the public network graph
+    // (e.g. private channels). For RGB payments, restrict to channels holding the
+    // relevant asset.
+    let usable_channels;
+    let first_hops = if start == channel_manager.get_our_node_id() {
+        usable_channels = channel_manager.list_usable_channels();
+        let first_hops = usable_channels
+            .iter()
+            .filter(|channel| match rgb_payment {
+                Some((contract_id, _)) => {
+                    get_rgb_channel_info_optional(&channel.channel_id, false, kv_store)
+                        .is_some_and(|rgb_info| rgb_info.contract_id == contract_id)
+                }
+                None => true,
+            })
+            .collect::<Vec<_>>();
+        (!first_hops.is_empty()).then_some(first_hops)
+    } else {
+        None
+    };
     let payment_params = PaymentParameters {
         payee: Payee::Clear {
             node_id: dest,
@@ -497,7 +766,7 @@ pub(crate) fn get_route(
             max_total_routing_fee_msat: None,
             rgb_payment,
         },
-        None,
+        first_hops.as_deref(),
         inflight_htlcs,
     );
 
@@ -537,4 +806,38 @@ pub(crate) fn validate_and_parse_payment_preimage(
         return Err(APIError::InvalidPaymentPreimage);
     }
     Ok(preimage)
+}
+
+#[cfg(test)]
+mod utils_tests {
+    use super::validate_vss_url;
+
+    #[test]
+    fn vss_url_https_accepted() {
+        assert!(validate_vss_url("https://example.com/vss", false).is_ok());
+        assert!(validate_vss_url("https://example.com/vss", true).is_ok());
+    }
+
+    #[test]
+    fn vss_url_loopback_http_accepted_without_override() {
+        assert!(validate_vss_url("http://localhost:8081/vss", false).is_ok());
+        assert!(validate_vss_url("http://127.0.0.1:8081/vss", false).is_ok());
+        assert!(validate_vss_url("http://[::1]:8081/vss", false).is_ok());
+    }
+
+    #[test]
+    fn vss_url_non_loopback_http_rejected_without_override() {
+        assert!(validate_vss_url("http://example.com/vss", false).is_err());
+    }
+
+    #[test]
+    fn vss_url_non_loopback_http_accepted_with_override() {
+        assert!(validate_vss_url("http://example.com/vss", true).is_ok());
+    }
+
+    #[test]
+    fn vss_url_other_schemes_rejected() {
+        assert!(validate_vss_url("ftp://example.com/vss", true).is_err());
+        assert!(validate_vss_url("example.com/vss", true).is_err());
+    }
 }

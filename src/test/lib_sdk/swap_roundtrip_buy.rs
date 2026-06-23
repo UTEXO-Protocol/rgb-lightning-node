@@ -124,7 +124,7 @@ fn swap_roundtrip_buy() {
                 fee_base_msat: None,
                 fee_proportional_millionths: None,
                 temporary_channel_id: None,
-                asset_id: Some(asset_id.clone()),
+                asset_id: Some(asset_id),
                 asset_amount: Some(600),
                 push_asset_amount: None,
                 virtual_open_mode: None,
@@ -195,7 +195,7 @@ fn swap_roundtrip_buy() {
                 qty_from,
                 qty_to,
                 from_asset: None,
-                to_asset: Some(asset_id.clone()),
+                to_asset: Some(asset_id),
                 timeout_sec: 3600,
             })
             .expect("node A makerinit");
@@ -212,7 +212,7 @@ fn swap_roundtrip_buy() {
         assert_eq!(swap_maker.qty_from, qty_from);
         assert_eq!(swap_maker.qty_to, qty_to);
         assert_eq!(swap_maker.from_asset, None);
-        assert_eq!(swap_maker.to_asset, Some(asset_id.clone()));
+        assert_eq!(swap_maker.to_asset, Some(asset_id));
         assert_eq!(swap_maker.payment_hash, maker_init.payment_hash);
         assert!(matches!(swap_maker.status, SwapStatus::Waiting));
 
@@ -223,7 +223,7 @@ fn swap_roundtrip_buy() {
         assert_eq!(swap_taker.qty_from, qty_from);
         assert_eq!(swap_taker.qty_to, qty_to);
         assert_eq!(swap_taker.from_asset, None);
-        assert_eq!(swap_taker.to_asset, Some(asset_id.clone()));
+        assert_eq!(swap_taker.to_asset, Some(asset_id));
         assert_eq!(swap_taker.payment_hash, maker_init.payment_hash);
         assert!(matches!(swap_taker.status, SwapStatus::Waiting));
 
@@ -383,9 +383,8 @@ fn swap_roundtrip_buy() {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
-                skip_sync: false,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id: asset_id.clone(),
+                    asset_id,
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id.0),
                         witness_data: None,
@@ -419,9 +418,8 @@ fn swap_roundtrip_buy() {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
-                skip_sync: false,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id: asset_id.clone(),
+                    asset_id,
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id.0),
                         witness_data: None,

@@ -20,12 +20,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tracing::warn;
 
-use crate::utils::{hex_str, validate_and_parse_payment_hash};
+use crate::utils::{hex_str, validate_and_parse_description_hash, validate_and_parse_payment_hash};
 
 pub(crate) const ASYNC_ORDER_MESSAGE_TYPE_ID: u16 = 37915;
 pub(crate) const ASYNC_ORDER_MAX_HASH_BATCH_SIZE: usize = 200;
@@ -33,6 +33,11 @@ pub(crate) const ASYNC_ORDER_RESPONSE_TIMEOUT_SECS: u64 = 30;
 const ASYNC_ERROR_DUPLICATE_INDEX_CONFLICT: i64 = 1004;
 const ASYNC_ERROR_DUPLICATE_HASH_CONFLICT: i64 = 1005;
 const ASYNC_ERROR_INVALID_HASH_BATCH: i64 = 1003;
+pub(crate) const ASYNC_ERROR_INVOICE_HASH_MISMATCH: i64 = 1104;
+pub(crate) const ASYNC_ERROR_STALE_FLOW: i64 = 1105;
+const ASYNC_ORDER_NEW_METHOD: &str = "async_order.new";
+const ASYNC_ORDER_REQUEST_INVOICE_METHOD: &str = "async_order.request_invoice";
+const ASYNC_ORDER_PAYMENT_SENT_PATH: &str = "/internal/async_order/payment_sent";
 const ASYNC_ERROR_UNSUPPORTED_PROTOCOL_VERSION: i64 = 1000;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
@@ -94,9 +99,9 @@ struct AsyncOrderEnvelope {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AsyncOrderNewHashWire {
-    pub(crate) hash_index: u64,
-    pub(crate) payment_hash: String,
+pub struct AsyncOrderNewHashWire {
+    pub hash_index: u64,
+    pub payment_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -104,6 +109,183 @@ pub(crate) struct AsyncOrderNewHashWire {
 pub(crate) struct AsyncOrderNewParamsWire {
     pub(crate) protocol_version: u64,
     pub(crate) hashes: Vec<AsyncOrderNewHashWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch: Option<ApayBatchCommitmentWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) address_sig: Option<String>,
+}
+
+pub(crate) const APAY_BATCH_EXPIRY_SECS: u64 = 365 * 24 * 60 * 60;
+const APAY_BATCH_ID_TAG: &[u8] = b"UTEXO_APAY_BATCH_ID_V1";
+pub(crate) const APAY_HASH_BATCH_TAG: &[u8] = b"UTEXO_APAY_HASH_BATCH_V1";
+pub(crate) const APAY_LNADDR_TAG: &[u8] = b"UTEXO_APAY_LNADDR_V1";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ApayBatchCommitmentWire {
+    pub(crate) host_pubkey: String,
+    pub(crate) batch_id: String,
+    pub(crate) batch_root: String,
+    pub(crate) batch_size: u64,
+    pub(crate) batch_sig: String,
+    pub(crate) created_at: u64,
+    pub(crate) expires_at: u64,
+}
+
+fn apay_hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn apay_decode_hex_fixed<const N: usize>(
+    field: &str,
+    s: &str,
+) -> Result<[u8; N], JsonRpcErrorWire> {
+    let s = s.trim();
+    if s.len() != 2 * N {
+        return Err(JsonRpcErrorWire::invalid_params(format!(
+            "{field} must be {N}-byte hex"
+        )));
+    }
+    let mut out = [0u8; N];
+    for (slot, pair) in out.iter_mut().zip(s.as_bytes().chunks_exact(2)) {
+        let high = apay_hex_nibble(pair[0]).ok_or_else(|| {
+            JsonRpcErrorWire::invalid_params(format!("{field} must be {N}-byte hex"))
+        })?;
+        let low = apay_hex_nibble(pair[1]).ok_or_else(|| {
+            JsonRpcErrorWire::invalid_params(format!("{field} must be {N}-byte hex"))
+        })?;
+        *slot = (high << 4) | low;
+    }
+    Ok(out)
+}
+
+pub(crate) fn apay_derive_batch_id(recipient_pubkey: &[u8; 33], start_index: u64) -> [u8; 16] {
+    let mut material = Vec::with_capacity(APAY_BATCH_ID_TAG.len() + recipient_pubkey.len() + 8);
+    material.extend_from_slice(APAY_BATCH_ID_TAG);
+    material.extend_from_slice(recipient_pubkey);
+    material.extend_from_slice(&start_index.to_be_bytes());
+    let digest = sha256::Hash::hash(&material).to_byte_array();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    id
+}
+
+pub(crate) fn apay_batch_root(
+    recipient_pubkey: &[u8; 33],
+    batch_id: &[u8; 16],
+    hashes: &[AsyncOrderNewHashWire],
+) -> Result<[u8; 32], JsonRpcErrorWire> {
+    if hashes.is_empty() {
+        return Err(JsonRpcErrorWire::invalid_hash_batch());
+    }
+    let mut leaves = Vec::with_capacity(hashes.len());
+    for entry in hashes {
+        let payment_hash = validate_and_parse_payment_hash(&entry.payment_hash)
+            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_payment_hash"))?;
+        leaves.push(crate::apay_merkle::leaf_hash(
+            recipient_pubkey,
+            batch_id,
+            entry.hash_index,
+            &payment_hash.0,
+        ));
+    }
+    Ok(crate::apay_merkle::root(&leaves))
+}
+
+pub(crate) fn apay_commit_bytes(
+    recipient_pubkey: &[u8; 33],
+    host_pubkey: &[u8; 33],
+    batch_id: &[u8; 16],
+    batch_root: &[u8; 32],
+    batch_size: u64,
+    created_at: u64,
+    expires_at: u64,
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(APAY_HASH_BATCH_TAG.len() + 33 + 33 + 16 + 32 + 24);
+    data.extend_from_slice(APAY_HASH_BATCH_TAG);
+    data.extend_from_slice(recipient_pubkey);
+    data.extend_from_slice(host_pubkey);
+    data.extend_from_slice(batch_id);
+    data.extend_from_slice(batch_root);
+    data.extend_from_slice(&batch_size.to_be_bytes());
+    data.extend_from_slice(&created_at.to_be_bytes());
+    data.extend_from_slice(&expires_at.to_be_bytes());
+    data
+}
+
+pub(crate) fn apay_attest_bytes(
+    recipient_pubkey: &[u8; 33],
+    domain: &str,
+    username: &str,
+    expires_at: u64,
+) -> Vec<u8> {
+    let mut data =
+        Vec::with_capacity(APAY_LNADDR_TAG.len() + 33 + domain.len() + username.len() + 8);
+    data.extend_from_slice(APAY_LNADDR_TAG);
+    data.extend_from_slice(recipient_pubkey);
+    data.extend_from_slice(domain.as_bytes());
+    data.extend_from_slice(username.as_bytes());
+    data.extend_from_slice(&expires_at.to_be_bytes());
+    data
+}
+
+pub(crate) fn build_apay_address_attestation<F>(
+    recipient_pubkey_hex: &str,
+    domain: &str,
+    username: &str,
+    expires_at: u64,
+    sign: F,
+) -> Result<String, JsonRpcErrorWire>
+where
+    F: FnOnce(&[u8]) -> Result<String, ()>,
+{
+    let recipient_pubkey = apay_decode_hex_fixed::<33>("recipient_pubkey", recipient_pubkey_hex)?;
+    let attest = apay_attest_bytes(&recipient_pubkey, domain, username, expires_at);
+    sign(&attest)
+        .map_err(|_| JsonRpcErrorWire::internal_error("apay_attest_sign_failed".to_owned()))
+}
+
+pub(crate) fn build_apay_batch_commitment<F>(
+    recipient_pubkey_hex: &str,
+    host_pubkey_hex: &str,
+    start_index: u64,
+    hashes: &[AsyncOrderNewHashWire],
+    created_at: u64,
+    expires_at: u64,
+    sign: F,
+) -> Result<ApayBatchCommitmentWire, JsonRpcErrorWire>
+where
+    F: FnOnce(&[u8]) -> Result<String, ()>,
+{
+    let recipient_pubkey = apay_decode_hex_fixed::<33>("recipient_pubkey", recipient_pubkey_hex)?;
+    let host_pubkey = apay_decode_hex_fixed::<33>("host_pubkey", host_pubkey_hex)?;
+    let batch_id = apay_derive_batch_id(&recipient_pubkey, start_index);
+    let batch_root = apay_batch_root(&recipient_pubkey, &batch_id, hashes)?;
+    let commit = apay_commit_bytes(
+        &recipient_pubkey,
+        &host_pubkey,
+        &batch_id,
+        &batch_root,
+        hashes.len() as u64,
+        created_at,
+        expires_at,
+    );
+    let batch_sig = sign(&commit)
+        .map_err(|_| JsonRpcErrorWire::internal_error("apay_batch_sign_failed".to_owned()))?;
+    Ok(ApayBatchCommitmentWire {
+        host_pubkey: hex_str(&host_pubkey),
+        batch_id: hex_str(&batch_id),
+        batch_root: hex_str(&batch_root),
+        batch_size: hashes.len() as u64,
+        batch_sig,
+        created_at,
+        expires_at,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -115,6 +297,25 @@ pub(crate) struct AsyncOrderNewResultWire {
     pub(crate) next_index_expected: u64,
     pub(crate) unused_hashes: u64,
     pub(crate) refill_batch_size: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AsyncOrderOutboundInvoiceResultWire {
+    pub(crate) payment_hash: String,
+    pub(crate) bolt11: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AsyncOrderRequestInvoiceParamsWire {
+    pub(crate) hash_index: String,
+    pub(crate) payment_hash: String,
+    pub(crate) amount_msat: u64,
+    pub(crate) asset_id: Option<String>,
+    pub(crate) asset_amount: Option<u64>,
+    pub(crate) description_hash: String,
+    pub(crate) invoice_expiry_sec: u32,
+    pub(crate) min_final_cltv_expiry_delta: u16,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -200,6 +401,14 @@ pub(crate) trait AsyncOrderAccessControl: Send + Sync {
     fn allows_peer(&self, peer: &PublicKey) -> bool;
 }
 
+pub(crate) trait AsyncOrderInvoiceProvider: Send + Sync {
+    fn request_outbound_invoice(
+        &self,
+        sender_node_id: PublicKey,
+        params: AsyncOrderRequestInvoiceParamsWire,
+    ) -> Result<AsyncOrderOutboundInvoiceResultWire, JsonRpcErrorWire>;
+}
+
 #[derive(Debug)]
 struct AllowFreeAccess;
 
@@ -211,6 +420,7 @@ impl AsyncOrderAccessControl for AllowFreeAccess {
 
 pub(crate) struct AsyncOrderMessageHandler {
     access_control: Arc<dyn AsyncOrderAccessControl>,
+    invoice_provider: Arc<Mutex<Option<Arc<dyn AsyncOrderInvoiceProvider>>>>,
     lsp_client: Option<AsyncOrderLspClient>,
     runtime_handle: Option<Handle>,
     state: Arc<Mutex<AsyncOrderState>>,
@@ -221,9 +431,10 @@ struct AsyncOrderState {
     peers: HashMap<PublicKey, PeerOrderState>,
     pending: Vec<(PublicKey, AsyncOrderMessage)>,
     pending_responses: HashMap<(PublicKey, String), AsyncOrderResponseSender>,
+    request_invoice_cache: HashMap<(PublicKey, String), AsyncOrderRequestInvoiceCacheEntry>,
 }
 
-type AsyncOrderResponse = Result<AsyncOrderNewResultWire, JsonRpcErrorWire>;
+type AsyncOrderResponse = Result<Value, JsonRpcErrorWire>;
 type AsyncOrderResponseSender = oneshot::Sender<AsyncOrderResponse>;
 pub(crate) type AsyncOrderResponseReceiver = oneshot::Receiver<AsyncOrderResponse>;
 
@@ -238,6 +449,37 @@ struct AsyncOrderRecord {
     hashes: BTreeMap<u64, String>,
 }
 
+#[derive(Clone, Debug)]
+struct AsyncOrderRequestInvoiceCacheEntry {
+    params: AsyncOrderRequestInvoiceParamsWire,
+    result: AsyncOrderOutboundInvoiceResultWire,
+    expires_at: Instant,
+}
+
+fn canonicalize_request_invoice_params(
+    params: &AsyncOrderRequestInvoiceParamsWire,
+) -> Result<AsyncOrderRequestInvoiceParamsWire, JsonRpcErrorWire> {
+    let hash_index = params
+        .hash_index
+        .parse::<u64>()
+        .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_hash_index"))?;
+    let payment_hash = validate_and_parse_payment_hash(&params.payment_hash)
+        .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_payment_hash"))?;
+    let description_hash = validate_and_parse_description_hash(params.description_hash.trim())
+        .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_description_hash"))?;
+
+    Ok(AsyncOrderRequestInvoiceParamsWire {
+        hash_index: hash_index.to_string(),
+        payment_hash: hex_str(&payment_hash.0),
+        amount_msat: params.amount_msat,
+        asset_id: params.asset_id.clone(),
+        asset_amount: params.asset_amount,
+        description_hash: hex_str(&description_hash.0.to_byte_array()),
+        invoice_expiry_sec: params.invoice_expiry_sec,
+        min_final_cltv_expiry_delta: params.min_final_cltv_expiry_delta,
+    })
+}
+
 #[derive(Clone)]
 struct AsyncOrderLspClient {
     base_url: String,
@@ -246,11 +488,28 @@ struct AsyncOrderLspClient {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct AsyncOrderNewStoreRequest {
+struct AsyncOrderClaimableRequest {
+    amount_msat: u64,
+    claim_deadline_height: Option<u32>,
+    payment_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AsyncOrderNewLspRequest {
     id: Value,
     peer_pubkey: String,
     protocol_version: u64,
     hashes: Vec<AsyncOrderNewHashWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch: Option<ApayBatchCommitmentWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address_sig: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AsyncOrderPaymentSentRequest {
+    payment_hash: String,
+    payment_preimage: String,
 }
 
 impl Default for AsyncOrderState {
@@ -260,6 +519,7 @@ impl Default for AsyncOrderState {
             peers: HashMap::new(),
             pending: Vec::new(),
             pending_responses: HashMap::new(),
+            request_invoice_cache: HashMap::new(),
         }
     }
 }
@@ -277,17 +537,109 @@ impl AsyncOrderLspClient {
         }
     }
 
+    async fn async_order_claimable(
+        &self,
+        payment_hash: PaymentHash,
+        amount_msat: u64,
+        claim_deadline_height: Option<u32>,
+    ) -> Result<(), JsonRpcErrorWire> {
+        let request = AsyncOrderClaimableRequest {
+            amount_msat,
+            claim_deadline_height,
+            payment_hash: hex_str(&payment_hash.0),
+        };
+        let mut builder = self
+            .client
+            .post(format!("{}/internal/async_order/claimable", self.base_url))
+            .json(&request);
+        if let Some(token) = self
+            .lsp_bearer_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+        {
+            builder = builder.bearer_auth(token);
+        }
+
+        let response = builder.send().await.map_err(|err| {
+            if err.is_timeout() {
+                JsonRpcErrorWire::internal_error(
+                    "async_order_lsp_request_failed: POST /internal/async_order/claimable timed out"
+                        .to_owned(),
+                )
+            } else {
+                JsonRpcErrorWire::internal_error(format!(
+                    "async_order_lsp_request_failed: POST /internal/async_order/claimable failed: {err}"
+                ))
+            }
+        })?;
+        if !response.status().is_success() {
+            return Err(JsonRpcErrorWire::internal_error(format!(
+                "async_order_lsp_request_failed: POST /internal/async_order/claimable returned {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn async_order_payment_sent(
+        &self,
+        payment_hash: String,
+        payment_preimage: String,
+    ) -> Result<(), JsonRpcErrorWire> {
+        let request = AsyncOrderPaymentSentRequest {
+            payment_hash,
+            payment_preimage,
+        };
+        let mut builder = self
+            .client
+            .post(format!(
+                "{}/{}",
+                self.base_url,
+                ASYNC_ORDER_PAYMENT_SENT_PATH.trim_start_matches('/')
+            ))
+            .json(&request);
+        if let Some(token) = self
+            .lsp_bearer_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+        {
+            builder = builder.bearer_auth(token);
+        }
+
+        let response = builder.send().await.map_err(|err| {
+            if err.is_timeout() {
+                JsonRpcErrorWire::internal_error(
+                    "async_order_lsp_request_failed: POST /internal/async_order/payment_sent timed out"
+                        .to_owned(),
+                )
+            } else {
+                JsonRpcErrorWire::internal_error(format!(
+                    "async_order_lsp_request_failed: POST /internal/async_order/payment_sent failed: {err}"
+                ))
+            }
+        })?;
+        if !response.status().is_success() {
+            return Err(JsonRpcErrorWire::internal_error(format!(
+                "async_order_lsp_request_failed: POST /internal/async_order/payment_sent returned {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
     async fn async_order_new(
         &self,
         sender_node_id: PublicKey,
         request_id: Value,
         params: AsyncOrderNewParamsWire,
     ) -> Result<AsyncOrderNewResultWire, JsonRpcErrorWire> {
-        let request = AsyncOrderNewStoreRequest {
+        let request = AsyncOrderNewLspRequest {
             id: request_id.clone(),
             peer_pubkey: hex_str(&sender_node_id.serialize()),
             protocol_version: params.protocol_version,
             hashes: params.hashes,
+            batch: params.batch,
+            address_sig: params.address_sig,
         };
         let mut builder = self
             .client
@@ -376,6 +728,34 @@ impl AsyncOrderLspClient {
 }
 
 impl AsyncPaymentsPreimageRoot {
+    pub(crate) fn build_from_seed(
+        seed: &[u8; 32],
+        network: Network,
+        this_node_pubkey: &PublicKey,
+    ) -> Result<Self, JsonRpcErrorWire> {
+        let mut account_xprv = Xpriv::new_master(network, seed).map_err(|err| {
+            let message = format!("async_payment_root_derivation_failed: {err}");
+            JsonRpcErrorWire::internal_error(message)
+        })?;
+
+        let h31 = u32::from_be_bytes(
+            sha256::Hash::hash(&this_node_pubkey.serialize()).to_byte_array()[0..4]
+                .try_into()
+                .expect("sha256 hash is 32 bytes"),
+        ) & ASYNC_PAYMENTS_BIP32_MAX_CHILD_INDEX;
+
+        let path = [
+            ASYNC_PAYMENTS_PURPOSE_APAY_INDEX,
+            ASYNC_PAYMENTS_ACCOUNT_INDEX,
+            h31,
+        ];
+        for index in path {
+            account_xprv = derive_hardened_child(&account_xprv, index)?;
+        }
+
+        Ok(Self { account_xprv })
+    }
+
     pub(crate) fn build_from_mnemonic(
         mnemonic: &Mnemonic,
         network: Network,
@@ -470,6 +850,8 @@ impl AsyncPaymentsPreimageRoot {
         Ok(AsyncOrderNewParamsWire {
             protocol_version: PROTOCOL_VERSION,
             hashes,
+            batch: None,
+            address_sig: None,
         })
     }
 }
@@ -478,6 +860,7 @@ impl AsyncOrderMessageHandler {
     pub(crate) fn new(access_control: Arc<dyn AsyncOrderAccessControl>) -> Self {
         Self {
             access_control,
+            invoice_provider: Arc::new(Mutex::new(None)),
             lsp_client: None,
             runtime_handle: None,
             state: Arc::new(Mutex::new(AsyncOrderState::default())),
@@ -492,6 +875,7 @@ impl AsyncOrderMessageHandler {
     ) -> Self {
         Self {
             access_control,
+            invoice_provider: Arc::new(Mutex::new(None)),
             lsp_client: Some(AsyncOrderLspClient::new(
                 lsp_base_url,
                 lsp_bearer_token,
@@ -505,6 +889,48 @@ impl AsyncOrderMessageHandler {
     #[cfg(test)]
     fn new_allowing_all_peers() -> Self {
         Self::new(Arc::new(AllowFreeAccess))
+    }
+
+    pub(crate) fn set_invoice_provider(&self, provider: Arc<dyn AsyncOrderInvoiceProvider>) {
+        *self.invoice_provider.lock().unwrap() = Some(provider);
+    }
+
+    fn queue_async_order_request(
+        &self,
+        sender_node_id: PublicKey,
+        id: Value,
+        method: &'static str,
+        params: impl Serialize,
+    ) -> Result<AsyncOrderResponseReceiver, JsonRpcErrorWire> {
+        let Some(request_id) = id.as_str().map(str::to_owned) else {
+            return Err(JsonRpcErrorWire::invalid_request());
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        let mut state = self.state.lock().unwrap();
+        let response_key = (sender_node_id, request_id);
+        if state.pending_responses.contains_key(&response_key) {
+            return Err(JsonRpcErrorWire::internal_error(
+                "async_order_request_id_already_pending".to_owned(),
+            ));
+        }
+        state
+            .pending_responses
+            .insert(response_key, response_sender);
+        state.pending.push((
+            sender_node_id,
+            AsyncOrderMessage {
+                payload: json!({
+                    "jsonrpc": JSONRPC_VERSION,
+                    "id": id,
+                    "method": method,
+                    "params": params,
+                })
+                .to_string(),
+            },
+        ));
+
+        Ok(response_receiver)
     }
 
     fn queue_jsonrpc_value_to_state(
@@ -525,7 +951,7 @@ impl AsyncOrderMessageHandler {
         Self::queue_jsonrpc_value_to_state(&self.state, peer, value);
     }
 
-    fn queue_jsonrpc_result(&self, peer: PublicKey, id: Value, result: AsyncOrderNewResultWire) {
+    fn queue_jsonrpc_result<T: Serialize>(&self, peer: PublicKey, id: Value, result: T) {
         self.queue_jsonrpc_value(
             peer,
             json!({
@@ -536,42 +962,23 @@ impl AsyncOrderMessageHandler {
         );
     }
 
-    pub(crate) fn queue_async_order_new_request(
+    pub(crate) fn queue_async_order_new(
         &self,
         host_node_id: PublicKey,
         id: Value,
         params: AsyncOrderNewParamsWire,
     ) -> Result<AsyncOrderResponseReceiver, JsonRpcErrorWire> {
         Self::validate_async_order_new_params(&params)?;
-        let Some(request_id) = id.as_str().map(str::to_owned) else {
-            return Err(JsonRpcErrorWire::invalid_request());
-        };
+        self.queue_async_order_request(host_node_id, id, ASYNC_ORDER_NEW_METHOD, params)
+    }
 
-        let (response_sender, response_receiver) = oneshot::channel();
-        let mut state = self.state.lock().unwrap();
-        let response_key = (host_node_id, request_id);
-        if state.pending_responses.contains_key(&response_key) {
-            return Err(JsonRpcErrorWire::internal_error(
-                "async_order_request_id_already_pending".to_owned(),
-            ));
-        }
-        state
-            .pending_responses
-            .insert(response_key, response_sender);
-        state.pending.push((
-            host_node_id,
-            AsyncOrderMessage {
-                payload: json!({
-                    "jsonrpc": JSONRPC_VERSION,
-                    "id": id,
-                    "method": "async_order.new",
-                    "params": params,
-                })
-                .to_string(),
-            },
-        ));
-
-        Ok(response_receiver)
+    pub(crate) fn queue_async_order_request_invoice(
+        &self,
+        peer_node_id: PublicKey,
+        id: Value,
+        params: AsyncOrderRequestInvoiceParamsWire,
+    ) -> Result<AsyncOrderResponseReceiver, JsonRpcErrorWire> {
+        self.queue_async_order_request(peer_node_id, id, ASYNC_ORDER_REQUEST_INVOICE_METHOD, params)
     }
 
     pub(crate) fn forget_async_order_response(&self, host_node_id: PublicKey, request_id: &str) {
@@ -610,7 +1017,7 @@ impl AsyncOrderMessageHandler {
         state: &Arc<Mutex<AsyncOrderState>>,
         peer: PublicKey,
         id: Value,
-        result: AsyncOrderNewResultWire,
+        result: impl Serialize,
     ) {
         Self::queue_jsonrpc_value_to_state(
             state,
@@ -658,12 +1065,7 @@ impl AsyncOrderMessageHandler {
         };
 
         let response = match (result, error) {
-            (Some(result), None) => serde_json::from_value::<AsyncOrderNewResultWire>(result)
-                .map_err(|err| {
-                    JsonRpcErrorWire::internal_error(format!(
-                        "invalid_async_order_response_result: {err}"
-                    ))
-                }),
+            (Some(result), None) => Ok(result),
             (None, Some(error)) => match serde_json::from_value::<JsonRpcErrorWire>(error) {
                 Ok(err) => Err(err),
                 Err(err) => Err(JsonRpcErrorWire::internal_error(format!(
@@ -687,6 +1089,48 @@ impl AsyncOrderMessageHandler {
         if let Some(response_sender) = response_sender {
             let _ = response_sender.send(response);
         }
+    }
+
+    fn receive_async_order_request_invoice(
+        &self,
+        sender_node_id: PublicKey,
+        params: AsyncOrderRequestInvoiceParamsWire,
+    ) -> Result<AsyncOrderOutboundInvoiceResultWire, JsonRpcErrorWire> {
+        let canonical_params = canonicalize_request_invoice_params(&params)?;
+        let Some(invoice_provider) = self.invoice_provider.lock().unwrap().clone() else {
+            return Err(JsonRpcErrorWire::internal_error(
+                "async_order_invoice_provider_not_available".to_owned(),
+            ));
+        };
+
+        let cache_key = (sender_node_id, canonical_params.payment_hash.clone());
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        if let Some(cached) = state.request_invoice_cache.get(&cache_key).cloned() {
+            if now < cached.expires_at {
+                if cached.params == canonical_params {
+                    return Ok(cached.result);
+                }
+                return Err(JsonRpcErrorWire::stale_flow());
+            }
+            state.request_invoice_cache.remove(&cache_key);
+        }
+
+        let result = invoice_provider.request_outbound_invoice(sender_node_id, params.clone())?;
+        let expires_at = Instant::now()
+            .checked_add(Duration::from_secs(params.invoice_expiry_sec as u64))
+            .ok_or_else(|| {
+                JsonRpcErrorWire::internal_error("async_order_invoice_expiry_overflow".to_owned())
+            })?;
+        state.request_invoice_cache.insert(
+            cache_key,
+            AsyncOrderRequestInvoiceCacheEntry {
+                params: canonical_params,
+                result: result.clone(),
+                expires_at,
+            },
+        );
+        Ok(result)
     }
 
     fn record_async_order_new(
@@ -759,6 +1203,53 @@ impl AsyncOrderMessageHandler {
             }
         });
         Ok(())
+    }
+
+    pub(crate) fn notify_claimable_hodl_invoice(
+        &self,
+        payment_hash: PaymentHash,
+        amount_msat: u64,
+        claim_deadline_height: Option<u32>,
+    ) {
+        let (Some(lsp_client), Some(runtime_handle)) =
+            (self.lsp_client.clone(), self.runtime_handle.clone())
+        else {
+            return;
+        };
+
+        runtime_handle.spawn(async move {
+            if let Err(err) = lsp_client
+                .async_order_claimable(
+                    payment_hash,
+                    amount_msat,
+                    claim_deadline_height,
+                )
+                .await
+            {
+                warn!(code = err.code, message = %err.message, "async_order claimable notification failed");
+            }
+        });
+    }
+
+    pub(crate) fn notify_payment_sent(
+        &self,
+        payment_hash: PaymentHash,
+        payment_preimage: PaymentPreimage,
+    ) {
+        let (Some(lsp_client), Some(runtime_handle)) =
+            (self.lsp_client.clone(), self.runtime_handle.clone())
+        else {
+            return;
+        };
+
+        runtime_handle.spawn(async move {
+            if let Err(err) = lsp_client
+                .async_order_payment_sent(hex_str(&payment_hash.0), hex_str(&payment_preimage.0))
+                .await
+            {
+                warn!(code = err.code, message = %err.message, "async_order payment_sent notification failed");
+            }
+        });
     }
 
     fn validate_async_order_new_params(
@@ -872,7 +1363,7 @@ impl CustomMessageHandler for AsyncOrderMessageHandler {
             return Ok(());
         };
 
-        if method == "async_order.new" {
+        if method == ASYNC_ORDER_NEW_METHOD {
             let params_value = match envelope.params {
                 Some(params) => params,
                 None => {
@@ -917,6 +1408,45 @@ impl CustomMessageHandler for AsyncOrderMessageHandler {
             }
 
             match self.record_async_order_new(sender_node_id, params) {
+                Ok(result) => self.queue_jsonrpc_result(sender_node_id, id, result),
+                Err(err) => self.queue_jsonrpc_error(sender_node_id, id, err.code, &err.message),
+            }
+            return Ok(());
+        }
+
+        if method == ASYNC_ORDER_REQUEST_INVOICE_METHOD {
+            let params_value = match envelope.params {
+                Some(params) => params,
+                None => {
+                    self.queue_jsonrpc_error(
+                        sender_node_id,
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "missing params",
+                    );
+                    return Ok(());
+                }
+            };
+
+            let params: AsyncOrderRequestInvoiceParamsWire =
+                match serde_json::from_value(params_value) {
+                    Ok(params) => params,
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            "invalid async_order.request_invoice params from {sender_node_id}"
+                        );
+                        self.queue_jsonrpc_error(
+                            sender_node_id,
+                            id,
+                            JSONRPC_INVALID_PARAMS,
+                            "invalid_request_invoice_params",
+                        );
+                        return Ok(());
+                    }
+                };
+
+            match self.receive_async_order_request_invoice(sender_node_id, params) {
                 Ok(result) => self.queue_jsonrpc_result(sender_node_id, id, result),
                 Err(err) => self.queue_jsonrpc_error(sender_node_id, id, err.code, &err.message),
             }
@@ -1073,7 +1603,14 @@ impl JsonRpcErrorWire {
         }
     }
 
-    fn internal_error(message: String) -> Self {
+    pub(crate) fn application_error(code: i64, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn internal_error(message: String) -> Self {
         Self {
             code: JSONRPC_INTERNAL_ERROR,
             message,
@@ -1087,10 +1624,24 @@ impl JsonRpcErrorWire {
         }
     }
 
+    pub(crate) fn invalid_params(message: impl Into<String>) -> Self {
+        Self {
+            code: JSONRPC_INVALID_PARAMS,
+            message: message.into(),
+        }
+    }
+
     fn invalid_request() -> Self {
         Self {
             code: JSONRPC_INVALID_REQUEST,
             message: "invalid request".to_owned(),
+        }
+    }
+
+    fn stale_flow() -> Self {
+        Self {
+            code: ASYNC_ERROR_STALE_FLOW,
+            message: "stale_flow".to_owned(),
         }
     }
 
@@ -1153,90 +1704,41 @@ fn validate_async_payments_next_hash_index(next_index: u64) -> Result<(), JsonRp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_store::test_support::MemoryKvStore;
     use crate::utils::new_jsonrpc_request_id;
     use axum::{extract::Json, http::StatusCode, routing::post, Router};
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
-    use std::collections::HashMap as StdHashMap;
     use std::str::FromStr;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::time::sleep;
 
     struct DenyAllAccess;
 
-    #[derive(Default)]
-    struct MemoryKvStore {
-        entries: StdMutex<StdHashMap<(String, String, String), Vec<u8>>>,
+    struct TestInvoiceProvider {
+        calls: AtomicUsize,
+        result: AsyncOrderOutboundInvoiceResultWire,
     }
 
-    impl KVStoreSync for MemoryKvStore {
-        fn read(
-            &self,
-            primary_namespace: &str,
-            secondary_namespace: &str,
-            key: &str,
-        ) -> Result<Vec<u8>, io::Error> {
-            self.entries
-                .lock()
-                .unwrap()
-                .get(&(
-                    primary_namespace.to_owned(),
-                    secondary_namespace.to_owned(),
-                    key.to_owned(),
-                ))
-                .cloned()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing key"))
+    impl TestInvoiceProvider {
+        fn new(result: AsyncOrderOutboundInvoiceResultWire) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                result,
+            }
         }
+    }
 
-        fn write(
+    impl AsyncOrderInvoiceProvider for TestInvoiceProvider {
+        fn request_outbound_invoice(
             &self,
-            primary_namespace: &str,
-            secondary_namespace: &str,
-            key: &str,
-            buf: Vec<u8>,
-        ) -> Result<(), io::Error> {
-            self.entries.lock().unwrap().insert(
-                (
-                    primary_namespace.to_owned(),
-                    secondary_namespace.to_owned(),
-                    key.to_owned(),
-                ),
-                buf,
-            );
-            Ok(())
-        }
-
-        fn remove(
-            &self,
-            primary_namespace: &str,
-            secondary_namespace: &str,
-            key: &str,
-            _lazy: bool,
-        ) -> Result<(), io::Error> {
-            self.entries.lock().unwrap().remove(&(
-                primary_namespace.to_owned(),
-                secondary_namespace.to_owned(),
-                key.to_owned(),
-            ));
-            Ok(())
-        }
-
-        fn list(
-            &self,
-            primary_namespace: &str,
-            secondary_namespace: &str,
-        ) -> Result<Vec<String>, io::Error> {
-            Ok(self
-                .entries
-                .lock()
-                .unwrap()
-                .keys()
-                .filter(|(primary, secondary, _)| {
-                    primary == primary_namespace && secondary == secondary_namespace
-                })
-                .map(|(_, _, key)| key.clone())
-                .collect())
+            _sender_node_id: PublicKey,
+            _params: AsyncOrderRequestInvoiceParamsWire,
+        ) -> Result<AsyncOrderOutboundInvoiceResultWire, JsonRpcErrorWire> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.result.clone())
         }
     }
 
@@ -1327,6 +1829,8 @@ mod tests {
                             .to_owned(),
                 },
             ],
+            batch: None,
+            address_sig: None,
         }
     }
 
@@ -1340,6 +1844,44 @@ mod tests {
             unused_hashes: 2,
             refill_batch_size: ASYNC_ORDER_MAX_HASH_BATCH_SIZE as u64,
         }
+    }
+
+    fn test_request_invoice_params() -> AsyncOrderRequestInvoiceParamsWire {
+        AsyncOrderRequestInvoiceParamsWire {
+            hash_index: "42".to_owned(),
+            payment_hash: "abababababababababababababababababababababababababababababababab"
+                .to_owned(),
+            amount_msat: 99000,
+            asset_id: Some("rgb:EIkAVQvq-WbAb5JG-CYxbUER-oqDNwne-ZNxBDID-p0cpf9U".to_owned()),
+            asset_amount: Some(10),
+            description_hash: hex_str(
+                &sha256::Hash::hash(b"test request invoice description").to_byte_array(),
+            ),
+            invoice_expiry_sec: 900,
+            min_final_cltv_expiry_delta: 18,
+        }
+    }
+
+    fn test_request_invoice_result() -> AsyncOrderOutboundInvoiceResultWire {
+        AsyncOrderOutboundInvoiceResultWire {
+            payment_hash: "abababababababababababababababababababababababababababababababab"
+                .to_owned(),
+            bolt11: "lnbc1test".to_owned(),
+        }
+    }
+
+    fn request_invoice_payload(
+        id: &str,
+        method: &str,
+        params: &AsyncOrderRequestInvoiceParamsWire,
+    ) -> String {
+        json!({
+            "jsonrpc": JSONRPC_VERSION,
+            "id": id,
+            "method": method,
+            "params": params,
+        })
+        .to_string()
     }
 
     fn test_mnemonic() -> Mnemonic {
@@ -1430,7 +1972,7 @@ mod tests {
         let request_id = Value::String(new_jsonrpc_request_id());
 
         let _response_rx = handler
-            .queue_async_order_new_request(
+            .queue_async_order_new(
                 host_node_id,
                 request_id.clone(),
                 test_async_order_new_params(),
@@ -1459,7 +2001,7 @@ mod tests {
         let host_node_id = test_peer_pubkey(26);
         let request_id = Value::String(new_jsonrpc_request_id());
         let response_rx = handler
-            .queue_async_order_new_request(
+            .queue_async_order_new(
                 host_node_id,
                 request_id.clone(),
                 test_async_order_new_params(),
@@ -1482,7 +2024,253 @@ mod tests {
             .unwrap();
 
         let response = response_rx.await.unwrap().unwrap();
+        let response: AsyncOrderNewResultWire = serde_json::from_value(response).unwrap();
         assert_eq!(response, test_async_order_new_result());
+    }
+
+    #[test]
+    fn async_order_request_invoice_returns_provider_invoice() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let provider = Arc::new(TestInvoiceProvider::new(test_request_invoice_result()));
+        handler.set_invoice_provider(provider.clone());
+        let test_peer = test_peer_pubkey(34);
+        let request_id = new_jsonrpc_request_id();
+        let params = test_request_invoice_params();
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+
+        let response_value = read_single_response(&handler);
+        assert_eq!(response_value["jsonrpc"], JSONRPC_VERSION);
+        assert_eq!(response_value["id"], request_id);
+        assert_eq!(
+            response_value["result"]["payment_hash"],
+            "abababababababababababababababababababababababababababababababab"
+        );
+        assert_eq!(response_value["result"]["bolt11"], "lnbc1test");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn async_order_request_invoice_is_idempotent_by_payment_hash() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let provider = Arc::new(TestInvoiceProvider::new(test_request_invoice_result()));
+        handler.set_invoice_provider(provider.clone());
+        let test_peer = test_peer_pubkey(36);
+        let first_request_id = new_jsonrpc_request_id();
+        let second_request_id = new_jsonrpc_request_id();
+        let params = test_request_invoice_params();
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &first_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        let first_response = read_single_response(&handler);
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &second_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        let second_response = read_single_response(&handler);
+
+        assert_eq!(first_response["result"], second_response["result"]);
+        assert_eq!(first_response["id"], first_request_id);
+        assert_eq!(second_response["id"], second_request_id);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn async_order_request_invoice_rejects_conflicting_payment_hash_replay() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let provider = Arc::new(TestInvoiceProvider::new(test_request_invoice_result()));
+        handler.set_invoice_provider(provider.clone());
+        let test_peer = test_peer_pubkey(37);
+        let first_request_id = new_jsonrpc_request_id();
+        let second_request_id = new_jsonrpc_request_id();
+        let params = test_request_invoice_params();
+        let mut conflicting_params = params.clone();
+        conflicting_params.amount_msat = 98000;
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &first_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        read_single_response(&handler);
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &second_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &conflicting_params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+
+        let response_value = read_single_response(&handler);
+        assert_eq!(response_value["id"], second_request_id);
+        assert_eq!(response_value["error"]["code"], ASYNC_ERROR_STALE_FLOW);
+        assert_eq!(response_value["error"]["message"], "stale_flow");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn async_order_request_invoice_allows_reissue_after_expiry() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let provider = Arc::new(TestInvoiceProvider::new(test_request_invoice_result()));
+        handler.set_invoice_provider(provider.clone());
+        let test_peer = test_peer_pubkey(38);
+        let first_request_id = new_jsonrpc_request_id();
+        let second_request_id = new_jsonrpc_request_id();
+        let mut params = test_request_invoice_params();
+        params.invoice_expiry_sec = 0;
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &first_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        let first_response = read_single_response(&handler);
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &second_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        let second_response = read_single_response(&handler);
+
+        assert_eq!(first_response["result"], second_response["result"]);
+        assert_eq!(first_response["id"], first_request_id);
+        assert_eq!(second_response["id"], second_request_id);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn async_order_request_invoice_requires_provider() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let test_peer = test_peer_pubkey(39);
+        let request_id = new_jsonrpc_request_id();
+        let params = test_request_invoice_params();
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+
+        let response_value = read_single_response(&handler);
+        assert_eq!(response_value["id"], request_id);
+        assert_eq!(response_value["error"]["code"], JSONRPC_INTERNAL_ERROR);
+        assert_eq!(
+            response_value["error"]["message"],
+            "async_order_invoice_provider_not_available"
+        );
+    }
+
+    #[test]
+    fn async_order_request_invoice_replays_canonicalized_params() {
+        let handler = AsyncOrderMessageHandler::new_allowing_all_peers();
+        let provider = Arc::new(TestInvoiceProvider::new(test_request_invoice_result()));
+        handler.set_invoice_provider(provider.clone());
+        let test_peer = test_peer_pubkey(40);
+        let first_request_id = new_jsonrpc_request_id();
+        let second_request_id = new_jsonrpc_request_id();
+        let params = test_request_invoice_params();
+        let mut replay_params = params.clone();
+        replay_params.hash_index = "0042".to_owned();
+        replay_params.payment_hash = replay_params.payment_hash.to_uppercase();
+        replay_params.description_hash = replay_params.description_hash.to_uppercase();
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &first_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        let first_response = read_single_response(&handler);
+
+        handler
+            .handle_custom_message(
+                AsyncOrderMessage {
+                    payload: request_invoice_payload(
+                        &second_request_id,
+                        ASYNC_ORDER_REQUEST_INVOICE_METHOD,
+                        &replay_params,
+                    ),
+                },
+                test_peer,
+            )
+            .unwrap();
+        let second_response = read_single_response(&handler);
+
+        assert_eq!(first_response["result"], second_response["result"]);
+        assert_eq!(first_response["id"], first_request_id);
+        assert_eq!(second_response["id"], second_request_id);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1968,5 +2756,147 @@ mod tests {
             err.message,
             "async_order_lsp_request_failed: POST /internal/async_order/new timed out"
         );
+    }
+}
+
+#[cfg(test)]
+mod apay_commit_tests {
+    use super::*;
+
+    fn recipient_pubkey() -> [u8; 33] {
+        apay_decode_hex_fixed::<33>("recipient_pubkey", &format!("02{}", "11".repeat(32))).unwrap()
+    }
+    fn host_pubkey() -> [u8; 33] {
+        apay_decode_hex_fixed::<33>("host_pubkey", &format!("03{}", "22".repeat(32))).unwrap()
+    }
+    fn batch_id() -> [u8; 16] {
+        apay_decode_hex_fixed::<16>("batch_id", "000102030405060708090a0b0c0d0e0f").unwrap()
+    }
+    fn fixture_hashes() -> Vec<AsyncOrderNewHashWire> {
+        (1u64..=5)
+            .map(|i| AsyncOrderNewHashWire {
+                hash_index: i,
+                payment_hash: hex_str(&[i as u8; 32]),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn batch_root_matches_reference() {
+        let root = apay_batch_root(&recipient_pubkey(), &batch_id(), &fixture_hashes()).unwrap();
+        assert_eq!(
+            hex_str(&root),
+            "2a89ca7e910bae70bc3f03f0252ec22de83cc40a5b4ba1582b649be5ea667132"
+        );
+    }
+
+    #[test]
+    fn batch_root_reports_invalid_payment_hash() {
+        let mut hashes = fixture_hashes();
+        hashes[0].payment_hash = "not-hex".to_owned();
+        let err = apay_batch_root(&recipient_pubkey(), &batch_id(), &hashes).unwrap_err();
+        assert_eq!(err.message, "invalid_payment_hash");
+    }
+
+    #[test]
+    fn commit_bytes_match_reference() {
+        let root = apay_batch_root(&recipient_pubkey(), &batch_id(), &fixture_hashes()).unwrap();
+        let commit = apay_commit_bytes(
+            &recipient_pubkey(),
+            &host_pubkey(),
+            &batch_id(),
+            &root,
+            5,
+            1_700_000_000,
+            0,
+        );
+        assert_eq!(
+            hex_str(&commit),
+            "555445584f5f415041595f484153485f42415443485f5631021111111111111111111111111111111111111111111111111111111111111111032222222222222222222222222222222222222222222222222222222222222222000102030405060708090a0b0c0d0e0f2a89ca7e910bae70bc3f03f0252ec22de83cc40a5b4ba1582b649be5ea6671320000000000000005000000006553f1000000000000000000"
+        );
+    }
+
+    #[test]
+    fn attest_bytes_match_reference() {
+        let attest = apay_attest_bytes(&recipient_pubkey(), "utexo.com", "alice", 0);
+        assert_eq!(
+            hex_str(&attest),
+            "555445584f5f415041595f4c4e414444525f5631021111111111111111111111111111111111111111111111111111111111111111757465786f2e636f6d616c6963650000000000000000"
+        );
+    }
+
+    #[test]
+    fn derive_batch_id_is_deterministic() {
+        let a = apay_derive_batch_id(&recipient_pubkey(), 1);
+        let b = apay_derive_batch_id(&recipient_pubkey(), 1);
+        let c = apay_derive_batch_id(&recipient_pubkey(), 2);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn build_commitment_signs_commit() {
+        let hashes = fixture_hashes();
+        let rp_hex = format!("02{}", "11".repeat(32));
+        let hp_hex = format!("03{}", "22".repeat(32));
+        let commitment =
+            build_apay_batch_commitment(&rp_hex, &hp_hex, 1, &hashes, 1_700_000_000, 0, |msg| {
+                Ok(hex_str(msg))
+            })
+            .unwrap();
+        let bid = apay_derive_batch_id(&recipient_pubkey(), 1);
+        let root = apay_batch_root(&recipient_pubkey(), &bid, &hashes).unwrap();
+        assert_eq!(commitment.batch_id, hex_str(&bid));
+        assert_eq!(commitment.batch_root, hex_str(&root));
+        assert_eq!(commitment.batch_size, 5);
+        let expected_commit = apay_commit_bytes(
+            &recipient_pubkey(),
+            &host_pubkey(),
+            &bid,
+            &root,
+            5,
+            1_700_000_000,
+            0,
+        );
+        assert_eq!(commitment.batch_sig, hex_str(&expected_commit));
+    }
+
+    #[test]
+    fn build_attestation_signs_attest() {
+        let rp_hex = format!("02{}", "11".repeat(32));
+        let sig = build_apay_address_attestation(&rp_hex, "utexo.com", "alice", 0, |msg| {
+            Ok(hex_str(msg))
+        })
+        .unwrap();
+        let expected = apay_attest_bytes(&recipient_pubkey(), "utexo.com", "alice", 0);
+        assert_eq!(sig, hex_str(&expected));
+    }
+
+    #[test]
+    fn build_commitment_reports_invalid_pubkey_field() {
+        let hashes = fixture_hashes();
+        let hp_hex = format!("03{}", "22".repeat(32));
+        let err = build_apay_batch_commitment("02", &hp_hex, 1, &hashes, 1_700_000_000, 0, |_| {
+            Ok(String::new())
+        })
+        .unwrap_err();
+        assert_eq!(err.message, "recipient_pubkey must be 33-byte hex");
+
+        let rp_hex = format!("02{}", "11".repeat(32));
+        let err =
+            build_apay_batch_commitment(&rp_hex, "not-hex", 1, &hashes, 1_700_000_000, 0, |_| {
+                Ok(String::new())
+            })
+            .unwrap_err();
+        assert_eq!(err.message, "host_pubkey must be 33-byte hex");
+    }
+
+    #[test]
+    fn build_attestation_reports_invalid_recipient_pubkey() {
+        let err = build_apay_address_attestation("not-hex", "utexo.com", "alice", 0, |_| {
+            Ok(String::new())
+        })
+        .unwrap_err();
+        assert_eq!(err.message, "recipient_pubkey must be 33-byte hex");
     }
 }

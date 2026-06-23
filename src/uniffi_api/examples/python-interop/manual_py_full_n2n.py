@@ -370,7 +370,9 @@ def main():
             expiry_sec=3600,
             asset_id=asset_id,
             asset_amount=PAYMENT_ASSET_AMOUNT,
+            payment_hash=None,
             description_hash=None,
+            min_final_cltv_expiry_delta=None,
         )
         invoice = node_b.ln_invoice(inv_req).invoice
         print("invoice:", invoice)

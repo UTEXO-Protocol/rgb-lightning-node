@@ -3,10 +3,11 @@ use once_cell::sync::Lazy;
 pub(crate) use rgb_lightning_node::{
     AssetBalanceInfo, AssetRecipients, AssignmentKind, Channel, ContractId, HtlcStatus,
     InvoiceStatus, LnInvoiceRequest, Payment, PaymentHash, RecipientId, RgbRecipient,
-    SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkInitRequest, SdkIssueAssetCfaRequest,
-    SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkNode, SdkOpenChannelRequest,
-    SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest, SdkSendPaymentRequest,
-    SdkUnlockRequest, SendRgbRequest, TransactionType, TransportEndpoint, WitnessData,
+    SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkExternalSignerBootstrap, SdkInitRequest,
+    SdkIssueAssetCfaRequest, SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkNode,
+    SdkOpenChannelRequest, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest,
+    SdkSendPaymentRequest, SdkUnlockRequest, SendRgbRequest, TransactionType, TransportEndpoint,
+    WitnessData,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -222,6 +223,35 @@ pub(crate) fn make_node(
     daemon_listening_port: u16,
     ldk_peer_listening_port: u16,
 ) -> SdkNode {
+    make_node_inner(
+        storage_dir_path,
+        daemon_listening_port,
+        ldk_peer_listening_port,
+        None,
+    )
+}
+
+#[allow(dead_code)] // used by VSS-only tests
+pub(crate) fn make_node_with_vss(
+    storage_dir_path: &Path,
+    daemon_listening_port: u16,
+    ldk_peer_listening_port: u16,
+    vss_url: &str,
+) -> SdkNode {
+    make_node_inner(
+        storage_dir_path,
+        daemon_listening_port,
+        ldk_peer_listening_port,
+        Some(vss_url.to_string()),
+    )
+}
+
+fn make_node_inner(
+    storage_dir_path: &Path,
+    daemon_listening_port: u16,
+    ldk_peer_listening_port: u16,
+    vss_url: Option<String>,
+) -> SdkNode {
     fs::create_dir_all(storage_dir_path).expect("create storage dir");
     SdkNode::create(SdkInitRequest {
         storage_dir_path: storage_dir_path.display().to_string(),
@@ -233,6 +263,9 @@ pub(crate) fn make_node(
         virtual_peer_pubkeys: None,
         lsp_base_url: None,
         lsp_bearer_token: None,
+        vss_url,
+        vss_allow_http: true,
+        vss_allow_empty_restore: false,
     })
     .expect("create SDK node")
 }
@@ -240,14 +273,15 @@ pub(crate) fn make_node(
 pub(crate) fn unlock_request(password: &str) -> SdkUnlockRequest {
     SdkUnlockRequest {
         password: password.to_string(),
-        bitcoind_rpc_username: "user".to_string(),
-        bitcoind_rpc_password: "password".to_string(),
-        bitcoind_rpc_host: "localhost".to_string(),
-        bitcoind_rpc_port: 18443,
+        bitcoind_rpc_username: Some("user".to_string()),
+        bitcoind_rpc_password: Some("password".to_string()),
+        bitcoind_rpc_host: Some("localhost".to_string()),
+        bitcoind_rpc_port: Some(18443),
         indexer_url: Some("127.0.0.1:50001".to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
         announce_addresses: vec![],
         announce_alias: Some("RLN_alias".to_string()),
+        gossip_rgs_server_url: None,
     }
 }
 
@@ -297,13 +331,13 @@ pub(crate) fn fund_and_create_utxos(node: &SdkNode, node_name: &str) {
 }
 
 pub(crate) fn asset_balance_spendable(node: &SdkNode, asset_id: &ContractId) -> u64 {
-    node.asset_balance(asset_id.clone())
+    node.asset_balance(*asset_id)
         .expect("asset_balance spendable")
         .spendable
 }
 
 pub(crate) fn asset_balance_offchain_outbound(node: &SdkNode, asset_id: &ContractId) -> u64 {
-    node.asset_balance(asset_id.clone())
+    node.asset_balance(*asset_id)
         .expect("asset_balance offchain_outbound")
         .offchain_outbound
 }
@@ -317,12 +351,38 @@ pub(crate) fn wait_for_asset_balance(
     loop {
         node.sync()
             .expect("node sync while waiting for asset_balance");
-        if let Ok(balance) = node.asset_balance(asset_id.clone()) {
+        if let Ok(balance) = node.asset_balance(*asset_id) {
             return balance;
         }
         assert!(
             Instant::now() < deadline,
             "asset_balance did not become available in time"
+        );
+        sleep(Duration::from_secs(1));
+    }
+}
+
+pub(crate) fn wait_for_synced_to_tip(node: &SdkNode, node_name: &str) {
+    let tip = get_block_count();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_sync_err = None;
+    loop {
+        if let Err(err) = node.sync() {
+            last_sync_err = Some(format!("{err:?}"));
+        }
+        let height = node
+            .network_info()
+            .unwrap_or_else(|err| {
+                panic!("{node_name}: network_info while waiting for tip: {err:?}")
+            })
+            .height;
+        if height >= tip {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{node_name}: chain height {height} did not reach tip {tip} within 30s \
+             (last sync error: {last_sync_err:?})"
         );
         sleep(Duration::from_secs(1));
     }
@@ -431,7 +491,7 @@ pub(crate) fn wait_for_usable_channel(
             Instant::now() < deadline,
             "timeout waiting for usable channel"
         );
-        if polls % 5 == 0 {
+        if polls.is_multiple_of(5) {
             mine(1);
         }
         sleep(Duration::from_secs(2));
@@ -548,7 +608,7 @@ pub(crate) fn wait_for_usable_channel_counts(nodes: &[(&SdkNode, usize)], timeou
             Instant::now() < deadline,
             "usable channel counts did not reach expected values in time"
         );
-        if polls % 5 == 0 {
+        if polls.is_multiple_of(5) {
             mine(1);
         }
         sleep(Duration::from_secs(1));
@@ -747,7 +807,7 @@ pub(crate) fn keysend_with_ln_balance(
         .keysend(SdkKeysendRequest {
             dest_pubkey,
             amt_msat: amt_msat.unwrap_or(PAYMENT_MSAT),
-            asset_id: Some(asset_id.clone()),
+            asset_id: Some(*asset_id),
             asset_amount: Some(asset_amount),
         })
         .expect("keysend with ln balance checks");

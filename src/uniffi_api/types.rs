@@ -24,8 +24,40 @@ pub enum RlnError {
     NotFound,
     #[error("conflict with current node state")]
     Conflict,
+    #[error("failed bitcoind connection")]
+    FailedBitcoindConnection,
+    #[error("failed bdk sync")]
+    FailedBdkSync,
+    #[error("failed broadcast")]
+    FailedBroadcast,
+    #[error("failed peer connection")]
+    FailedPeerConnection,
+    #[error("insufficient capacity")]
+    InsufficientCapacity,
+    #[error("insufficient funds")]
+    InsufficientFunds,
+    #[error("no available utxos")]
+    NoAvailableUtxos,
+    #[error("no route")]
+    NoRoute,
+    #[error("external signer required")]
+    ExternalSignerRequired,
+    #[error("external signer mismatch")]
+    ExternalSignerMismatch,
+    #[error("external signer unavailable")]
+    ExternalSignerUnavailable,
+    #[error("external signer protocol error")]
+    ExternalSignerProtocolError,
+    #[error("unsupported in external signer mode")]
+    UnsupportedInExternalSignerMode,
     #[error("internal error")]
     Internal,
+}
+
+impl From<uniffi::UnexpectedUniFFICallbackError> for RlnError {
+    fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::Internal
+    }
 }
 
 pub struct NodeInfo {
@@ -47,6 +79,7 @@ pub struct NodeInfo {
     pub channel_asset_max_amount: u64,
     pub network_nodes: u64,
     pub network_channels: u64,
+    pub latest_rgs_snapshot_timestamp: Option<u64>,
 }
 
 pub struct NetworkInfo {
@@ -92,6 +125,7 @@ pub struct Payment {
     pub updated_at: u64,
     pub payee_pubkey: PublicKey,
     pub preimage: Option<String>,
+    pub description_hash: Option<String>,
 }
 
 pub enum PaymentType {
@@ -176,7 +210,8 @@ pub enum TransactionType {
     RgbSend,
     Drain,
     CreateUtxos,
-    User,
+    SendBtc,
+    Incoming,
 }
 
 pub struct Transaction {
@@ -325,6 +360,7 @@ pub struct DecodeLnInvoiceResponse {
     pub payment_hash: PaymentHash,
     pub payment_secret: String,
     pub payee_pubkey: Option<PublicKey>,
+    pub min_final_cltv_expiry_delta: u64,
     pub network: String,
 }
 
@@ -386,6 +422,7 @@ pub struct Utxo {
 pub struct Unspent {
     pub utxo: Utxo,
     pub rgb_allocations: Vec<RgbAllocation>,
+    pub pending_blinded: u32,
 }
 
 pub struct LnInvoiceRequest {
@@ -395,6 +432,7 @@ pub struct LnInvoiceRequest {
     pub asset_amount: Option<u64>,
     pub payment_hash: Option<PaymentHash>,
     pub description_hash: Option<String>,
+    pub min_final_cltv_expiry_delta: Option<u16>,
 }
 
 pub struct CancelHodlInvoiceRequest {
@@ -423,14 +461,29 @@ pub struct InflateResponse {
 
 pub struct SdkUnlockRequest {
     pub password: String,
-    pub bitcoind_rpc_username: String,
-    pub bitcoind_rpc_password: String,
-    pub bitcoind_rpc_host: String,
-    pub bitcoind_rpc_port: u16,
+    pub bitcoind_rpc_username: Option<String>,
+    pub bitcoind_rpc_password: Option<String>,
+    pub bitcoind_rpc_host: Option<String>,
+    pub bitcoind_rpc_port: Option<u16>,
     pub indexer_url: Option<String>,
     pub proxy_endpoint: Option<String>,
     pub announce_addresses: Vec<String>,
     pub announce_alias: Option<String>,
+    // None → P2P gossip (default). Some(url) → Rapid Gossip Sync against url.
+    pub gossip_rgs_server_url: Option<String>,
+}
+
+pub struct SdkExternalSignerBootstrap {
+    pub node_id: String,
+    pub account_xpub_vanilla: String,
+    pub account_xpub_colored: String,
+    pub master_fingerprint: String,
+    pub protocol_version: String,
+    pub api_level: u32,
+}
+
+pub struct SdkVssClearFenceRequest {
+    pub password: String,
 }
 
 pub struct SdkOpenChannelRequest {
@@ -623,13 +676,15 @@ pub struct SdkInitRequest {
     pub virtual_peer_pubkeys: Option<Vec<PublicKey>>,
     pub lsp_base_url: Option<String>,
     pub lsp_bearer_token: Option<String>,
+    pub vss_url: Option<String>,
+    pub vss_allow_http: bool,
+    pub vss_allow_empty_restore: bool,
 }
 
 pub struct SendRgbRequest {
     pub donation: bool,
     pub fee_rate: u64,
     pub min_confirmations: u8,
-    pub skip_sync: bool,
     pub recipient_groups: Vec<AssetRecipients>,
 }
 

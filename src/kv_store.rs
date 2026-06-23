@@ -178,3 +178,86 @@ impl KVStoreSync for SeaOrmKvStore {
         Ok(keys)
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::{collections::HashMap, sync::Mutex};
+
+    use bitcoin::io;
+    use lightning::util::persist::KVStoreSync;
+
+    #[derive(Default)]
+    pub(crate) struct MemoryKvStore {
+        entries: Mutex<HashMap<(String, String, String), Vec<u8>>>,
+    }
+
+    impl KVStoreSync for MemoryKvStore {
+        fn read(
+            &self,
+            primary_namespace: &str,
+            secondary_namespace: &str,
+            key: &str,
+        ) -> Result<Vec<u8>, io::Error> {
+            self.entries
+                .lock()
+                .unwrap()
+                .get(&(
+                    primary_namespace.to_owned(),
+                    secondary_namespace.to_owned(),
+                    key.to_owned(),
+                ))
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing key"))
+        }
+
+        fn write(
+            &self,
+            primary_namespace: &str,
+            secondary_namespace: &str,
+            key: &str,
+            buf: Vec<u8>,
+        ) -> Result<(), io::Error> {
+            self.entries.lock().unwrap().insert(
+                (
+                    primary_namespace.to_owned(),
+                    secondary_namespace.to_owned(),
+                    key.to_owned(),
+                ),
+                buf,
+            );
+            Ok(())
+        }
+
+        fn remove(
+            &self,
+            primary_namespace: &str,
+            secondary_namespace: &str,
+            key: &str,
+            _lazy: bool,
+        ) -> Result<(), io::Error> {
+            self.entries.lock().unwrap().remove(&(
+                primary_namespace.to_owned(),
+                secondary_namespace.to_owned(),
+                key.to_owned(),
+            ));
+            Ok(())
+        }
+
+        fn list(
+            &self,
+            primary_namespace: &str,
+            secondary_namespace: &str,
+        ) -> Result<Vec<String>, io::Error> {
+            Ok(self
+                .entries
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(primary, secondary, _)| {
+                    primary == primary_namespace && secondary == secondary_namespace
+                })
+                .map(|(_, _, key)| key.clone())
+                .collect())
+        }
+    }
+}

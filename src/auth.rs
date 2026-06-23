@@ -7,7 +7,7 @@ use crate::{
     utils::{hex_str, hex_str_to_vec, AppState},
 };
 
-const READ_ONLY_OPS: [&str; 23] = [
+const READ_ONLY_OPS: [&str; 25] = [
     "/assetbalance",
     "/assetmetadata",
     "/btcbalance",
@@ -15,6 +15,7 @@ const READ_ONLY_OPS: [&str; 23] = [
     "/checkproxyendpoint",
     "/decodelninvoice",
     "/decodergbinvoice",
+    "/decodeswapstring",
     "/estimatefee",
     "/getassetmedia",
     "/getchannelid",
@@ -31,6 +32,7 @@ const READ_ONLY_OPS: [&str; 23] = [
     "/listunspents",
     "/networkinfo",
     "/nodeinfo",
+    "/vssbackupinfo",
 ];
 
 pub(crate) fn check_auth_args(

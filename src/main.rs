@@ -1,4 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
+mod apay_merkle;
+#[cfg(not(target_arch = "wasm32"))]
 mod args;
 #[cfg(not(target_arch = "wasm32"))]
 mod async_order;
@@ -7,6 +9,8 @@ mod auth;
 mod backup;
 #[cfg(not(target_arch = "wasm32"))]
 mod bitcoind;
+#[cfg(not(target_arch = "wasm32"))]
+mod chain_backend;
 #[cfg(not(target_arch = "wasm32"))]
 mod core_types;
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,6 +22,10 @@ mod error;
 #[path = "test/fee_mock.rs"]
 mod fee_mock;
 #[cfg(not(target_arch = "wasm32"))]
+mod gossip;
+#[cfg(not(target_arch = "wasm32"))]
+mod indexer;
+#[cfg(not(target_arch = "wasm32"))]
 mod kv_store;
 mod ldk;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,9 +34,15 @@ mod rgb;
 mod routes;
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
+mod signer;
 mod swap;
 #[cfg(not(target_arch = "wasm32"))]
+mod synced_kv_store;
+#[cfg(not(target_arch = "wasm32"))]
 mod utils;
+#[cfg(all(feature = "vss", not(target_arch = "wasm32")))]
+mod vss_kv_store;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test;
@@ -76,17 +90,20 @@ use crate::error::AppError;
 use crate::ldk::stop_ldk;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::routes::{
-    address, asset_balance, asset_metadata, async_order_new, backup, btc_balance,
-    cancel_hodl_invoice, change_password, check_indexer_url, check_proxy_endpoint,
+    address, asset_balance, asset_metadata, async_order_new, async_order_outbound_invoice, backup,
+    btc_balance, cancel_hodl_invoice, change_password, check_indexer_url, check_proxy_endpoint,
     claim_hodl_invoice, close_channel, connect_peer, create_utxos, decode_ln_invoice,
-    decode_rgb_invoice, disconnect_peer, estimate_fee, fail_transfers, get_asset_media,
-    get_channel_id, get_payment, get_swap, inflate, init, invoice_status, issue_asset_cfa,
-    issue_asset_ifa, issue_asset_nia, issue_asset_uda, keysend, list_assets, list_channels,
-    list_payments, list_peers, list_swaps, list_transactions, list_transfers, list_unspents,
-    ln_invoice, lock, maker_execute, maker_init, network_info, node_info, open_channel,
-    post_asset_media, refresh_transfers, restore, revoke_token, rgb_invoice, send_btc,
-    send_onion_message, send_payment, send_rgb, shutdown, sign_message, sync, taker, unlock,
+    decode_rgb_invoice, decode_swapstring, disconnect_peer, estimate_fee, fail_transfers,
+    get_asset_media, get_channel_id, get_payment, get_swap, inflate, init, invoice_status,
+    issue_asset_cfa, issue_asset_ifa, issue_asset_nia, issue_asset_uda, keysend, list_assets,
+    list_channels, list_payments, list_peers, list_swaps, list_transactions, list_transfers,
+    list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info, node_info,
+    open_channel, post_asset_media, refresh_transfers, restore, revoke_token, rgb_invoice,
+    send_btc, send_onion_message, send_payment, send_rgb, shutdown, sign_message, sync, taker,
+    unlock,
 };
+#[cfg(all(feature = "vss", not(target_arch = "wasm32")))]
+use crate::routes::{vss_backup, vss_backup_info, vss_clear_fence};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::{start_daemon, AppState, LOGS_DIR};
 
@@ -147,6 +164,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .layer(DefaultBodyLimit::disable())
         .route("/address", post(address))
         .route("/apay/new", post(async_order_new))
+        .route("/apay/outboundinvoice", post(async_order_outbound_invoice))
         .route("/assetbalance", post(asset_balance))
         .route("/assetmetadata", post(asset_metadata))
         .route("/backup", post(backup))
@@ -161,6 +179,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/createutxos", post(create_utxos))
         .route("/decodelninvoice", post(decode_ln_invoice))
         .route("/decodergbinvoice", post(decode_rgb_invoice))
+        .route("/decodeswapstring", post(decode_swapstring))
         .route("/disconnectpeer", post(disconnect_peer))
         .route("/estimatefee", post(estimate_fee))
         .route("/failtransfers", post(fail_transfers))
@@ -203,7 +222,15 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/signmessage", post(sign_message))
         .route("/sync", post(sync))
         .route("/taker", post(taker))
-        .route("/unlock", post(unlock))
+        .route("/unlock", post(unlock));
+
+    #[cfg(feature = "vss")]
+    let router = router
+        .route("/vssbackup", post(vss_backup))
+        .route("/vssbackupinfo", get(vss_backup_info))
+        .route("/vssclearfence", post(vss_clear_fence));
+
+    let router = router
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<_>| {

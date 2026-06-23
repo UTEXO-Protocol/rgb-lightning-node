@@ -23,6 +23,9 @@ pub enum APIError {
     #[error("Node has already been initialized")]
     AlreadyInitialized,
 
+    #[error("Provide either bitcoind RPC credentials (all four fields) or an esplora indexer_url, not both")]
+    AmbiguousChainBackend,
+
     #[error("Anchor outputs are required for RGB channels")]
     AnchorsRequired,
 
@@ -46,6 +49,22 @@ pub enum APIError {
 
     #[error("Cannot call other APIs while node is changing state")]
     ChangingState,
+
+    #[error("External signer is required for this operation")]
+    ExternalSignerRequired,
+
+    #[allow(dead_code)]
+    #[error("External signer is unavailable: {0}")]
+    ExternalSignerUnavailable(String),
+
+    #[error("External signer identity does not match persisted node identity")]
+    ExternalSignerMismatch,
+
+    #[error("Unsupported in external signer mode: {0}")]
+    UnsupportedInExternalSignerMode(String),
+
+    #[error("External signer protocol error: {0}")]
+    ExternalSignerProtocolError(String),
 
     #[error("Another payment for this invoice is already in status {0}")]
     DuplicatePayment(String),
@@ -80,11 +99,21 @@ pub enum APIError {
     #[error("Failed to connect to peer")]
     FailedPeerConnection,
 
+    #[cfg(feature = "vss")]
+    #[error("Failed to initialize VSS: {0}")]
+    FailedVssInit(String),
+
     #[error("Failed to disconnect to peer: {0}")]
     FailedPeerDisconnection(String),
 
     #[error("Failed to send onion message: {0}")]
     FailedSendingOnionMessage(String),
+
+    #[error("Gossip update failed: {0}")]
+    GossipUpdateFailed(String),
+
+    #[error("Gossip update timed out")]
+    GossipUpdateTimeout,
 
     #[error("For an RGB operation both the asset ID and amount are necessary")]
     IncompleteRGBInfo,
@@ -95,7 +124,7 @@ pub enum APIError {
     #[error("Insufficient capacity to cover the commitment transaction fees ({0} sat)")]
     InsufficientCapacity(u64),
 
-    #[error("Not enough funds, get an address and send {0} sats there")]
+    #[error("Not enough funds, missing {0} sats")]
     InsufficientFunds(u64),
 
     #[error("Invalid address: {0}")]
@@ -260,6 +289,9 @@ pub enum APIError {
     #[error("Min fee not met for transfer with TXID: {0}")]
     MinFeeNotMet(String),
 
+    #[error("Provide either bitcoind RPC credentials (all four fields) or an esplora indexer_url; none were supplied")]
+    MissingChainBackend,
+
     #[error("Unable to find payment preimage, be sure you've provided the correct swap info")]
     MissingSwapPaymentPreimage,
 
@@ -280,9 +312,6 @@ pub enum APIError {
 
     #[error("No valid transport endpoint found")]
     NoValidTransportEndpoint,
-
-    #[error("Cannot perform this operation while an open channel operation is in progress")]
-    OpenChannelInProgress,
 
     #[error("Output below the dust limit")]
     OutputBelowDustLimit,
@@ -527,12 +556,14 @@ impl IntoResponse for APIError {
             APIError::AllocationsAlreadyAvailable
             | APIError::AlreadyInitialized
             | APIError::AlreadyUnlocked
+            | APIError::AmbiguousChainBackend
             | APIError::AuthenticationDisabled
             | APIError::BatchTransferNotFound
             | APIError::CannotCloseChannel(_)
             | APIError::CannotEstimateFees
             | APIError::CannotFailBatchTransfer
             | APIError::ChangingState
+            | APIError::ExternalSignerRequired
             | APIError::DuplicatePayment(_)
             | APIError::FailedBdkSync(_)
             | APIError::FailedBitcoindConnection(_)
@@ -549,11 +580,11 @@ impl IntoResponse for APIError {
             | APIError::LockedNode
             | APIError::MaxFeeExceeded(_)
             | APIError::MinFeeNotMet(_)
+            | APIError::MissingChainBackend
             | APIError::NetworkMismatch(_, _)
             | APIError::NoAvailableUtxos
             | APIError::NoRoute
             | APIError::NotInitialized
-            | APIError::OpenChannelInProgress
             | APIError::PaymentNotFound(_)
             | APIError::RecipientIDAlreadyUsed
             | APIError::SwapNotFound(_)
@@ -565,14 +596,29 @@ impl IntoResponse for APIError {
             | APIError::UnlockedNode
             | APIError::UnsupportedInflation(_)
             | APIError::UnsupportedLayer1(_)
-            | APIError::UnsupportedTransportType => {
+            | APIError::UnsupportedTransportType
+            | APIError::UnsupportedInExternalSignerMode(_) => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
             }
             APIError::InvoiceAlreadyClaimed => {
                 (StatusCode::CONFLICT, self.to_string(), self.name())
             }
+            APIError::ExternalSignerMismatch => {
+                (StatusCode::CONFLICT, self.to_string(), self.name())
+            }
             APIError::InvoiceNotClaimable => (StatusCode::NOT_FOUND, self.to_string(), self.name()),
-            APIError::Network(_) | APIError::NoValidTransportEndpoint => (
+            APIError::ExternalSignerProtocolError(_)
+            | APIError::ExternalSignerUnavailable(_)
+            | APIError::GossipUpdateFailed(_)
+            | APIError::GossipUpdateTimeout
+            | APIError::Network(_)
+            | APIError::NoValidTransportEndpoint => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.to_string(),
+                self.name(),
+            ),
+            #[cfg(feature = "vss")]
+            APIError::FailedVssInit(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.to_string(),
                 self.name(),
@@ -607,6 +653,9 @@ pub enum AppError {
 
     #[error("Invalid virtual peer pubkey: {0}")]
     InvalidVirtualPeerPubkey(String),
+
+    #[error("Invalid VSS configuration: {0}")]
+    InvalidVssConfig(String),
 
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),

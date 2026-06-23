@@ -11,7 +11,7 @@ mod uniffi_smoke_tests {
     use serial_test::serial;
     use std::collections::HashSet;
     use std::str::FromStr;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use tokio::sync::Mutex as TokioMutex;
     use tokio_util::sync::CancellationToken;
 
@@ -30,6 +30,17 @@ mod uniffi_smoke_tests {
         assert!(matches!(payment, Err(RlnError::NotInitialized)));
         let swap = sdk_get_swap(lightning::types::payment::PaymentHash([0u8; 32]), true);
         assert!(matches!(swap, Err(RlnError::NotInitialized)));
+        let bootstrap = SdkExternalSignerBootstrap {
+            node_id: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                .to_string(),
+            account_xpub_vanilla: "xpub661MyMwAqRbcF9i3M7GQw1k8f7mR8n4x9nW2f2dJ8f1h9sP2b3K4L5M6N7P8Q9R0S1T2U3V4W5X6Y7Z8".to_string(),
+            account_xpub_colored: "xpub661MyMwAqRbcF9i3M7GQw1k8f7mR8n4x9nW2f2dJ8f1h9sP2b3K4L5M6N7P8Q9R0S1T2U3V4W5X6Y7Z8".to_string(),
+            master_fingerprint: "00000000".to_string(),
+            protocol_version: "1".to_string(),
+            api_level: 1,
+        };
+        let init_external = sdk_init_with_external_signer(bootstrap);
+        assert!(matches!(init_external, Err(RlnError::NotInitialized)));
 
         let invoice = sdk_ln_invoice(LnInvoiceRequest {
             amt_msat: Some(1000),
@@ -38,6 +49,7 @@ mod uniffi_smoke_tests {
             asset_amount: None,
             payment_hash: None,
             description_hash: None,
+            min_final_cltv_expiry_delta: None,
         });
         assert!(matches!(invoice, Err(RlnError::NotInitialized)));
 
@@ -67,7 +79,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::NotInitialized)));
@@ -94,13 +105,16 @@ mod uniffi_smoke_tests {
                 max_media_upload_size_mb: 1,
                 enable_virtual_channels_v0: false,
                 virtual_peer_pubkeys: vec![],
-                database: Arc::new(database),
+                database: RwLock::new(Arc::new(database)),
                 lsp_base_url: None,
                 lsp_bearer_token: None,
+                vss_url: None,
+                vss_allow_empty_restore: false,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),
             ldk_background_services: Arc::new(Mutex::new(None)),
+            attached_external_signer: Arc::new(Mutex::new(None)),
             changing_state: Mutex::new(false),
             root_public_key: None,
             revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
@@ -131,7 +145,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::InvalidRequest)));
@@ -165,7 +178,6 @@ mod uniffi_smoke_tests {
             donation: false,
             fee_rate: 1,
             min_confirmations: 1,
-            skip_sync: true,
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::InvalidRequest)));
@@ -258,8 +270,26 @@ mod uniffi_smoke_tests {
             RlnError::NotFound
         ));
         assert!(matches!(
-            super::super::state::map_api_error(crate::error::APIError::OpenChannelInProgress),
-            RlnError::Conflict
+            super::super::state::map_api_error(crate::error::APIError::FailedBitcoindConnection(
+                "down".to_string()
+            )),
+            RlnError::FailedBitcoindConnection
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::FailedBdkSync(
+                "sync".to_string()
+            )),
+            RlnError::FailedBdkSync
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::FailedBroadcast(
+                "broadcast".to_string()
+            )),
+            RlnError::FailedBroadcast
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::FailedPeerConnection),
+            RlnError::FailedPeerConnection
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::IO(std::io::Error::other(
@@ -275,11 +305,49 @@ mod uniffi_smoke_tests {
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::NoAvailableUtxos),
-            RlnError::Conflict
+            RlnError::NoAvailableUtxos
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::InsufficientFunds(42)),
+            RlnError::InsufficientFunds
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::InsufficientCapacity(42)),
+            RlnError::InsufficientCapacity
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::NoRoute),
+            RlnError::NoRoute
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::NoValidTransportEndpoint),
             RlnError::Conflict
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::ExternalSignerRequired),
+            RlnError::ExternalSignerRequired
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::ExternalSignerMismatch),
+            RlnError::ExternalSignerMismatch
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(crate::error::APIError::ExternalSignerUnavailable(
+                "down".to_string()
+            )),
+            RlnError::ExternalSignerUnavailable
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(
+                crate::error::APIError::ExternalSignerProtocolError("decode".to_string())
+            ),
+            RlnError::ExternalSignerProtocolError
+        ));
+        assert!(matches!(
+            super::super::state::map_api_error(
+                crate::error::APIError::UnsupportedInExternalSignerMode("x".to_string())
+            ),
+            RlnError::UnsupportedInExternalSignerMode
         ));
         assert!(matches!(
             super::super::state::map_api_error(crate::error::APIError::WrongPassword),
@@ -303,11 +371,202 @@ mod uniffi_smoke_tests {
             payee_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .to_string(),
             preimage: expected_preimage.clone(),
+            description_hash: None,
         };
 
         let mapped = map_payment_data(data).expect("payment mapping should succeed");
         assert_eq!(mapped.payment_hash.0, [7u8; 32]);
         assert_eq!(mapped.preimage, expected_preimage);
         assert!(matches!(mapped.payment_type, PaymentType::InboundHodl));
+    }
+
+    #[test]
+    fn sdk_create_rejects_invalid_vss_url() {
+        let res = SdkNode::create(SdkInitRequest {
+            storage_dir_path: "/tmp/rln_vss_validation_test".to_string(),
+            daemon_listening_port: 3001,
+            ldk_peer_listening_port: 9735,
+            network: "regtest".to_string(),
+            max_media_upload_size_mb: 1,
+            enable_virtual_channels_v0: None,
+            virtual_peer_pubkeys: None,
+            lsp_base_url: None,
+            lsp_bearer_token: None,
+            vss_url: Some("http://example.com/vss".to_string()),
+            vss_allow_http: false,
+            vss_allow_empty_restore: false,
+        });
+        assert!(matches!(res, Err(RlnError::InvalidRequest)));
+    }
+}
+
+#[cfg(all(test, feature = "vls"))]
+mod external_apay_signing_tests {
+    use std::{str::FromStr, sync::Arc};
+
+    use bitcoin::{
+        hex::FromHex,
+        secp256k1::{PublicKey, Secp256k1, SecretKey},
+    };
+    use lightning::{
+        rgb_utils::RgbBackend,
+        sign::{KeysManager, NodeSigner},
+        util::message_signing,
+    };
+    use rgb_lib::{
+        keys::WitnessVersion,
+        utils::get_account_data,
+        wallet::{DatabaseType, OnlineOptions, SinglesigKeys, Wallet as RgbLibWallet, WalletData},
+        AssetSchema, BitcoinNetwork,
+    };
+
+    use crate::{
+        async_order::{
+            apay_attest_bytes, apay_commit_bytes, build_apay_address_attestation,
+            build_apay_batch_commitment, AsyncOrderNewHashWire,
+        },
+        kv_store::test_support::MemoryKvStore,
+        signer::{ExternalSigner, ExternalSignerTransport},
+        uniffi_api::UniffiExternalSignerTransport,
+    };
+
+    /// Offline native RGB backend for tests that only need a valid `Arc<RgbBackend>` to pass into
+    /// `KeysManager` (the backend is never exercised by these key-derivation parity checks).
+    fn build_rgb_backend() -> Arc<RgbBackend> {
+        let mnemonic =
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let network = BitcoinNetwork::Regtest;
+        let (_, account_xpub_vanilla, _) =
+            get_account_data(&network, mnemonic, false, WitnessVersion::Taproot).unwrap();
+        let (_, account_xpub_colored, master_fingerprint) =
+            get_account_data(&network, mnemonic, true, WitnessVersion::Taproot).unwrap();
+        let data_dir =
+            std::env::temp_dir().join(format!("rln-rgb-backend-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let keys = SinglesigKeys {
+            account_xpub_vanilla: account_xpub_vanilla.to_string(),
+            account_xpub_colored: account_xpub_colored.to_string(),
+            vanilla_keychain: None,
+            master_fingerprint: master_fingerprint.to_string(),
+            mnemonic: Some(mnemonic.to_string()),
+            witness_version: WitnessVersion::Taproot,
+        };
+        let wallet = RgbLibWallet::new(
+            WalletData {
+                data_dir: data_dir.to_string_lossy().to_string(),
+                bitcoin_network: network,
+                database_type: DatabaseType::Sqlite,
+                max_allocations_per_utxo: 1,
+                supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
+                reuse_addresses: false,
+            },
+            keys,
+        )
+        .expect("offline rgb-lib wallet");
+        let online_options = OnlineOptions {
+            indexer_url: String::new(),
+            skip_consistency_check: false,
+            vanilla_sync_lookback: 0,
+        };
+        Arc::new(RgbBackend::new(wallet, online_options))
+    }
+
+    fn external_signer_from_seed(seed_hex: String) -> (ExternalSigner, PublicKey) {
+        let host = crate::NativeExternalSigner::new(seed_hex, "regtest".to_string(), Some(true))
+            .expect("native signer");
+        let transport: Arc<dyn ExternalSignerTransport> =
+            Arc::new(UniffiExternalSignerTransport::new(host));
+        let attachment =
+            crate::ldk::attach_external_signer_transport(transport).expect("attachment");
+        let node_id =
+            PublicKey::from_str(&attachment.bootstrap.identity.node_id).expect("bootstrap node id");
+        let signer = ExternalSigner::from_attachment(&attachment).expect("external signer");
+        (signer, node_id)
+    }
+
+    fn decode_fixed<const N: usize>(hex: &str) -> [u8; N] {
+        Vec::<u8>::from_hex(hex)
+            .expect("valid hex")
+            .try_into()
+            .expect("expected length")
+    }
+
+    #[test]
+    fn external_message_signing_matches_internal_mode() {
+        let (signer, node_id) = external_signer_from_seed("33".repeat(32));
+        let message: &[u8] = b"\x00\xff\xfe binary commitment bytes";
+
+        let external_sig = NodeSigner::sign_message(&signer, message).expect("external sign");
+        assert!(message_signing::verify(message, &external_sig, &node_id));
+
+        let keys_manager = KeysManager::new(
+            &[0x33u8; 32],
+            42,
+            42,
+            true,
+            build_rgb_backend(),
+            Arc::new(MemoryKvStore::default()),
+        );
+        let secp = Secp256k1::new();
+        let internal_node_id =
+            PublicKey::from_secret_key(&secp, &keys_manager.get_node_secret_key());
+        assert_eq!(internal_node_id, node_id);
+
+        let internal_sig = message_signing::sign(message, &keys_manager.get_node_secret_key());
+        assert_eq!(external_sig, internal_sig);
+    }
+
+    #[test]
+    fn external_signatures_verify() {
+        let (signer, node_id) = external_signer_from_seed("44".repeat(32));
+        let node_id_hex = node_id.to_string();
+        let secp = Secp256k1::new();
+        let host_pubkey = PublicKey::from_secret_key(
+            &secp,
+            &SecretKey::from_slice(&[9u8; 32]).expect("host secret"),
+        );
+        let host_pubkey_hex = host_pubkey.to_string();
+
+        let prepared = signer
+            .prepare_async_payments_hashes(host_pubkey_hex.clone(), 1, 4)
+            .expect("prepare hashes");
+        assert_eq!(prepared.len(), 4);
+        let hashes: Vec<AsyncOrderNewHashWire> = prepared
+            .iter()
+            .map(|entry| AsyncOrderNewHashWire {
+                hash_index: entry.hash_index,
+                payment_hash: entry.payment_hash_hex.clone(),
+            })
+            .collect();
+
+        let batch = build_apay_batch_commitment(
+            &node_id_hex,
+            &host_pubkey_hex,
+            1,
+            &hashes,
+            1_000,
+            2_000,
+            |msg| NodeSigner::sign_message(&signer, msg),
+        )
+        .expect("batch commitment");
+
+        let commit = apay_commit_bytes(
+            &decode_fixed::<33>(&node_id_hex),
+            &decode_fixed::<33>(&batch.host_pubkey),
+            &decode_fixed::<16>(&batch.batch_id),
+            &decode_fixed::<32>(&batch.batch_root),
+            batch.batch_size,
+            batch.created_at,
+            batch.expires_at,
+        );
+        assert!(message_signing::verify(&commit, &batch.batch_sig, &node_id));
+
+        let address_sig =
+            build_apay_address_attestation(&node_id_hex, "utexo.com", "xalkan", 0, |msg| {
+                NodeSigner::sign_message(&signer, msg)
+            })
+            .expect("address attestation");
+        let attest = apay_attest_bytes(&decode_fixed::<33>(&node_id_hex), "utexo.com", "xalkan", 0);
+        assert!(message_signing::verify(&attest, &address_sig, &node_id));
     }
 }

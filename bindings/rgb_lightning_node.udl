@@ -35,7 +35,13 @@ interface SdkNode {
     [Throws=RlnError]
     string init(string password, string? mnemonic);
     [Throws=RlnError]
+    void init_with_external_signer(SdkExternalSignerBootstrap bootstrap);
+    [Throws=RlnError]
     void unlock(SdkUnlockRequest request);
+    [Throws=RlnError]
+    void vss_clear_fence(SdkVssClearFenceRequest request);
+    [Throws=RlnError]
+    i64 vss_backup();
     [Throws=RlnError]
     void connectpeer(string peer_pubkey_and_addr);
     [Throws=RlnError]
@@ -112,6 +118,10 @@ interface SdkNode {
     InflateResponse inflate(InflateRequest request);
     [Throws=RlnError]
     SendRgbResponse send_rgb(SendRgbRequest request);
+    [Throws=RlnError]
+    AsyncOrderNewResponse apay_new(string host_node_id);
+    [Throws=RlnError]
+    AsyncOrderNewResponse apay_new_with_address(string host_node_id, string username, string domain);
 };
 
 [Error]
@@ -120,6 +130,19 @@ enum RlnError {
     "InvalidRequest",
     "NotFound",
     "Conflict",
+    "FailedBitcoindConnection",
+    "FailedBdkSync",
+    "FailedBroadcast",
+    "FailedPeerConnection",
+    "InsufficientCapacity",
+    "InsufficientFunds",
+    "NoAvailableUtxos",
+    "NoRoute",
+    "ExternalSignerRequired",
+    "ExternalSignerMismatch",
+    "ExternalSignerUnavailable",
+    "ExternalSignerProtocolError",
+    "UnsupportedInExternalSignerMode",
     "Internal",
 };
 
@@ -142,6 +165,7 @@ dictionary NodeInfo {
     u64 channel_asset_max_amount;
     u64 network_nodes;
     u64 network_channels;
+    u64? latest_rgs_snapshot_timestamp = null;
 };
 
 dictionary NetworkInfo {
@@ -187,6 +211,7 @@ dictionary Payment {
     u64 updated_at;
     PublicKey payee_pubkey;
     string? preimage;
+    string? description_hash;
 };
 
 enum PaymentType {
@@ -271,7 +296,8 @@ enum TransactionType {
     "RgbSend",
     "Drain",
     "CreateUtxos",
-    "User",
+    "SendBtc",
+    "Incoming",
 };
 
 dictionary Transaction {
@@ -420,6 +446,7 @@ dictionary DecodeLnInvoiceResponse {
     PaymentHash payment_hash;
     string payment_secret;
     PublicKey? payee_pubkey;
+    u64 min_final_cltv_expiry_delta;
     string network;
 };
 
@@ -481,6 +508,7 @@ dictionary Utxo {
 dictionary Unspent {
     Utxo utxo;
     sequence<RgbAllocation> rgb_allocations;
+    u32 pending_blinded;
 };
 
 dictionary LnInvoiceRequest {
@@ -490,6 +518,7 @@ dictionary LnInvoiceRequest {
     u64? asset_amount;
     PaymentHash? payment_hash;
     string? description_hash;
+    u16? min_final_cltv_expiry_delta;
 };
 
 dictionary LnInvoiceResponse {
@@ -530,18 +559,35 @@ dictionary SdkInitRequest {
     sequence<PublicKey>? virtual_peer_pubkeys;
     string? lsp_base_url;
     string? lsp_bearer_token;
+    string? vss_url = null;
+    boolean vss_allow_http = false;
+    boolean vss_allow_empty_restore = false;
 };
 
 dictionary SdkUnlockRequest {
     string password;
-    string bitcoind_rpc_username;
-    string bitcoind_rpc_password;
-    string bitcoind_rpc_host;
-    u16 bitcoind_rpc_port;
+    string? bitcoind_rpc_username;
+    string? bitcoind_rpc_password;
+    string? bitcoind_rpc_host;
+    u16? bitcoind_rpc_port;
     string? indexer_url;
     string? proxy_endpoint;
     sequence<string> announce_addresses;
     string? announce_alias;
+    string? gossip_rgs_server_url = null;
+};
+
+dictionary SdkExternalSignerBootstrap {
+    string node_id;
+    string account_xpub_vanilla;
+    string account_xpub_colored;
+    string master_fingerprint;
+    string protocol_version;
+    u32 api_level;
+};
+
+dictionary SdkVssClearFenceRequest {
+    string password;
 };
 
 dictionary SdkOpenChannelRequest {
@@ -724,7 +770,6 @@ dictionary SendRgbRequest {
     boolean donation;
     u64 fee_rate;
     u8 min_confirmations;
-    boolean skip_sync;
     sequence<AssetRecipients> recipient_groups;
 };
 
@@ -757,6 +802,26 @@ enum AssignmentKind {
     "InflationRight",
     "ReplaceRight",
     "Any",
+};
+
+dictionary AsyncOrderNewHashWire {
+    u64 hash_index;
+    string payment_hash;
+};
+
+dictionary AsyncOrderNewResponse {
+    string request_id;
+    string host_node_id;
+    u64 protocol_version;
+    string order_id;
+    string status;
+    u64 accepted_through_index;
+    u64 next_index_expected;
+    u64 unused_hashes;
+    u64 refill_batch_size;
+    u64 first_hash_index;
+    u64 last_hash_index;
+    sequence<AsyncOrderNewHashWire> hashes;
 };
 
 [Custom]

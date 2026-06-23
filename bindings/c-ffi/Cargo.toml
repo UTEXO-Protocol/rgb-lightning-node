@@ -1,0 +1,59 @@
+[package]
+name = "rln-c-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88.0"
+build = "build.rs"
+publish = false
+
+[lib]
+# staticlib: mobile + napi link against librlncffi.a. rlib: Rust consumers
+# (e.g. the napi-rs binding) call wrappers without redeclaring the extern "C".
+crate-type = ["staticlib", "rlib"]
+name = "rlncffi"
+
+[dependencies]
+rgb-lightning-node = { path = "../..", features = ["uniffi", "vls", "vss"] }
+# Direct deps so we can construct typed wrappers by their real crate paths —
+# `rgb_lightning_node::PaymentHash` etc. are aliases and Rust 2021 doesn't
+# allow tuple-struct construction through an alias. Unified with the parent
+# via `[patch.crates-io]` below.
+lightning = { version = "0.2.0" }
+lightning-invoice = { version = "0.34.0", features = ["std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+hex = { package = "hex-conservative", version = "0.3.0" }
+
+[build-dependencies]
+cbindgen = "0.29.0"
+
+[features]
+default = []
+
+# Own workspace so the parent crate's rust-lightning path-submodule workspace
+# isn't pulled in. The committed Cargo.lock locks `rgb-lib` to the same
+# revision the parent uses.
+[workspace]
+
+# Mirror the parent's [patch.crates-io] so we don't end up with two copies of
+# `lightning` (which fails with trait-bound errors). Keep in lock-step with
+# the parent's pins.
+#
+# IMPORTANT: `lightning` MUST resolve to the SAME rust-lightning the parent
+# builds — the pinned submodule at `../../rust-lightning`. The parent crate's
+# v0.5.2 source uses fork-specific APIs (e.g. `RgbInfo.batch_transfer_idx`)
+# that only exist at the submodule commit; pointing these at a separate
+# `rmn-boiko` branch tip drifts behind and fails to compile the parent
+# source. Using the submodule path guarantees they never skew again.
+[patch.crates-io]
+lightning = { path = "../../rust-lightning/lightning" }
+lightning-background-processor = { path = "../../rust-lightning/lightning-background-processor" }
+lightning-block-sync = { path = "../../rust-lightning/lightning-block-sync" }
+lightning-dns-resolver = { path = "../../rust-lightning/lightning-dns-resolver" }
+lightning-invoice = { path = "../../rust-lightning/lightning-invoice" }
+lightning-net-tokio = { path = "../../rust-lightning/lightning-net-tokio" }
+lightning-persister = { path = "../../rust-lightning/lightning-persister" }
+lightning-rapid-gossip-sync = { path = "../../rust-lightning/lightning-rapid-gossip-sync" }
+vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
+vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }

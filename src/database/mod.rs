@@ -63,16 +63,6 @@ impl RlnDatabase {
         Ok(())
     }
 
-    pub fn get_config(&self, key: &str) -> Result<Option<String>, APIError> {
-        let result = block_on(
-            ConfigEntity::find()
-                .filter(ConfigColumn::Key.eq(key))
-                .one(self.get_connection()),
-        )?;
-
-        Ok(result.map(|r| r.value))
-    }
-
     pub fn get_mnemonic(&self) -> Result<Option<DbMnemonic>, APIError> {
         Ok(block_on(
             MnemonicEntity::find_by_id(1).one(self.get_connection()),

@@ -3,6 +3,8 @@
 #![allow(unused_imports)]
 
 #[cfg(not(target_arch = "wasm32"))]
+mod apay_merkle;
+#[cfg(not(target_arch = "wasm32"))]
 mod args;
 #[cfg(not(target_arch = "wasm32"))]
 mod async_order;
@@ -11,6 +13,8 @@ mod auth;
 mod backup;
 #[cfg(not(target_arch = "wasm32"))]
 mod bitcoind;
+#[cfg(not(target_arch = "wasm32"))]
+mod chain_backend;
 #[cfg(not(target_arch = "wasm32"))]
 mod core_types;
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,6 +27,10 @@ mod error;
 mod fee_mock;
 #[cfg(all(feature = "uniffi", not(target_arch = "wasm32")))]
 pub mod ffi;
+#[cfg(not(target_arch = "wasm32"))]
+mod gossip;
+#[cfg(not(target_arch = "wasm32"))]
+mod indexer;
 #[cfg(not(target_arch = "wasm32"))]
 mod kv_store;
 mod ldk;
@@ -39,13 +47,24 @@ mod sdk;
 #[path = "sdk/wasm.rs"]
 pub mod sdk;
 #[cfg(not(target_arch = "wasm32"))]
+mod signer;
+#[cfg(all(
+    feature = "uniffi",
+    feature = "test-utils",
+    not(target_arch = "wasm32")
+))]
+pub mod signer_integration_wire;
+#[cfg(not(target_arch = "wasm32"))]
 mod swap;
+mod synced_kv_store;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 #[cfg(all(feature = "uniffi", not(target_arch = "wasm32")))]
 mod uniffi_api;
 #[cfg(not(target_arch = "wasm32"))]
 mod utils;
+#[cfg(feature = "vss")]
+mod vss_kv_store;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use node::{NodeConfig, NodeHandle};
