@@ -21,6 +21,16 @@ use vss_client::util::retry::{
 type VssRetryPolicy =
     MaxTotalDelayRetryPolicy<MaxAttemptsRetryPolicy<ExponentialBackoffRetryPolicy<VssError>>>;
 
+/// Dedicated runtime for driving synchronous VSS calls (see [`VssKvStore::block_on`]).
+static VSS_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("vss-runtime")
+        .enable_all()
+        .build()
+        .expect("Failed to create VSS tokio runtime")
+});
+
 /// Result of a single VSS get-object during a paged `download_all`. `Ok(None)`
 /// means the key disappeared between list and get (race; benign).
 type FetchResult = Result<Option<(String, Vec<u8>)>, VssError>;
@@ -102,15 +112,24 @@ impl VssKvStore {
         })
     }
 
-    /// Runs an async future to completion using the ambient Tokio runtime
-    /// (which must be multi-threaded — `#[tokio::main]` in `src/main.rs`
-    /// satisfies this).
+    /// Runs a VSS future to completion on a dedicated runtime via a separate
+    /// thread, blocking only the calling thread. It must not re-enter the caller's
+    /// runtime: re-entrancy would let tasks holding LDK locks interleave on the
+    /// blocked worker and deadlock.
     fn block_on<F>(&self, future: F) -> F::Output
     where
         F: std::future::Future + Send,
         F::Output: Send,
     {
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+        if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::scope(|s| {
+                s.spawn(|| VSS_RUNTIME.block_on(future))
+                    .join()
+                    .expect("VSS runtime thread panicked")
+            })
+        } else {
+            VSS_RUNTIME.block_on(future)
+        }
     }
 
     /// Encrypt a value for storage on VSS using the inline wire format
@@ -331,6 +350,90 @@ impl VssKvStore {
                 tracing::warn!(error = %e, "VSS fence periodic check failed");
             }
         }
+    }
+
+    /// Async counterparts of the `KVStoreSync` methods, `.await`ed directly (no
+    /// `block_on`) so a monitor write can run on the LDK async event loop. They
+    /// skip the periodic fence re-check; `acquire_fence` at startup still holds.
+    pub async fn read_async(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+    ) -> Result<Vec<u8>, io::Error> {
+        let vss_key = vss_key(primary_namespace, secondary_namespace, key);
+        let request = GetObjectRequest {
+            store_id: self.store_id.clone(),
+            key: vss_key.clone(),
+        };
+        match self.client.get_object(&request).await {
+            Ok(resp) => {
+                if let Some(kv) = resp.value {
+                    self.decrypt_value(kv.value)
+                } else {
+                    Err(io::Error::new(io::ErrorKind::NotFound, "Key not found"))
+                }
+            }
+            Err(VssError::NoSuchKeyError(_)) => {
+                Err(io::Error::new(io::ErrorKind::NotFound, "Key not found"))
+            }
+            Err(e) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("VSS read failed: {e}"),
+            )),
+        }
+    }
+
+    pub async fn write_async(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+        buf: Vec<u8>,
+    ) -> Result<(), io::Error> {
+        let vss_key = vss_key(primary_namespace, secondary_namespace, key);
+        tracing::trace!(vss_key, value_len = buf.len(), "VssKvStore write_async");
+        let stored = self.encrypt_value(buf)?;
+        let request = PutObjectRequest {
+            store_id: self.store_id.clone(),
+            global_version: None,
+            transaction_items: vec![KeyValue {
+                key: vss_key.clone(),
+                version: -1,
+                value: stored,
+            }],
+            delete_items: vec![],
+        };
+        self.client.put_object(&request).await.map_err(|e| {
+            tracing::error!(vss_key, error = %e, "VssKvStore write_async failed");
+            io::Error::new(io::ErrorKind::Other, format!("VSS write failed: {e}"))
+        })?;
+        Ok(())
+    }
+
+    pub async fn remove_async(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+    ) -> Result<(), io::Error> {
+        let vss_key = vss_key(primary_namespace, secondary_namespace, key);
+        tracing::trace!(vss_key, "VssKvStore remove_async");
+        let request = PutObjectRequest {
+            store_id: self.store_id.clone(),
+            global_version: None,
+            transaction_items: vec![],
+            delete_items: vec![KeyValue {
+                key: vss_key.clone(),
+                version: -1,
+                value: vec![],
+            }],
+        };
+        self.client.put_object(&request).await.map_err(|e| {
+            tracing::error!(vss_key, error = %e, "VssKvStore remove_async failed");
+            io::Error::new(io::ErrorKind::Other, format!("VSS remove failed: {e}"))
+        })?;
+        Ok(())
     }
 
     /// Downloads all key-value pairs from VSS for this store_id, decrypting

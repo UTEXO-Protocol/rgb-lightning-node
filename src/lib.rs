@@ -4,6 +4,8 @@
 
 mod apay_merkle;
 mod args;
+#[cfg(feature = "vss")]
+mod async_kv_store;
 mod async_order;
 mod auth;
 mod backup;

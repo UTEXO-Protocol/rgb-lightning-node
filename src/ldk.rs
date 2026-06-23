@@ -41,13 +41,26 @@ use lightning::routing::gossip;
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
-use lightning::sign::{KeysManager, NodeSigner, OutputSpender, SpendableOutputDescriptor};
+use lightning::sign::{KeysManager, OutputSpender, SpendableOutputDescriptor};
+// Used by the non-VSS ChainMonitor encryptor closure and the signer unit tests.
+#[cfg(feature = "vss")]
+use lightning::chain::chainmonitor::AsyncPersister;
+#[cfg(any(not(feature = "vss"), test))]
+use lightning::sign::NodeSigner;
+#[cfg(feature = "vss")]
+use lightning::sign::PeerStorageKey;
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::UserConfig;
 use lightning::util::hash_tables::hash_map::Entry;
 use lightning::util::hash_tables::{new_hash_map, HashMap as LdkHashMap};
+#[cfg(feature = "vss")]
+use lightning::util::native_async::FutureSpawner;
+#[cfg(not(feature = "vss"))]
+use lightning::util::persist::MonitorUpdatingPersister;
+#[cfg(feature = "vss")]
+use lightning::util::persist::MonitorUpdatingPersisterAsync;
 use lightning::util::persist::{
-    KVStoreSync, KVStoreSyncWrapper, MonitorUpdatingPersister, CHANNEL_MANAGER_PERSISTENCE_KEY,
+    KVStoreSync, KVStoreSyncWrapper, CHANNEL_MANAGER_PERSISTENCE_KEY,
     CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
     OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
     OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -100,6 +113,8 @@ use tokio::runtime::Handle;
 use tokio::sync::watch::Sender;
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "vss")]
+use crate::async_kv_store::RemoteFirstKvStore;
 use crate::bitcoind::BitcoindClient;
 use crate::chain_backend::ChainBackend;
 use crate::core_types::{
@@ -973,22 +988,51 @@ impl UnlockedAppState {
     }
 }
 
+/// `FutureSpawner` backed by `tokio::spawn`, used to drive async monitor
+/// persistence completions for `MonitorUpdatingPersisterAsync`.
+#[cfg(feature = "vss")]
+pub(crate) struct TokioFutureSpawner;
+
+#[cfg(feature = "vss")]
+impl FutureSpawner for TokioFutureSpawner {
+    fn spawn<T: std::future::Future<Output = ()> + Send + 'static>(&self, future: T) {
+        tokio::spawn(future);
+    }
+}
+
+/// The `ChainMonitor` persister generic: with VSS, the async
+/// `MonitorUpdatingPersisterAsync` (wrapped as `AsyncPersister`, returning
+/// `InProgress`); without VSS, the synchronous `MonitorUpdatingPersister`.
+#[cfg(feature = "vss")]
+pub(crate) type MonitorPersister = AsyncPersister<
+    Arc<RemoteFirstKvStore>,
+    TokioFutureSpawner,
+    Arc<FilesystemLogger>,
+    ActiveSignerRef,
+    ActiveSignerRef,
+    Arc<ChainBackend>,
+    Arc<ChainBackend>,
+>;
+
+#[cfg(not(feature = "vss"))]
+pub(crate) type MonitorPersister = Arc<
+    MonitorUpdatingPersister<
+        Arc<SyncedKvStore>,
+        Arc<FilesystemLogger>,
+        ActiveSignerRef,
+        ActiveSignerRef,
+        Arc<ChainBackend>,
+        Arc<ChainBackend>,
+    >,
+>;
+
 pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
     DynRlnChannelSigner,
     Arc<dyn Filter + Send + Sync>,
     Arc<ChainBackend>,
     Arc<ChainBackend>,
     Arc<FilesystemLogger>,
-    Arc<
-        MonitorUpdatingPersister<
-            Arc<SyncedKvStore>,
-            Arc<FilesystemLogger>,
-            ActiveSignerRef,
-            ActiveSignerRef,
-            Arc<ChainBackend>,
-            Arc<ChainBackend>,
-        >,
-    >,
+    MonitorPersister,
     ActiveSignerRef,
 >;
 
@@ -3674,8 +3718,11 @@ pub(crate) async fn start_ldk(
         None
     };
 
+    // Monitors persist remote-first through `monitor_kv_store` (async, VSS-durable
+    // before ack); ChannelManager and aux state keep the local-first `kv_store`
+    // sync facade. Both share the same local DB and (when configured) VSS store.
     #[cfg(feature = "vss")]
-    let kv_store = if let (Some(ref vss_url), Some(ref identity)) =
+    let (kv_store, monitor_kv_store) = if let (Some(ref vss_url), Some(ref identity)) =
         (&static_state.vss_url, &vss_identity)
     {
         tracing::info!(store_id = %identity.pubkey_hex, "Initializing VSS KV store");
@@ -3695,6 +3742,10 @@ pub(crate) async fn start_ldk(
             .acquire_fence()
             .map_err(|e| APIError::FailedVssInit(e.to_string()))?;
 
+        let monitor_kv_store = Arc::new(RemoteFirstKvStore::new(
+            Arc::clone(&local_kv_store),
+            Some(Arc::clone(&vss_kv_store)),
+        ));
         let synced = Arc::new(SyncedKvStore::with_vss(local_kv_store, vss_kv_store));
 
         // Auto-restore from VSS if local DB has no channel manager data.
@@ -3729,9 +3780,11 @@ pub(crate) async fn start_ldk(
             }
         }
 
-        synced
+        (synced, monitor_kv_store)
     } else {
-        Arc::new(SyncedKvStore::local_only(local_kv_store))
+        let monitor_kv_store = Arc::new(RemoteFirstKvStore::new(Arc::clone(&local_kv_store), None));
+        let synced = Arc::new(SyncedKvStore::local_only(local_kv_store));
+        (synced, monitor_kv_store)
     };
 
     #[cfg(not(feature = "vss"))]
@@ -3956,20 +4009,56 @@ pub(crate) async fn start_ldk(
     let entropy_source: Arc<dyn crate::signer::RlnEntropySource> = Arc::new(SystemEntropySource);
     let ldk_entropy_source = Arc::new(LightningEntropySource::new(Arc::clone(&entropy_source)));
 
-    let persister = Arc::new(MonitorUpdatingPersister::new(
-        Arc::clone(&kv_store),
-        Arc::clone(&logger),
-        1000,
-        Arc::clone(&keys_manager),
-        Arc::clone(&keys_manager),
-        Arc::clone(&chain_backend),
-        Arc::clone(&chain_backend),
-    ));
-
     // Initialize the ChainMonitor — esplora threads tx_sync as the Filter source.
-    let peer_storage_signer = Arc::clone(&keys_manager);
-    let chain_monitor: Arc<ChainMonitor> =
-        Arc::new(chainmonitor::ChainMonitor::new_with_peer_storage_encryptor(
+    //
+    // With VSS: monitors persist remote-first via `MonitorUpdatingPersisterAsync`
+    // + `ChainMonitor::new_async_beta` (a write returns `InProgress` and completes
+    // once VSS durably acks). Without VSS: the original synchronous persister.
+    #[cfg(feature = "vss")]
+    let (chain_monitor, mut channelmonitors): (Arc<ChainMonitor>, _) = {
+        let persister = MonitorUpdatingPersisterAsync::new(
+            Arc::clone(&monitor_kv_store),
+            TokioFutureSpawner,
+            Arc::clone(&logger),
+            1000,
+            Arc::clone(&keys_manager),
+            Arc::clone(&keys_manager),
+            Arc::clone(&chain_backend),
+            Arc::clone(&chain_backend),
+        );
+        // Read before moving the persister into the ChainMonitor.
+        let channelmonitors = persister
+            .read_all_channel_monitors_with_updates()
+            .await
+            .unwrap();
+        let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new_async_beta(
+            chain_source.clone(),
+            Arc::clone(&broadcaster),
+            Arc::clone(&logger),
+            Arc::clone(&fee_estimator),
+            persister,
+            Arc::clone(&keys_manager),
+            // `peer_storage` is compiled out in this build (cfg never set), so the
+            // key is ignored. Pass a placeholder rather than the signer's key —
+            // external-signer mode panics on `get_peer_storage_key`.
+            PeerStorageKey { inner: [0u8; 32] },
+        ));
+        (chain_monitor, channelmonitors)
+    };
+
+    #[cfg(not(feature = "vss"))]
+    let (chain_monitor, mut channelmonitors): (Arc<ChainMonitor>, _) = {
+        let persister = Arc::new(MonitorUpdatingPersister::new(
+            Arc::clone(&kv_store),
+            Arc::clone(&logger),
+            1000,
+            Arc::clone(&keys_manager),
+            Arc::clone(&keys_manager),
+            Arc::clone(&chain_backend),
+            Arc::clone(&chain_backend),
+        ));
+        let peer_storage_signer = Arc::clone(&keys_manager);
+        let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new_with_peer_storage_encryptor(
             chain_source.clone(),
             Arc::clone(&broadcaster),
             Arc::clone(&logger),
@@ -3980,9 +4069,9 @@ pub(crate) async fn start_ldk(
                 peer_storage_signer.encrypt_peer_storage_payload(plaintext, random_bytes)
             }),
         ));
-
-    // Read ChannelMonitor state from disk
-    let mut channelmonitors = persister.read_all_channel_monitors_with_updates().unwrap();
+        let channelmonitors = persister.read_all_channel_monitors_with_updates().unwrap();
+        (chain_monitor, channelmonitors)
+    };
 
     // Initialize routing ProbabilisticScorer
     let network_graph_path = ldk_data_dir.join("network_graph");
@@ -4197,12 +4286,17 @@ pub(crate) async fn start_ldk(
             identity.signing_key,
         )
         .with_encryption(true)
-        .with_auto_backup(true);
+        .with_auto_backup(true)
+        // Blocking: each RGB op waits until its VSS backup is durable.
+        .with_backup_mode(rgb_lib::wallet::vss::VssBackupMode::Blocking);
 
-        match rgb_wallet.configure_vss_backup(vss_config) {
-            Ok(()) => tracing::info!("VSS auto-backup enabled for RGB wallet"),
-            Err(e) => tracing::warn!("Failed to configure VSS backup for RGB wallet: {e}"),
-        }
+        // Fail closed: a misconfigured backup must not silently run local-only.
+        rgb_wallet.configure_vss_backup(vss_config).map_err(|e| {
+            APIError::FailedVssInit(format!(
+                "Failed to configure VSS backup for RGB wallet: {e}"
+            ))
+        })?;
+        tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
     }
     save_config(
         &static_state.db(),

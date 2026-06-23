@@ -40,6 +40,8 @@ use crate::kv_store::SeaOrmKvStore;
 use crate::ldk::{
     InboundPaymentInfoStorage, InvoiceType, IGNORE_INBOUND_CHANNELS_ON_NODE, INBOUND_PAYMENTS_KEY,
 };
+#[cfg(feature = "vss")]
+use crate::routes::VssClearFenceRequest;
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetIFA, AssetNIA,
     AssetUDA, Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse,
@@ -355,6 +357,124 @@ async fn start_node_with_virtual_options(
 
     println!("node on peer port {node_peer_port} started with address {node_address:?}");
     (node_address, password)
+}
+
+#[cfg(feature = "vss")]
+async fn start_daemon_with_vss(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    keep_node_dir: bool,
+    vss_url: Option<String>,
+) -> SocketAddr {
+    if !keep_node_dir && Path::new(&node_test_dir).is_dir() {
+        std::fs::remove_dir_all(node_test_dir).unwrap();
+    }
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let node_address = listener.local_addr().unwrap();
+    std::fs::create_dir_all(node_test_dir).unwrap();
+    let args = UserArgs {
+        storage_dir_path: node_test_dir.into(),
+        ldk_peer_listening_port: node_peer_port,
+        vss_url,
+        ..Default::default()
+    };
+    let (router, app_state) = app(args).await.unwrap();
+    register_app_state(node_address, Arc::clone(&app_state));
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal(app_state))
+            .await
+            .unwrap();
+    });
+    node_address
+}
+
+/// Start a node with VSS replication enabled, returning `(addr, password, mnemonic)`.
+///
+/// - `mnemonic = Some(seed)`: `init` with that exact seed — used for a post-wipe
+///   restart so the recovered node reuses the same (seed-derived) VSS identity.
+/// - `mnemonic = None` on a fresh start: `init` generates a random seed (unique
+///   per run, so VSS state never leaks between test runs) and it is returned for
+///   the caller to reuse on the restart.
+/// - `mnemonic = None` with `keep_node_dir`: plain restart keeping local state,
+///   no `init` (returns an empty mnemonic).
+#[cfg(feature = "vss")]
+async fn start_node_with_vss(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    keep_node_dir: bool,
+    vss_url: &str,
+    mnemonic: Option<&str>,
+) -> (SocketAddr, String, String) {
+    println!("starting vss node with peer port {node_peer_port}");
+    let node_address = start_daemon_with_vss(
+        node_test_dir,
+        node_peer_port,
+        keep_node_dir,
+        Some(vss_url.into()),
+    )
+    .await;
+
+    let password = format!("{node_test_dir}.{node_peer_port}");
+
+    let used_mnemonic = if keep_node_dir && mnemonic.is_none() {
+        String::new()
+    } else {
+        let resp = init(node_address, &password, mnemonic.map(|m| m.to_string())).await;
+        // Take over our own store_id: a same-seed restart inherits the previous
+        // incarnation's fence (nothing releases it on shutdown). No-op on a first
+        // start.
+        clear_vss_fence(node_address, &password).await;
+        resp.mnemonic
+    };
+
+    unlock(node_address, &password).await;
+    wait_for_peer_port_ready(node_peer_port).await;
+
+    println!("vss node on peer port {node_peer_port} started with address {node_address:?}");
+    (node_address, password, used_mnemonic)
+}
+
+#[cfg(feature = "vss")]
+async fn vss_backup_info(node_address: SocketAddr) -> serde_json::Value {
+    let res = reqwest::Client::new()
+        .get(format!("http://{node_address}/vssbackupinfo"))
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()
+}
+
+#[cfg(feature = "vss")]
+async fn clear_vss_fence(node_address: SocketAddr, password: &str) {
+    let payload = VssClearFenceRequest {
+        password: password.to_string(),
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/vssclearfence"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<EmptyResponse>()
+        .await
+        .unwrap();
+}
+
+/// Gracefully stop a node and wipe its entire storage dir (DB, channel state,
+/// rgb wallet).
+#[cfg(feature = "vss")]
+async fn wipe_node_dir(node_address: SocketAddr, node_test_dir: &str) {
+    shutdown(&[node_address]).await;
+    if Path::new(node_test_dir).is_dir() {
+        std::fs::remove_dir_all(node_test_dir).unwrap();
+    }
 }
 
 async fn address(node_address: SocketAddr) -> String {
@@ -2731,8 +2851,13 @@ mod openchannel_push_asset_amount;
 mod pagination_filters;
 mod payment;
 mod refuse_high_fees;
+#[cfg(feature = "vss")]
+mod remote_first_kv;
+#[cfg(feature = "vss")]
+mod remote_first_recovery;
 mod restart;
 mod restore_swaps_db_pool;
+mod rgb_payment_htlc_persistence;
 mod send_receive;
 mod swap_assets_liquidity_both_ways;
 mod swap_reverse_same_channel;
