@@ -4006,9 +4006,12 @@ pub(crate) async fn start_ldk(
         account_xpub_colored: account_xpub_colored.clone(),
         vanilla_keychain: None,
         master_fingerprint: master_fingerprint.clone(),
-        mnemonic: rgb_wallet_mnemonic,
+        mnemonic: rgb_wallet_mnemonic.clone(),
         witness_version: WitnessVersion::Taproot,
     };
+    // The native RGB backend (below) builds its own wallet instance from the same data directory
+    // and mnemonic; clone the inputs that the application-wallet construction consumes.
+    let backend_data_dir = data_dir.clone();
     let mut rgb_wallet = tokio::task::spawn_blocking(move || {
         RgbLibWallet::new(
             WalletData {
@@ -4082,14 +4085,36 @@ pub(crate) async fn start_ldk(
     // client per stream avoids running two tokio runtimes for the same
     // backups and removes the race between the two clients writing
     // overlapping state.
-    // Share one wallet instance between the application-level wrapper and rust-lightning's RGB
-    // backend so both observe the same RGB state (the native RGB backend colors channel/HTLC
-    // transactions through this same wallet).
+    // rust-lightning's native RGB backend owns its own rgb-lib wallet instance, built from the same
+    // keys and data directory as the application wallet (both operate on the same on-disk RGB
+    // database). The backend goes online lazily through the stored `online_options` when it needs to
+    // color channel/HTLC transactions.
     let shared_rgb_wallet = Arc::new(Mutex::new(rgb_wallet));
-    let rgb_backend: Arc<RgbBackend> = Arc::new(RgbBackend::new_shared(
-        Arc::clone(&shared_rgb_wallet),
-        online_options,
-    ));
+    let backend_keys = SinglesigKeys {
+        account_xpub_vanilla: account_xpub_vanilla.clone(),
+        account_xpub_colored: account_xpub_colored.clone(),
+        vanilla_keychain: None,
+        master_fingerprint: master_fingerprint.clone(),
+        mnemonic: rgb_wallet_mnemonic,
+        witness_version: WitnessVersion::Taproot,
+    };
+    let backend_wallet = tokio::task::spawn_blocking(move || {
+        RgbLibWallet::new(
+            WalletData {
+                data_dir: backend_data_dir,
+                bitcoin_network,
+                database_type: DatabaseType::Sqlite,
+                max_allocations_per_utxo: 1,
+                supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
+                reuse_addresses: false,
+            },
+            backend_keys,
+        )
+        .expect("valid rgb-lib wallet")
+    })
+    .await
+    .unwrap();
+    let rgb_backend: Arc<RgbBackend> = Arc::new(RgbBackend::new(backend_wallet, online_options));
     let rgb_wallet_wrapper = Arc::new(RgbLibWalletWrapper::new(
         Arc::clone(&shared_rgb_wallet),
         rgb_online,
