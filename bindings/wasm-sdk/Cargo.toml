@@ -8,8 +8,10 @@ description = "Standalone WASM SDK bridge for RLN + rgb-lib-wasm"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The crate targets wasm32 only and always builds against the real `rgb-lib-wasm` backend, so the
+# backend feature is enabled by default (wasm-pack and `cargo build --target wasm32` use defaults).
 [features]
-default = []
+default = ["real-wasm-rgb"]
 debug-manual-events = []
 real-wasm-rgb = ["lightning/rgb-wasm"]
 
@@ -31,18 +33,11 @@ lightning-invoice = { version = "0.34.0", features = ["std"] }
 bitcoin_hashes = "0.14"
 secp256k1 = "0.29"
 urlencoding = "2.1"
-lightning = { path = "../../../rust-lightning/lightning", default-features = false, features = ["std"] }
+lightning = { path = "../../rust-lightning/lightning", default-features = false, features = ["std"] }
 sdk-contracts = { path = "../../src/sdk/contracts" }
 
 [patch.crates-io]
-lightning-invoice = { path = "../../../rust-lightning/lightning-invoice" }
-
-# Build against the local rgb-lib-wasm checkout (which carries `post_consignment_by_txid`, used by
-# WasmRgbBackend to post the funding consignment under the txid so a native acceptor can resolve it).
-# Patches BOTH this crate's and lightning's git `dev` rgb-lib-wasm deps to the same source, avoiding
-# a duplicate-crate version conflict.
-[patch."https://github.com/UTEXO-Protocol/rgb-lib-wasm.git"]
-rgb-lib-wasm = { path = "../../../rgb-lib-wasm" }
+lightning-invoice = { path = "../../rust-lightning/lightning-invoice" }
 
 [profile.reldebug]
 inherits = "release"

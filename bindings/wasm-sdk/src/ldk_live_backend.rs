@@ -367,7 +367,7 @@ fn finalize_rgb_channel_payment(
                 .read_rgb_channel_info(channel_id_str, false)
                 .is_ok()
             {
-                update_rgb_channel_amount(
+                let _ = update_rgb_channel_amount(
                     channel_id_str,
                     offered,
                     received,
@@ -1858,7 +1858,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
 
         if let Some((contract, amount)) = rgb_payment {
             // Tells the RGB HTLC machinery how much asset rides this payment (mirrors native send).
-            write_rgb_payment_info_file(
+            let _ = write_rgb_payment_info_file(
                 &payment_hash,
                 contract,
                 amount,
@@ -1966,7 +1966,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
         })?;
         if let Some((contract, amount)) = rgb_payment {
-            write_rgb_payment_info_file(
+            let _ = write_rgb_payment_info_file(
                 &payment_hash,
                 contract,
                 amount,
@@ -2460,6 +2460,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 None,
                 rgb_endpoint.clone(),
                 rgb_push_amount,
+                false,
             ) {
                 Ok(id) => {
                     temporary_channel_id_opt = Some(id);
@@ -2508,9 +2509,11 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 remote_rgb_amount: 0,
                 batch_transfer_idx: None,
             };
-            g.rgb_kv_store
+            let _ = g
+                .rgb_kv_store
                 .write_rgb_channel_info(&temp_id, &rgb_info, false);
-            g.rgb_kv_store
+            let _ = g
+                .rgb_kv_store
                 .write_rgb_channel_info(&temp_id, &rgb_info, true);
             self.pending_rgb_open_intents.borrow_mut().insert(
                 user_channel_id,

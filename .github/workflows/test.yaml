@@ -113,10 +113,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
       - name: wasm-sdk check
-        run: cargo check --manifest-path bindings/wasm-sdk/Cargo.toml
+        run: cargo check --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown
       - name: wasm-sdk test (compile only)
-        run: cargo test --manifest-path bindings/wasm-sdk/Cargo.toml --no-run
+        run: cargo test --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown --no-run
 
   wasm-sdk-wasm32:
     runs-on: ubuntu-latest

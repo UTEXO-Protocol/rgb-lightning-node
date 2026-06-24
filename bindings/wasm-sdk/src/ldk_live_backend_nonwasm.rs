@@ -697,6 +697,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 None,
                 None,
                 None,
+                false,
             )
             .map_err(|e| match e {
                 APIError::APIMisuseError { err }

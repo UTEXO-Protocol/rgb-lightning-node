@@ -40,9 +40,9 @@ This document describes how the main SDK flows are implemented in wasm today, wi
 
 ### Relevant implementation
 
-- `connectPeer`: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:609)
-- Open channel with options: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:2155)
-- Proxy websocket connect/backoff: [ln_transport.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_transport.rs:253)
+- `connectPeer`: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:609)
+- Open channel with options: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:2155)
+- Proxy websocket connect/backoff: [ln_transport.rs](bindings/wasm-sdk/src/ln_transport.rs:253)
 
 ## 2) Virtual Channels Logic (`trusted_no_broadcast`)
 
@@ -69,10 +69,10 @@ WASM enforces conservative guards before trusted virtual cleanup:
 
 ### Relevant implementation
 
-- Virtual open validation + session creation: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:2173)
-- Virtual close path and guards: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:2396)
-- Guard checks: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:2576)
-- Scope/link tracking: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:2964)
+- Virtual open validation + session creation: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:2173)
+- Virtual close path and guards: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:2396)
+- Guard checks: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:2576)
+- Scope/link tracking: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:2964)
 
 ## 3) RGB Logic (via proxy transport endpoints)
 
@@ -93,9 +93,9 @@ RGB wallet operations use transport endpoints, with explicit proxy config suppor
 
 ### Relevant implementation
 
-- Wallet proxy config validation/resolution: [lib.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/lib.rs:3143)
-- Resolve default/wallet transport endpoints: [lib.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/lib.rs:3227)
-- Wallet API surface (`setRgbProxyTransport`, etc.): [lib.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/lib.rs:3244)
+- Wallet proxy config validation/resolution: [lib.rs](bindings/wasm-sdk/src/lib.rs:3143)
+- Resolve default/wallet transport endpoints: [lib.rs](bindings/wasm-sdk/src/lib.rs:3227)
+- Wallet API surface (`setRgbProxyTransport`, etc.): [lib.rs](bindings/wasm-sdk/src/lib.rs:3244)
 
 ## 4) Chain Sync (critical runtime infrastructure)
 
@@ -116,8 +116,8 @@ RGB wallet operations use transport endpoints, with explicit proxy config suppor
 
 ### Relevant implementation
 
-- Driver model/status/snapshot: [chain_sync.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/chain_sync.rs:21)
-- Node chain sync API passthrough: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:883)
+- Driver model/status/snapshot: [chain_sync.rs](bindings/wasm-sdk/src/chain_sync.rs:21)
+- Node chain sync API passthrough: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:883)
 
 ## 5) Runtime Event / Payment State Porting Model
 
@@ -130,9 +130,9 @@ RGB wallet operations use transport endpoints, with explicit proxy config suppor
 
 ### Relevant implementation
 
-- Runtime queue APIs: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:1025)
-- Runtime event listing + persistence hooks: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:1159)
-- Payment status via event stream: [ln_node.rs](/home/roman-boiko/projects/utexo/rgb-lightning-node/bindings/wasm-sdk/src/ln_node.rs:3143)
+- Runtime queue APIs: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:1025)
+- Runtime event listing + persistence hooks: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:1159)
+- Payment status via event stream: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:3143)
 
 ## 6) Strictness choices in current wasm parity
 
