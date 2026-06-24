@@ -3880,6 +3880,7 @@ fn asset_id_validation_accepts_canonical_rgb_id_for_ln_methods_contract() {
     .expect("open channel should accept canonical rgb asset id");
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn close_channel_regular_coop_and_force_contracts() {
     crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
@@ -3945,6 +3946,7 @@ fn close_channel_regular_coop_and_force_contracts() {
     assert!(channels.as_array().expect("channels array").is_empty());
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn close_channel_regular_coop_persists_across_node_recreation_contract() {
     crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
@@ -4007,6 +4009,7 @@ fn close_channel_regular_coop_persists_across_node_recreation_contract() {
     );
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn close_channel_regular_force_records_channel_closed_sequence_contract() {
     crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
@@ -4138,6 +4141,7 @@ fn close_channel_counterparty_event_persists_across_node_recreation_contract() {
     );
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn close_channel_force_after_restart_records_sequence_contract() {
     crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
@@ -4579,12 +4583,15 @@ fn multi_hop_route_requires_pending_receiver_invoice_contract() {
     }));
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn open_channel_with_push_asset_amount_success_path_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
-    let node = RlnWasmNode::new_with_runtime_backend(
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
+    let node = RlnWasmNode::new_with_runtime_backend_and_id(
         "ws://proxy.open-push-asset.example".to_string(),
         "wasm_native_ldk".to_string(),
+        Some("node-rt-test".to_string()),
     )
     .expect("node");
     let _ = node.list_peers_value().expect("warm runtime");
@@ -6766,14 +6773,17 @@ fn sdk_node_handle_relay_session_auth_forwarding_contract() {
     assert_eq!(auth["relay_node_id"], valid_node_id);
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_facade_transport_json_alias_channel_id_fallback_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend(
+        .new_node_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3355".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node");
     let peer_pubkey =
@@ -6813,14 +6823,17 @@ fn sdk_facade_transport_json_alias_channel_id_fallback_contract() {
     assert_eq!(channels[0]["is_usable"], false);
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_json_alias_channel_id_fallback_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .create_node_handle_with_runtime_backend(
+        .create_node_handle_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3356".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -6917,14 +6930,17 @@ fn list_channels_merges_runtime_metadata_from_local_cache_contract() {
     assert_eq!(channels[0]["ready"], true);
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_facade_transport_json_type_alias_channel_id_fallback_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend(
+        .new_node_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3359".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node");
     let peer_pubkey =
@@ -7038,14 +7054,17 @@ fn sdk_node_handle_transport_json_type_alias_reconnect_contract() {
     assert!(peers[0]["started"].is_boolean());
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_json_type_alias_channel_id_fallback_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .create_node_handle_with_runtime_backend(
+        .create_node_handle_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3360".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node handle");
     let _ = node.list_peers_value().expect("warm runtime");
@@ -7123,12 +7142,15 @@ fn sdk_facade_transport_peer_connected_alias_reconnect_contract() {
     assert!(peers[0]["started"].is_boolean());
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn node_ingest_runtime_transport_event_channel_opened_alias_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
-    let node = RlnWasmNode::new_with_runtime_backend(
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
+    let node = RlnWasmNode::new_with_runtime_backend_and_id(
         "ws://127.0.0.1:3362".to_string(),
         "wasm_native_ldk".to_string(),
+        Some("node-rt-test".to_string()),
     )
     .expect("node");
     let peer_pubkey =
@@ -7179,14 +7201,17 @@ fn node_ingest_runtime_transport_event_channel_opened_alias_contract() {
     assert_eq!(channels[0]["is_usable"], true);
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_ready_alias_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .create_node_handle_with_runtime_backend(
+        .create_node_handle_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3363".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -7240,14 +7265,17 @@ fn sdk_node_handle_transport_channel_ready_alias_contract() {
     assert_eq!(channels[0]["is_usable"], true);
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_facade_transport_channel_disconnected_alias_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .new_node_with_runtime_backend(
+        .new_node_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3364".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node");
     let peer_pubkey =
@@ -7289,14 +7317,17 @@ fn sdk_facade_transport_channel_disconnected_alias_contract() {
     assert_eq!(channels[0]["is_usable"], false);
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_disconnected_alias_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .create_node_handle_with_runtime_backend(
+        .create_node_handle_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3365".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -7375,14 +7406,17 @@ fn sdk_facade_transport_peer_online_alias_reconnect_contract() {
     assert!(peers[0]["started"].is_boolean());
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_online_alias_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .create_node_handle_with_runtime_backend(
+        .create_node_handle_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3367".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -7472,14 +7506,17 @@ fn sdk_facade_transport_peer_offline_alias_disconnect_contract() {
     assert!(peers.is_empty());
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_offline_alias_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .create_node_handle_with_runtime_backend(
+        .create_node_handle_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3369".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -7567,14 +7604,17 @@ fn sdk_facade_transport_peer_up_down_alias_contract() {
     assert!(peers.is_empty());
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_up_down_alias_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .create_node_handle_with_runtime_backend(
+        .create_node_handle_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3371".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -7672,14 +7712,17 @@ fn sdk_facade_transport_peer_hyphen_alias_contract() {
     assert!(peers[0]["started"].is_boolean());
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn sdk_node_handle_transport_channel_dot_alias_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
     let sdk = RlnWasmSdk::new();
     let node = sdk
-        .create_node_handle_with_runtime_backend(
+        .create_node_handle_with_runtime_backend_and_runtime_id(
             "ws://127.0.0.1:3373".to_string(),
             "wasm_native_ldk".to_string(),
+            "node-rt-test".to_string(),
         )
         .expect("node handle");
     let peer_pubkey =
@@ -7929,12 +7972,15 @@ fn node_ingest_runtime_transport_event_json_alias_contract() {
     assert!(peers[0]["started"].is_boolean());
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test]
 fn node_ingest_runtime_transport_event_json_alias_channel_id_fallback_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
-    let node = RlnWasmNode::new_with_runtime_backend(
+    crate::test_utils::set_wasm_sdk_identity_unlocked_for_tests();
+    let node = RlnWasmNode::new_with_runtime_backend_and_id(
         "ws://127.0.0.1:3354".to_string(),
         "wasm_native_ldk".to_string(),
+        Some("node-rt-test".to_string()),
     )
     .expect("node");
     let peer_pubkey =

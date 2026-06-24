@@ -64,7 +64,6 @@ Transport contract requirements:
 The HTTP/RGB JSON-RPC proxy is **transport-only** for RGB consignment/indexer-style calls.
 
 RGB-aware **LN peer bytes** in this repository are carried inside **channel messages** parsed by
-`ChannelManager` (forked `lightning::ln::msgs` + `rgb_utils`). Both runtimes also share a small
-**BOLT #1 experimental** custom-message handler for fork capability discovery (`type` **45001**;
-see `src/rgb_ln_fork_custom_wire.rs` and `bindings/wasm-sdk/src/rgb_ln_wire.rs`). See
-`src/ldk.rs` next to `PeerManager::new` for native wiring.
+`ChannelManager` (forked `lightning::ln::msgs` + `rgb_utils`). The wasm runtime also includes a
+small **BOLT #1 experimental** custom-message handler for fork capability discovery (`type`
+**45001**; see `bindings/wasm-sdk/src/rgb_ln_wire.rs`).

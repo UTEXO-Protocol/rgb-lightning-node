@@ -30,11 +30,12 @@ This starts the services the flows need:
 3. Electrum (`127.0.0.1:50001`)
 4. Unified wasm gateway — LN websocket relay + RGB JSON-RPC pass-through (`127.0.0.1:3001`)
 
-Build the wasm package (`pkg/`) — the `real-wasm-rgb` feature is required:
+Build the wasm package (`pkg/`). The `real-wasm-rgb` backend feature is enabled by default,
+so no extra `--features` flag is needed:
 
 ```sh
 cd bindings/wasm-sdk
-wasm-pack build --target web --dev --out-dir pkg -- --features real-wasm-rgb
+wasm-pack build --target web --dev --out-dir pkg
 ```
 
 The `rgb-native-phase5-node` harness binary must be available at the path the driver

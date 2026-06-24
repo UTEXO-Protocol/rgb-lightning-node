@@ -14,6 +14,9 @@ crate-type = ["cdylib", "rlib"]
 default = ["real-wasm-rgb"]
 debug-manual-events = []
 real-wasm-rgb = ["lightning/rgb-wasm"]
+# Tests that require live RGB/LN infra (online wallet via a real indexer): excluded from the
+# infra-less headless-browser job; enable in an infra-backed job.
+wasm-browser-infra = []
 
 [dependencies]
 rgb-lib-wasm = { git = "https://github.com/UTEXO-Protocol/rgb-lib-wasm.git", branch = "dev", package = "rgb-lib-wasm" }

@@ -36,16 +36,6 @@ default = []
 # revision the parent uses.
 [workspace]
 
-# Mirror the parent's [patch.crates-io] so we don't end up with two copies of
-# `lightning` (which fails with trait-bound errors). Keep in lock-step with
-# the parent's pins.
-#
-# IMPORTANT: `lightning` MUST resolve to the SAME rust-lightning the parent
-# builds — the pinned submodule at `../../rust-lightning`. The parent crate's
-# v0.5.2 source uses fork-specific APIs (e.g. `RgbInfo.batch_transfer_idx`)
-# that only exist at the submodule commit; pointing these at a separate
-# `rmn-boiko` branch tip drifts behind and fails to compile the parent
-# source. Using the submodule path guarantees they never skew again.
 [patch.crates-io]
 lightning = { path = "../../rust-lightning/lightning" }
 lightning-background-processor = { path = "../../rust-lightning/lightning-background-processor" }

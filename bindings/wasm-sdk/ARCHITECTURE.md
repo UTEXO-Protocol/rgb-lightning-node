@@ -70,9 +70,6 @@ flowchart LR
 
 - **Shared contract types + stable error strings** live in `src/sdk/contracts`.
 - **Golden JSON fixtures** are enforced by `cargo test -p sdk-contracts`.
-- WASM-only contract encoding guardrails:
-  - `scripts/ci/check_wasm_bindings_contract_encoding.sh` (prevents accidental casing drift in `src/sdk/wasm_bindings.rs`)
-  - `scripts/ci/check_wasm_sdk_no_new_literal_js_errors.sh` (prevents new literal error strings in `bindings/wasm-sdk`)
 
 ## How to run
 
@@ -85,5 +82,4 @@ E2E_AUTO_PROVISION_REGULAR_RLN=1 ./scripts/ci/wasm_regular_rln_e2e.sh
 - See:
   - `bindings/wasm-sdk/README.md` (local env and examples)
   - `e2e-specs/README.md` (Playwright scenarios and ports)
-  - `bindings/wasm-sdk/NATIVE_ONLY_WASM_RLN_INTEROP_PLAN.md` (done-state summary)
 

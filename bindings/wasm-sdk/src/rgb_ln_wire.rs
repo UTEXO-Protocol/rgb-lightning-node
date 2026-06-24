@@ -8,9 +8,8 @@
 //!
 //! # BOLT #1 fork custom messages
 //!
-//! This module also registers **experimental** custom message type
-//! [`RGB_LN_FORK_CUSTOM_CAP_PING_TYPE`] (see BOLT #1). Keep definitions in lockstep with
-//! `rgb-lightning-node/src/rgb_ln_fork_custom_wire.rs`.
+//! This module also registers an **experimental** custom message type
+//! [`RGB_LN_FORK_CUSTOM_CAP_PING_TYPE`] (see BOLT #1).
 //!
 //! The WASM proxy remains **transport-only** for RGB JSON-RPC; LN bytes terminate in
 //! `PeerManager` / `ChannelManager`.
@@ -25,7 +24,7 @@ use lightning::util::ser::{LengthLimitedRead, Readable, Writeable, Writer};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 
-/// Experimental type id (BOLT #1 range). **Must match** `src/rgb_ln_fork_custom_wire.rs`.
+/// Experimental type id (BOLT #1 range).
 pub const RGB_LN_FORK_CUSTOM_CAP_PING_TYPE: u16 = 45_001;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -18,21 +18,23 @@ For endpoint-level status, see [SDK_WASM_ENDPOINT_MATRIX.md](SDK_WASM_ENDPOINT_M
 
 ## Build
 
-From repository root:
+From repository root. The crate targets `wasm32` only and builds against the real
+`rgb-lib-wasm` backend (the `real-wasm-rgb` feature is enabled by default), so all checks
+use the wasm32 target:
 
 ```sh
-cargo check --manifest-path bindings/wasm-sdk/Cargo.toml
-cargo test --manifest-path bindings/wasm-sdk/Cargo.toml --no-run
-cargo test --manifest-path bindings/wasm-sdk/Cargo.toml ldk_data_dir
 cargo check --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown
+cargo test --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown --no-run
 ```
+
+The unit tests are executed in a browser via `wasm-pack` (see [CI](#ci) below); a plain
+`cargo test` host run is not supported because the wasm RGB backend requires a wasm32 target.
 
 LDK `KeysManager` / `ChannelManager` RGB scratch paths and rgb-lib **auto-wallet** `data_dir`: on **wasm32** use single-segment names `rln_ldk_<slug>` / `rln_wallet_<slug>` (no POSIX `/tmp`); on native host tests use `/tmp/rln_wasm_ldk_<slug>` and `/tmp/rln_wasm_sdk_wallet_<slug>`. See `src/wasm_runtime_paths.rs`.
 
 RGB **LN peer wire** vs the RGB **HTTP proxy**: channel RGB data is handled inside LDK
-`ChannelManager` / `PeerManager`, plus optional BOLT1 fork custom messages in `src/rgb_ln_wire.rs`
-(must stay aligned with `rgb_ln_fork_custom_wire.rs` in the main crate). The HTTP proxy
-contract in `RGB_WASM_PROXY_TRANSPORT_SPEC.md` is orthogonal transport for JSON-RPC.
+`ChannelManager` / `PeerManager`, plus optional BOLT1 fork custom messages in `src/rgb_ln_wire.rs`.
+The HTTP proxy contract in `RGB_WASM_PROXY_TRANSPORT_SPEC.md` is orthogonal transport for JSON-RPC.
 
 Generate package artifacts:
 
@@ -111,7 +113,7 @@ model) and avoids REST coupling.
 
 WASM checks are wired into CI in `.github/workflows/test.yaml`:
 
-- `wasm-sdk` (native host checks for crate)
+- `wasm-sdk` (wasm32 crate check + test-binary compile)
 - `wasm-sdk-wasm32` (target compatibility check)
 - `wasm-sdk-browser` (blocking headless browser run in Chrome)
 - `wasm-sdk-browser-diagnostic-firefox` (non-blocking diagnostic run in Firefox)

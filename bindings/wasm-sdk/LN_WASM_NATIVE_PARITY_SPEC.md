@@ -124,12 +124,14 @@ Parity is complete only when all are true:
 
 ## CI Gate Requirements
 
-1. `cargo check` (wasm-sdk crate).
-2. `cargo test --no-run` (wasm-sdk crate).
-3. `cargo check --target wasm32-unknown-unknown`.
-4. Browser wasm test execution job (wasm-bindgen test path) for contract tests.
+1. `cargo check --target wasm32-unknown-unknown` (wasm-sdk crate).
+2. `cargo test --target wasm32-unknown-unknown --no-run` (wasm-sdk crate).
+3. Browser wasm test execution job (wasm-bindgen test path) for contract tests.
 
-Parity cannot be declared complete until all four gate groups are green on CI.
+The crate targets `wasm32` only (the `real-wasm-rgb` backend feature is on by default), so all
+compile checks use the wasm32 target.
+
+Parity cannot be declared complete until all three gate groups are green on CI.
 
 ## Tracking Convention
 

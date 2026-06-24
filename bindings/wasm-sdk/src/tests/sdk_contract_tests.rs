@@ -157,7 +157,10 @@ async fn sdk_node_handle_connect_peer_invalid_pubkey_contract() {
         .await
         .expect("unlock");
     let node = sdk
-        .create_node_handle("ws://127.0.0.1:3001".to_string())
+        .create_node_handle_with_runtime_id(
+            "ws://127.0.0.1:3001".to_string(),
+            "node-rt-test".to_string(),
+        )
         .expect("node handle");
 
     let err = node
@@ -181,7 +184,10 @@ async fn sdk_node_handle_connect_peer_invalid_addr_contract() {
         .await
         .expect("unlock");
     let node = sdk
-        .create_node_handle("ws://127.0.0.1:3001".to_string())
+        .create_node_handle_with_runtime_id(
+            "ws://127.0.0.1:3001".to_string(),
+            "node-rt-test".to_string(),
+        )
         .expect("node handle");
 
     let err = node
@@ -375,6 +381,7 @@ async fn sdk_send_onion_message_validation_contracts() {
     );
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test(async)]
 async fn sdk_issue_asset_nia_uses_unlock_bootstrapped_wallet_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
@@ -464,6 +471,7 @@ async fn sdk_issue_asset_cfa_empty_amounts_contract() {
     assert_eq!(msg, "amounts cannot be empty");
 }
 
+#[cfg(feature = "wasm-browser-infra")]
 #[wasm_bindgen_test(async)]
 async fn sdk_issue_asset_nia_node_created_before_unlock_uses_default_wallet_contract() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();

@@ -10,6 +10,32 @@ fn reset_wasm_sdk_lifecycle_state_for_tests() {
     });
 }
 
+/// Puts the SDK lifecycle into an unlocked state with a deterministic test mnemonic and bootstraps
+/// a default RGB wallet, mirroring the production `unlock` flow. This satisfies both prerequisites
+/// `open_channel` enforces: a stable identity (`ensure_stable_identity_for_channel_operations`) and
+/// an attached RGB wallet (auto-attached from `WASM_SDK_DEFAULT_WALLET`). Pair this with a node
+/// constructed with an explicit `node_runtime_id` (the `*_and_runtime_id` / `*_and_id` constructors)
+/// to complete the stable-runtime-id half of the identity guard.
+#[cfg(feature = "wasm-browser-infra")]
+pub(crate) fn set_wasm_sdk_identity_unlocked_for_tests() {
+    WASM_SDK_LIFECYCLE_STATE.with(|state| {
+        let next = WasmSdkLifecycleState::Unlocked {
+            password: "test-password".to_string(),
+            mnemonic:
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+                    .to_string(),
+        };
+        *state.borrow_mut() = next.clone();
+        sync_runtime_session_authority_from_lifecycle(&next);
+    });
+
+    let wallet =
+        crate::RlnWasmWallet::new(&test_wallet_data_json()).expect("test default rgb wallet");
+    WASM_SDK_DEFAULT_WALLET.with(|slot| {
+        *slot.borrow_mut() = Some(std::rc::Rc::clone(&wallet.inner));
+    });
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn reset_wasm_media_store_for_tests() {
     WASM_MEDIA_STORE.with(|store| {

@@ -1,5 +1,5 @@
 [submodule "rust-lightning"]
 	path = rust-lightning
-	url = https://github.com/rmn-boiko/rust-lightning.git
-	branch = wasm-compatibility
+	url = https://github.com/UTEXO-Protocol/rust-lightning.git
+	branch = dev
 	shallow = true
