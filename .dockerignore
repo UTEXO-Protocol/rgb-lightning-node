@@ -12,8 +12,10 @@
 !src/
 !migration/
 !build.rs
+!tools/
 
 # but still ignore these
 rust-lightning/.git
 rust-lightning/.github
 rust-lightning/.gitignore
+tools/wasm-proxy-gateway/target
