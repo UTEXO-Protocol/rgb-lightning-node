@@ -14,7 +14,7 @@ use lightning::sign::ChangeDestinationSource;
 use lightning::util::async_poll::AsyncResult;
 use lightning::util::persist::KVStoreSync;
 use rgb_lib::{
-    bdk_wallet::SignOptions,
+    bdk_wallet::{KeychainKind, SignOptions},
     bitcoin::psbt::Psbt as BitcoinPsbt,
     wallet::{
         rust_only::{check_proxy_url, ColoringInfo},
@@ -199,6 +199,10 @@ impl UnlockedAppState {
 
     pub(crate) fn rgb_get_address(&self) -> Result<String, RgbLibError> {
         self.rgb_wallet_wrapper.get_address()
+    }
+
+    pub(crate) fn rgb_rotate_address(&self) -> Result<String, RgbLibError> {
+        self.rgb_wallet_wrapper.rotate_address()
     }
 
     pub(crate) fn rgb_get_asset_balance(
@@ -649,6 +653,10 @@ impl RgbLibWalletWrapper {
 
     pub(crate) fn get_address(&self) -> Result<String, RgbLibError> {
         self.get_rgb_wallet().get_address()
+    }
+
+    pub(crate) fn rotate_address(&self) -> Result<String, RgbLibError> {
+        self.get_rgb_wallet().rotate_address(KeychainKind::Internal)
     }
 
     pub(crate) fn get_asset_balance(

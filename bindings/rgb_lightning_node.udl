@@ -562,6 +562,7 @@ dictionary SdkInitRequest {
     string? vss_url = null;
     boolean vss_allow_http = false;
     boolean vss_allow_empty_restore = false;
+    boolean reuse_addresses = false;
 };
 
 dictionary SdkUnlockRequest {

@@ -145,6 +145,9 @@ pub(crate) struct StaticState {
     /// continues with empty local state instead of aborting unlock.
     #[cfg_attr(not(feature = "vss"), allow(dead_code))]
     pub(crate) vss_allow_empty_restore: bool,
+    /// When true, the RGB wallet returns a pinned address instead of a fresh
+    /// one on each `/address` call. Set from the `--reuse-addresses` flag.
+    pub(crate) reuse_addresses: bool,
 }
 
 impl StaticState {
@@ -662,6 +665,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         lsp_bearer_token: args.lsp_bearer_token.clone(),
         vss_url: args.vss_url.clone(),
         vss_allow_empty_restore: args.vss_allow_empty_restore,
+        reuse_addresses: args.reuse_addresses,
     });
 
     let app_state = Arc::new(AppState {

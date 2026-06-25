@@ -4324,6 +4324,7 @@ mod tests {
                 database: RwLock::new(Arc::new(database)),
                 vss_url: None,
                 vss_allow_empty_restore: false,
+                reuse_addresses: false,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),

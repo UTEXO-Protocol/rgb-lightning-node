@@ -119,6 +119,12 @@ lightning-transaction-sync = { path = "./rust-lightning/lightning-transaction-sy
 vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
 vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
 
+# TEMP: redirect all rgb-lib usages (direct + transitive, e.g. signer-external)
+# to the dcorral fork carrying the reuse-address rotation persistence fix.
+# Drop this once the fix lands in utexo/dev and the rgb-lib tag is bumped.
+[patch."https://github.com/UTEXO-Protocol/rgb-lib.git"]
+rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "5053f8b" }
+
 [lints.rust.unexpected_cfgs]
 level = "allow"
 

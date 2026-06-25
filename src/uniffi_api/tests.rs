@@ -110,6 +110,7 @@ mod uniffi_smoke_tests {
                 lsp_bearer_token: None,
                 vss_url: None,
                 vss_allow_empty_restore: false,
+                reuse_addresses: false,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),
@@ -395,6 +396,7 @@ mod uniffi_smoke_tests {
             vss_url: Some("http://example.com/vss".to_string()),
             vss_allow_http: false,
             vss_allow_empty_restore: false,
+            reuse_addresses: false,
         });
         assert!(matches!(res, Err(RlnError::InvalidRequest)));
     }

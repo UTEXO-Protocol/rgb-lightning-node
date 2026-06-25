@@ -113,6 +113,7 @@ impl Default for UserArgs {
             lsp_bearer_token: None,
             vss_url: None,
             vss_allow_empty_restore: false,
+            reuse_addresses: false,
         }
     }
 }
@@ -359,12 +360,60 @@ async fn start_node_with_virtual_options(
     (node_address, password)
 }
 
+/// Start a node with the `--reuse-addresses` flag, returning `(addr, password, mnemonic)`.
+///
+/// Mnemonic semantics mirror [`start_node_with_vss`]:
+/// - `mnemonic = None` on a fresh start: `init` generates a random seed and returns it.
+/// - `mnemonic = Some(seed)`: `init` with that exact seed — used for post-wipe seed recovery.
+/// - `mnemonic = None` with `keep_node_dir`: plain restart keeping local state, no `init`.
+async fn start_node_with_reuse_addresses(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    reuse_addresses: bool,
+    keep_node_dir: bool,
+    mnemonic: Option<&str>,
+) -> (SocketAddr, String, String) {
+    if !keep_node_dir && Path::new(&node_test_dir).is_dir() {
+        std::fs::remove_dir_all(node_test_dir).unwrap();
+    }
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let node_address = listener.local_addr().unwrap();
+    std::fs::create_dir_all(node_test_dir).unwrap();
+    let args = UserArgs {
+        storage_dir_path: node_test_dir.into(),
+        ldk_peer_listening_port: node_peer_port,
+        reuse_addresses,
+        ..Default::default()
+    };
+    let (router, app_state) = app(args).await.unwrap();
+    register_app_state(node_address, Arc::clone(&app_state));
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal(app_state))
+            .await
+            .unwrap();
+    });
+
+    let password = format!("{node_test_dir}.{node_peer_port}");
+    let used_mnemonic = if keep_node_dir && mnemonic.is_none() {
+        String::new()
+    } else {
+        init(node_address, &password, mnemonic.map(|m| m.to_string()))
+            .await
+            .mnemonic
+    };
+    unlock(node_address, &password).await;
+    wait_for_peer_port_ready(node_peer_port).await;
+    (node_address, password, used_mnemonic)
+}
+
 #[cfg(feature = "vss")]
 async fn start_daemon_with_vss(
     node_test_dir: &str,
     node_peer_port: u16,
     keep_node_dir: bool,
     vss_url: Option<String>,
+    reuse_addresses: bool,
 ) -> SocketAddr {
     if !keep_node_dir && Path::new(&node_test_dir).is_dir() {
         std::fs::remove_dir_all(node_test_dir).unwrap();
@@ -376,6 +425,7 @@ async fn start_daemon_with_vss(
         storage_dir_path: node_test_dir.into(),
         ldk_peer_listening_port: node_peer_port,
         vss_url,
+        reuse_addresses,
         ..Default::default()
     };
     let (router, app_state) = app(args).await.unwrap();
@@ -405,6 +455,7 @@ async fn start_node_with_vss(
     keep_node_dir: bool,
     vss_url: &str,
     mnemonic: Option<&str>,
+    reuse_addresses: bool,
 ) -> (SocketAddr, String, String) {
     println!("starting vss node with peer port {node_peer_port}");
     let node_address = start_daemon_with_vss(
@@ -412,6 +463,7 @@ async fn start_node_with_vss(
         node_peer_port,
         keep_node_dir,
         Some(vss_url.into()),
+        reuse_addresses,
     )
     .await;
 
@@ -2810,6 +2862,7 @@ pub fn set_mock_fee(fee: u32) {
     crate::fee_mock::set_mock_fee_for_tests(Some(fee));
 }
 
+mod address_reuse;
 mod auth_db_persistence;
 mod authentication;
 mod backup_and_restore;

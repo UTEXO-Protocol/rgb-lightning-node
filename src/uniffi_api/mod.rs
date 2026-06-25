@@ -103,6 +103,7 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
         lsp_bearer_token: request.lsp_bearer_token,
         vss_url: request.vss_url,
         vss_allow_empty_restore: request.vss_allow_empty_restore,
+        reuse_addresses: request.reuse_addresses,
     };
     block_on_app(NodeHandle::new(config))
 }
