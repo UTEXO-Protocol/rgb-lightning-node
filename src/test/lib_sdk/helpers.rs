@@ -6,8 +6,8 @@ pub(crate) use rgb_lightning_node::{
     SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkExternalSignerBootstrap, SdkInitRequest,
     SdkIssueAssetCfaRequest, SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkNode,
     SdkOpenChannelRequest, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest,
-    SdkSendPaymentRequest, SdkUnlockRequest, SendRgbRequest, TransactionType, TransportEndpoint,
-    WitnessData,
+    SdkSendPaymentRequest, SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest,
+    TransactionType, TransportEndpoint, WitnessData,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -331,13 +331,13 @@ pub(crate) fn fund_and_create_utxos(node: &SdkNode, node_name: &str) {
 }
 
 pub(crate) fn asset_balance_spendable(node: &SdkNode, asset_id: &ContractId) -> u64 {
-    node.asset_balance(*asset_id)
+    node.asset_balance(asset_id.clone())
         .expect("asset_balance spendable")
         .spendable
 }
 
 pub(crate) fn asset_balance_offchain_outbound(node: &SdkNode, asset_id: &ContractId) -> u64 {
-    node.asset_balance(*asset_id)
+    node.asset_balance(asset_id.clone())
         .expect("asset_balance offchain_outbound")
         .offchain_outbound
 }
@@ -351,7 +351,7 @@ pub(crate) fn wait_for_asset_balance(
     loop {
         node.sync()
             .expect("node sync while waiting for asset_balance");
-        if let Ok(balance) = node.asset_balance(*asset_id) {
+        if let Ok(balance) = node.asset_balance(asset_id.clone()) {
             return balance;
         }
         assert!(
@@ -491,7 +491,7 @@ pub(crate) fn wait_for_usable_channel(
             Instant::now() < deadline,
             "timeout waiting for usable channel"
         );
-        if polls.is_multiple_of(5) {
+        if polls % 5 == 0 {
             mine(1);
         }
         sleep(Duration::from_secs(2));
@@ -608,7 +608,7 @@ pub(crate) fn wait_for_usable_channel_counts(nodes: &[(&SdkNode, usize)], timeou
             Instant::now() < deadline,
             "usable channel counts did not reach expected values in time"
         );
-        if polls.is_multiple_of(5) {
+        if polls % 5 == 0 {
             mine(1);
         }
         sleep(Duration::from_secs(1));
@@ -807,7 +807,7 @@ pub(crate) fn keysend_with_ln_balance(
         .keysend(SdkKeysendRequest {
             dest_pubkey,
             amt_msat: amt_msat.unwrap_or(PAYMENT_MSAT),
-            asset_id: Some(*asset_id),
+            asset_id: Some(asset_id.clone()),
             asset_amount: Some(asset_amount),
         })
         .expect("keysend with ln balance checks");

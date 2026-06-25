@@ -259,10 +259,6 @@ if [[ "$E2E_AUTO_PROVISION_REGULAR_RLN" == "1" ]]; then
       -H 'content-type: application/json' \
       -d '{
         "password":"rln-password",
-        "bitcoind_rpc_username":"admin",
-        "bitcoind_rpc_password":"passw",
-        "bitcoind_rpc_host":"127.0.0.1",
-        "bitcoind_rpc_port":19443,
         "indexer_url":"http://127.0.0.1:3002",
         "proxy_endpoint":"rpc://127.0.0.1:3005/json-rpc",
         "announce_addresses":[]

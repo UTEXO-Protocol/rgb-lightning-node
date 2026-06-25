@@ -1,55 +1,35 @@
-#[cfg(not(target_arch = "wasm32"))]
 mod apay_merkle;
-#[cfg(not(target_arch = "wasm32"))]
 mod args;
-#[cfg(not(target_arch = "wasm32"))]
 mod async_order;
 mod auth;
-#[cfg(not(target_arch = "wasm32"))]
 mod backup;
-#[cfg(not(target_arch = "wasm32"))]
 mod bitcoind;
-#[cfg(not(target_arch = "wasm32"))]
 mod chain_backend;
-#[cfg(not(target_arch = "wasm32"))]
 mod core_types;
-#[cfg(not(target_arch = "wasm32"))]
 mod database;
 mod disk;
-#[cfg(not(target_arch = "wasm32"))]
 mod error;
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 #[path = "test/fee_mock.rs"]
 mod fee_mock;
-#[cfg(not(target_arch = "wasm32"))]
 mod gossip;
-#[cfg(not(target_arch = "wasm32"))]
 mod indexer;
-#[cfg(not(target_arch = "wasm32"))]
 mod kv_store;
 mod ldk;
-#[cfg(not(target_arch = "wasm32"))]
 mod rgb;
-#[cfg(not(target_arch = "wasm32"))]
 mod routes;
-#[cfg(not(target_arch = "wasm32"))]
 mod runtime;
-#[cfg(not(target_arch = "wasm32"))]
 mod signer;
 mod swap;
-#[cfg(not(target_arch = "wasm32"))]
 mod synced_kv_store;
-#[cfg(not(target_arch = "wasm32"))]
 mod utils;
-#[cfg(all(feature = "vss", not(target_arch = "wasm32")))]
+#[cfg(feature = "vss")]
 mod vss_kv_store;
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod test;
 
-#[cfg(not(target_arch = "wasm32"))]
 use anyhow::Result;
-#[cfg(not(target_arch = "wasm32"))]
 use axum::{
     extract::DefaultBodyLimit,
     http::Request,
@@ -58,19 +38,12 @@ use axum::{
     routing::{get, post},
     Router,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-#[cfg(not(target_arch = "wasm32"))]
 use tokio::signal;
-#[cfg(not(target_arch = "wasm32"))]
 use tower_http::cors::CorsLayer;
-#[cfg(not(target_arch = "wasm32"))]
 use tower_http::limit::RequestBodyLimitLayer;
-#[cfg(not(target_arch = "wasm32"))]
 use tower_http::trace::TraceLayer;
-#[cfg(not(target_arch = "wasm32"))]
 use tracing::Span;
-#[cfg(not(target_arch = "wasm32"))]
 use tracing_subscriber::{
     filter,
     fmt::{
@@ -80,15 +53,10 @@ use tracing_subscriber::{
     prelude::*,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::args::UserArgs;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::auth::conditional_auth_middleware;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::error::AppError;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::ldk::stop_ldk;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::routes::{
     address, asset_balance, asset_metadata, async_order_new, async_order_outbound_invoice, backup,
     btc_balance, cancel_hodl_invoice, change_password, check_indexer_url, check_proxy_endpoint,
@@ -102,15 +70,10 @@ use crate::routes::{
     send_btc, send_onion_message, send_payment, send_rgb, shutdown, sign_message, sync, taker,
     unlock,
 };
-#[cfg(all(feature = "vss", not(target_arch = "wasm32")))]
+#[cfg(feature = "vss")]
 use crate::routes::{vss_backup, vss_backup_info, vss_clear_fence};
-#[cfg(not(target_arch = "wasm32"))]
 use crate::utils::{start_daemon, AppState, LOGS_DIR};
 
-#[cfg(target_arch = "wasm32")]
-fn main() {}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = args::parse_startup_args()?;
@@ -149,7 +112,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppError> {
     let app_state = start_daemon(&args).await?;
 
@@ -259,7 +221,6 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
     Ok((router, app_state))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl AppState {
     fn wait_state_change(&self) -> bool {
         let _unlocked_state = self.get_unlocked_app_state();
@@ -273,7 +234,6 @@ impl AppState {
 }
 
 /// Tokio signal handler that will wait for a user to press CTRL+C.
-#[cfg(not(target_arch = "wasm32"))]
 async fn shutdown_signal(app_state: Arc<AppState>) {
     let cancel_token = app_state.cancel_token.clone();
 
@@ -316,11 +276,9 @@ async fn shutdown_signal(app_state: Arc<AppState>) {
 }
 
 // workaround for https://github.com/tokio-rs/tracing/issues/1372
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 struct TypedFields(DefaultFields);
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<'writer> FormatFields<'writer> for TypedFields {
     fn format_fields<R: tracing_subscriber::field::RecordFields>(
         &self,

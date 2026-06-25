@@ -33,8 +33,8 @@ use lightning::onion_message::messenger::{
     DefaultMessageRouter, OnionMessenger as LdkOnionMessenger,
 };
 use lightning::rgb_utils::{
-    get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount, RgbBackend,
-    RgbKvStoreExt, RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
+    get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount, RgbKvStoreExt,
+    RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
 use lightning::rgb_utils::{RgbPaymentInfo, STATIC_BLINDING};
 use lightning::routing::gossip;
@@ -90,6 +90,7 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::ToSocketAddrs;
 use std::net::{SocketAddr, TcpListener};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -192,18 +193,39 @@ impl_writeable_tlv_based_enum!(InvoiceType,
     },
 );
 
-/// Save config to database (source of truth).
-///
-/// The `kv_store` parameter is retained for call-site compatibility; native rust-lightning reads
-/// config from the database, not the KV store, so config is no longer mirrored there.
+/// Save config to database (source of truth) and sync to KVStore for rust-lightning.
 fn save_config(
     database: &sea_orm::DatabaseConnection,
-    _kv_store: &dyn KVStoreSync,
+    kv_store: &dyn KVStoreSync,
     key: &str,
     value: &str,
 ) -> Result<(), APIError> {
     let db = RlnDatabase::new(database.clone());
     db.set_config(key, value)?;
+    kv_store.write_config(key, value);
+    Ok(())
+}
+
+/// Sync config from database to KVStore on startup.
+fn sync_config_to_kvstore(
+    database: &sea_orm::DatabaseConnection,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), APIError> {
+    let db = RlnDatabase::new(database.clone());
+
+    for key in [
+        CONFIG_INDEXER_URL,
+        CONFIG_BITCOIN_NETWORK,
+        CONFIG_WALLET_FINGERPRINT,
+        CONFIG_WALLET_ACCOUNT_XPUB_VANILLA,
+        CONFIG_WALLET_ACCOUNT_XPUB_COLORED,
+        CONFIG_WALLET_MASTER_FINGERPRINT,
+    ] {
+        if let Some(value) = db.get_config(key)? {
+            kv_store.write_config(key, &value);
+        }
+    }
+
     Ok(())
 }
 
@@ -867,7 +889,7 @@ impl UnlockedAppState {
         }
 
         if let Ok(rgb_state) = kv.read_rgb_channel_info(&channel_id_hex, false) {
-            let _ = kv.write_rgb_channel_info(&channel_id_hex, &rgb_state, true);
+            kv.write_rgb_channel_info(&channel_id_hex, &rgb_state, true);
         }
 
         let final_rgb_state = kv.read_rgb_channel_info(&channel_id_hex, false);
@@ -1303,7 +1325,7 @@ fn _safe_update_rgb_channel_amount(
         }
         Err(e) => return Err(e),
     }
-    let _ = update_rgb_channel_amount(
+    update_rgb_channel_amount(
         channel_id,
         rgb_offered_htlc,
         rgb_received_htlc,
@@ -1410,7 +1432,7 @@ fn _finalize_virtual_rgb_channel_info(
         match kv_store.read_rgb_channel_info(&tmp_id, pending) {
             Ok(rgb_info) => {
                 if kv_store.read_rgb_channel_info(&final_id, pending).is_err() {
-                    let _ = kv_store.write_rgb_channel_info(&final_id, &rgb_info, pending);
+                    kv_store.write_rgb_channel_info(&final_id, &rgb_info, pending);
                 }
                 let _ = kv_store.remove_rgb_channel_info(&tmp_id, pending);
             }
@@ -1534,36 +1556,6 @@ async fn handle_ldk_events(
     static_state: Arc<StaticState>,
 ) -> Result<(), ReplayEvent> {
     match event {
-        Event::RgbFundingValidationRequired {
-            temporary_channel_id,
-            ..
-        } => {
-            // Fetch the inbound RGB funding consignment, validate the assignment, and accept or
-            // reject the pending channel. The ChannelManager drives the whole flow (including the
-            // consignment download via the RGB backend) internally.
-            if let Err(e) = unlocked_state
-                .channel_manager
-                .process_pending_rgb_funding_validation(temporary_channel_id)
-                .await
-            {
-                tracing::error!(
-                    "failed to process pending RGB funding validation for channel {temporary_channel_id}: {e:?}"
-                );
-                return Err(ReplayEvent());
-            }
-        }
-        Event::RgbTransactionPersistenceRequired => {
-            // Durably consume prepared RGB fascia so blocked commitment/HTLC/funding/close
-            // signatures and messages can resume.
-            if let Err(e) = unlocked_state
-                .channel_manager
-                .process_pending_rgb_transactions()
-                .await
-            {
-                tracing::error!("failed to process pending RGB transactions: {e:?}");
-                return Err(ReplayEvent());
-            }
-        }
         Event::FundingGenerationReady {
             temporary_channel_id,
             counterparty_node_id,
@@ -1628,19 +1620,13 @@ async fn handle_ldk_events(
                 let mut channel_id = ChannelId::v1_from_funding_outpoint(virtual_funding_txo);
 
                 if is_colored {
-                    let rgb_info = match get_rgb_channel_info_pending(
+                    let rgb_info = get_rgb_channel_info_pending(
                         &temporary_channel_id,
                         unlocked_state.kv_store.as_ref(),
-                    ) {
-                        Ok(rgb_info) => rgb_info,
-                        Err(e) => {
-                            tracing::error!("cannot read pending RGB channel info: {e}");
-                            return Err(ReplayEvent());
-                        }
-                    };
+                    );
                     let channel_rgb_amount = rgb_info.local_rgb_amount;
                     let asset_id = rgb_info.contract_id.to_string();
-                    let assignment = match AssetSchema::from(rgb_info.schema) {
+                    let assignment = match rgb_info.schema {
                         AssetSchema::Nia | AssetSchema::Cfa => {
                             Assignment::Fungible(channel_rgb_amount)
                         }
@@ -1838,20 +1824,14 @@ async fn handle_ldk_events(
             }
 
             let (unsigned_psbt, asset_id) = if is_colored {
-                let rgb_info = match get_rgb_channel_info_pending(
+                let rgb_info = get_rgb_channel_info_pending(
                     &temporary_channel_id,
                     unlocked_state.kv_store.as_ref(),
-                ) {
-                    Ok(rgb_info) => rgb_info,
-                    Err(e) => {
-                        tracing::error!("cannot read pending RGB channel info: {e}");
-                        return Err(ReplayEvent());
-                    }
-                };
+                );
 
                 let channel_rgb_amount = rgb_info.local_rgb_amount + rgb_info.remote_rgb_amount;
                 let asset_id = rgb_info.contract_id.to_string();
-                let assignment = match AssetSchema::from(rgb_info.schema) {
+                let assignment = match rgb_info.schema {
                     AssetSchema::Nia | AssetSchema::Cfa | AssetSchema::Ifa => {
                         Assignment::Fungible(channel_rgb_amount)
                     }
@@ -1919,7 +1899,7 @@ async fn handle_ldk_events(
                     unlocked_state.kv_store.as_ref(),
                 ) {
                     rgb_info.batch_transfer_idx = batch_transfer_idx;
-                    let _ = unlocked_state.kv_store.write_rgb_channel_info(
+                    unlocked_state.kv_store.write_rgb_channel_info(
                         &temporary_channel_id.0.as_hex().to_string(),
                         &rgb_info,
                         true,
@@ -2772,7 +2752,7 @@ async fn handle_ldk_events(
                     let consignment =
                         RgbTransfer::load(&mut std::io::Cursor::new(consignment_data))
                             .expect("successful consignment load");
-                    let _ = unlocked_state
+                    unlocked_state
                         .kv_store
                         .remove_rgb_consignment(&funding_txid);
 
@@ -3094,9 +3074,7 @@ impl OutputSpender for RgbOutputSpender {
             if !transfer_info_exists {
                 continue;
             }
-            let Ok(transfer_info) = self.kv_store.read_rgb_transfer_info(&txid_str) else {
-                continue;
-            };
+            let transfer_info = self.kv_store.read_rgb_transfer_info(&txid_str);
             if transfer_info.rgb_amount == 0 {
                 continue;
             }
@@ -3759,7 +3737,11 @@ pub(crate) async fn start_ldk(
     #[cfg(not(feature = "vss"))]
     let kv_store = Arc::new(SyncedKvStore::local_only(local_kv_store));
 
+    // Sync config from database to KVStore
+    sync_config_to_kvstore(&static_state.db(), kv_store.as_ref())?;
+
     let ldk_data_dir = static_state.ldk_data_dir.clone();
+    let ldk_data_dir_path = PathBuf::from(&ldk_data_dir);
     let logger = static_state.logger.clone();
     let bitcoin_network = static_state.network;
     let network: Network = bitcoin_network.into();
@@ -3932,194 +3914,6 @@ pub(crate) async fn start_ldk(
     let fee_estimator = chain_backend.clone();
     let broadcaster = chain_backend.clone();
 
-    // Prepare the RGB wallet
-    let (account_xpub_vanilla, account_xpub_colored, master_fingerprint, rgb_wallet_mnemonic) =
-        if external_signer_mode {
-            let bootstrap = external_bootstrap.clone().ok_or_else(|| {
-                APIError::ExternalSignerProtocolError(
-                    "missing external bootstrap in external mode".to_string(),
-                )
-            })?;
-            (
-                bootstrap.identity.account_xpub_vanilla,
-                bootstrap.identity.account_xpub_colored,
-                bootstrap.identity.master_fingerprint,
-                None,
-            )
-        } else {
-            let mnemonic_str = internal_mnemonic
-                .as_ref()
-                .ok_or_else(|| {
-                    APIError::ExternalSignerProtocolError(
-                        "missing internal mnemonic in internal mode".to_string(),
-                    )
-                })?
-                .to_string();
-            let (_, account_xpub_vanilla, _) = get_account_data(
-                &bitcoin_network,
-                &mnemonic_str,
-                false,
-                WitnessVersion::Taproot,
-            )
-            .unwrap();
-            let (_, account_xpub_colored, master_fingerprint) = get_account_data(
-                &bitcoin_network,
-                &mnemonic_str,
-                true,
-                WitnessVersion::Taproot,
-            )
-            .unwrap();
-            (
-                account_xpub_vanilla.to_string(),
-                account_xpub_colored.to_string(),
-                master_fingerprint.to_string(),
-                Some(mnemonic_str.clone()),
-            )
-        };
-    let data_dir = static_state
-        .storage_dir_path
-        .clone()
-        .to_string_lossy()
-        .to_string();
-
-    // Pull the RGB wallet down from VSS before constructing it locally, when
-    // VSS is configured and the local wallet directory for this mnemonic's
-    // fingerprint is absent. Mirrors the KV-side auto-restore at the top of
-    // this function — together they make `unlock` recover the full node
-    // state (channels + assets + on-chain) on a fresh device.
-    #[cfg(feature = "vss")]
-    if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
-        let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
-        maybe_restore_rgb_from_vss(
-            vss_url,
-            rgb_store_id,
-            identity.signing_key,
-            &static_state.storage_dir_path,
-            &master_fingerprint.to_string(),
-            static_state.vss_allow_empty_restore,
-        )
-        .await?;
-    }
-
-    let keys = SinglesigKeys {
-        account_xpub_vanilla: account_xpub_vanilla.clone(),
-        account_xpub_colored: account_xpub_colored.clone(),
-        vanilla_keychain: None,
-        master_fingerprint: master_fingerprint.clone(),
-        mnemonic: rgb_wallet_mnemonic.clone(),
-        witness_version: WitnessVersion::Taproot,
-    };
-    // The native RGB backend (below) builds its own wallet instance from the same data directory
-    // and mnemonic; clone the inputs that the application-wallet construction consumes.
-    let backend_data_dir = data_dir.clone();
-    let mut rgb_wallet = tokio::task::spawn_blocking(move || {
-        RgbLibWallet::new(
-            WalletData {
-                data_dir,
-                bitcoin_network,
-                database_type: DatabaseType::Sqlite,
-                max_allocations_per_utxo: 1,
-                supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
-                reuse_addresses: false,
-            },
-            keys,
-        )
-        .expect("valid rgb-lib wallet")
-    })
-    .await
-    .unwrap();
-    let online_options = OnlineOptions {
-        indexer_url: indexer_url.to_string(),
-        skip_consistency_check: false,
-        vanilla_sync_lookback: 20,
-    };
-    let rgb_online = rgb_wallet.go_online(online_options.clone())?;
-
-    // Configure VSS backup for the RGB wallet if VSS is enabled. Reuses the
-    // identity derived once at the top of this function — see N3.1 / the
-    // `derive_vss_identity` helper.
-    #[cfg(feature = "vss")]
-    if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
-        let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
-        let vss_config = rgb_lib::wallet::vss::VssBackupConfig::new(
-            vss_url.clone(),
-            rgb_store_id,
-            identity.signing_key,
-        )
-        .with_encryption(true)
-        .with_auto_backup(true);
-
-        match rgb_wallet.configure_vss_backup(vss_config) {
-            Ok(()) => tracing::info!("VSS auto-backup enabled for RGB wallet"),
-            Err(e) => tracing::warn!("Failed to configure VSS backup for RGB wallet: {e}"),
-        }
-    }
-    save_config(
-        &static_state.db(),
-        kv_store.as_ref(),
-        CONFIG_WALLET_FINGERPRINT,
-        &master_fingerprint,
-    )?;
-    save_config(
-        &static_state.db(),
-        kv_store.as_ref(),
-        CONFIG_WALLET_ACCOUNT_XPUB_COLORED,
-        &account_xpub_colored,
-    )?;
-    save_config(
-        &static_state.db(),
-        kv_store.as_ref(),
-        CONFIG_WALLET_ACCOUNT_XPUB_VANILLA,
-        &account_xpub_vanilla,
-    )?;
-    save_config(
-        &static_state.db(),
-        kv_store.as_ref(),
-        CONFIG_WALLET_MASTER_FINGERPRINT,
-        &master_fingerprint,
-    )?;
-
-    // No second VssBackupClient is constructed here: the manual /vssbackup
-    // and /vssbackupinfo routes use the wallet's own client, retrievable via
-    // `wallet.vss_client()` (R-lib.1 in rgb-lib's PR #31). Keeping a single
-    // client per stream avoids running two tokio runtimes for the same
-    // backups and removes the race between the two clients writing
-    // overlapping state.
-    // rust-lightning's native RGB backend owns its own rgb-lib wallet instance, built from the same
-    // keys and data directory as the application wallet (both operate on the same on-disk RGB
-    // database). The backend goes online lazily through the stored `online_options` when it needs to
-    // color channel/HTLC transactions.
-    let shared_rgb_wallet = Arc::new(Mutex::new(rgb_wallet));
-    let backend_keys = SinglesigKeys {
-        account_xpub_vanilla: account_xpub_vanilla.clone(),
-        account_xpub_colored: account_xpub_colored.clone(),
-        vanilla_keychain: None,
-        master_fingerprint: master_fingerprint.clone(),
-        mnemonic: rgb_wallet_mnemonic,
-        witness_version: WitnessVersion::Taproot,
-    };
-    let backend_wallet = tokio::task::spawn_blocking(move || {
-        RgbLibWallet::new(
-            WalletData {
-                data_dir: backend_data_dir,
-                bitcoin_network,
-                database_type: DatabaseType::Sqlite,
-                max_allocations_per_utxo: 1,
-                supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
-                reuse_addresses: false,
-            },
-            backend_keys,
-        )
-        .expect("valid rgb-lib wallet")
-    })
-    .await
-    .unwrap();
-    let rgb_backend: Arc<RgbBackend> = Arc::new(RgbBackend::new(backend_wallet, online_options));
-    let rgb_wallet_wrapper = Arc::new(RgbLibWalletWrapper::new(
-        Arc::clone(&shared_rgb_wallet),
-        rgb_online,
-    ));
-
     // LDK signing: internal mode uses `KeysManager` from the mnemonic-derived LDK seed (BIP32 child
     // 535 of the master xpriv). External mode uses `ExternalSigner` only; inbound / peer_storage /
     // receive_auth key material comes from bootstrap hex fields (see `ExternalSigner::from_attachment`).
@@ -4151,7 +3945,7 @@ pub(crate) async fn start_ldk(
             cur.as_secs(),
             cur.subsec_nanos(),
             true,
-            rgb_backend.clone(),
+            ldk_data_dir_path.clone(),
             Arc::clone(&kv_store) as Arc<dyn KVStoreSync + Send + Sync>,
         ));
         Arc::new(DynRlnSigner::from_internal(internal_keys_manager))
@@ -4253,7 +4047,7 @@ pub(crate) async fn start_ldk(
                     logger.clone(),
                     user_config,
                     channel_monitor_references,
-                    rgb_backend.clone(),
+                    ldk_data_dir_path.clone(),
                     Arc::clone(&kv_store) as Arc<dyn KVStoreSync + Send + Sync>,
                 );
                 <(BlockHash, ChannelManager)>::read(&mut &bytes[..], read_args).unwrap()
@@ -4281,7 +4075,7 @@ pub(crate) async fn start_ldk(
                     user_config,
                     chain_params,
                     cur.as_secs() as u32,
-                    rgb_backend.clone(),
+                    ldk_data_dir_path.clone(),
                     Arc::clone(&kv_store) as Arc<dyn KVStoreSync + Send + Sync>,
                 );
                 (polled_best_block_hash, fresh_channel_manager)
@@ -4291,6 +4085,160 @@ pub(crate) async fn start_ldk(
             }
         }
     };
+
+    // Prepare the RGB wallet
+    let (account_xpub_vanilla, account_xpub_colored, master_fingerprint, rgb_wallet_mnemonic) =
+        if external_signer_mode {
+            let bootstrap = external_bootstrap.clone().ok_or_else(|| {
+                APIError::ExternalSignerProtocolError(
+                    "missing external bootstrap in external mode".to_string(),
+                )
+            })?;
+            (
+                bootstrap.identity.account_xpub_vanilla,
+                bootstrap.identity.account_xpub_colored,
+                bootstrap.identity.master_fingerprint,
+                None,
+            )
+        } else {
+            let mnemonic_str = internal_mnemonic
+                .as_ref()
+                .ok_or_else(|| {
+                    APIError::ExternalSignerProtocolError(
+                        "missing internal mnemonic in internal mode".to_string(),
+                    )
+                })?
+                .to_string();
+            let (_, account_xpub_vanilla, _) = get_account_data(
+                &bitcoin_network,
+                &mnemonic_str,
+                false,
+                WitnessVersion::Taproot,
+            )
+            .unwrap();
+            let (_, account_xpub_colored, master_fingerprint) = get_account_data(
+                &bitcoin_network,
+                &mnemonic_str,
+                true,
+                WitnessVersion::Taproot,
+            )
+            .unwrap();
+            (
+                account_xpub_vanilla.to_string(),
+                account_xpub_colored.to_string(),
+                master_fingerprint.to_string(),
+                Some(mnemonic_str.clone()),
+            )
+        };
+    let data_dir = static_state
+        .storage_dir_path
+        .clone()
+        .to_string_lossy()
+        .to_string();
+
+    // Pull the RGB wallet down from VSS before constructing it locally, when
+    // VSS is configured and the local wallet directory for this mnemonic's
+    // fingerprint is absent. Mirrors the KV-side auto-restore at the top of
+    // this function — together they make `unlock` recover the full node
+    // state (channels + assets + on-chain) on a fresh device.
+    #[cfg(feature = "vss")]
+    if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
+        let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
+        maybe_restore_rgb_from_vss(
+            vss_url,
+            rgb_store_id,
+            identity.signing_key,
+            &static_state.storage_dir_path,
+            &master_fingerprint.to_string(),
+            static_state.vss_allow_empty_restore,
+        )
+        .await?;
+    }
+
+    let keys = SinglesigKeys {
+        account_xpub_vanilla: account_xpub_vanilla.clone(),
+        account_xpub_colored: account_xpub_colored.clone(),
+        vanilla_keychain: None,
+        master_fingerprint: master_fingerprint.clone(),
+        mnemonic: rgb_wallet_mnemonic,
+        witness_version: WitnessVersion::Taproot,
+    };
+    let mut rgb_wallet = tokio::task::spawn_blocking(move || {
+        RgbLibWallet::new(
+            WalletData {
+                data_dir,
+                bitcoin_network,
+                database_type: DatabaseType::Sqlite,
+                max_allocations_per_utxo: 1,
+                supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
+                reuse_addresses: false,
+            },
+            keys,
+        )
+        .expect("valid rgb-lib wallet")
+    })
+    .await
+    .unwrap();
+    let rgb_online = rgb_wallet.go_online(OnlineOptions {
+        indexer_url: indexer_url.to_string(),
+        skip_consistency_check: false,
+        vanilla_sync_lookback: 20,
+    })?;
+
+    // Configure VSS backup for the RGB wallet if VSS is enabled. Reuses the
+    // identity derived once at the top of this function — see N3.1 / the
+    // `derive_vss_identity` helper.
+    #[cfg(feature = "vss")]
+    if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
+        let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
+        let vss_config = rgb_lib::wallet::vss::VssBackupConfig::new(
+            vss_url.clone(),
+            rgb_store_id,
+            identity.signing_key,
+        )
+        .with_encryption(true)
+        .with_auto_backup(true);
+
+        match rgb_wallet.configure_vss_backup(vss_config) {
+            Ok(()) => tracing::info!("VSS auto-backup enabled for RGB wallet"),
+            Err(e) => tracing::warn!("Failed to configure VSS backup for RGB wallet: {e}"),
+        }
+    }
+    save_config(
+        &static_state.db(),
+        kv_store.as_ref(),
+        CONFIG_WALLET_FINGERPRINT,
+        &master_fingerprint,
+    )?;
+    save_config(
+        &static_state.db(),
+        kv_store.as_ref(),
+        CONFIG_WALLET_ACCOUNT_XPUB_COLORED,
+        &account_xpub_colored,
+    )?;
+    save_config(
+        &static_state.db(),
+        kv_store.as_ref(),
+        CONFIG_WALLET_ACCOUNT_XPUB_VANILLA,
+        &account_xpub_vanilla,
+    )?;
+    save_config(
+        &static_state.db(),
+        kv_store.as_ref(),
+        CONFIG_WALLET_MASTER_FINGERPRINT,
+        &master_fingerprint,
+    )?;
+
+    // No second VssBackupClient is constructed here: the manual /vssbackup
+    // and /vssbackupinfo routes use the wallet's own client, retrievable via
+    // `wallet.vss_client()` (R-lib.1 in rgb-lib's PR #31). Keeping a single
+    // client per stream avoids running two tokio runtimes for the same
+    // backups and removes the race between the two clients writing
+    // overlapping state.
+    let rgb_wallet_wrapper = Arc::new(RgbLibWalletWrapper::new(
+        Arc::new(Mutex::new(rgb_wallet)),
+        rgb_online,
+    ));
 
     // Initialize the OutputSweeper.
     let txes: OutputSpenderTxes = match kv_store.read("", "", OUTPUT_SPENDER_TXES_KEY) {
@@ -5217,48 +5165,6 @@ mod tests {
         Arc::new(SeaOrmKvStore::from_connection(Arc::new(db)))
     }
 
-    /// Build an offline native RGB backend for tests that only need a valid `Arc<RgbBackend>` to
-    /// pass into `KeysManager`/`ChannelManager` (e.g. key-derivation parity checks). The wallet is
-    /// constructed locally and never goes online.
-    fn build_rgb_backend() -> Arc<RgbBackend> {
-        let mnemonic =
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let network = BitcoinNetwork::Regtest;
-        let (_, account_xpub_vanilla, _) =
-            get_account_data(&network, mnemonic, false, WitnessVersion::Taproot).unwrap();
-        let (_, account_xpub_colored, master_fingerprint) =
-            get_account_data(&network, mnemonic, true, WitnessVersion::Taproot).unwrap();
-        let data_dir =
-            std::env::temp_dir().join(format!("rln-rgb-backend-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&data_dir).unwrap();
-        let keys = SinglesigKeys {
-            account_xpub_vanilla: account_xpub_vanilla.to_string(),
-            account_xpub_colored: account_xpub_colored.to_string(),
-            vanilla_keychain: None,
-            master_fingerprint: master_fingerprint.to_string(),
-            mnemonic: Some(mnemonic.to_string()),
-            witness_version: WitnessVersion::Taproot,
-        };
-        let wallet = RgbLibWallet::new(
-            WalletData {
-                data_dir: data_dir.to_string_lossy().to_string(),
-                bitcoin_network: network,
-                database_type: DatabaseType::Sqlite,
-                max_allocations_per_utxo: 1,
-                supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
-                reuse_addresses: false,
-            },
-            keys,
-        )
-        .expect("offline rgb-lib wallet");
-        let online_options = OnlineOptions {
-            indexer_url: String::new(),
-            skip_consistency_check: false,
-            vanilla_sync_lookback: 0,
-        };
-        Arc::new(RgbBackend::new(wallet, online_options))
-    }
-
     fn seed_channel_info(
         kv_store: &Arc<dyn KVStoreSync + Send + Sync>,
         channel_id: &str,
@@ -5272,7 +5178,7 @@ mod tests {
             remote_rgb_amount,
             batch_transfer_idx: None,
         };
-        let _ = kv_store.write_rgb_channel_info(channel_id, &info, false);
+        kv_store.write_rgb_channel_info(channel_id, &info, false);
     }
 
     fn seed_pending_payment_key(
@@ -5447,7 +5353,14 @@ mod tests {
         use lightning::ln::inbound_payment::ExpandedKey;
         let seed = [18u8; 32];
         let kv = build_kv_store();
-        let km = KeysManager::new(&seed, 1, 2, true, build_rgb_backend(), kv);
+        let km = KeysManager::new(
+            &seed,
+            1,
+            2,
+            true,
+            std::env::temp_dir().join(format!("ldk-aux-parity-{}", uuid::Uuid::new_v4())),
+            kv,
+        );
         let (a, b, c) =
             signer_external::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes(
                 &seed,

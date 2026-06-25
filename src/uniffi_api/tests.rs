@@ -409,15 +409,8 @@ mod external_apay_signing_tests {
         secp256k1::{PublicKey, Secp256k1, SecretKey},
     };
     use lightning::{
-        rgb_utils::RgbBackend,
         sign::{KeysManager, NodeSigner},
         util::message_signing,
-    };
-    use rgb_lib::{
-        keys::WitnessVersion,
-        utils::get_account_data,
-        wallet::{DatabaseType, OnlineOptions, SinglesigKeys, Wallet as RgbLibWallet, WalletData},
-        AssetSchema, BitcoinNetwork,
     };
 
     use crate::{
@@ -429,47 +422,6 @@ mod external_apay_signing_tests {
         signer::{ExternalSigner, ExternalSignerTransport},
         uniffi_api::UniffiExternalSignerTransport,
     };
-
-    /// Offline native RGB backend for tests that only need a valid `Arc<RgbBackend>` to pass into
-    /// `KeysManager` (the backend is never exercised by these key-derivation parity checks).
-    fn build_rgb_backend() -> Arc<RgbBackend> {
-        let mnemonic =
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let network = BitcoinNetwork::Regtest;
-        let (_, account_xpub_vanilla, _) =
-            get_account_data(&network, mnemonic, false, WitnessVersion::Taproot).unwrap();
-        let (_, account_xpub_colored, master_fingerprint) =
-            get_account_data(&network, mnemonic, true, WitnessVersion::Taproot).unwrap();
-        let data_dir =
-            std::env::temp_dir().join(format!("rln-rgb-backend-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&data_dir).unwrap();
-        let keys = SinglesigKeys {
-            account_xpub_vanilla: account_xpub_vanilla.to_string(),
-            account_xpub_colored: account_xpub_colored.to_string(),
-            vanilla_keychain: None,
-            master_fingerprint: master_fingerprint.to_string(),
-            mnemonic: Some(mnemonic.to_string()),
-            witness_version: WitnessVersion::Taproot,
-        };
-        let wallet = RgbLibWallet::new(
-            WalletData {
-                data_dir: data_dir.to_string_lossy().to_string(),
-                bitcoin_network: network,
-                database_type: DatabaseType::Sqlite,
-                max_allocations_per_utxo: 1,
-                supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
-                reuse_addresses: false,
-            },
-            keys,
-        )
-        .expect("offline rgb-lib wallet");
-        let online_options = OnlineOptions {
-            indexer_url: String::new(),
-            skip_consistency_check: false,
-            vanilla_sync_lookback: 0,
-        };
-        Arc::new(RgbBackend::new(wallet, online_options))
-    }
 
     fn external_signer_from_seed(seed_hex: String) -> (ExternalSigner, PublicKey) {
         let host = crate::NativeExternalSigner::new(seed_hex, "regtest".to_string(), Some(true))
@@ -504,7 +456,7 @@ mod external_apay_signing_tests {
             42,
             42,
             true,
-            build_rgb_backend(),
+            std::env::temp_dir().join(format!("rln-signer-parity-{}", uuid::Uuid::new_v4())),
             Arc::new(MemoryKvStore::default()),
         );
         let secp = Secp256k1::new();

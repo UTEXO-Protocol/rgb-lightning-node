@@ -77,7 +77,7 @@ fn send_receive() {
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id,
+                    asset_id: asset_id.clone(),
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id_n2a.0),
                         witness_data: None,
@@ -123,7 +123,7 @@ fn send_receive() {
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id: asset_id_2,
+                    asset_id: asset_id_2.clone(),
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id_n2a_asset2.0),
                         witness_data: None,
@@ -144,7 +144,7 @@ fn send_receive() {
 
         let node_a_invoice = node_a
             .rgbinvoice(SdkRgbInvoiceRequest {
-                asset_id: Some(asset_id),
+                asset_id: Some(asset_id.clone()),
                 assignment_kind: Some(AssignmentKind::Fungible),
                 assignment_amount: Some(200),
                 duration_seconds: Some(DURATION_SECONDS),
@@ -169,7 +169,7 @@ fn send_receive() {
             .recipient_id;
         let recipient_id_n1a_asset2 = node_a
             .rgbinvoice(SdkRgbInvoiceRequest {
-                asset_id: Some(asset_id_2),
+                asset_id: Some(asset_id_2.clone()),
                 assignment_kind: Some(AssignmentKind::Fungible),
                 assignment_amount: Some(100),
                 duration_seconds: Some(DURATION_SECONDS),
@@ -185,7 +185,7 @@ fn send_receive() {
                 min_confirmations: 1,
                 recipient_groups: vec![
                     AssetRecipients {
-                        asset_id,
+                        asset_id: asset_id.clone(),
                         recipients: vec![
                             RgbRecipient {
                                 recipient_id: RecipientId(recipient_id_n1a_str.clone()),
@@ -214,7 +214,7 @@ fn send_receive() {
                         ],
                     },
                     AssetRecipients {
-                        asset_id: asset_id_2,
+                        asset_id: asset_id_2.clone(),
                         recipients: vec![RgbRecipient {
                             recipient_id: RecipientId(recipient_id_n1a_asset2.0),
                             witness_data: None,
@@ -245,7 +245,7 @@ fn send_receive() {
             .expect("node A decode_rgb_invoice");
         assert_eq!(decoded.recipient_id, recipient_id_n1a_str);
         assert_eq!(decoded.asset_schema, Some("Nia".to_string()));
-        assert_eq!(decoded.asset_id, Some(asset_id));
+        assert_eq!(decoded.asset_id, Some(asset_id.clone()));
         assert_eq!(decoded.assignment, "Fungible(200)");
         assert_eq!(decoded.network, "Regtest");
         assert!(decoded.expiration_timestamp.is_some());
@@ -282,7 +282,7 @@ fn send_receive() {
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id,
+                    asset_id: asset_id.clone(),
                     recipients: vec![
                         RgbRecipient {
                             recipient_id: RecipientId(recipient_id_n2b.0),

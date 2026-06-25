@@ -4,31 +4,42 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88.0"
 
-[workspace]
-members = [".", "tools/wasm-proxy-gateway"]
-exclude = ["bindings/wasm-sdk", "bindings/uniffi-bindgen"]
-
-[workspace.lints.rust]
-unexpected_cfgs = "allow"
-
 [lib]
 name = "rgb_lightning_node"
 crate-type = ["lib", "staticlib", "cdylib"]
 
+# Minimal workspace so the (self-contained) wasm-proxy-gateway builds into ./target via
+# `cargo build -p wasm-proxy-gateway` (used by the wasm e2e script). The wasm SDK and bindings are
+# their own crates/workspaces and stay excluded.
+[workspace]
+members = [".", "tools/wasm-proxy-gateway"]
+exclude = [
+    "bindings/wasm-sdk",
+    "bindings/uniffi-bindgen",
+    "bindings/c-ffi",
+    "src/sdk/contracts",
+    "rust-lightning",
+]
+
+[workspace.lints.rust]
+unexpected_cfgs = "allow"
+
 [features]
 default = []
 test-utils = []
-native-sdk-engine = []
-real-wasm-rgb = []
 vls = ["signer-external/with-vls"]
 vss = ["rgb-lib/vss", "dep:vss-client"]
 
 [dependencies]
 amplify = { version = "=4.8.1", default-features = false }
 anyhow = "1.0.93"
+axum = { version = "0.7.7", features = ["multipart"] }
+axum-extra = "0.9.4"
 # axum-macros = "0.4.2"  # uncomment to use debug_handler
 baid58 = "0.4.4"
 base64 = "0.22.1"
+bincode = "1"
+biscuit-auth = "6.0.0"
 bitcoin = "0.32"
 bitcoin-bech32 = "0.13"
 chacha20poly1305 = { version = "0.10.1", features = ["stream"] }
@@ -40,27 +51,6 @@ electrum-client = "0.20.0"
 esplora-client = { version = "0.12", default-features = false, features = ["blocking-https-rustls"] }
 futures = "0.3"
 hex = { package = "hex-conservative", version = "0.3.0", default-features = false }
-magic-crypt = "4.0.1"
-rand = "0.8.5"
-regex = { version = "1.11", default-features = false }
-scrypt = "0.11.0"
-serde = { version = "^1.0", features = ["derive"] }
-serde_json = "1.0"
-tempfile = "3.14.0"
-thiserror = "2.0"
-time = { version = "0.3.36", features = ["std"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-typenum = "1.17.0"
-uuid = { version = "1.11.0", default-features = false, features = ["v4", "js"] }
-walkdir = "2.5.0"
-uniffi = { version = "0.28.3", features = ["build"], optional = true }
-zip = { version = "2.2.0", default-features = false, features = ["time", "zstd"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-axum = { version = "0.7.7", features = ["multipart", "ws"] }
-axum-extra = "0.9.4"
-biscuit-auth = "6.0.0"
 lightning = { version = "0.2.0", features = ["dnssec"] }
 lightning-background-processor = { version = "0.2.0" }
 lightning-block-sync = { version = "0.2.0", features = ["rpc-client", "tokio"] }
@@ -71,8 +61,10 @@ lightning-net-tokio = { version = "0.2.0" }
 lightning-persister = { version = "0.2.0", features = ["tokio"] }
 lightning-rapid-gossip-sync = { version = "0.2.0" }
 lightning-transaction-sync = { version = "0.2.0", features = ["esplora-blocking", "electrum"] }
-bincode = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+magic-crypt = "4.0.1"
+rand = "0.8.5"
+regex = { version = "1.11", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.24", features = [
     "electrum",
     "esplora",
@@ -95,10 +87,14 @@ prost = "0.13"
 tempfile = "3.14.0"
 thiserror = "2.0"
 time = { version = "0.3.36", features = ["std"] }
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread", "signal", "sync", "net", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "signal", "sync", "net", "time"] }
 tokio-util = { version = "0.7.12", features = ["codec"] }
 tower-http = { version = "0.6.1", features = ["cors", "limit", "trace"] }
+tracing = "0.1"
 tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+typenum = "1.17.0"
+uuid = { version = "1.11.0", default-features = false, features = ["v4"] }
 # `vls-protocol` remains on crates.io; only `vls-core` and
 # `vls-protocol-signer` need the RGB compatibility forks.
 vls-protocol = "0.14.0"
@@ -106,25 +102,21 @@ vls-protocol-client = "0.14.0"
 vls-protocol-signer = "0.14.0"
 # Use the remote RGB compatibility fork for `vls-core`.
 lightning-signer = { package = "vls-core", version = "0.14.0", features = ["rgb-commitment-compat"] }
+walkdir = "2.5.0"
+uniffi = { version = "0.28.3", features = ["build"], optional = true }
 vss-client = { package = "vss-client-ng", git = "https://github.com/lightningdevkit/vss-client", rev = "ad63805047561dcf3117cd992ad6d8bc3881adef", default-features = false, features = ["sigs-auth"], optional = true }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2.16", features = ["js"] }
-serde-wasm-bindgen = "0.6.5"
-wasm-bindgen = "0.2.100"
+zip = { version = "2.2.0", default-features = false, features = ["time", "zstd"] }
 
 [dev-dependencies]
 dircmp = "0.2.0"
+electrum-client = "0.20.0"
 http = "1.4.0"
 lazy_static = { version = "1.5.0", default-features = false }
 lightning = { version = "0.2.0", features = ["_rln_test_hooks"] }
 once_cell = "1.20.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "native-tls", "stream"] }
 serial_test = "3.1.1"
 tracing-test = "0.2.5"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-electrum-client = "0.20.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "native-tls", "stream"] }
 
 [build-dependencies]
 uniffi = { version = "0.28.3", features = ["build"], optional = true }
@@ -149,11 +141,6 @@ level = "allow"
 [profile.reldebug]
 inherits = "release"
 debug = 1
-
-[[bin]]
-name = "rgb-lightning-node"
-path = "src/main.rs"
-bench = false
 
 [[test]]
 name = "lib_core"

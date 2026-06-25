@@ -27,8 +27,11 @@ const DEFAULTS = {
   esploraUrl: "http://127.0.0.1:3002",
   rgbProxyUrl: "http://127.0.0.1:3001/rgb/json-rpc",
   gatewayUrl: "http://127.0.0.1:3001",
-  nativePeerAddr: "127.0.0.1:19735",
-  nativeMgmtUrl: "http://127.0.0.1:19737",
+  // Native peer = a regular `rgb-lightning-node` (LDK peer port 9802, REST 3101), instead of the
+  // old `rgb-native-phase5-node` (19735/19737). The native helpers below translate the old mgmt
+  // API (/info, /invoice, /pay_invoice, /force_close) to the regular RLN's REST endpoints.
+  nativePeerAddr: "127.0.0.1:9802",
+  nativeMgmtUrl: "http://127.0.0.1:3101",
 };
 
 const VANILLA_CAPACITY_SAT = 1_000_000n;
@@ -146,14 +149,50 @@ async function mineBlocks(gatewayUrl, address, count) {
   }
 }
 
-async function nativeManagementPost(nativeMgmtUrl, path, body) {
-  const resp = await fetch(`${nativeMgmtUrl}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+// GET node info from a regular `rgb-lightning-node` and expose it under the old `/info` shape
+// (the rest of this flow reads `nativeInfo.node_id`).
+async function fetchNativeInfo(nativeMgmtUrl) {
+  const resp = await fetch(`${nativeMgmtUrl}/nodeinfo`, {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!resp.ok) throw new Error(`${path} failed: ${resp.status} ${await resp.text().catch(() => "")}`);
+  if (!resp.ok) throw new Error(`/nodeinfo failed: ${resp.status}`);
+  const j = await resp.json();
+  return { node_id: j.pubkey, ...j };
+}
+
+// Translate the old phase5-node mgmt API to the regular RLN's REST endpoints:
+//   /invoice      -> /lninvoice   (BTC or RGB BOLT11; the RGB asset rides in asset_id/asset_amount)
+//   /pay_invoice  -> /sendpayment (the regular RLN decodes the asset from the invoice)
+async function nativeManagementPost(nativeMgmtUrl, path, body) {
+  let target = path;
+  let payload = body;
+  if (path === "/invoice") {
+    target = "/lninvoice";
+    payload = {
+      amt_msat: body.amt_msat ?? null,
+      expiry_sec: body.expiry_sec ?? 3600,
+      asset_id: body.asset_id ?? null,
+      asset_amount: body.asset_amount ?? null,
+      payment_hash: body.payment_hash ?? null,
+      description_hash: null,
+      min_final_cltv_expiry_delta: null,
+    };
+  } else if (path === "/pay_invoice") {
+    target = "/sendpayment";
+    payload = {
+      invoice: body.invoice,
+      amt_msat: body.amt_msat ?? null,
+      asset_id: body.asset_id ?? null,
+      asset_amount: body.asset_amount ?? null,
+    };
+  }
+  const resp = await fetch(`${nativeMgmtUrl}${target}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`${target} failed: ${resp.status} ${await resp.text().catch(() => "")}`);
   return resp.json();
 }
 
@@ -175,10 +214,10 @@ async function nativePayInvoice(node, nativeMgmtUrl, body, timeoutMs = 30_000) {
 // Fallback: ask the native node to force-close a channel (its /force_close mgmt endpoint).
 // counterparty_node_id is THIS wasm node's pubkey (the channel's counterparty from native's view).
 async function nativeForceClose(nativeMgmtUrl, channelId, counterpartyNodeId) {
-  const resp = await fetch(`${nativeMgmtUrl}/force_close`, {
+  const resp = await fetch(`${nativeMgmtUrl}/closechannel`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ channel_id: channelId, counterparty_node_id: counterpartyNodeId }),
+    body: JSON.stringify({ channel_id: channelId, peer_pubkey: counterpartyNodeId, force: true }),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   return { status: resp.status, body: (await resp.text().catch(() => "")).slice(0, 160) };
@@ -425,7 +464,7 @@ async function runFlow(cfg, runtimeId) {
   node.chainSyncStartValue(cfg.esploraUrl, 3_600_000);
 
   // --- connect to the native node ---
-  const nativeInfo = await (await fetch(`${cfg.nativeMgmtUrl}/info`)).json();
+  const nativeInfo = await fetchNativeInfo(cfg.nativeMgmtUrl);
   const nativePubkey = nativeInfo.node_id;
   log("Native node info", nativeInfo);
   await node.connectPeer(cfg.nativePeerAddr, nativePubkey);

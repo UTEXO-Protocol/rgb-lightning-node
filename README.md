@@ -46,7 +46,6 @@ docker build -t rgb-lightning-node .
 
 See [UniFFI SDK documentation](src/uniffi_api/README.md) for setup, runtime
 model, binding generation, test commands, and artifact packaging details.
-See [SDK WASM notes](src/sdk/README.md) for wasm architecture and validation commands.
 
 ## Run
 

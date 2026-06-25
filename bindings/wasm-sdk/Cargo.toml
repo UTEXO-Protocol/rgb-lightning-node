@@ -36,11 +36,16 @@ lightning-invoice = { version = "0.34.0", features = ["std"] }
 bitcoin_hashes = "0.14"
 secp256k1 = "0.29"
 urlencoding = "2.1"
-lightning = { path = "../../rust-lightning/lightning", default-features = false, features = ["std"] }
-sdk-contracts = { path = "../../src/sdk/contracts" }
+# Core RLN is reverted to dev (native, pre-wasm rust-lightning), so the wasm SDK pulls the
+# wasm-compatibility rust-lightning + shared contracts from git instead of the local tree:
+#   - lightning: pinned to the rust-lightning commit the feat/wasm-version SDK targets (RgbBackend +
+#     9-arg create_channel).
+#   - sdk-contracts: from the rgb-lightning-node feat/wasm-version fork.
+lightning = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", rev = "3313e10d9291838c4ad2d9528f79b7dffbc63488", default-features = false, features = ["std"] }
+sdk-contracts = { git = "https://github.com/rmn-boiko/rgb-lightning-node.git", branch = "feat/wasm-version" }
 
 [patch.crates-io]
-lightning-invoice = { path = "../../rust-lightning/lightning-invoice" }
+lightning-invoice = { git = "https://github.com/UTEXO-Protocol/rust-lightning.git", rev = "3313e10d9291838c4ad2d9528f79b7dffbc63488" }
 
 [profile.reldebug]
 inherits = "release"

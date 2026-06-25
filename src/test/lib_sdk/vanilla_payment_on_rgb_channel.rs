@@ -71,7 +71,7 @@ fn vanilla_payment_on_rgb_channel() {
                 fee_base_msat: None,
                 fee_proportional_millionths: None,
                 temporary_channel_id: None,
-                asset_id: Some(asset_id),
+                asset_id: Some(asset_id.clone()),
                 asset_amount: Some(600),
                 push_asset_amount: None,
                 virtual_open_mode: None,
@@ -175,7 +175,7 @@ fn vanilla_payment_on_rgb_channel() {
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
                 recipient_groups: vec![AssetRecipients {
-                    asset_id,
+                    asset_id: asset_id.clone(),
                     recipients: vec![RgbRecipient {
                         recipient_id: RecipientId(recipient_id.0),
                         witness_data: None,

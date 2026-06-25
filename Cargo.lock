@@ -2735,6 +2735,7 @@ dependencies = [
  "bincode",
  "bitcoin 0.32.100",
  "dnssec-prover",
+ "futures",
  "hashbrown 0.13.2",
  "libm",
  "lightning-invoice 0.34.0",
@@ -2742,12 +2743,9 @@ dependencies = [
  "lightning-types 0.3.1",
  "musig2",
  "possiblyrandom 0.2.0",
- "rgb-invoicing",
  "rgb-lib",
  "serde",
- "serde_json",
  "tokio",
- "web-time",
 ]
 
 [[package]]
@@ -2802,7 +2800,7 @@ dependencies = [
  "bech32 0.11.1",
  "bitcoin 0.32.100",
  "lightning-types 0.3.1",
- "rgb-ops",
+ "rgb-lib",
  "serde",
 ]
 
@@ -2878,7 +2876,6 @@ dependencies = [
  "esplora-client",
  "lightning 0.2.2",
  "lightning-macros 0.2.1",
- "web-time",
 ]
 
 [[package]]
@@ -4248,7 +4245,6 @@ dependencies = [
  "electrum-client 0.20.0",
  "esplora-client",
  "futures",
- "getrandom 0.2.17",
  "hex-conservative 0.3.2",
  "http",
  "lazy_static",
@@ -4275,7 +4271,6 @@ dependencies = [
  "scrypt",
  "sea-orm",
  "serde",
- "serde-wasm-bindgen",
  "serde_json",
  "serial_test",
  "signer-external",
@@ -4298,7 +4293,6 @@ dependencies = [
  "vls-protocol-signer",
  "vss-client-ng",
  "walkdir",
- "wasm-bindgen",
  "zip 2.4.2",
 ]
 
@@ -4950,17 +4944,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -6353,9 +6336,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
  "getrandom 0.4.2",
- "js-sys",
  "serde_core",
- "wasm-bindgen",
 ]
 
 [[package]]

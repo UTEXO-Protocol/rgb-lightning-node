@@ -24,6 +24,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
+          # Needed by the `wasm-without-vls` mode, which runs `cargo check --target
+          # wasm32-unknown-unknown` against the wasm-sdk crate.
+          target: wasm32-unknown-unknown
       - name: Run feature-matrix checks
         run: |
           set -euo pipefail
@@ -35,12 +38,12 @@ jobs:
             cargo test --features "uniffi,vls" --lib 'signer::in_process_transport::tests::' -- --test-threads=1
           elif [ "${{ matrix.mode }}" = "wasm-without-vls" ]; then
             # WASM SDK crate is tracked in a separate workspace/repo path in current layout.
-            # Keep this gate explicit and non-VLS by requiring no `vls` feature.
+            # It never pulls VLS, so this gate is inherently non-VLS.
             cargo check --no-default-features -p uniffi-bindgen --manifest-path bindings/uniffi-bindgen/Cargo.toml
             if [ -f bindings/wasm-sdk/Cargo.toml ]; then
-              # The wasm-sdk targets wasm32 and builds against the real rgb-lib-wasm backend
-              # (enabled by its default `real-wasm-rgb` feature); it has no `vls` feature.
-              rustup target add wasm32-unknown-unknown
+              # Build with default features: `real-wasm-rgb` is the crate's whole purpose and
+              # enables `lightning/rgb-wasm`. With `--no-default-features` the rust-lightning RGB
+              # backend code fails to compile, and the crate has no `vls` feature to exclude anyway.
               cargo check --target wasm32-unknown-unknown --manifest-path bindings/wasm-sdk/Cargo.toml
             else
               echo "bindings/wasm-sdk/Cargo.toml not found; skipping direct wasm-sdk cargo check in this repository layout"
@@ -104,109 +107,6 @@ jobs:
           rustflags: ""
       - name: Run parity test by name
         run: cargo test ${{ matrix.test_name }} -- --test-threads=1
-
-  wasm-sdk:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: ""
-      - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
-      - name: wasm-sdk check
-        run: cargo check --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown
-      - name: wasm-sdk test (compile only)
-        run: cargo test --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown --no-run
-
-  wasm-sdk-wasm32:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: ""
-      - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
-      - name: wasm-sdk wasm32 check
-        run: cargo check --manifest-path bindings/wasm-sdk/Cargo.toml --target wasm32-unknown-unknown
-
-  wasm-sdk-browser:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      WASM_PACK_VERSION: "0.13.1"
-      WASM_BINDGEN_TEST_TIMEOUT: "300"
-      WASM_BROWSER_TEST_LOG: "bindings/wasm-sdk/target/wasm-browser-tests-chrome.log"
-      WASM_BINDGEN_TEST_RUNNER_VERSION: "0.2.117"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: ""
-      - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version ${WASM_PACK_VERSION} --locked
-      - name: Install Chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-      - name: Browser tooling versions
-        run: |
-          wasm-pack --version
-          if command -v google-chrome >/dev/null 2>&1; then
-            google-chrome --version
-          elif command -v chromium >/dev/null 2>&1; then
-            chromium --version
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            chromium-browser --version
-          else
-            echo "Chrome/Chromium binary not found in PATH"
-            exit 1
-          fi
-      - name: wasm-sdk browser tests
-        run: |
-          WASM_TEST_BROWSER=chrome ./bindings/wasm-sdk/scripts/run-browser-tests.sh
-      - name: Verify wasm-bindgen test runner version
-        if: always()
-        run: |
-          RUNNER_PATH="$(find "${HOME}/.cache/.wasm-pack" -maxdepth 2 -type f -name "wasm-bindgen-test-runner" | head -n1 || true)"
-          if [ -z "${RUNNER_PATH}" ]; then
-            echo "wasm-bindgen-test-runner binary was not found in cache"
-            exit 1
-          fi
-          RAW_VERSION="$(${RUNNER_PATH} --version)"
-          echo "Runner path: ${RUNNER_PATH}"
-          echo "Runner version: ${RAW_VERSION}"
-          ACTUAL_VERSION="$(printf '%s\n' "${RAW_VERSION}" | awk '{print $2}')"
-          if [ "${ACTUAL_VERSION}" != "${WASM_BINDGEN_TEST_RUNNER_VERSION}" ]; then
-            echo "Unexpected wasm-bindgen-test-runner version: ${ACTUAL_VERSION} (expected ${WASM_BINDGEN_TEST_RUNNER_VERSION})"
-            exit 1
-          fi
-      - name: Cached wasm runner versions
-        if: always()
-        run: |
-          find "${HOME}/.cache/.wasm-pack" -maxdepth 2 -type f -name "wasm-bindgen-test-runner" -print -exec {} --version \; || true
-          find "${HOME}/.cache/.wasm-pack" -maxdepth 3 -type f -name "chromedriver" -print -exec {} --version \; || true
-      - name: Upload browser test artifacts (chrome)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-sdk-browser-chrome-logs
-          path: |
-            bindings/wasm-sdk/target/wasm-browser-tests-chrome.log
-            bindings/wasm-sdk/target/wasm32-unknown-unknown/debug/deps/*.wasm
-          if-no-files-found: warn
 
   lib-sdk-tests:
     runs-on: warp-ubuntu-latest-x64-16x

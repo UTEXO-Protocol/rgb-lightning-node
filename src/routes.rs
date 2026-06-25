@@ -4283,15 +4283,15 @@ pub(crate) async fn open_channel(
             let push_amount = payload.push_asset_amount.unwrap_or(0);
             let rgb_info = RgbInfo {
                 contract_id: *contract_id,
-                schema: schema.unwrap().into(),
+                schema: schema.unwrap(),
                 local_rgb_amount: *asset_amount - push_amount,
                 remote_rgb_amount: push_amount,
                 batch_transfer_idx: None,
             };
-            let _ = unlocked_state
+            unlocked_state
                 .kv_store
                 .write_rgb_channel_info(&temp_id_str, &rgb_info, true);
-            let _ = unlocked_state
+            unlocked_state
                 .kv_store
                 .write_rgb_channel_info(&temp_id_str, &rgb_info, false);
             (Some(temp_id), Some(temp_id_str))

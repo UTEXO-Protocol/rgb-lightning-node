@@ -260,6 +260,7 @@ struct RegtestFundingTxRequest {
     mine_blocks: Option<u16>,
 }
 
+#[cfg(feature = "dev-http")]
 #[derive(Deserialize)]
 struct RegtestBroadcastTxRequest {
     tx_hex: String,
@@ -458,6 +459,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Important: apply layers *after* all routes are registered.
     // In axum, adding routes after `.layer(...)` may bypass those layers.
+    // `mut` is only needed when the `dev-http` routes below are compiled in.
+    #[cfg_attr(not(feature = "dev-http"), allow(unused_mut))]
     let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route("/rgb/json-rpc", post(rgb_json_rpc))
