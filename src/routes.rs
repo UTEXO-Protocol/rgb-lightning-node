@@ -1597,6 +1597,17 @@ pub(crate) async fn address(
     Ok(Json(AddressResponse { address }))
 }
 
+pub(crate) async fn rotate_address(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AddressResponse>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    let address = unlocked_state.rgb_rotate_address()?;
+
+    Ok(Json(AddressResponse { address }))
+}
+
 pub(crate) async fn async_order_new(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<AsyncOrderNewRequest>, APIError>,

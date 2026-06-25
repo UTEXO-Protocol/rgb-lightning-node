@@ -29,6 +29,8 @@ interface SdkNode {
     [Throws=RlnError]
     AddressInfo address();
     [Throws=RlnError]
+    AddressInfo rotate_address();
+    [Throws=RlnError]
     BtcBalanceInfo btc_balance(boolean skip_sync);
     [Throws=RlnError]
     SignMessageResponse sign_message(string message);
@@ -562,6 +564,7 @@ dictionary SdkInitRequest {
     string? vss_url = null;
     boolean vss_allow_http = false;
     boolean vss_allow_empty_restore = false;
+    boolean reuse_addresses = false;
 };
 
 dictionary SdkUnlockRequest {

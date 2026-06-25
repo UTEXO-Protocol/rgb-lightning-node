@@ -17,6 +17,9 @@ pub(crate) struct APIErrorResponse {
 /// The error variants returned by APIs
 #[derive(Debug, thiserror::Error)]
 pub enum APIError {
+    #[error("Address reuse is disabled")]
+    AddressReuseDisabled,
+
     #[error("Allocations already available")]
     AllocationsAlreadyAvailable,
 
@@ -399,6 +402,7 @@ impl From<axum::extract::multipart::MultipartRejection> for APIError {
 impl From<RgbLibError> for APIError {
     fn from(error: RgbLibError) -> Self {
         match error {
+            RgbLibError::AddressReuseDisabled => APIError::AddressReuseDisabled,
             RgbLibError::AllocationsAlreadyAvailable => APIError::AllocationsAlreadyAvailable,
             RgbLibError::AssetNotFound { .. } => APIError::UnknownContractId,
             RgbLibError::BatchTransferNotFound { .. } => APIError::BatchTransferNotFound,
@@ -507,6 +511,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidAmount(_)
             | APIError::InvalidAnnounceAddresses(_)
             | APIError::InvalidAnnounceAlias(_)
+            | APIError::AddressReuseDisabled
             | APIError::InvalidAssetID(_)
             | APIError::InvalidAssignment
             | APIError::InvalidAttachments(_)

@@ -4262,6 +4262,7 @@ pub(crate) async fn start_ldk(
         mnemonic: rgb_wallet_mnemonic,
         witness_version: WitnessVersion::Taproot,
     };
+    let reuse_addresses = static_state.reuse_addresses;
     let mut rgb_wallet = tokio::task::spawn_blocking(move || {
         RgbLibWallet::new(
             WalletData {
@@ -4270,7 +4271,7 @@ pub(crate) async fn start_ldk(
                 database_type: DatabaseType::Sqlite,
                 max_allocations_per_utxo: 1,
                 supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
-                reuse_addresses: false,
+                reuse_addresses,
             },
             keys,
         )

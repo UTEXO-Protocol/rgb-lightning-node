@@ -134,6 +134,8 @@ CResultString rln_refresh_transfers(const COpaqueStruct *node, const char *reque
 
 CResultString rln_rgb_invoice(const COpaqueStruct *node, const char *request_json);
 
+CResultString rln_rotate_address(const COpaqueStruct *node);
+
 CResultString rln_sdk_initialize(const char *request_json);
 
 /// APay receiver-side registration with an LSP. Argument is the LSP's

@@ -103,6 +103,7 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
         lsp_bearer_token: request.lsp_bearer_token,
         vss_url: request.vss_url,
         vss_allow_empty_restore: request.vss_allow_empty_restore,
+        reuse_addresses: request.reuse_addresses,
     };
     block_on_app(NodeHandle::new(config))
 }
@@ -988,6 +989,14 @@ impl SdkNode {
         })
     }
 
+    pub fn rotate_address(&self) -> Result<AddressInfo, RlnError> {
+        let state = self.handle.app_state();
+        let info = block_on_sdk(sdk::rotate_address(state))?;
+        Ok(AddressInfo {
+            address: info.address,
+        })
+    }
+
     pub fn btc_balance(&self, skip_sync: bool) -> Result<BtcBalanceInfo, RlnError> {
         let state = self.handle.app_state();
         let bal = block_on_sdk(sdk::btc_balance(state, skip_sync))?;
@@ -1605,6 +1614,11 @@ pub fn sdk_network_info() -> Result<NetworkInfo, RlnError> {
 pub fn sdk_address() -> Result<AddressInfo, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
     SdkNode { handle }.address()
+}
+
+pub fn sdk_rotate_address() -> Result<AddressInfo, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.rotate_address()
 }
 
 pub fn sdk_btc_balance(skip_sync: bool) -> Result<BtcBalanceInfo, RlnError> {

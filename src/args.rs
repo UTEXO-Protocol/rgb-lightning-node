@@ -75,6 +75,16 @@ struct Args {
     /// (abort on restore failure) is the safe choice in almost all cases.
     #[arg(long, default_value_t = false)]
     vss_allow_empty_restore: bool,
+
+    /// Reuse a pinned wallet address instead of generating a fresh one on each
+    /// `/address` call.
+    ///
+    /// **Privacy:** enabling this reduces on-chain privacy since all incoming
+    /// transactions to the same keychain become linkable. Only enable when
+    /// address reuse is acceptable. The pinned address can be advanced via the
+    /// `/rotateaddress` endpoint.
+    #[arg(long, default_value_t = false)]
+    reuse_addresses: bool,
 }
 
 pub(crate) struct UserArgs {
@@ -90,6 +100,7 @@ pub(crate) struct UserArgs {
     pub(crate) lsp_bearer_token: Option<String>,
     pub(crate) vss_url: Option<String>,
     pub(crate) vss_allow_empty_restore: bool,
+    pub(crate) reuse_addresses: bool,
 }
 
 pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
@@ -130,5 +141,6 @@ pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
         lsp_bearer_token: args.lsp_bearer_token,
         vss_url: args.vss_url,
         vss_allow_empty_restore: args.vss_allow_empty_restore,
+        reuse_addresses: args.reuse_addresses,
     })
 }

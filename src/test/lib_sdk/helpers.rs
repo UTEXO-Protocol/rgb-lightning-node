@@ -266,6 +266,7 @@ fn make_node_inner(
         vss_url,
         vss_allow_http: true,
         vss_allow_empty_restore: false,
+        reuse_addresses: false,
     })
     .expect("create SDK node")
 }

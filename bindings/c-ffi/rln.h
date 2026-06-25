@@ -150,6 +150,8 @@ struct CResultString rln_refresh_transfers(const struct COpaqueStruct *node,
 
 struct CResultString rln_rgb_invoice(const struct COpaqueStruct *node, const char *request_json);
 
+struct CResultString rln_rotate_address(const struct COpaqueStruct *node);
+
 struct CResultString rln_sdk_initialize(const char *request_json);
 
 /**

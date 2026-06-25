@@ -1150,6 +1150,15 @@ pub(crate) async fn address(state: Arc<AppState>) -> Result<AddressData, APIErro
     })
 }
 
+pub(crate) async fn rotate_address(state: Arc<AppState>) -> Result<AddressData, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    Ok(AddressData {
+        address: unlocked_state.rgb_rotate_address()?,
+    })
+}
+
 pub(crate) async fn async_order_new(
     state: Arc<AppState>,
     request: AsyncOrderNewRequest,
@@ -4324,6 +4333,7 @@ mod tests {
                 database: RwLock::new(Arc::new(database)),
                 vss_url: None,
                 vss_allow_empty_restore: false,
+                reuse_addresses: false,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),

@@ -32,10 +32,24 @@ async fn remote_first_recovery_inner() {
 
     // Fresh per-run seeds (returned by init) so VSS state never leaks between
     // runs; node1's seed is reused on the post-wipe restart.
-    let (node1_addr, _, mnemonic_1) =
-        start_node_with_vss(&test_dir_node1, NODE1_PEER_PORT, false, VSS_URL, None).await;
-    let (node2_addr, _, _) =
-        start_node_with_vss(&test_dir_node2, NODE2_PEER_PORT, false, VSS_URL, None).await;
+    let (node1_addr, _, mnemonic_1) = start_node_with_vss(
+        &test_dir_node1,
+        NODE1_PEER_PORT,
+        false,
+        VSS_URL,
+        None,
+        false,
+    )
+    .await;
+    let (node2_addr, _, _) = start_node_with_vss(
+        &test_dir_node2,
+        NODE2_PEER_PORT,
+        false,
+        VSS_URL,
+        None,
+        false,
+    )
+    .await;
 
     fund_and_create_utxos(node1_addr, None).await;
     fund_and_create_utxos(node2_addr, None).await;
@@ -99,6 +113,7 @@ async fn remote_first_recovery_inner() {
         true,
         VSS_URL,
         Some(&mnemonic_1),
+        false,
     )
     .await;
 

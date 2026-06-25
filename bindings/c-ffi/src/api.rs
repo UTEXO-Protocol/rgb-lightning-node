@@ -498,6 +498,12 @@ pub(crate) fn address(node: &COpaqueStruct) -> Result<String, Error> {
     json(JsonAddressInfo::from(resp))
 }
 
+pub(crate) fn rotate_address(node: &COpaqueStruct) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let resp = node.rotate_address()?;
+    json(JsonAddressInfo::from(resp))
+}
+
 pub(crate) fn btc_balance(
     node: &COpaqueStruct,
     skip_sync: bool,

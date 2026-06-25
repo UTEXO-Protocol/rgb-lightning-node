@@ -442,6 +442,11 @@ pub extern "C" fn rln_address(node: &COpaqueStruct) -> CResultString {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rln_rotate_address(node: &COpaqueStruct) -> CResultString {
+    ffi_call!("rln_rotate_address", api::rotate_address(node))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rln_btc_balance(node: &COpaqueStruct, skip_sync: bool) -> CResultString {
     ffi_call!("rln_btc_balance", api::btc_balance(node, skip_sync))
 }

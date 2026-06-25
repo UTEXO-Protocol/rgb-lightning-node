@@ -1026,6 +1026,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RgbInvoiceResponse'
+  /rotateaddress:
+    post:
+      tags:
+        - On-chain
+      summary: Rotate the pinned Bitcoin address
+      description: Advance the pinned Bitcoin address so the next `/address` call returns a fresh one. Only available when the node is started with `--reuse-addresses`; otherwise returns an `AddressReuseDisabled` error.
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressResponse'
   /sendbtc:
     post:
       tags:

@@ -268,6 +268,7 @@ The node currently exposes the following APIs:
 - `/restore` (POST)
 - `/revoketoken` (POST)
 - `/rgbinvoice` (POST)
+- `/rotateaddress` (POST)
 - `/sendbtc` (POST)
 - `/sendonionmessage` (POST)
 - `/sendpayment` (POST)
