@@ -5,7 +5,7 @@ This document is the **canonical architecture reference** for the WASM-related s
 - **WASM SDK crate**: `bindings/wasm-sdk` (browser-facing `wasm-bindgen` SDK)
 - **WS↔TCP gateway + dev helpers**: `tools/wasm-proxy-gateway`
 - **Browser E2E**: `e2e-specs` + `scripts/ci/wasm_regular_rln_e2e.sh`
-- **Shared contracts**: `src/sdk/contracts` (types + stable error strings + drift fixtures)
+- **Shared contracts**: the `sdk-contracts` crate (git dependency; types + stable error strings)
 
 ## Components
 
@@ -66,10 +66,10 @@ flowchart LR
   BrowserDemo -->|submitFundingTransaction*| BrowserWasm["Browser WASM (LDK)"]
 ```
 
-## Contracts and drift prevention
+## Contracts
 
-- **Shared contract types + stable error strings** live in `src/sdk/contracts`.
-- **Golden JSON fixtures** are enforced by `cargo test -p sdk-contracts`.
+- **Shared contract types + stable error strings** live in the `sdk-contracts` crate,
+  consumed as a git dependency (see `bindings/wasm-sdk/Cargo.toml`).
 
 ## How to run
 

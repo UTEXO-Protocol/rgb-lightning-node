@@ -55,6 +55,9 @@ fn wasm_debug(msg: &str) {
 }
 
 const SDK_HTLC_MIN_MSAT: u64 = 3_000_000;
+/// Lower HTLC floor permitted over virtual (`trusted_no_broadcast`) channels, matching
+/// native `VIRTUAL_HTLC_MIN_MSAT`. Regular channels keep the `SDK_HTLC_MIN_MSAT` floor.
+const VIRTUAL_HTLC_MIN_MSAT: u64 = 1_000;
 const SDK_INVOICE_MIN_MSAT: u64 = SDK_HTLC_MIN_MSAT;
 const SDK_OPENRGBCHANNEL_MIN_SAT: u64 = SDK_HTLC_MIN_MSAT / 1000 * 10 + 10;
 const SDK_OPENCHANNEL_MIN_SAT: u64 = 5_506;
@@ -2009,9 +2012,10 @@ impl RlnWasmNode {
         if SecpPublicKey::from_str(dest_pubkey.trim()).is_err() {
             return Err(JsValue::from_str(sdk_contracts::ERR_DEST_PUBKEY_INVALID));
         }
-        if amt_msat < SDK_HTLC_MIN_MSAT {
+        let min_htlc_msat = self.min_htlc_msat_to_dest(&dest_pubkey);
+        if amt_msat < min_htlc_msat {
             return Err(JsValue::from_str(&format!(
-                "amt_msat cannot be less than {SDK_HTLC_MIN_MSAT}"
+                "amt_msat cannot be less than {min_htlc_msat}"
             )));
         }
         if (asset_id.is_some() && asset_amount.is_none())
@@ -2146,9 +2150,10 @@ impl RlnWasmNode {
         if SecpPublicKey::from_str(&dest_pubkey).is_err() {
             return Err(JsValue::from_str(sdk_contracts::ERR_DEST_PUBKEY_INVALID));
         }
-        if amt_msat < SDK_HTLC_MIN_MSAT {
+        let min_htlc_msat = self.min_htlc_msat_to_dest(&dest_pubkey);
+        if amt_msat < min_htlc_msat {
             return Err(JsValue::from_str(&format!(
-                "amt_msat cannot be less than {SDK_HTLC_MIN_MSAT}"
+                "amt_msat cannot be less than {min_htlc_msat}"
             )));
         }
         if (asset_id.is_some() && asset_amount.is_none())
@@ -2377,8 +2382,8 @@ impl RlnWasmNode {
             amt_msat: parsed.amount_milli_satoshis(),
             expiry_sec: parsed.expiry_time().as_secs(),
             timestamp: parsed.duration_since_epoch().as_secs(),
-            asset_id: None,
-            asset_amount: None,
+            asset_id: parsed.rgb_contract_id().map(|c| c.to_string()),
+            asset_amount: parsed.rgb_amount(),
             payment_hash: parsed.payment_hash().to_string(),
             payment_secret: hex::encode(parsed.payment_secret().0),
             payee_pubkey: parsed.payee_pub_key().map(|p| p.to_string()),
@@ -3167,6 +3172,28 @@ impl RlnWasmNode {
         let mut non_virtual_status = "pending".to_string();
         let mut non_virtual_ready = false;
         let mut non_virtual_usable = false;
+        // Derive the real RGB asset schema from wallet metadata so the colored channel records
+        // the correct schema rather than a hardcoded one. Best-effort: on any lookup failure the
+        // runtime defaults to Nia (both wasm-supported schemas are fungible).
+        let asset_schema = if asset_id.is_some() {
+            contract_id
+                .clone()
+                .or_else(|| asset_id.clone())
+                .and_then(|id| {
+                    self.with_attached_wallet(|wallet| {
+                        Ok(wallet.get_asset_metadata(id).ok().map(|m| {
+                            match m.asset_schema {
+                                rgb_lib_wasm::AssetSchema::Ifa => "ifa".to_string(),
+                                _ => "nia".to_string(),
+                            }
+                        }))
+                    })
+                    .ok()
+                    .flatten()
+                })
+        } else {
+            None
+        };
         if !is_virtual_open {
             let opened =
                 self.ldk_runtime
@@ -3178,6 +3205,7 @@ impl RlnWasmNode {
                         asset_local_amount,
                         contract_id: contract_id.clone(),
                         consignment_endpoint: consignment_endpoint.clone(),
+                        asset_schema: asset_schema.clone(),
                     })?;
             let temp = opened.temporary_channel_id.trim().to_string();
             let chan = opened.channel_id.trim().to_string();
@@ -4445,6 +4473,30 @@ impl RlnWasmNode {
             asset_id: data.asset_id.clone(),
             asset_local_amount: data.asset_local_amount,
             virtual_open_mode: data.virtual_open_mode.clone(),
+        }
+    }
+
+    /// True if this node has a virtual (`trusted_no_broadcast`) channel to `dest_pubkey`.
+    fn has_virtual_channel_to(&self, dest_pubkey: &str) -> bool {
+        self.ldk_runtime
+            .list_channels()
+            .into_iter()
+            .filter(|c| c.peer_pubkey == dest_pubkey)
+            .any(|c| {
+                self.ldk_runtime
+                    .virtual_channel_session_get(&c.channel_id)
+                    .is_some()
+            })
+    }
+
+    /// Effective HTLC floor for a payment to `dest_pubkey`: the lower virtual floor when
+    /// a virtual channel to the destination exists, otherwise the regular floor. Mirrors
+    /// native's per-channel `our_htlc_minimum_msat` selection.
+    fn min_htlc_msat_to_dest(&self, dest_pubkey: &str) -> u64 {
+        if self.has_virtual_channel_to(dest_pubkey) {
+            VIRTUAL_HTLC_MIN_MSAT
+        } else {
+            SDK_HTLC_MIN_MSAT
         }
     }
 

@@ -417,6 +417,10 @@ pub struct WasmLdkLiveBackend {
     live_payments: RefCell<HashMap<String, LdkRuntimeLivePaymentData>>,
     /// Invoice hashes whose claimable HTLCs must be held until explicitly claimed or cancelled.
     hodl_payment_hashes: RefCell<HashSet<String>>,
+    /// CLTV `claim_deadline` (block height) for each held hodl HTLC, so we can proactively
+    /// fail it back before the deadline forces a channel close. Repopulated from replayed
+    /// `PaymentClaimable` events on restart (intentionally not persisted).
+    hodl_claim_deadlines: RefCell<HashMap<String, u32>>,
     /// Channel ids the live `ChannelManager` reported closed via `Event::ChannelClosed`, pending
     /// propagation to the runtime channel view (drained by `take_closed_live_channels`).
     closed_channels: RefCell<Vec<String>>,
@@ -527,6 +531,12 @@ struct FixedFeeEstimator;
 // with "Peer's feerate much too low". So we must open at a realistic feerate, not the floor.
 const REGTEST_CHANNEL_FEERATE_SATS_PER_KW: u32 = 5000;
 
+// Per-channel handshake parameters for non-virtual opens, matching native `open_channel`.
+const OPEN_CHANNEL_HTLC_MIN_MSAT: u64 = 3_000_000;
+const MIN_CHANNEL_CONFIRMATIONS: u32 = 6;
+// LND's max `to_self_delay` is 2016 blocks; stay compatible.
+const CHANNEL_TO_SELF_DELAY: u16 = 2016;
+
 impl FeeEstimator for FixedFeeEstimator {
     fn get_est_sat_per_1000_weight(
         &self,
@@ -612,6 +622,51 @@ impl lightning::chain::Filter for WasmFilter {
 
 struct WasmPersister {
     runtime_key: String,
+    // Back-handle to the owning ChainMonitor, populated after construction. Used to
+    // signal async completion (`channel_monitor_updated`) when a monitor could not be
+    // persisted synchronously to localStorage and had to be deferred to IndexedDB.
+    chain_monitor: std::cell::RefCell<Option<std::sync::Weak<WasmChainMonitor>>>,
+}
+
+impl WasmPersister {
+    /// Persist a monitor, never acking durability we don't have.
+    ///
+    /// The synchronous localStorage write is the durability gate: if it succeeds the
+    /// monitor survives reload, so we return `Completed`. If it fails (quota /
+    /// private-mode / serialization) we MUST NOT return `Completed` — instead we
+    /// serialize once and complete the persist asynchronously through the IndexedDB
+    /// tier (which survives reload and is rehydrated into localStorage on next load),
+    /// reporting `channel_monitor_updated` only once that durable write succeeds.
+    fn persist_or_defer(
+        &self,
+        monitor_name: MonitorName,
+        monitor: &lightning::chain::channelmonitor::ChannelMonitor<InMemorySigner>,
+        completed_update_id: u64,
+    ) -> ChannelMonitorUpdateStatus {
+        match persist_monitor_snapshot(&self.runtime_key, monitor_name, monitor) {
+            Ok(()) => ChannelMonitorUpdateStatus::Completed,
+            Err(err) => {
+                web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "monitor localStorage persist failed ({err:?}); deferring to IndexedDB"
+                )));
+                let mut bytes: Vec<u8> = Vec::new();
+                if monitor.write(&mut bytes).is_err() {
+                    // We cannot even serialize the monitor; halting is the safe response.
+                    return ChannelMonitorUpdateStatus::UnrecoverableError;
+                }
+                let weak = self.chain_monitor.borrow().clone();
+                spawn_local_persist_completion(
+                    self.runtime_key.clone(),
+                    monitor_name.to_string(),
+                    bytes,
+                    monitor.channel_id(),
+                    completed_update_id,
+                    weak,
+                );
+                ChannelMonitorUpdateStatus::InProgress
+            }
+        }
+    }
 }
 
 impl chainmonitor::Persist<InMemorySigner> for WasmPersister {
@@ -620,23 +675,99 @@ impl chainmonitor::Persist<InMemorySigner> for WasmPersister {
         monitor_name: MonitorName,
         monitor: &lightning::chain::channelmonitor::ChannelMonitor<InMemorySigner>,
     ) -> ChannelMonitorUpdateStatus {
-        let _ = persist_monitor_snapshot(&self.runtime_key, monitor_name, monitor);
-        ChannelMonitorUpdateStatus::Completed
+        let update_id = monitor.get_latest_update_id();
+        self.persist_or_defer(monitor_name, monitor, update_id)
     }
 
     fn update_persisted_channel(
         &self,
         monitor_name: MonitorName,
-        _monitor_update: Option<&lightning::chain::channelmonitor::ChannelMonitorUpdate>,
+        monitor_update: Option<&lightning::chain::channelmonitor::ChannelMonitorUpdate>,
         monitor: &lightning::chain::channelmonitor::ChannelMonitor<InMemorySigner>,
     ) -> ChannelMonitorUpdateStatus {
-        let _ = persist_monitor_snapshot(&self.runtime_key, monitor_name, monitor);
-        ChannelMonitorUpdateStatus::Completed
+        let update_id = monitor_update
+            .map(|u| u.update_id)
+            .unwrap_or_else(|| monitor.get_latest_update_id());
+        self.persist_or_defer(monitor_name, monitor, update_id)
     }
 
     fn archive_persisted_channel(&self, monitor_name: MonitorName) {
         let _ = delete_monitor_snapshot(&self.runtime_key, monitor_name);
     }
+}
+
+/// Map a wallet-derived schema string to the fork's `AssetSchema`. The wasm RGB backend
+/// only supports the fungible Nia/Ifa schemas; anything else (including `None`) falls back
+/// to `Nia`, which yields the same fungible funding assignment.
+fn parse_rgb_asset_schema(schema: Option<&str>) -> lightning::rgb_utils::AssetSchema {
+    match schema.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("ifa") => lightning::rgb_utils::AssetSchema::Ifa,
+        Some("cfa") => lightning::rgb_utils::AssetSchema::Cfa,
+        Some("uda") => lightning::rgb_utils::AssetSchema::Uda,
+        _ => lightning::rgb_utils::AssetSchema::Nia,
+    }
+}
+
+/// Storage key for a monitor snapshot identified by its stringified `MonitorName`.
+fn monitor_snapshot_key_str(runtime_key: &str, name: &str) -> String {
+    format!("{WASM_LDK_MONITORS_STORAGE_PREFIX}{runtime_key}:monitor:{name}")
+}
+
+/// Complete a deferred monitor persist via the durable IndexedDB tier, then signal
+/// `channel_monitor_updated` so LDK can release the paused channel. If the durable
+/// write also fails the channel simply stays paused (safe) until a later persist.
+#[cfg(target_arch = "wasm32")]
+fn spawn_local_persist_completion(
+    runtime_key: String,
+    name: String,
+    bytes: Vec<u8>,
+    channel_id: lightning::ln::types::ChannelId,
+    completed_update_id: u64,
+    chain_monitor: Option<std::sync::Weak<WasmChainMonitor>>,
+) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let snap_key = monitor_snapshot_key_str(&runtime_key, &name);
+        let encoded = hex::encode(&bytes);
+        if let Err(err) = crate::runtime_store::indexed_db_set_durable(snap_key, encoded).await {
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "deferred monitor IndexedDB persist failed ({err:?}); channel stays paused"
+            )));
+            return;
+        }
+        // Maintain the monitor index in the durable tier too, so restart can find it.
+        let idx_key = monitor_index_key(&runtime_key);
+        let store = browser_persistent_state_store();
+        let mut index: Vec<String> = store
+            .get(&idx_key)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default();
+        if !index.iter().any(|v| v == &name) {
+            index.push(name.clone());
+        }
+        if let Ok(raw) = serde_json::to_string(&index) {
+            let _ = crate::runtime_store::indexed_db_set_durable(idx_key, raw).await;
+        }
+        if let Some(cm) = chain_monitor.and_then(|w| w.upgrade()) {
+            if let Err(err) = cm.channel_monitor_updated(channel_id, completed_update_id) {
+                web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "channel_monitor_updated after deferred persist failed: {err:?}"
+                )));
+            }
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_local_persist_completion(
+    _runtime_key: String,
+    _name: String,
+    _bytes: Vec<u8>,
+    _channel_id: lightning::ln::types::ChannelId,
+    _completed_update_id: u64,
+    _chain_monitor: Option<std::sync::Weak<WasmChainMonitor>>,
+) {
 }
 
 fn channel_manager_snapshot_key(runtime_key: &str) -> String {
@@ -960,6 +1091,7 @@ impl WasmLdkLiveBackend {
             submitted_funding_txids: RefCell::new(HashSet::new()),
             live_payments: RefCell::new(HashMap::new()),
             hodl_payment_hashes: RefCell::new(HashSet::new()),
+            hodl_claim_deadlines: RefCell::new(HashMap::new()),
             closed_channels: RefCell::new(Vec::new()),
             object_graph: RefCell::new(None),
         }
@@ -977,6 +1109,7 @@ impl WasmLdkLiveBackend {
         });
         let persister = Arc::new(WasmPersister {
             runtime_key: self.runtime_key.clone(),
+            chain_monitor: std::cell::RefCell::new(None),
         });
         let chain_source = Arc::new(WasmFilter::new());
         let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> =
@@ -1016,6 +1149,9 @@ impl WasmLdkLiveBackend {
             Arc::clone(&keys_manager),
             keys_manager.get_peer_storage_key(),
         ));
+        // Wire the persister's back-handle so deferred (IndexedDB) monitor persists can
+        // signal completion via `channel_monitor_updated`.
+        *persister.chain_monitor.borrow_mut() = Some(Arc::downgrade(&chain_monitor));
         let restored_monitors = load_persisted_monitors(&self.runtime_key, &keys_manager)?;
         let has_persisted_monitors = !restored_monitors.is_empty();
         let (network_graph, _network_graph_restored) =
@@ -1037,7 +1173,7 @@ impl WasmLdkLiveBackend {
             Arc::clone(&keys_manager),
         ));
         let mut user_config = UserConfig::default();
-        // Act as a routing intermediary for multi-hop payments (Phase 4): forward HTLCs whose
+        // Act as a routing intermediary for multi-hop payments: forward HTLCs whose
         // outgoing hop is one of our *private* (unannounced) channels. With the default `false`,
         // LDK returns `PrivateChannelForward` and refuses to forward over private channels
         // (`can_forward_htlc_to_outgoing_channel`), which would break native-A -> WASM -> native-B
@@ -1312,6 +1448,7 @@ impl WasmLdkLiveBackend {
                 purpose,
                 amount_msat,
                 receiving_channel_ids,
+                claim_deadline,
                 ..
             } => {
                 let hash_hex = hex::encode(payment_hash.0);
@@ -1322,6 +1459,29 @@ impl WasmLdkLiveBackend {
                     &receiving_channel_ids,
                     &hash_hex,
                 );
+                // Receive-path validation (parity with native `PaymentClaimable`): never
+                // claim an expired or underpaid invoice — fail the HTLC back instead.
+                {
+                    let now = unix_now_secs();
+                    let (expired, underpaid) = {
+                        let live = self.live_payments.borrow();
+                        match live.get(&hash_hex) {
+                            Some(rec) => (
+                                rec.expires_at.is_some_and(|exp| now >= exp),
+                                rec.amt_msat.is_some_and(|expected| amount_msat < expected),
+                            ),
+                            None => (false, false),
+                        }
+                    };
+                    if expired || underpaid {
+                        g.channel_manager.fail_htlc_backwards(&payment_hash);
+                        self.upsert_inbound_live_payment(&hash_hex, "failed", amount_msat);
+                        ldk_live_debug(&format!(
+                            "[rln-wasm-sdk ldk-live] PaymentClaimable failed back (expired={expired}, underpaid={underpaid}) hash={hash_hex}"
+                        ));
+                        return;
+                    }
+                }
                 let (preimage, external_hash_invoice) = match purpose {
                     lightning::events::PaymentPurpose::SpontaneousPayment(preimage) => {
                         (Some(preimage), false)
@@ -1336,6 +1496,12 @@ impl WasmLdkLiveBackend {
                     self.hodl_payment_hashes
                         .borrow_mut()
                         .insert(hash_hex.clone());
+                    // Track the CLTV deadline so we can fail back before a forced close.
+                    if let Some(deadline) = claim_deadline {
+                        self.hodl_claim_deadlines
+                            .borrow_mut()
+                            .insert(hash_hex.clone(), deadline);
+                    }
                     self.upsert_inbound_live_payment(&hash_hex, "claimable", amount_msat);
                     ldk_live_debug(&format!(
                         "[rln-wasm-sdk ldk-live] PaymentClaimable held hash={hash_hex}"
@@ -1380,6 +1546,7 @@ impl WasmLdkLiveBackend {
                 asset_amount: None,
                 inbound: false,
                 preimage: None,
+                expires_at: None,
                 created_at: now,
                 updated_at: now,
             });
@@ -1404,6 +1571,7 @@ impl WasmLdkLiveBackend {
                 asset_amount: None,
                 inbound: true,
                 preimage: None,
+                expires_at: None,
                 created_at: now,
                 updated_at: now,
             });
@@ -1897,6 +2065,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             asset_amount,
             inbound: false,
             preimage: None,
+            expires_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -2003,6 +2172,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             asset_amount: rgb_payment.map(|(_, amount)| amount),
             inbound: false,
             preimage: None,
+            expires_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -2053,6 +2223,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 asset_amount,
                 inbound: true,
                 preimage: None,
+                expires_at: Some(now.saturating_add(expiry_sec as u64)),
                 created_at: now,
                 updated_at: now,
             },
@@ -2121,6 +2292,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 asset_amount,
                 inbound: true,
                 preimage: None,
+                expires_at: Some(now.saturating_add(expiry_sec as u64)),
                 created_at: now,
                 updated_at: now,
             },
@@ -2176,6 +2348,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         })?;
         g.channel_manager.claim_funds(preimage);
         self.mark_live_payment(payment_hash, "claiming", Some(payment_preimage.to_string()));
+        self.hodl_claim_deadlines.borrow_mut().remove(payment_hash);
         g.peer_manager.borrow().process_events();
         Ok(true)
     }
@@ -2217,7 +2390,9 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
         })?;
         g.channel_manager.fail_htlc_backwards(&payment_hash);
-        self.mark_live_payment(&hex::encode(payment_hash.0), "cancelled", None);
+        let hash_hex = hex::encode(payment_hash.0);
+        self.mark_live_payment(&hash_hex, "cancelled", None);
+        self.hodl_claim_deadlines.borrow_mut().remove(&hash_hex);
         g.peer_manager.borrow().process_events();
         Ok(())
     }
@@ -2290,6 +2465,32 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             }
             g.chain_monitor.best_block_updated(&header, height);
             g.channel_manager.best_block_updated(&header, height);
+            // Proactively fail back held hodl HTLCs whose CLTV claim deadline has passed,
+            // before the deadline forces a channel close.
+            let expired: Vec<String> = self
+                .hodl_claim_deadlines
+                .borrow()
+                .iter()
+                .filter(|(_, &deadline)| height >= deadline)
+                .map(|(hash, _)| hash.clone())
+                .collect();
+            for hash_hex in expired {
+                if let Some(arr) = hex::decode(&hash_hex)
+                    .ok()
+                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                {
+                    g.channel_manager.fail_htlc_backwards(&PaymentHash(arr));
+                }
+                self.hodl_payment_hashes.borrow_mut().remove(&hash_hex);
+                self.hodl_claim_deadlines.borrow_mut().remove(&hash_hex);
+                if let Some(rec) = self.live_payments.borrow_mut().get_mut(&hash_hex) {
+                    rec.status = "cancelled".to_string();
+                    rec.updated_at = unix_now_secs();
+                }
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk ldk-live] hodl HTLC failed back at CLTV deadline height={height} hash={hash_hex}"
+                ));
+            }
             persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
             Ok(())
         })
@@ -2439,6 +2640,18 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             // the amount pushed to the counterparty, so this channel opens with a zero push.
             .map(|(_, _, ep)| (Some(ep.clone()), Some(0)))
             .unwrap_or((None, None));
+        // Per-channel handshake config matching native `open_channel` (non-virtual path):
+        // anchors are mandatory for colored (RGB) channels; announce only when public;
+        // 3M-msat HTLC floor; 6-conf funding; LND-compatible 2016-block to_self_delay.
+        let with_anchors = rgb_open.is_some();
+        let mut override_config = UserConfig::default();
+        override_config.channel_handshake_config.announce_for_forwarding = request.public;
+        override_config.channel_handshake_config.our_htlc_minimum_msat = OPEN_CHANNEL_HTLC_MIN_MSAT;
+        override_config.channel_handshake_config.minimum_depth = MIN_CHANNEL_CONFIRMATIONS;
+        override_config
+            .channel_handshake_config
+            .negotiate_anchors_zero_fee_htlc_tx = with_anchors;
+        override_config.channel_handshake_limits.their_to_self_delay = CHANNEL_TO_SELF_DELAY;
         for attempt in 1..=20 {
             let peer_ids = g
                 .peer_manager
@@ -2457,7 +2670,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 0,
                 user_channel_id,
                 None,
-                None,
+                Some(override_config.clone()),
                 rgb_endpoint.clone(),
                 rgb_push_amount,
                 false,
@@ -2502,9 +2715,12 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         // LDK renames this state to the funding channel ID when funding is generated.
         if let Some((contract_id, asset_amount, consignment_endpoint)) = rgb_open {
             let temp_id = format!("{temporary_channel_id}");
+            // Use the real asset schema (derived from wallet metadata by the caller); the wasm
+            // RGB backend only supports the fungible Nia/Ifa schemas.
+            let schema = parse_rgb_asset_schema(request.asset_schema.as_deref());
             let rgb_info = RgbInfo {
                 contract_id,
-                schema: lightning::rgb_utils::AssetSchema::Nia,
+                schema,
                 local_rgb_amount: asset_amount,
                 remote_rgb_amount: 0,
                 batch_transfer_idx: None,
@@ -2519,7 +2735,7 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 user_channel_id,
                 PendingRgbOpenIntent {
                     contract_id,
-                    schema: lightning::rgb_utils::AssetSchema::Nia,
+                    schema,
                     asset_amount,
                     consignment_endpoint,
                     fee_rate: 1,

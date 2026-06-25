@@ -5,33 +5,28 @@ End-to-end browser tests covering native WASM SDK flows against a regular
 
 Canonical stack overview: `bindings/wasm-sdk/ARCHITECTURE.md`.
 
-## Test architecture (Phase 1)
+## Test architecture
 
-The suite is split into a **structured smoke** target and a **full** target.
+Every spec drives the SDK directly via `window.__sdk` exposed by
+`bindings/wasm-sdk/examples/wasm-interop/wasm_e2e_harness.html` (no log
+scraping), funds via a Node-side regtest controller (`helpers/regtest.js`)
+talking directly to `bitcoind` RPC, and asserts on typed JSON state from
+`listChannelsJson()`, `listPaymentsJson()`, `ldkRuntimeStatusJson()`, etc. via
+reusable matchers in `helpers/sdk.js`. On failure, a structured snapshot is
+dumped under `test-results/<spec>/sdk-snapshot-failure/` plus a console summary.
 
-- **Smoke** (`E2E_SUITE=smoke` or `npm run test:smoke`):
-  - Drives the SDK directly via `window.__sdk` exposed by
-    `bindings/wasm-sdk/examples/wasm-interop/wasm_e2e_harness.html`. No log
-    scraping.
-  - Funds via a Node-side regtest controller (`helpers/regtest.js`) talking
-    directly to `bitcoind` RPC. Tests do **not** call the gateway's
-    `/dev/regtest/*` endpoints.
-  - Asserts on typed JSON state from `listChannelsJson()`, `listPaymentsJson()`,
-    `ldkRuntimeStatusJson()`, etc. via reusable matchers in `helpers/sdk.js`.
-  - On failure, dumps a structured snapshot under
-    `test-results/<spec>/sdk-snapshot-failure/` plus a console summary.
+The suite has a **smoke** target and a **full** target:
 
-- **Full** (`E2E_SUITE=full` or `npm run test:full`):
-  - Smoke + the legacy specs (`page_reload`, `websocket_disconnect`) which still
-    use the example flow under `wasm_to_regular_rln_channel_flow.html` and the
-    gateway's `dev-http` helpers. They will be migrated to structured form in
-    Phase 2.
+- **Smoke** (`E2E_SUITE=smoke` or `npm run test:smoke`): the happy-path channel
+  spec only.
+- **Full** (`E2E_SUITE=full` or `npm run test:full`): smoke plus the page-reload
+  and websocket-disconnect specs.
 
 | Spec | Scenario |
 | --- | --- |
-| `wasm_regular_rln_native_channel.spec.js` (structured) | Happy path: connect peer, open native channel, fund (regtest controller), confirm, keysend. |
-| `wasm_regular_rln_page_reload.spec.js` (legacy) | Mid-flow **full page reload**, then second run. |
-| `wasm_regular_rln_websocket_disconnect.spec.js` (legacy) | **WebSocket** to the LN relay closed mid-run; flow should still complete. |
+| `wasm_regular_rln_native_channel.spec.js` | Happy path: connect peer, open native channel, fund (regtest controller), confirm, keysend. |
+| `wasm_regular_rln_page_reload.spec.js` | Mid-flow **full page reload**, then second run; asserts state restored from persistence. |
+| `wasm_regular_rln_websocket_disconnect.spec.js` | **WebSocket** to the LN relay closed mid-run; flow still completes after reconnect. |
 
 Run smoke locally:
 
@@ -57,8 +52,8 @@ E2E_SUITE=full \
 | WASM proxy gateway | `127.0.0.1:3001` | LN WS relay, `/rgb/json-rpc`, `/dev/regular-rln/*`, regtest helpers. |
 | RGB HTTP proxy (upstream) | `127.0.0.1:3005` | Host port for compose `proxy` (container `3000`). |
 | Esplora HTTP (indexer) | `127.0.0.1:3002` | Default in the HTML / manual JS. |
-| Bitcoind RPC (compose `bitcoind`) | `127.0.0.1:19443` | Mapped from container `18443`; user `user`, password `password` (same as `compose.wasm.yaml` RPCAUTH demo). |
-| Regular RLN REST | `127.0.0.1:3101` | Native daemon; browser talks via `http://127.0.0.1:3001/dev/regular-rln` on the gateway. |
+| Bitcoind RPC (compose `bitcoind`) | `127.0.0.1:19443` | Mapped from container `18443`; user `admin`, password `passw` (matches `helpers/regtest.js` defaults). |
+| Regular RLN REST | `127.0.0.1:3101` | Native daemon; the structured specs call it directly (`helpers/regular-rln.js`). A gateway `/dev/regular-rln` proxy also exists (feature `dev-http`) but is not used by these specs. |
 | Regular RLN LN peer | `127.0.0.1:9802` | WASM connects through gateway to this TCP address. |
 
 Override the static base URL if needed:
@@ -171,7 +166,10 @@ This waits for `http://127.0.0.1:3001/healthz`, provisions a fresh regular RLN d
 
 ## CI
 
-Workflow `.github/workflows/wasm-regular-rln-e2e.yaml` runs on `workflow_dispatch` and on pushes / pull requests to `dev`, `master`, and `stage` when relevant paths change. Playwright browser downloads are cached under `~/.cache/ms-playwright` using a key derived from `e2e-specs/package-lock.json`.
+This browser suite is not wired into a GitHub Actions workflow; run it locally
+with the orchestration script (`scripts/ci/wasm_regular_rln_e2e.sh`) or the
+`npm run test:*` commands above. (`.github/workflows/wasm-artifacts.yaml` only
+builds the wasm `pkg/` artifact; it does not run these tests.)
 
 ## Environment variables (gateway)
 

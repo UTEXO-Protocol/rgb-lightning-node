@@ -64,7 +64,7 @@ A successful run ends with `✅✅✅ ... PASSED` and exit code 0.
 - `PUPPETEER_EXECUTABLE_PATH` — path to Chrome (default `/usr/bin/google-chrome`).
 - `E2E_PUPPETEER` — path to a `puppeteer-core` install.
 - `E2E_STATIC_PORT` — static-server port (`0` = random free port).
-- `E2E_RUN_TIMEOUT_MS` / `E2E_VERIFY_TIMEOUT_MS` — phase timeouts.
+- `E2E_RUN_TIMEOUT_MS` / `E2E_VERIFY_TIMEOUT_MS` — timeouts for the run and verify steps.
 - `E2E_ESPLORA_URL` — indexer URL (default `http://127.0.0.1:3002`).
 - `E2E_VERBOSE` — surface a narrow set of router/path-finding log lines from the page.
 
@@ -84,7 +84,7 @@ Useful env vars:
 2. `WASM_PROXY_RGB_UPSTREAM=http://127.0.0.1:3000/json-rpc`
 3. `WASM_PROXY_RELAY_AUTH_REQUIRED=true`
 4. `WASM_PROXY_RELAY_AUTH_TOKEN=...`
-5. `WASM_PROXY_RELAY_AUTH_NODE_ID=...`
+5. `WASM_PROXY_RELAY_NODE_ID=...`
 6. `WASM_PROXY_RGB_MAX_BODY_BYTES=2097152`
 7. `WASM_PROXY_RGB_REQUEST_TIMEOUT_MS=15000`
 8. `WASM_PROXY_TCP_CONNECT_TIMEOUT_MS=5000`

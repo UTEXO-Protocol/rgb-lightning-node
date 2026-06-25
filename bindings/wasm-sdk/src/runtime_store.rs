@@ -100,8 +100,24 @@ async fn hydrate_local_storage_from_indexed_db_prefixes(_prefixes: &[&str]) -> R
 #[cfg(target_arch = "wasm32")]
 fn persist_to_indexed_db_background(key: String, value: String) {
     spawn_local(async move {
-        let _ = indexed_db_set_item(&key, &value).await;
+        if let Err(err) = indexed_db_set_item(&key, &value).await {
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "background IndexedDB persist failed for {key}: {err:?}"
+            )));
+        }
     });
+}
+
+/// Durable, awaitable IndexedDB write. Unlike `set`, the caller can observe the
+/// result (used to complete deferred LDK monitor persists when localStorage fails).
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn indexed_db_set_durable(key: String, value: String) -> Result<(), JsValue> {
+    indexed_db_set_item(&key, &value).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn indexed_db_set_durable(_key: String, _value: String) -> Result<(), JsValue> {
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -11,8 +11,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the consolidated WASM stack overview 
 ## Scope
 
 - Target: browser and Node.js consumers via `wasm-bindgen` output.
-- Focus: SDK parity where feasible in WASM.
-- Current intentional gap: `issue_asset_uda` remains unsupported for now.
+- Focus: SDK parity in WASM.
+- `issue_asset_uda` is unsupported (no UDA primitive in `rgb-lib-wasm`).
 
 For endpoint-level status, see [SDK_WASM_ENDPOINT_MATRIX.md](SDK_WASM_ENDPOINT_MATRIX.md).
 
@@ -62,11 +62,11 @@ docker compose -f compose.wasm.yaml up -d
 
 This brings up:
 
-- RGB proxy: `127.0.0.1:3005` (host port mapped from compose `proxy`)
+- RGB proxy: `127.0.0.1:3000` (host port mapped from compose `proxy`)
 - WASM proxy gateway: `127.0.0.1:3001`
 - Esplora HTTP: `127.0.0.1:3002`
-- Electrum: `127.0.0.1:50011` (host port mapped from compose `electrs`)
-- Bitcoind RPC: `127.0.0.1:19443` (host port for `compose.wasm-infra.yaml` / `compose.wasm.yaml` bitcoind)
+- Electrum: `127.0.0.1:50001` (host port mapped from compose `electrs`)
+- Bitcoind RPC: `127.0.0.1:18443` (host port mapped from compose `bitcoind`)
 
 Build WASM package for browser examples:
 
@@ -111,18 +111,12 @@ model) and avoids REST coupling.
 
 ## CI
 
-WASM checks are wired into CI in `.github/workflows/test.yaml`:
+WASM checks run in `.github/workflows/test.yaml`: the `feature-matrix` job's
+`wasm-without-vls` mode runs `cargo check --target wasm32-unknown-unknown` against
+`bindings/wasm-sdk/Cargo.toml`. The package `pkg/` artifact is built separately by
+`.github/workflows/wasm-artifacts.yaml` via `wasm-pack build`.
 
-- `wasm-sdk` (wasm32 crate check + test-binary compile)
-- `wasm-sdk-wasm32` (target compatibility check)
-- `wasm-sdk-browser` (blocking headless browser run in Chrome)
-- `wasm-sdk-browser-diagnostic-firefox` (non-blocking diagnostic run in Firefox)
-
-Both browser jobs pin:
-- `wasm-pack` to `0.13.1`
-- `wasm-bindgen-test-runner` to `0.2.117` (verified in CI after test bootstrap)
-
-Local browser test command (same wrapper used by CI):
+Run the browser unit tests locally (not run in CI):
 
 ```sh
 WASM_BINDGEN_TEST_TIMEOUT=300 WASM_TEST_BROWSER=chrome ./bindings/wasm-sdk/scripts/run-browser-tests.sh

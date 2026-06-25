@@ -209,6 +209,10 @@ pub struct LdkRuntimeOpenChannelRequestData {
     /// RGB transport endpoint string (e.g. `rpc://…`). Required when `asset_id` is `Some`.
     #[serde(default)]
     pub consignment_endpoint: Option<String>,
+    /// RGB asset schema (`nia` | `ifa`) derived from wallet metadata. Defaults to `nia`
+    /// when absent. Determines the funding assignment type for the colored channel.
+    #[serde(default)]
+    pub asset_schema: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -282,6 +286,10 @@ pub struct LdkRuntimeLivePaymentData {
     pub inbound: bool,
     #[serde(default)]
     pub preimage: Option<String>,
+    /// Absolute unix-seconds expiry for inbound BOLT11 invoices; `None` for
+    /// spontaneous/keysend or outbound records. Used to fail back expired claims.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }

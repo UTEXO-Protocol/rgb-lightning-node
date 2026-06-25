@@ -3,7 +3,7 @@
 /**
  * High-level WASM SDK ↔ regular RLN E2E flow building blocks.
  *
- * Phase 2a: every spec drives the same `wasm_e2e_harness.html` and the same
+ * Every spec drives the same `wasm_e2e_harness.html` and the same
  * `RegtestController` / `RegularRlnClient` plumbing, then composes its own
  * scenario from these primitives. Keeps individual specs short and focused
  * on what they're actually testing (happy path, reload, ws disconnect, …).

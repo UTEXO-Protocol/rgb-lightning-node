@@ -1,6 +1,6 @@
-# SDK -> WASM Flow Porting Guide
+# SDK -> WASM Flow Reference
 
-This document describes how the main SDK flows are implemented in wasm today, with explicit notes on proxy usage and runtime behavior.
+This document describes how the main SDK flows are implemented in wasm, with explicit notes on proxy usage and runtime behavior.
 
 ## Scope
 
@@ -119,7 +119,7 @@ RGB wallet operations use transport endpoints, with explicit proxy config suppor
 - Driver model/status/snapshot: [chain_sync.rs](bindings/wasm-sdk/src/chain_sync.rs:21)
 - Node chain sync API passthrough: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:883)
 
-## 5) Runtime Event / Payment State Porting Model
+## 5) Runtime Event / Payment State Model
 
 ### Current wasm behavior
 
@@ -134,9 +134,9 @@ RGB wallet operations use transport endpoints, with explicit proxy config suppor
 - Runtime event listing + persistence hooks: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:1159)
 - Payment status via event stream: [ln_node.rs](bindings/wasm-sdk/src/ln_node.rs:3143)
 
-## 6) Strictness choices in current wasm parity
+## 6) Strictness choices in wasm parity
 
-The wasm implementation now intentionally removed broad backward-compat paths in production:
+The wasm implementation intentionally omits broad backward-compat paths in production:
 
 - Single runtime backend model (`wasm_native_ldk`) for exported APIs.
 - Canonical runtime transport/payment event parsing only.

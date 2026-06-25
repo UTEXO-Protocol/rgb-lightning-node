@@ -1,29 +1,27 @@
-# RGB WASM Proxy Transport Spec
+# RGB WASM Proxy Transport
 
 ## Purpose
 
-This document freezes the architecture boundary for porting RGB business logic
-to native wasm runtime while routing RGB network transport through a proxy
+This document describes the architecture boundary: RGB business logic runs in
+the native wasm runtime, while RGB network transport is routed through a proxy
 service colocated with LN websocket proxying.
-
-This is the scope/contract baseline for the RGB-native migration track.
 
 ## Scope Boundary
 
-### In scope (must become wasm-native)
+### Native in the wasm runtime
 
-1. RGB transfer orchestration and lifecycle state transitions in wasm runtime.
+1. RGB transfer orchestration and lifecycle state transitions.
 2. RGB runtime persistence and recovery in browser storage.
 3. Deterministic wasm API contracts for RGB operations and status surfaces.
 4. LN<->RGB status synchronization in wasm runtime observers.
 
-### Out of scope (external infra still required)
+### External infra required
 
 1. RGB network transport service itself (provided by proxy upstream).
 2. Bitcoin chain source/indexer (Esplora).
 3. Funding/signing provider integration for on-chain tx flows.
 
-## Proxy Contract (Frozen)
+## Proxy Contract
 
 Browser-facing routes (example):
 
@@ -38,26 +36,20 @@ Transport contract requirements:
 4. Tenant isolation: requests for one session/node cannot access another session.
 5. Request size/time limits and rate limiting are enforced.
 
-## Wasm Runtime Contract (Frozen)
+## Wasm Runtime Contract
 
-1. Wasm runtime is authoritative for RGB transfer state machine.
-2. Proxy is transport-only; business decisions are not delegated to proxy.
+1. The wasm runtime is authoritative for the RGB transfer state machine.
+2. The proxy is transport-only; business decisions are not delegated to it.
 3. Runtime state persistence uses browser-backed storage with deterministic
    recovery semantics.
-4. Error contracts returned by wasm APIs remain deterministic and documented in
+4. Error contracts returned by wasm APIs are deterministic and documented in
    `ERROR_CONTRACT.md`.
 
-## Deliverables
+## Responsibility split
 
-1. This boundary/spec document.
-2. README reference to this document.
-3. No behavior changes are required by this document.
-
-## Exit Criteria
-
-1. Team agrees on responsibility split (wasm runtime vs proxy).
-2. No ambiguous ownership for transport, state, or auth/session logic.
-3. Follow-up implementation steps can proceed without redefining boundaries.
+The wasm runtime owns RGB transfer state, persistence, and auth/session logic;
+the proxy owns only transport. There is no shared ownership of transport, state,
+or auth/session logic across the boundary.
 
 ## RGB on the LN peer link (not the HTTP proxy)
 

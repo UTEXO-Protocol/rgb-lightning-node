@@ -163,8 +163,7 @@ class RegtestController {
 
   /**
    * Send `amountBtc` BTC from the regtest miner wallet to `address`. Used to
-   * top up the WASM SDK's BDK wallet so it can build its own funding tx in
-   * Phase 1.5+.
+   * top up the WASM SDK's BDK wallet so it can build its own funding tx.
    *
    * If `mineBlocks > 0`, mines that many blocks immediately after the send so
    * the receiver can spend the funds without waiting for an external block
@@ -253,7 +252,7 @@ class RegtestController {
 
   /**
    * Wait until the indexer has *accepted* a transaction (mempool or confirmed),
-   * regardless of confirmation status. We use this in Phase 1.6 to verify that
+   * regardless of confirmation status. We use this to verify that
    * the WASM SDK has broadcast the funding tx itself via its own LDK
    * `BroadcasterInterface` → `chain_sync::broadcast_tx` pipeline (POST `/tx`).
    * Returns the raw `/tx/{txid}/status` body on success.

@@ -41,9 +41,11 @@ const ASSET_TOTAL_ISSUE = 2000; // total NIA minted
 const ASSET_CHANNEL_AMOUNT = 1000n; // RGB committed into the channel on open
 const ASSET_SEND_AMOUNT = 100n; // RGB moved to the native node over LN
 const BTC_KEYSEND_MSAT = 30_000_000n; // 30k sat, seeds native outbound liquidity above reserve
-const BOLT11_SEND_MSAT = 2_000_000n;
-const BOLT11_RECEIVE_MSAT = 1_000_000n;
-const HODL_INVOICE_MSAT = 1_000_000n;
+// Channels opened by the wasm node enforce the native-parity 3M-msat HTLC floor
+// (our_htlc_minimum_msat = HTLC_MIN_MSAT), so any HTLC the wasm *receives* must be >= 3M.
+const BOLT11_SEND_MSAT = 3_000_000n;
+const BOLT11_RECEIVE_MSAT = 3_000_000n;
+const HODL_INVOICE_MSAT = 3_000_000n;
 const RGB_INVOICE_SEND_AMOUNT = 100n;
 const RGB_INVOICE_RECEIVE_AMOUNT = 40n;
 const RGB_INVOICE_SEND_MSAT = 10_000_000n;
@@ -514,7 +516,12 @@ async function runFlow(cfg, runtimeId) {
   log("RGB channel open initiated", { tempChannelId: rgbOpen.channel_id });
   const rgbChannel = await waitForUsableChannel(node, nativePubkey, true, cfg.gatewayUrl, walletAddress, CHANNEL_READY_TIMEOUT_MS);
   const rgbChannelId = rgbChannel.channel_id;
-  log("✅ RGB channel usable", { id: rgbChannelId });
+  // WS4: the colored channel now opens with mandatory anchors + per-channel handshake config
+  // (announce/htlc-min/min-depth/to_self_delay). If the native peer rejected that negotiation the
+  // channel would never reach `usable`, so this assertion is the channel-open-parity regression gate.
+  assert(rgbChannel.is_usable === true, "RGB channel did not become usable (anchor/handshake negotiation?)");
+  assert(!!rgbChannel.asset_id, "RGB channel missing asset_id");
+  log("✅ RGB channel usable (WS4 anchors+handshake config negotiated)", { id: rgbChannelId });
 
   const assetBalAfterOpen = wallet.getAssetBalanceValue(assetId);
   log("Asset balance after RGB channel open (channel amount now off-chain)", assetBalAfterOpen);
@@ -636,6 +643,19 @@ async function runFlow(cfg, runtimeId) {
     RGB_INVOICE_RECEIVE_AMOUNT,
   );
   const decodedWasmRgbInvoice = node.decodeLnInvoiceValue(wasmRgbInvoice.invoice);
+  // WS2: decodeLnInvoice must surface the RGB asset fields (previously hardcoded null).
+  assert(
+    decodedWasmRgbInvoice.asset_id === assetId,
+    `decoded RGB invoice asset_id mismatch (got ${decodedWasmRgbInvoice.asset_id}, want ${assetId})`,
+  );
+  assert(
+    BigInt(decodedWasmRgbInvoice.asset_amount ?? 0n) === RGB_INVOICE_RECEIVE_AMOUNT,
+    `decoded RGB invoice asset_amount mismatch (got ${decodedWasmRgbInvoice.asset_amount}, want ${RGB_INVOICE_RECEIVE_AMOUNT})`,
+  );
+  log("✅ WS2: decodeLnInvoice surfaced RGB asset fields", {
+    asset_id: decodedWasmRgbInvoice.asset_id,
+    asset_amount: decodedWasmRgbInvoice.asset_amount,
+  });
   await nativePayInvoice(node, cfg.nativeMgmtUrl, {
     invoice: wasmRgbInvoice.invoice,
     amt_msat: Number(RGB_INVOICE_RECEIVE_MSAT),
