@@ -283,6 +283,62 @@ fn map_token(data: crate::sdk::Token) -> Token {
     }
 }
 
+fn map_transaction(tx: crate::sdk::TransactionData) -> Result<Transaction, RlnError> {
+    let txid = Txid::from_str(&tx.txid).map_err(|_| RlnError::Internal)?;
+    let transaction_type = match tx.transaction_type {
+        crate::sdk::TransactionType::RgbSend => TransactionType::RgbSend,
+        crate::sdk::TransactionType::Drain => TransactionType::Drain,
+        crate::sdk::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
+        crate::sdk::TransactionType::SendBtc => TransactionType::SendBtc,
+        crate::sdk::TransactionType::Incoming => TransactionType::Incoming,
+    };
+    Ok(Transaction {
+        transaction_type,
+        txid,
+        received: tx.received,
+        sent: tx.sent,
+        fee: tx.fee,
+        confirmation_time: tx.confirmation_time.map(|ct| BlockTime {
+            height: ct.height,
+            timestamp: ct.timestamp,
+        }),
+    })
+}
+
+fn map_transfer(t: crate::sdk::TransferData) -> Result<Transfer, RlnError> {
+    let txid = t
+        .txid
+        .map(|v| Txid::from_str(&v).map_err(|_| RlnError::Internal))
+        .transpose()?;
+    Ok(Transfer {
+        idx: t.idx,
+        created_at: t.created_at,
+        updated_at: t.updated_at,
+        status: format!("{:?}", t.status),
+        requested_assignment: t.requested_assignment.map(|a| format!("{:?}", a)),
+        assignments: t
+            .assignments
+            .into_iter()
+            .map(|a| format!("{:?}", a))
+            .collect(),
+        kind: format!("{:?}", t.kind),
+        txid,
+        recipient_id: t.recipient_id,
+        receive_utxo: t.receive_utxo,
+        change_utxo: t.change_utxo,
+        expiration: t.expiration,
+        transport_endpoints: t
+            .transport_endpoints
+            .into_iter()
+            .map(|e| TransferTransportEndpoint {
+                endpoint: e.endpoint,
+                transport_type: format!("{:?}", e.transport_type),
+                used: e.used,
+            })
+            .collect(),
+    })
+}
+
 impl SdkNode {
     pub fn create(request: SdkInitRequest) -> Result<Self, RlnError> {
         let handle = handle_from_request(request)?;
@@ -947,29 +1003,17 @@ impl SdkNode {
     pub fn list_transactions(&self, skip_sync: bool) -> Result<Vec<Transaction>, RlnError> {
         let state = self.handle.app_state();
         let txs = block_on_sdk(sdk::list_transactions(state, skip_sync))?;
-        txs.into_iter()
-            .map(|tx| {
-                let txid = Txid::from_str(&tx.txid).map_err(|_| RlnError::Internal)?;
-                let transaction_type = match tx.transaction_type {
-                    crate::sdk::TransactionType::RgbSend => TransactionType::RgbSend,
-                    crate::sdk::TransactionType::Drain => TransactionType::Drain,
-                    crate::sdk::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
-                    crate::sdk::TransactionType::SendBtc => TransactionType::SendBtc,
-                    crate::sdk::TransactionType::Incoming => TransactionType::Incoming,
-                };
-                Ok(Transaction {
-                    transaction_type,
-                    txid,
-                    received: tx.received,
-                    sent: tx.sent,
-                    fee: tx.fee,
-                    confirmation_time: tx.confirmation_time.map(|ct| BlockTime {
-                        height: ct.height,
-                        timestamp: ct.timestamp,
-                    }),
-                })
-            })
-            .collect()
+        txs.into_iter().map(map_transaction).collect()
+    }
+
+    pub fn list_transactions_by_txid(
+        &self,
+        txid: String,
+        skip_sync: bool,
+    ) -> Result<Vec<Transaction>, RlnError> {
+        let state = self.handle.app_state();
+        let txs = block_on_sdk(sdk::list_transactions_by_txid(state, txid, skip_sync))?;
+        txs.into_iter().map(map_transaction).collect()
     }
 
     pub fn network_info(&self) -> Result<NetworkInfo, RlnError> {
@@ -1270,41 +1314,13 @@ impl SdkNode {
     pub fn list_transfers(&self, asset_id: ContractId) -> Result<Vec<Transfer>, RlnError> {
         let state = self.handle.app_state();
         let resp = block_on_sdk(sdk::list_transfers(state, asset_id.to_string()))?;
-        resp.into_iter()
-            .map(|t| {
-                let txid = t
-                    .txid
-                    .map(|v| Txid::from_str(&v).map_err(|_| RlnError::Internal))
-                    .transpose()?;
-                Ok(Transfer {
-                    idx: t.idx,
-                    created_at: t.created_at,
-                    updated_at: t.updated_at,
-                    status: format!("{:?}", t.status),
-                    requested_assignment: t.requested_assignment.map(|a| format!("{:?}", a)),
-                    assignments: t
-                        .assignments
-                        .into_iter()
-                        .map(|a| format!("{:?}", a))
-                        .collect(),
-                    kind: format!("{:?}", t.kind),
-                    txid,
-                    recipient_id: t.recipient_id,
-                    receive_utxo: t.receive_utxo,
-                    change_utxo: t.change_utxo,
-                    expiration: t.expiration,
-                    transport_endpoints: t
-                        .transport_endpoints
-                        .into_iter()
-                        .map(|e| TransferTransportEndpoint {
-                            endpoint: e.endpoint,
-                            transport_type: format!("{:?}", e.transport_type),
-                            used: e.used,
-                        })
-                        .collect(),
-                })
-            })
-            .collect()
+        resp.into_iter().map(map_transfer).collect()
+    }
+
+    pub fn list_transfers_by_txid(&self, txid: String) -> Result<Vec<Transfer>, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::list_transfers_by_txid(state, txid))?;
+        resp.into_iter().map(map_transfer).collect()
     }
 
     pub fn list_unspents(&self, skip_sync: bool) -> Result<Vec<Unspent>, RlnError> {

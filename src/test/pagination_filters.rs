@@ -192,3 +192,120 @@ async fn transactions_pagination() {
     }
     assert_eq!(seen.len(), total);
 }
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn by_txid() {
+    initialize();
+
+    let test_dir_node1 = format!("{TEST_DIR_BASE}by_txid/node1");
+    let test_dir_node2 = format!("{TEST_DIR_BASE}by_txid/node2");
+    let (node1_addr, _) = start_node(&test_dir_node1, NODE1_PEER_PORT, false).await;
+    let (node2_addr, _) = start_node(&test_dir_node2, NODE2_PEER_PORT, false).await;
+
+    fund_and_create_utxos(node1_addr, None).await;
+    fund_and_create_utxos(node2_addr, None).await;
+
+    let asset_id = issue_asset_nia(node1_addr).await.asset_id;
+
+    // two sends produce two distinct on-chain txids
+    for amount in [100u64, 50] {
+        let recipient_id = rgb_invoice(node2_addr, None, false).await.recipient_id;
+        send_asset(
+            node1_addr,
+            &asset_id,
+            Assignment::Fungible(amount),
+            recipient_id,
+            None,
+        )
+        .await;
+        mine(false);
+        refresh_transfers(node2_addr).await;
+        refresh_transfers(node1_addr).await;
+    }
+
+    // group the sender's transfers by their on-chain txid
+    let all = list_transfers(node1_addr, &asset_id).await;
+    let mut idx_by_txid: HashMap<String, Vec<i32>> = HashMap::new();
+    for t in &all {
+        if let Some(txid) = &t.txid {
+            idx_by_txid.entry(txid.clone()).or_default().push(t.idx);
+        }
+    }
+    assert!(
+        idx_by_txid.len() >= 2,
+        "expected at least two distinct txids, got {}",
+        idx_by_txid.len()
+    );
+
+    // for every distinct txid, by-txid returns exactly that txid's transfers (and
+    // nothing from the other txids); the BTC tx lookup returns only matching txs
+    let mut saw_btc_match = false;
+    for (txid, mut expected) in idx_by_txid.clone() {
+        expected.sort_unstable();
+        let mut got: Vec<i32> = list_transfers_by_txid(node1_addr, &txid)
+            .await
+            .iter()
+            .map(|t| t.idx)
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, expected, "transfers by txid {txid} mismatch");
+
+        let txs = list_transactions_by_txid(node1_addr, &txid).await;
+        assert!(txs.iter().all(|t| t.txid == txid));
+        if txs.len() == 1 {
+            saw_btc_match = true;
+        }
+    }
+    assert!(
+        saw_btc_match,
+        "expected at least one txid to resolve to exactly one wallet tx"
+    );
+
+    // receiver side: its receive transfers are reachable by the same txid
+    let rcv = list_transfers(node2_addr, &asset_id).await;
+    let rcv_txid = rcv
+        .iter()
+        .filter_map(|t| t.txid.clone())
+        .next()
+        .expect("receiver should have a transfer with a txid");
+    let rcv_by_txid = list_transfers_by_txid(node2_addr, &rcv_txid).await;
+    assert!(!rcv_by_txid.is_empty());
+    assert!(rcv_by_txid
+        .iter()
+        .all(|t| t.txid.as_deref() == Some(rcv_txid.as_str())));
+
+    // unknown txid yields empty results on both endpoints
+    let unknown = "0".repeat(64);
+    assert!(list_transfers_by_txid(node1_addr, &unknown)
+        .await
+        .is_empty());
+    assert!(list_transactions_by_txid(node1_addr, &unknown)
+        .await
+        .is_empty());
+
+    // neither asset_id nor txid is a bad request
+    let payload = ListTransfersRequest {
+        asset_id: None,
+        txid: None,
+        index_offset: None,
+        max_transfers: None,
+        status: None,
+        created_after: None,
+        created_before: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node1_addr}/listtransfers"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        res,
+        reqwest::StatusCode::BAD_REQUEST,
+        "either asset_id or txid",
+        "InvalidRequest",
+    )
+    .await;
+}

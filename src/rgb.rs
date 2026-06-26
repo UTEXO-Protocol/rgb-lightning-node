@@ -338,6 +338,13 @@ impl UnlockedAppState {
         self.rgb_wallet_wrapper.list_transfers(asset_id)
     }
 
+    pub(crate) fn rgb_list_transfers_by_txid(
+        &self,
+        txid: String,
+    ) -> Result<Vec<Transfer>, RgbLibError> {
+        self.rgb_wallet_wrapper.list_transfers_by_txid(txid)
+    }
+
     pub(crate) fn rgb_list_unspents(
         &self,
         settled_only: bool,
@@ -797,6 +804,13 @@ impl RgbLibWalletWrapper {
 
     pub(crate) fn list_transfers(&self, asset_id: String) -> Result<Vec<Transfer>, RgbLibError> {
         self.get_rgb_wallet().list_transfers(Some(asset_id))
+    }
+
+    pub(crate) fn list_transfers_by_txid(
+        &self,
+        txid: String,
+    ) -> Result<Vec<Transfer>, RgbLibError> {
+        self.get_rgb_wallet().list_transfers_by_txid(txid)
     }
 
     pub(crate) fn list_unspents(

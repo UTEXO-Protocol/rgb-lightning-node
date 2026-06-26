@@ -520,6 +520,30 @@ fn success() {
         assert!(xfer_3.change_utxo.is_none());
         assert!(xfer_3.expiration.is_none());
         assert!(!xfer_3.transport_endpoints.is_empty());
+
+        // txid-based binding lookups resolve the same on-chain transaction
+        let send_txid = xfer_2.txid.as_ref().expect("send txid").to_string();
+        let by_txid = node_a
+            .list_transfers_by_txid(send_txid.clone())
+            .expect("node A list_transfers_by_txid");
+        assert!(!by_txid.is_empty());
+        assert!(by_txid.iter().all(|t| t.txid == xfer_2.txid));
+        assert!(by_txid.iter().any(|t| t.idx == xfer_2.idx));
+
+        let txs_by_txid = node_a
+            .list_transactions_by_txid(send_txid.clone(), false)
+            .expect("node A list_transactions_by_txid");
+        assert_eq!(txs_by_txid.len(), 1);
+        assert_eq!(txs_by_txid[0].txid.to_string(), send_txid);
+        assert!(matches!(
+            txs_by_txid[0].transaction_type,
+            TransactionType::RgbSend
+        ));
+
+        assert!(node_a
+            .list_transfers_by_txid("0".repeat(64))
+            .expect("node A list_transfers_by_txid unknown")
+            .is_empty());
     }));
 
     node_a.shutdown();

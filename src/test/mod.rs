@@ -1372,6 +1372,7 @@ async fn list_transactions_full(
         skip_sync: false,
         index_offset,
         max_transactions,
+        txid: None,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/listtransactions"))
@@ -1408,7 +1409,8 @@ async fn list_transfers_full(
 ) -> ListTransfersResponse {
     println!("listing transfers for asset {asset_id} on node {node_address}");
     let payload = ListTransfersRequest {
-        asset_id: asset_id.to_string(),
+        asset_id: Some(asset_id.to_string()),
+        txid: None,
         index_offset: filter.index_offset,
         max_transfers: filter.max_transfers,
         status: filter.status,
@@ -1426,6 +1428,53 @@ async fn list_transfers_full(
         .json::<ListTransfersResponse>()
         .await
         .unwrap()
+}
+
+async fn list_transfers_by_txid(node_address: SocketAddr, txid: &str) -> Vec<Transfer> {
+    println!("listing transfers for txid {txid} on node {node_address}");
+    let payload = ListTransfersRequest {
+        asset_id: None,
+        txid: Some(txid.to_string()),
+        index_offset: None,
+        max_transfers: None,
+        status: None,
+        created_after: None,
+        created_before: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/listtransfers"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<ListTransfersResponse>()
+        .await
+        .unwrap()
+        .transfers
+}
+
+async fn list_transactions_by_txid(node_address: SocketAddr, txid: &str) -> Vec<Transaction> {
+    println!("listing transactions for txid {txid} on node {node_address}");
+    let payload = ListTransactionsRequest {
+        skip_sync: false,
+        index_offset: None,
+        max_transactions: None,
+        txid: Some(txid.to_string()),
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/listtransactions"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<ListTransactionsResponse>()
+        .await
+        .unwrap()
+        .transactions
 }
 
 async fn list_unspents(node_address: SocketAddr) -> Vec<Unspent> {

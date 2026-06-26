@@ -4166,6 +4166,68 @@ pub(crate) async fn list_swaps(state: Arc<AppState>) -> Result<SwapListData, API
     })
 }
 
+fn to_transaction_data(tx: rgb_lib::wallet::Transaction) -> TransactionData {
+    TransactionData {
+        transaction_type: match tx.transaction_type {
+            rgb_lib::wallet::TransactionType::RgbSend => TransactionType::RgbSend,
+            rgb_lib::wallet::TransactionType::Drain => TransactionType::Drain,
+            rgb_lib::wallet::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
+            rgb_lib::wallet::TransactionType::SendBtc => TransactionType::SendBtc,
+            rgb_lib::wallet::TransactionType::Incoming => TransactionType::Incoming,
+        },
+        txid: tx.txid,
+        received: tx.received,
+        sent: tx.sent,
+        fee: tx.fee,
+        confirmation_time: tx.confirmation_time.map(|ct| BlockTime {
+            height: ct.height,
+            timestamp: ct.timestamp,
+        }),
+    }
+}
+
+fn to_transfer_data(transfer: rgb_lib::wallet::Transfer) -> TransferData {
+    TransferData {
+        idx: transfer.idx,
+        created_at: transfer.created_at,
+        updated_at: transfer.updated_at,
+        status: match transfer.status {
+            rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
+            rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
+            rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
+            rgb_lib::TransferStatus::WaitingConfirmations => TransferStatus::WaitingConfirmations,
+            rgb_lib::TransferStatus::Settled => TransferStatus::Settled,
+            rgb_lib::TransferStatus::Failed => TransferStatus::Failed,
+        },
+        requested_assignment: transfer.requested_assignment,
+        assignments: transfer.assignments,
+        kind: match transfer.kind {
+            rgb_lib::wallet::TransferKind::Issuance => TransferKind::Issuance,
+            rgb_lib::wallet::TransferKind::ReceiveBlind => TransferKind::ReceiveBlind,
+            rgb_lib::wallet::TransferKind::ReceiveWitness => TransferKind::ReceiveWitness,
+            rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
+            rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
+            rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
+        },
+        txid: transfer.txid,
+        recipient_id: transfer.recipient_id,
+        receive_utxo: transfer.receive_utxo.map(|u| u.to_string()),
+        change_utxo: transfer.change_utxo.map(|u| u.to_string()),
+        expiration: transfer.expiration_timestamp.map(|t| t as i64),
+        transport_endpoints: transfer
+            .transport_endpoints
+            .iter()
+            .map(|tte| TransferTransportEndpointData {
+                endpoint: tte.endpoint.clone(),
+                transport_type: match tte.transport_type {
+                    rgb_lib::TransportType::JsonRpc => TransportType::JsonRpc,
+                },
+                used: tte.used,
+            })
+            .collect(),
+    }
+}
+
 pub(crate) async fn list_transactions(
     state: Arc<AppState>,
     skip_sync: bool,
@@ -4173,28 +4235,27 @@ pub(crate) async fn list_transactions(
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let mut transactions = vec![];
-    for tx in unlocked_state.rgb_list_transactions(skip_sync)? {
-        transactions.push(TransactionData {
-            transaction_type: match tx.transaction_type {
-                rgb_lib::wallet::TransactionType::RgbSend => TransactionType::RgbSend,
-                rgb_lib::wallet::TransactionType::Drain => TransactionType::Drain,
-                rgb_lib::wallet::TransactionType::CreateUtxos => TransactionType::CreateUtxos,
-                rgb_lib::wallet::TransactionType::SendBtc => TransactionType::SendBtc,
-                rgb_lib::wallet::TransactionType::Incoming => TransactionType::Incoming,
-            },
-            txid: tx.txid,
-            received: tx.received,
-            sent: tx.sent,
-            fee: tx.fee,
-            confirmation_time: tx.confirmation_time.map(|ct| BlockTime {
-                height: ct.height,
-                timestamp: ct.timestamp,
-            }),
-        });
-    }
+    Ok(unlocked_state
+        .rgb_list_transactions(skip_sync)?
+        .into_iter()
+        .map(to_transaction_data)
+        .collect())
+}
 
-    Ok(transactions)
+pub(crate) async fn list_transactions_by_txid(
+    state: Arc<AppState>,
+    txid: String,
+    skip_sync: bool,
+) -> Result<Vec<TransactionData>, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    Ok(unlocked_state
+        .rgb_list_transactions(skip_sync)?
+        .into_iter()
+        .map(to_transaction_data)
+        .filter(|tx| tx.txid == txid)
+        .collect())
 }
 
 pub(crate) async fn list_transfers(
@@ -4204,51 +4265,25 @@ pub(crate) async fn list_transfers(
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let mut transfers = vec![];
-    for transfer in unlocked_state.rgb_list_transfers(asset_id)? {
-        transfers.push(TransferData {
-            idx: transfer.idx,
-            created_at: transfer.created_at,
-            updated_at: transfer.updated_at,
-            status: match transfer.status {
-                rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
-                rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
-                rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
-                rgb_lib::TransferStatus::WaitingConfirmations => {
-                    TransferStatus::WaitingConfirmations
-                }
-                rgb_lib::TransferStatus::Settled => TransferStatus::Settled,
-                rgb_lib::TransferStatus::Failed => TransferStatus::Failed,
-            },
-            requested_assignment: transfer.requested_assignment,
-            assignments: transfer.assignments,
-            kind: match transfer.kind {
-                rgb_lib::wallet::TransferKind::Issuance => TransferKind::Issuance,
-                rgb_lib::wallet::TransferKind::ReceiveBlind => TransferKind::ReceiveBlind,
-                rgb_lib::wallet::TransferKind::ReceiveWitness => TransferKind::ReceiveWitness,
-                rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
-                rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
-                rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
-            },
-            txid: transfer.txid,
-            recipient_id: transfer.recipient_id,
-            receive_utxo: transfer.receive_utxo.map(|u| u.to_string()),
-            change_utxo: transfer.change_utxo.map(|u| u.to_string()),
-            expiration: transfer.expiration_timestamp.map(|t| t as i64),
-            transport_endpoints: transfer
-                .transport_endpoints
-                .iter()
-                .map(|tte| TransferTransportEndpointData {
-                    endpoint: tte.endpoint.clone(),
-                    transport_type: match tte.transport_type {
-                        rgb_lib::TransportType::JsonRpc => TransportType::JsonRpc,
-                    },
-                    used: tte.used,
-                })
-                .collect(),
-        });
-    }
-    Ok(transfers)
+    Ok(unlocked_state
+        .rgb_list_transfers(asset_id)?
+        .into_iter()
+        .map(to_transfer_data)
+        .collect())
+}
+
+pub(crate) async fn list_transfers_by_txid(
+    state: Arc<AppState>,
+    txid: String,
+) -> Result<Vec<TransferData>, APIError> {
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap();
+
+    Ok(unlocked_state
+        .rgb_list_transfers_by_txid(txid)?
+        .into_iter()
+        .map(to_transfer_data)
+        .collect())
 }
 
 pub(crate) async fn list_unspents(

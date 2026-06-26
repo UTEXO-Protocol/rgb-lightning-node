@@ -374,6 +374,15 @@ pub(crate) fn list_transfers(
     json(transfers.into_iter().map(JsonTransfer::from).collect::<Vec<_>>())
 }
 
+pub(crate) fn list_transfers_by_txid(
+    node: &COpaqueStruct,
+    txid: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let transfers = node.list_transfers_by_txid(ptr_to_string(txid))?;
+    json(transfers.into_iter().map(JsonTransfer::from).collect::<Vec<_>>())
+}
+
 pub(crate) fn list_unspents(
     node: &COpaqueStruct,
     skip_sync: bool,
@@ -572,6 +581,16 @@ pub(crate) fn list_transactions(
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
     let txs = node.list_transactions(skip_sync)?;
+    json(txs.into_iter().map(JsonTransaction::from).collect::<Vec<_>>())
+}
+
+pub(crate) fn list_transactions_by_txid(
+    node: &COpaqueStruct,
+    txid: *const c_char,
+    skip_sync: bool,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let txs = node.list_transactions_by_txid(ptr_to_string(txid), skip_sync)?;
     json(txs.into_iter().map(JsonTransaction::from).collect::<Vec<_>>())
 }
 

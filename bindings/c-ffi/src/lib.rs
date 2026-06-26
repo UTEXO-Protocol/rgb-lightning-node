@@ -342,6 +342,17 @@ pub extern "C" fn rln_list_transfers(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rln_list_transfers_by_txid(
+    node: &COpaqueStruct,
+    txid: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_list_transfers_by_txid",
+        api::list_transfers_by_txid(node, txid)
+    )
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rln_list_unspents(node: &COpaqueStruct, skip_sync: bool) -> CResultString {
     ffi_call!("rln_list_unspents", api::list_unspents(node, skip_sync))
 }
@@ -502,6 +513,18 @@ pub extern "C" fn rln_list_transactions(
     skip_sync: bool,
 ) -> CResultString {
     ffi_call!("rln_list_transactions", api::list_transactions(node, skip_sync))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_list_transactions_by_txid(
+    node: &COpaqueStruct,
+    txid: *const c_char,
+    skip_sync: bool,
+) -> CResultString {
+    ffi_call!(
+        "rln_list_transactions_by_txid",
+        api::list_transactions_by_txid(node, txid, skip_sync)
+    )
 }
 
 #[unsafe(no_mangle)]

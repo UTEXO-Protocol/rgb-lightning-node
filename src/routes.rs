@@ -871,6 +871,7 @@ pub(crate) struct ListTransactionsRequest {
     pub(crate) skip_sync: bool,
     pub(crate) index_offset: Option<u64>,
     pub(crate) max_transactions: Option<u64>,
+    pub(crate) txid: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -882,7 +883,8 @@ pub(crate) struct ListTransactionsResponse {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct ListTransfersRequest {
-    pub(crate) asset_id: String,
+    pub(crate) asset_id: Option<String>,
+    pub(crate) txid: Option<String>,
     pub(crate) index_offset: Option<u64>,
     pub(crate) max_transfers: Option<u64>,
     pub(crate) status: Option<TransferStatus>,
@@ -3329,6 +3331,10 @@ pub(crate) async fn list_transactions(
         })
     }
 
+    if let Some(txid) = &payload.txid {
+        transactions.retain(|t| &t.txid == txid);
+    }
+
     // No stable index; order newest-first (unconfirmed first, then by height)
     // and derive a descending index so the cursor walks a consistent snapshot.
     transactions.sort_by(|a, b| {
@@ -3362,8 +3368,18 @@ pub(crate) async fn list_transfers(
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
 
+    let raw_transfers = match (payload.txid, payload.asset_id) {
+        (Some(txid), _) => unlocked_state.rgb_list_transfers_by_txid(txid)?,
+        (None, Some(asset_id)) => unlocked_state.rgb_list_transfers(asset_id)?,
+        (None, None) => {
+            return Err(APIError::InvalidRequest(s!(
+                "either asset_id or txid must be provided"
+            )));
+        }
+    };
+
     let mut transfers = vec![];
-    for transfer in unlocked_state.rgb_list_transfers(payload.asset_id)? {
+    for transfer in raw_transfers {
         transfers.push(Transfer {
             idx: transfer.idx,
             created_at: transfer.created_at,

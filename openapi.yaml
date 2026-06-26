@@ -2733,6 +2733,11 @@ components:
             - 'null'
           format: uint64
           description: Maximum number to return. Defaults to 100 when absent or zero.
+        txid:
+          type:
+            - string
+            - 'null'
+          description: Return only the on-chain transaction with this txid.
     ListTransactionsResponse:
       type: object
       required:
@@ -2756,12 +2761,22 @@ components:
             index_offset to fetch the next, older page.
     ListTransfersRequest:
       type: object
-      required:
-        - asset_id
+      description: >-
+        Provide either asset_id (list that asset's transfers) or txid (list the
+        transfers committed by that on-chain transaction, across all assets).
       properties:
         asset_id:
-          type: string
+          type:
+            - string
+            - 'null'
           example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+        txid:
+          type:
+            - string
+            - 'null'
+          description: >-
+            Return the transfers committed by the on-chain transaction with this
+            txid. Takes precedence over asset_id when both are given.
         index_offset:
           type:
             - integer

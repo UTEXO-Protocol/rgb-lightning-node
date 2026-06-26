@@ -120,7 +120,13 @@ struct CResultString rln_list_swaps(const struct COpaqueStruct *node);
 
 struct CResultString rln_list_transactions(const struct COpaqueStruct *node, bool skip_sync);
 
+struct CResultString rln_list_transactions_by_txid(const struct COpaqueStruct *node,
+                                                   const char *txid,
+                                                   bool skip_sync);
+
 struct CResultString rln_list_transfers(const struct COpaqueStruct *node, const char *asset_id);
+
+struct CResultString rln_list_transfers_by_txid(const struct COpaqueStruct *node, const char *txid);
 
 struct CResultString rln_list_unspents(const struct COpaqueStruct *node, bool skip_sync);
 
