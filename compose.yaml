@@ -1,5 +1,6 @@
 services:
   bitcoind:
+    platform: linux/amd64
     image: registry.gitlab.com/hashbeam/docker/bitcoind:30.2
     command: ["-fallbackfee=0.0002", "-rest"]
     environment:
@@ -11,6 +12,7 @@ services:
     volumes:
       - ./datacore:/srv/app/.bitcoin
   electrs:
+    platform: linux/amd64
     image: registry.gitlab.com/hashbeam/docker/electrs:0.11.0
     environment:
       MYUID: 1000
@@ -39,6 +41,7 @@ services:
     ports:
       - 3002:3002
   proxy:
+    platform: linux/amd64
     image: ghcr.io/rgb-tools/rgb-proxy-server:0.3.0
     ports:
       - 3000:3000
