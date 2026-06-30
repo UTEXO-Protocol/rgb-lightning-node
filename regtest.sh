@@ -65,6 +65,20 @@ _wait_for_electrs() {
     done
 }
 
+_wait_for_proxy() {
+    # wait for proxy to be responding to requests
+    start_time=$(date +%s)
+    until curl -s http://127.0.0.1:3000 >/dev/null 2>&1; do
+        current_time=$(date +%s)
+        if [ $((current_time - start_time)) -gt $TIMEOUT ]; then
+            echo "Timeout waiting for proxy to start"
+            $COMPOSE logs proxy
+            exit 1
+        fi
+        sleep 1
+    done
+}
+
 _start_services() {
     _stop_services
 
@@ -85,6 +99,8 @@ _start_services() {
     $COMPOSE up -d
     echo "waiting for electrs to have completed startup"
     _wait_for_electrs
+    echo "waiting for proxy to be ready"
+    _wait_for_proxy
 
     # optionally start VSS server
     if [ "${VSS:-}" = "1" ]; then
