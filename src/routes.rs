@@ -34,6 +34,7 @@ use lightning::{
         router::{PaymentParameters, RouteParameters},
     },
     util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig},
+    util::persist::KVStoreSync,
     util::{errors::APIError as LDKAPIError, IS_SWAP_SCID},
 };
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description, PaymentSecret};
@@ -120,6 +121,8 @@ const OPENCHANNEL_MIN_SAT: u64 = 5506;
 const OPENCHANNEL_MAX_SAT: u64 = 16777215;
 const OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
 const VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
+const ASSET_LINK_NAMESPACE: &str = "asset_link";
+const ASSET_LINK_SIGNATURE_DOMAIN: &str = "RLN_ASSET_LINK_V1";
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AddressResponse {
@@ -216,6 +219,57 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             reject_list_url: value.reject_list_url,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AssetLink {
+    pub(crate) asset_id: String,
+    pub(crate) linked_asset_id: Option<String>,
+    pub(crate) issuer_pubkey: String,
+    pub(crate) signature: Option<String>,
+    pub(crate) created_at: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct AssetLinkCreateRequest {
+    pub(crate) asset_id: String,
+    pub(crate) linked_asset_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct AssetLinkCreateResponse {
+    pub(crate) asset_link: AssetLink,
+}
+
+fn asset_link_read_record(
+    kv_store: &dyn KVStoreSync,
+    asset_id: &str,
+) -> Result<AssetLink, APIError> {
+    match kv_store.read(ASSET_LINK_NAMESPACE, "", asset_id) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| APIError::Unexpected(format!("invalid persisted asset link: {e}"))),
+        Err(e) if e.kind() == bitcoin::io::ErrorKind::NotFound => Err(APIError::InvalidRequest(
+            format!("asset link record for {asset_id} is missing"),
+        )),
+        Err(e) => Err(APIError::IO(std::io::Error::other(format!(
+            "asset link read failed: {e}"
+        )))),
+    }
+}
+
+fn asset_link_write_record(
+    kv_store: &dyn KVStoreSync,
+    asset_link: &AssetLink,
+) -> Result<(), APIError> {
+    let encoded = serde_json::to_vec(asset_link)
+        .map_err(|e| APIError::Unexpected(format!("failed to serialize asset link: {e}")))?;
+    kv_store
+        .write(ASSET_LINK_NAMESPACE, "", &asset_link.asset_id, encoded)
+        .map_err(|e| {
+            APIError::IO(std::io::Error::other(format!(
+                "asset link write failed: {e}"
+            )))
+        })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1834,6 +1888,77 @@ pub(crate) async fn asset_balance(
     }))
 }
 
+pub(crate) async fn asset_link_create(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<AssetLinkCreateRequest>, APIError>,
+) -> Result<Json<AssetLinkCreateResponse>, APIError> {
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+    let issuer_pubkey = unlocked_state.runtime_node_pubkey();
+
+    let asset_id = payload.asset_id.trim().to_string();
+    let linked_asset_id = payload.linked_asset_id.trim().to_string();
+
+    let contract_id =
+        ContractId::from_str(&asset_id).map_err(|_| APIError::InvalidAssetID(asset_id.clone()))?;
+    let linked_contract_id = ContractId::from_str(&linked_asset_id)
+        .map_err(|_| APIError::InvalidAssetID(linked_asset_id.clone()))?;
+
+    if contract_id == linked_contract_id {
+        return Err(APIError::InvalidRequest(
+            "asset_id and linked_asset_id must be different".to_string(),
+        ));
+    }
+
+    unlocked_state.rgb_get_asset_metadata(contract_id)?;
+    unlocked_state.rgb_get_asset_metadata(linked_contract_id)?;
+
+    let asset_record = asset_link_read_record(unlocked_state.kv_store.as_ref(), &asset_id)?;
+    let linked_asset_record =
+        asset_link_read_record(unlocked_state.kv_store.as_ref(), &linked_asset_id)?;
+
+    if asset_record.issuer_pubkey != issuer_pubkey
+        || linked_asset_record.issuer_pubkey != issuer_pubkey
+    {
+        return Err(APIError::InvalidRequest(
+            "asset link requires both assets to be issued by this node".to_string(),
+        ));
+    }
+
+    match asset_record.linked_asset_id.as_deref() {
+        None => {}
+        Some(existing_linked_asset_id) if existing_linked_asset_id == linked_asset_id => {
+            if asset_record.signature.is_some() && asset_record.created_at.is_some() {
+                return Ok(Json(AssetLinkCreateResponse {
+                    asset_link: asset_record,
+                }));
+            }
+            return Err(APIError::InvalidRequest(format!(
+                "asset link record for asset_id {asset_id} is partially populated"
+            )));
+        }
+        Some(_) => {
+            return Err(APIError::InvalidRequest(format!(
+                "asset link already exists for asset_id {asset_id}"
+            )));
+        }
+    }
+
+    let network = format!("{:?}", state.static_state.network);
+    let message = format!("{ASSET_LINK_SIGNATURE_DOMAIN}:{network}:{asset_id}:{linked_asset_id}");
+    let signature = unlocked_state.sign_node_message(message.as_bytes())?;
+    let asset_link = AssetLink {
+        asset_id: asset_id.clone(),
+        linked_asset_id: Some(linked_asset_id),
+        issuer_pubkey,
+        signature: Some(signature),
+        created_at: Some(get_current_timestamp()),
+    };
+    asset_link_write_record(unlocked_state.kv_store.as_ref(), &asset_link)?;
+
+    Ok(Json(AssetLinkCreateResponse { asset_link }))
+}
+
 pub(crate) async fn asset_metadata(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<AssetMetadataRequest>, APIError>,
@@ -2874,6 +2999,14 @@ pub(crate) async fn issue_asset_nia(
             payload.precision,
             payload.amounts,
         )?;
+        let no_asset_link = AssetLink {
+            asset_id: asset.asset_id.clone(),
+            linked_asset_id: None,
+            issuer_pubkey: unlocked_state.runtime_node_pubkey(),
+            signature: None,
+            created_at: None,
+        };
+        asset_link_write_record(unlocked_state.kv_store.as_ref(), &no_asset_link)?;
 
         Ok(Json(IssueAssetNIAResponse {
             asset: asset.into(),
