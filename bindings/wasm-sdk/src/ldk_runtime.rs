@@ -487,6 +487,23 @@ pub trait LdkRuntimeManager {
     ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Register a fresh async-payment hash batch with an invoice-host / LSP peer
+    /// (`async_order.new`), optionally attesting a `username@domain` Lightning Address.
+    fn apay_new_boxed(
+        &self,
+        _host_node_id: String,
+        _username: Option<String>,
+        _domain: Option<String>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>,
+    > {
+        Box::pin(async {
+            Err(JsValue::from_str(
+                "apay_new is not supported by this runtime manager",
+            ))
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1154,6 +1171,23 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
                 backend.process_pending_rgb_transactions_boxed().await?;
             }
             Ok(())
+        })
+    }
+
+    fn apay_new_boxed(
+        &self,
+        host_node_id: String,
+        username: Option<String>,
+        domain: Option<String>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>,
+    > {
+        let maybe_backend = self.live_backend.borrow().as_ref().map(Rc::clone);
+        Box::pin(async move {
+            let backend = maybe_backend.ok_or_else(|| {
+                JsValue::from_str("apay_new requires a started live LDK runtime")
+            })?;
+            backend.apay_new_boxed(host_node_id, username, domain).await
         })
     }
 

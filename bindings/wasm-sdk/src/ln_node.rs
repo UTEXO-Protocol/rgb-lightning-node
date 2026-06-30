@@ -3407,6 +3407,57 @@ impl RlnWasmNode {
             .await
     }
 
+    /// Async payments with LSP: register a fresh batch of payment hashes with the invoice-host /
+    /// LSP peer (`async_order.new`). Returns the host's order acknowledgement. Mirrors the native
+    /// SDK's `apay_new` / `/apay/new`.
+    #[wasm_bindgen(js_name = apayNewValue)]
+    pub async fn apay_new_value(&self, host_node_id: String) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let response = self
+            .ldk_runtime
+            .apay_new_boxed(host_node_id, None, None)
+            .await?;
+        crate::js_obj(&response)
+    }
+
+    #[wasm_bindgen(js_name = apayNewJson)]
+    pub async fn apay_new_json(&self, host_node_id: String) -> Result<String, JsValue> {
+        let value = self.apay_new_value(host_node_id).await?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    /// Like [`Self::apay_new_value`] but also attests a `username@domain` Lightning Address so the
+    /// LSP can serve inbound payments to that address. Mirrors `apay_new_with_address`.
+    #[wasm_bindgen(js_name = apayNewWithAddressValue)]
+    pub async fn apay_new_with_address_value(
+        &self,
+        host_node_id: String,
+        username: String,
+        domain: String,
+    ) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let response = self
+            .ldk_runtime
+            .apay_new_boxed(host_node_id, Some(username), Some(domain))
+            .await?;
+        crate::js_obj(&response)
+    }
+
+    #[wasm_bindgen(js_name = apayNewWithAddressJson)]
+    pub async fn apay_new_with_address_json(
+        &self,
+        host_node_id: String,
+        username: String,
+        domain: String,
+    ) -> Result<String, JsValue> {
+        let value = self
+            .apay_new_with_address_value(host_node_id, username, domain)
+            .await?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = closeChannel)]
     pub fn close_channel(&self, channel_id: String) -> Result<(), JsValue> {
         self.close_channel_with_options(channel_id, None, false)

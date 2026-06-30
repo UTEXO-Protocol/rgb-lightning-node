@@ -14,6 +14,11 @@ success.
   directions, then close and verify channel state is restored from persistence.
 - **`run_multihop_flow.mjs`** (page `rgb_multihop_flow.html` + `manual_js_rgb_multihop_flow.js`):
   multi-hop forwarding `native-A -> WASM -> native-B` (boots two native nodes).
+- **`run_apay_lsp_flow.mjs`** (page `apay_lsp_flow.html` + `manual_js_apay_lsp_flow.js`):
+  **async payments with LSP** — two independent wasm recipient nodes each open a channel to a
+  native invoice-host node and call `apayNewWithAddress` / `apayNew` to register signed hash
+  batches with a real [`utexo-lsp`](../../../../../utexo-lsp); the flow asserts the LSP tracked
+  them as separate orders. See the dedicated section below.
 
 ## Prerequisites
 
@@ -102,6 +107,101 @@ Useful env vars:
 the SDK (`RlnWasmNode` + `RlnWasmWallet`), bring the wallet online, and expose everything on
 `window.__sdk` without driving anything. The Playwright suite under `../../../../e2e-specs`
 drives this harness, so keep it in sync with the SDK surface.
+
+## Async payments with LSP (`run_apay_lsp_flow.mjs`)
+
+This flow needs two extra services beyond the standard infra + wasm pkg: a **native invoice-host
+node** and a **utexo-lsp** instance. Topology:
+
+```
+wasm client ──(LN custom msg 37915: async_order.new)──▶ native invoice-host RLN node
+                                                         │  (--lsp-base-url)
+                                                         ▼ HTTP /internal/async_order/new
+                                                       utexo-lsp ──▶ sqlite
+```
+
+The wasm node never talks to the LSP directly — it speaks Lightning to the host node, which relays
+to the LSP over HTTP.
+
+### 1. Standard infra + wasm pkg
+
+```sh
+cd bindings/wasm-sdk
+docker compose -f compose.wasm.yaml up -d
+wasm-pack build --target web --dev --out-dir pkg
+```
+
+### 2. Native invoice-host node (peer `9802`, REST `3101`), wired to the LSP
+
+```sh
+APAY_TOKEN=devtoken
+cargo build --release --bin rgb-lightning-node
+rm -rf /tmp/apay-host-data && mkdir -p /tmp/apay-host-data
+./target/release/rgb-lightning-node /tmp/apay-host-data \
+  --daemon-listening-port 3101 \
+  --ldk-peer-listening-port 9802 \
+  --network regtest \
+  --disable-authentication \
+  --lsp-base-url http://127.0.0.1:8080 \
+  --lsp-bearer-token "$APAY_TOKEN" &
+
+# init + unlock (point it at the compose infra indexer/proxy)
+curl -sf -X POST http://127.0.0.1:3101/init -H 'content-type: application/json' \
+  -d '{"password":"rln-password","mnemonic":"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"}' || true
+curl -sf -X POST http://127.0.0.1:3101/unlock -H 'content-type: application/json' \
+  -d '{"password":"rln-password","indexer_url":"http://127.0.0.1:3002","proxy_endpoint":"rpc://127.0.0.1:3005/json-rpc","announce_addresses":[]}'
+```
+
+### 3. utexo-lsp (`:8080`), pointed back at the host node
+
+```sh
+cd ../utexo-lsp              # sibling of the rgb-lightning-node repo root
+export SERVER_ADDR=":8080"
+export LSP_BASE_URL="http://127.0.0.1:3101"        # the invoice-host node's REST
+export RGB_NODE_BASE_URL="http://127.0.0.1:3101"
+export LIGHTNING_ADDRESS_DOMAIN_URL="http://127.0.0.1:8080"
+export APAY_BEARER_TOKEN="devtoken"                # must match --lsp-bearer-token above
+export CRON_EVERY="10s"
+go run .
+# health: curl -s http://127.0.0.1:8080/health
+```
+
+### 4. Run the flow
+
+```sh
+PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome \
+E2E_PUPPETEER=/tmp/e2e-driver/node_modules/puppeteer-core \
+node bindings/wasm-sdk/examples/wasm-interop/run_apay_lsp_flow.mjs
+```
+
+It provisions **two** independent wasm recipient nodes; each opens a vanilla channel to the host,
+calls `apayNewWithAddress` (registering a signed 200-hash batch + a `username@domain`
+Lightning-Address attestation), then `apayNew` to refill, asserting the LSP accepted both batches
+and the per-host hash cursor advanced (no hash reuse). It then asserts the two recipients are
+distinct LN peers tracked as separate LSP orders.
+
+It then runs the **payment path**: node A keysends the host some outbound liquidity, node B resolves
+node A's Lightning Address via the LSP's LNURL-pay endpoints and pays it. The host holds B's HTLC
+and asks A for an invoice (`async_order.request_invoice` over custom message 37915); A's wasm backend
+re-derives the preimage for the requested hash and mints the invoice. **That A-mints-the-invoice
+step (the new wasm capability) is hard-asserted.** A successful run ends with `✅✅✅ ... PASSED`
+and exit code 0.
+
+> **Full settlement is best-effort, not asserted.** The final host→A forward + B settle requires the
+> host node to `/sendpayment` an invoice whose hash it already holds as a HODL inbound — utexo-lsp's
+> intended single-node forward (it pays the outbound to *learn the preimage*, then claims B's hodl).
+> A stock `rgb-lightning-node` rejects this with `PaymentHashAlreadyUsed`
+> ([routes.rs](../../../../src/routes.rs), in `send_payment`), so B's payment stays pending and the
+> example logs that rather than failing. To observe full end-to-end settlement, relax that guard so
+> the node permits paying a hash it holds as a hodl inbound. The payment leg also depends on the
+> utexo-lsp cron (`CRON_EVERY`) advancing its outbox and on enough host→A liquidity (seeded by A's
+> keysend).
+
+The defaults (host peer `127.0.0.1:9802`, host
+REST `127.0.0.1:3101`, LN-address domain `127.0.0.1:8080`) live in `DEFAULTS` in
+`manual_js_apay_lsp_flow.js` and can be overridden per run via page query params
+(`?nativePeerAddr=`, `?nativeMgmtUrl=`, `?lnAddressDomain=`) when opening `apay_lsp_flow.html`
+manually in a browser.
 
 ## Notes
 

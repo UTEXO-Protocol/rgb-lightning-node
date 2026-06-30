@@ -55,6 +55,7 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use secp256k1::PublicKey as SecpPublicKey;
 use wasm_bindgen::prelude::JsValue;
 
+use crate::apay;
 use crate::ldk_runtime::{
     LdkRuntimeFundingRequestData, LdkRuntimeFundingTxSubmissionData, LdkRuntimeLivePaymentData,
     LdkRuntimeOpenChannelRequestData, LdkRuntimeOpenChannelResultData,
@@ -267,6 +268,20 @@ pub trait LdkLiveBackend {
     ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Register a fresh batch of async-payment hashes with the invoice-host / LSP peer
+    /// (`async_order.new`). When `username`/`domain` are supplied a Lightning-Address attestation
+    /// is included so the LSP can serve `username@domain`. Resolves once the host replies.
+    fn apay_new_boxed(
+        &self,
+        _host_node_id: String,
+        _username: Option<String>,
+        _domain: Option<String>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>,
+    > {
+        Box::pin(async { Err(JsValue::from_str("apay_new is not supported by this backend")) })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -421,6 +436,11 @@ pub struct WasmLdkLiveBackend {
     /// fail it back before the deadline forces a channel close. Repopulated from replayed
     /// `PaymentClaimable` events on restart (intentionally not persisted).
     hodl_claim_deadlines: RefCell<HashMap<String, u32>>,
+    /// Preimages for async-payment **recipient** invoices minted in response to a host
+    /// `request_invoice`, keyed by hex payment hash. When the inbound HTLC for one of these
+    /// arrives we auto-claim with the stashed preimage (we derived it deterministically, so unlike
+    /// a normal external-hash/hodl invoice there is nothing to wait for).
+    async_recipient_preimages: RefCell<HashMap<String, PaymentPreimage>>,
     /// Channel ids the live `ChannelManager` reported closed via `Event::ChannelClosed`, pending
     /// propagation to the runtime channel view (drained by `take_closed_live_channels`).
     closed_channels: RefCell<Vec<String>>,
@@ -440,6 +460,9 @@ struct LdkObjectGraph {
     channel_manager: Arc<WasmChannelManager>,
     rgb_backend: Arc<lightning::rgb_utils::RgbBackend>,
     rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
+    /// Custom-message handler shared with the `PeerManager`; also drives the `async_order.*`
+    /// (async-payments-with-LSP) request/response wire.
+    fork_custom_wire: Arc<crate::rgb_ln_wire::RgbLnForkCustomMessageHandler>,
     peer_descriptors: RefCell<HashMap<String, LiveSocketDescriptor>>,
     channel_manager_restored: bool,
     monitors_restored: bool,
@@ -1092,6 +1115,7 @@ impl WasmLdkLiveBackend {
             live_payments: RefCell::new(HashMap::new()),
             hodl_payment_hashes: RefCell::new(HashSet::new()),
             hodl_claim_deadlines: RefCell::new(HashMap::new()),
+            async_recipient_preimages: RefCell::new(HashMap::new()),
             closed_channels: RefCell::new(Vec::new()),
             object_graph: RefCell::new(None),
         }
@@ -1272,6 +1296,7 @@ impl WasmLdkLiveBackend {
             channel_manager,
             rgb_backend,
             rgb_kv_store,
+            fork_custom_wire,
             peer_descriptors: RefCell::new(HashMap::new()),
             channel_manager_restored,
             monitors_restored,
@@ -1481,6 +1506,19 @@ impl WasmLdkLiveBackend {
                         ));
                         return;
                     }
+                }
+                // Async-payment recipient invoices: we already know the preimage (derived
+                // deterministically when we answered the host's `request_invoice`), so claim
+                // immediately rather than holding like a normal external-hash/hodl invoice.
+                if let Some(preimage) = self.async_recipient_preimages.borrow_mut().remove(&hash_hex)
+                {
+                    self.hodl_payment_hashes.borrow_mut().remove(&hash_hex);
+                    g.channel_manager.claim_funds(preimage);
+                    self.upsert_inbound_live_payment(&hash_hex, "pending", amount_msat);
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] PaymentClaimable async-recipient auto-claimed hash={hash_hex}"
+                    ));
+                    return;
                 }
                 let (preimage, external_hash_invoice) = match purpose {
                     lightning::events::PaymentPurpose::SpontaneousPayment(preimage) => {
@@ -1805,6 +1843,11 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             if self.inbound_frames.borrow().is_empty() {
                 break;
             }
+        }
+        // Service any inbound async-payment `request_invoice` calls (recipient side): mint the
+        // invoice and queue the response, then flush it out to the host.
+        if self.handle_pending_async_order_requests(g) {
+            g.peer_manager.borrow().process_events();
         }
         // Advance received/forwarded HTLCs (no PendingHTLCsForwardable event exists in this LDK;
         // it must be driven explicitly) so inbound payments reach PaymentClaimable.
@@ -2903,9 +2946,367 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             Ok(())
         })
     }
+
+    fn apay_new_boxed(
+        &self,
+        host_node_id: String,
+        username: Option<String>,
+        domain: Option<String>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>,
+    > {
+        let maybe_this = self.self_weak.borrow().upgrade();
+        Box::pin(async move {
+            let this = maybe_this
+                .ok_or_else(|| JsValue::from_str("apay_new: live backend was dropped"))?;
+            WasmLdkLiveBackend::apay_new_impl(this, host_node_id, username, domain).await
+        })
+    }
 }
 
 impl WasmLdkLiveBackend {
+    /// Build, sign and ship an `async_order.new` request to the invoice-host / LSP peer, then
+    /// await its JSON-RPC response. See [`LdkLiveBackend::apay_new_boxed`].
+    async fn apay_new_impl(
+        this: Rc<Self>,
+        host_node_id: String,
+        username: Option<String>,
+        domain: Option<String>,
+    ) -> Result<crate::apay::AsyncOrderNewResponse, JsValue> {
+        if username.is_some() != domain.is_some() {
+            return Err(JsValue::from_str(
+                "apay_new: username and domain must be supplied together",
+            ));
+        }
+
+        this.ensure_phase1_runtime_ready()?;
+        let host_pubkey = hex::decode(host_node_id.trim())
+            .ok()
+            .and_then(|bytes| SecpPublicKey::from_slice(&bytes).ok())
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_PEER_PUBKEY_INVALID))?;
+
+        // Synchronous prep: derive + sign the batch, queue the request, flush it. We must not hold
+        // the `object_graph` borrow across the later `.await`, so collect everything we need here.
+        let (request_id, response_rx, first_hash_index, last_hash_index, hashes) = {
+            let graph = this.object_graph.borrow();
+            let g = graph.as_ref().ok_or_else(|| {
+                JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
+            })?;
+
+            // Require a live (usable) channel with the invoice-host, mirroring the native node.
+            let host_has_live_channel = g
+                .channel_manager
+                .list_channels()
+                .into_iter()
+                .any(|c| c.counterparty.node_id == host_pubkey && c.is_usable);
+            if !host_has_live_channel {
+                return Err(JsValue::from_str(
+                    "apay_new requires a live channel with the invoice-host peer",
+                ));
+            }
+
+            let local_node_id = g
+                .keys_manager
+                .get_node_id(Recipient::Node)
+                .map_err(|_| JsValue::from_str("apay_new: failed to derive local node id"))?;
+            let local_node_hex = local_node_id.to_string();
+            let host_node_hex = apay::hex_str(&host_pubkey.serialize());
+
+            // Derive the next hash batch from this node's seed.
+            let start_index = apay::read_async_payments_next_hash_index(
+                g.rgb_kv_store.as_ref(),
+                &host_pubkey,
+            )
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let seed = this.derive_seed32();
+            let preimage_root = apay::AsyncPaymentsPreimageRoot::build_from_seed(
+                &seed,
+                bitcoin::Network::Regtest,
+                &local_node_id,
+            )
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let mut params = preimage_root
+                .prepare_async_order_new_params(start_index, apay::ASYNC_ORDER_MAX_HASH_BATCH_SIZE)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+
+            let first_hash_index = params
+                .hashes
+                .first()
+                .map(|h| h.hash_index)
+                .ok_or_else(|| JsValue::from_str("apay_new: empty hash batch"))?;
+            let last_hash_index = params.hashes.last().map(|h| h.hash_index).unwrap();
+
+            // Sign the batch commitment (and optional Lightning-Address attestation) with the
+            // node key, exactly as the native `/apay/new` route does.
+            let keys_manager = Arc::clone(&g.keys_manager);
+            let created_at = unix_now_secs();
+            let expires_at = created_at.saturating_add(apay::APAY_BATCH_EXPIRY_SECS);
+            let batch = apay::build_apay_batch_commitment(
+                &local_node_hex,
+                &host_node_hex,
+                first_hash_index,
+                &params.hashes,
+                created_at,
+                expires_at,
+                |msg| keys_manager.sign_message(msg),
+            )
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            params.batch = Some(batch);
+
+            if let (Some(username), Some(domain)) = (username.as_deref(), domain.as_deref()) {
+                let address_sig = apay::build_apay_address_attestation(
+                    &local_node_hex,
+                    domain,
+                    username,
+                    0,
+                    |msg| keys_manager.sign_message(msg),
+                )
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                params.address_sig = Some(address_sig);
+            }
+
+            let request_id = apay::new_request_id(&local_node_hex, &host_node_hex);
+            let params_value = serde_json::to_value(&params)
+                .map_err(|err| JsValue::from_str(&format!("apay_new: serialize params: {err}")))?;
+            let response_rx = g.fork_custom_wire.queue_async_order_new(
+                host_pubkey,
+                request_id.clone(),
+                params_value,
+            );
+            (
+                request_id,
+                response_rx,
+                first_hash_index,
+                last_hash_index,
+                params.hashes,
+            )
+        };
+
+        // Flush the queued message out to the peer (populates outbound frames for the JS pump).
+        this.process_events()?;
+
+        // Await the host response, bounded by a timeout. The JS websocket pump keeps calling
+        // `process_events` as reply frames arrive, which completes `response_rx`.
+        let response_value = match Self::apay_await_response(
+            response_rx,
+            apay::ASYNC_ORDER_RESPONSE_TIMEOUT_MS,
+        )
+        .await
+        {
+            ApayAwaitOutcome::Response(Ok(value)) => value,
+            ApayAwaitOutcome::Response(Err(err)) => {
+                return Err(JsValue::from_str(&err.to_string()));
+            }
+            ApayAwaitOutcome::PeerClosed => {
+                return Err(JsValue::from_str(
+                    "apay_new: peer connection closed before the host replied",
+                ));
+            }
+            ApayAwaitOutcome::TimedOut => {
+                if let Some(g) = this.object_graph.borrow().as_ref() {
+                    g.fork_custom_wire.forget_response(host_pubkey, &request_id);
+                }
+                return Err(JsValue::from_str(
+                    "apay_new: timed out waiting for the host response",
+                ));
+            }
+        };
+
+        let result: apay::AsyncOrderNewResultWire = serde_json::from_value(response_value)
+            .map_err(|err| JsValue::from_str(&format!("apay_new: invalid host response: {err}")))?;
+
+        // Persist the host-advertised next index so the next batch never reuses hashes.
+        if let Some(g) = this.object_graph.borrow().as_ref() {
+            apay::write_async_payments_next_hash_index(
+                g.rgb_kv_store.as_ref(),
+                &host_pubkey,
+                result.next_index_expected,
+            )
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+        }
+
+        Ok(apay::AsyncOrderNewResponse {
+            request_id,
+            host_node_id: apay::hex_str(&host_pubkey.serialize()),
+            protocol_version: result.protocol_version,
+            order_id: result.order_id,
+            status: result.status,
+            accepted_through_index: result.accepted_through_index,
+            next_index_expected: result.next_index_expected,
+            unused_hashes: result.unused_hashes,
+            refill_batch_size: result.refill_batch_size,
+            first_hash_index,
+            last_hash_index,
+            hashes,
+        })
+    }
+
+    /// Recipient side of async payments: service any inbound `async_order.request_invoice` calls
+    /// queued by the wire handler. Returns true if at least one was handled (so the caller flushes
+    /// the queued responses out to the host). Each request mints a BOLT11 invoice for a
+    /// deterministically-derived preimage and stashes that preimage so the inbound HTLC auto-claims.
+    fn handle_pending_async_order_requests(&self, g: &LdkObjectGraph) -> bool {
+        let requests = g.fork_custom_wire.take_inbound_requests();
+        if requests.is_empty() {
+            return false;
+        }
+        for (sender, request_id, params_value) in requests {
+            match self.process_one_request_invoice(g, sender, params_value) {
+                Ok(result) => {
+                    let result_value = serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
+                    g.fork_custom_wire
+                        .queue_async_order_result(sender, &request_id, result_value);
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] async_order.request_invoice served hash={}",
+                        result.payment_hash
+                    ));
+                }
+                Err(err) => {
+                    g.fork_custom_wire
+                        .queue_async_order_error(sender, &request_id, &err);
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] async_order.request_invoice error {}: {}",
+                        err.code, err.message
+                    ));
+                }
+            }
+        }
+        true
+    }
+
+    fn process_one_request_invoice(
+        &self,
+        g: &LdkObjectGraph,
+        _sender: SecpPublicKey,
+        params_value: serde_json::Value,
+    ) -> Result<apay::AsyncOrderOutboundInvoiceResultWire, apay::JsonRpcErrorWire> {
+        use apay::JsonRpcErrorWire;
+
+        let params: apay::AsyncOrderRequestInvoiceParamsWire = serde_json::from_value(params_value)
+            .map_err(|err| JsonRpcErrorWire::invalid_params(format!("invalid_params: {err}")))?;
+
+        let hash_index = params
+            .hash_index
+            .parse::<u64>()
+            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_hash_index"))?;
+        if matches!(params.asset_amount, Some(0)) {
+            return Err(JsonRpcErrorWire::invalid_params("invalid_asset_amount"));
+        }
+        if params.description_hash.trim().is_empty() {
+            return Err(JsonRpcErrorWire::invalid_params("invalid_description_hash"));
+        }
+        let (contract_id, asset_amount) = match (&params.asset_id, params.asset_amount) {
+            (Some(asset_id), Some(asset_amount)) => (
+                Some(
+                    asset_id
+                        .parse::<ContractId>()
+                        .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_asset_id"))?,
+                ),
+                Some(asset_amount),
+            ),
+            (None, None) => (None, None),
+            _ => return Err(JsonRpcErrorWire::invalid_params("incomplete_rgb_info")),
+        };
+
+        // Re-derive the preimage/hash for this index and confirm it matches what the host asked
+        // for — otherwise we would mint an invoice we cannot settle.
+        let local_node_id = g
+            .keys_manager
+            .get_node_id(Recipient::Node)
+            .map_err(|_| JsonRpcErrorWire::internal_error("failed to derive local node id"))?;
+        let seed = self.derive_seed32();
+        let preimage_root = apay::AsyncPaymentsPreimageRoot::build_from_seed(
+            &seed,
+            bitcoin::Network::Regtest,
+            &local_node_id,
+        )?;
+        let (payment_preimage, payment_hash) = preimage_root.derive_hash_material(hash_index)?;
+        let requested = params.payment_hash.trim().to_lowercase();
+        if apay::hex_str(&payment_hash.0) != requested {
+            return Err(JsonRpcErrorWire::application_error(
+                1104,
+                "invoice_hash_mismatch",
+            ));
+        }
+        let hash_hex = apay::hex_str(&payment_hash.0);
+
+        // Refuse to re-mint while a prior invoice for this hash is still live.
+        if self.async_recipient_preimages.borrow().contains_key(&hash_hex)
+            || self.live_payments.borrow().get(&hash_hex).is_some_and(|p| {
+                matches!(p.status.as_str(), "pending" | "claimable" | "claiming")
+            })
+        {
+            return Err(JsonRpcErrorWire::application_error(1105, "stale_flow"));
+        }
+
+        let description_hash = lightning_invoice::Sha256(
+            params
+                .description_hash
+                .trim()
+                .parse::<lightning::bitcoin::hashes::sha256::Hash>()
+                .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_description_hash"))?,
+        );
+
+        let invoice = g
+            .channel_manager
+            .create_bolt11_invoice(Bolt11InvoiceParameters {
+                amount_msats: Some(params.amount_msat),
+                description: Bolt11InvoiceDescription::Hash(description_hash),
+                invoice_expiry_delta_secs: Some(params.invoice_expiry_sec),
+                min_final_cltv_expiry_delta: Some(params.min_final_cltv_expiry_delta),
+                payment_hash: Some(payment_hash),
+                contract_id,
+                asset_amount,
+                ..Default::default()
+            })
+            .map_err(|err| {
+                JsonRpcErrorWire::internal_error(format!("request_invoice_create_failed: {err:?}"))
+            })?;
+
+        // Stash the preimage so the inbound HTLC auto-claims, and track the inbound payment.
+        self.async_recipient_preimages
+            .borrow_mut()
+            .insert(hash_hex.clone(), payment_preimage);
+        let now = unix_now_secs();
+        self.live_payments.borrow_mut().insert(
+            hash_hex.clone(),
+            LdkRuntimeLivePaymentData {
+                payment_hash: hash_hex.clone(),
+                status: "pending".to_string(),
+                amt_msat: Some(params.amount_msat),
+                asset_id: contract_id.map(|c| c.to_string()),
+                asset_amount,
+                inbound: true,
+                preimage: None,
+                expires_at: Some(now.saturating_add(params.invoice_expiry_sec as u64)),
+                created_at: now,
+                updated_at: now,
+            },
+        );
+
+        Ok(apay::AsyncOrderOutboundInvoiceResultWire {
+            payment_hash: hash_hex,
+            bolt11: invoice.to_string(),
+        })
+    }
+
+    /// Race the async-order response receiver against a timeout.
+    async fn apay_await_response(
+        rx: crate::rgb_ln_wire::AsyncOrderResponseReceiver,
+        timeout_ms: u32,
+    ) -> ApayAwaitOutcome {
+        use futures::future::{select, Either};
+
+        let timeout = apay_sleep_ms(timeout_ms);
+        futures::pin_mut!(rx);
+        futures::pin_mut!(timeout);
+        match select(rx, timeout).await {
+            Either::Left((Ok(response), _)) => ApayAwaitOutcome::Response(response),
+            // Sender dropped (e.g. peer disconnected) without sending a response.
+            Either::Left((Err(_canceled), _)) => ApayAwaitOutcome::PeerClosed,
+            Either::Right(((), _)) => ApayAwaitOutcome::TimedOut,
+        }
+    }
     async fn drive_rgb_funding_work_impl(this: Rc<Self>) -> Result<(), JsValue> {
         loop {
             let work_item = this.pending_rgb_funding_work.borrow_mut().pop_front();
@@ -3098,6 +3499,34 @@ pub fn create_wasm_ldk_live_backend(
     let backend = Rc::new(WasmLdkLiveBackend::new(runtime_key, node_seed32));
     *backend.self_weak.borrow_mut() = Rc::downgrade(&backend);
     Ok(backend)
+}
+
+/// Outcome of awaiting an `async_order` response receiver against a timeout.
+enum ApayAwaitOutcome {
+    Response(Result<serde_json::Value, crate::apay::JsonRpcErrorWire>),
+    PeerClosed,
+    TimedOut,
+}
+
+/// Resolve after `ms` milliseconds. Browser path uses `setTimeout`; native test path sleeps.
+async fn apay_sleep_ms(ms: u32) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    &resolve, ms as i32,
+                );
+            } else {
+                let _ = resolve.call0(&JsValue::NULL);
+            }
+        });
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
 }
 
 fn unix_now_secs() -> u64 {

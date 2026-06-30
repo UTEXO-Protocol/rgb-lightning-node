@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RLN WASM ↔ utexo-lsp — Async Payments E2E</title>
+    <style>
+      body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 1.5rem; }
+      button { padding: 0.5rem 0.9rem; font-size: 1rem; }
+      #out { border: 1px solid #bbb; padding: 0.8rem; margin-top: 1rem; max-height: 80vh; overflow: auto; }
+      pre { margin: 0.3rem 0; white-space: pre-wrap; }
+      .hint { color: #666; font-size: 0.85em; }
+    </style>
+  </head>
+  <body>
+    <h1>WASM ↔ utexo-lsp — Async Payments with LSP (two recipients + payment)</h1>
+    <p class="hint">
+      Two independent wasm nodes each open a vanilla channel to a native invoice-host node &rarr;
+      <code>apayNewWithAddress</code> (register a signed 200-hash batch + Lightning-Address
+      attestation) &rarr; <code>apayNew</code> refill &amp; assert the persisted hash cursor
+      advanced &rarr; node B resolves node A's Lightning Address via LNURL-pay and pays it; A's
+      backend answers the host's <code>request_invoice</code> and auto-claims, settling B's payment
+      end-to-end. Requires compose.wasm.yaml infra, a native invoice-host node started with
+      <code>--lsp-base-url</code>, and <a href="https://github.com/UTEXO-Protocol">utexo-lsp</a>
+      running. Driven headlessly by <code>run_apay_lsp_flow.mjs</code> (auto-runs when
+      <code>?phase=</code> is present).
+    </p>
+    <button id="run">Run Async-Payments-with-LSP Flow</button>
+    <div id="out"></div>
+    <script type="module" src="./manual_js_apay_lsp_flow.js"></script>
+  </body>
+</html>
