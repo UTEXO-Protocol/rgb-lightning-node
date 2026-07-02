@@ -64,6 +64,16 @@ impl SyncedKvStore {
         }
     }
 
+    /// Releases the VSS single-writer fence if this instance owns it. No-op
+    /// without a remote store.
+    #[cfg(feature = "vss")]
+    pub(crate) fn release_vss_fence_if_owned(&self) -> Result<(), io::Error> {
+        match &self.remote {
+            Some(remote) => remote.release_fence_if_owned(),
+            None => Ok(()),
+        }
+    }
+
     /// Restores all key-value pairs from VSS into the local store.
     ///
     /// `force = false` is the safe default and returns `Ok(0)` if the local

@@ -473,9 +473,9 @@ async fn start_node_with_vss(
         String::new()
     } else {
         let resp = init(node_address, &password, mnemonic.map(|m| m.to_string())).await;
-        // Take over our own store_id: a same-seed restart inherits the previous
-        // incarnation's fence (nothing releases it on shutdown). No-op on a first
-        // start.
+        // Take over our own store_id: a same-seed restart may inherit a fence
+        // from a previous incarnation that exited without a graceful teardown.
+        // No-op on a first start.
         clear_vss_fence(node_address, &password).await;
         resp.mnemonic
     };

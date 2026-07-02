@@ -567,6 +567,25 @@ pub(crate) fn hex_str_to_vec(hex: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Runs a closure on drop, including during panic unwinding, so cleanup (e.g.
+/// clearing the changing-state flag) still happens if the guarded work returns
+/// early or panics.
+pub(crate) struct CallOnDrop<F: FnMut()> {
+    action: F,
+}
+
+impl<F: FnMut()> CallOnDrop<F> {
+    pub(crate) fn new(action: F) -> Self {
+        Self { action }
+    }
+}
+
+impl<F: FnMut()> Drop for CallOnDrop<F> {
+    fn drop(&mut self) {
+        (self.action)();
+    }
+}
+
 pub(crate) async fn no_cancel<Fut>(fut: Fut) -> Fut::Output
 where
     Fut: 'static + Future + Send,
@@ -843,5 +862,37 @@ mod utils_tests {
     fn vss_url_other_schemes_rejected() {
         assert!(validate_vss_url("ftp://example.com/vss", true).is_err());
         assert!(validate_vss_url("example.com/vss", true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod call_on_drop_tests {
+    use super::CallOnDrop;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn runs_action_on_scope_exit() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        {
+            let _g = CallOnDrop::new(move || flag.store(true, Ordering::SeqCst));
+        }
+        assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn runs_action_during_panic_unwind() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = CallOnDrop::new(move || flag.store(true, Ordering::SeqCst));
+            panic!("boom");
+        }));
+        assert!(result.is_err(), "closure should have panicked");
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "action must run while unwinding a panic"
+        );
     }
 }

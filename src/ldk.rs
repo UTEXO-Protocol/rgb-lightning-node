@@ -3732,6 +3732,8 @@ pub(crate) async fn start_ldk(
     // before ack); ChannelManager and aux state keep the local-first `kv_store`
     // sync facade. Both share the same local DB and (when configured) VSS store.
     #[cfg(feature = "vss")]
+    let mut fence_guard: Option<crate::vss_kv_store::FenceReleaseGuard> = None;
+    #[cfg(feature = "vss")]
     let (kv_store, monitor_kv_store) = if let (Some(ref vss_url), Some(ref identity)) =
         (&static_state.vss_url, &vss_identity)
     {
@@ -3751,6 +3753,16 @@ pub(crate) async fn start_ldk(
         vss_kv_store
             .acquire_fence()
             .map_err(|e| APIError::FailedVssInit(e.to_string()))?;
+
+        // Release the just-acquired fence if the rest of startup fails.
+        fence_guard = Some(crate::vss_kv_store::FenceReleaseGuard::new({
+            let store = Arc::clone(&vss_kv_store);
+            move || {
+                if let Err(e) = store.release_fence_if_owned() {
+                    tracing::warn!(error = %e, "failed to release VSS fence after aborted unlock");
+                }
+            }
+        }));
 
         let monitor_kv_store = Arc::new(RemoteFirstKvStore::new(
             Arc::clone(&local_kv_store),
@@ -4263,8 +4275,20 @@ pub(crate) async fn start_ldk(
         witness_version: WitnessVersion::Taproot,
     };
     let reuse_addresses = static_state.reuse_addresses;
-    let mut rgb_wallet = tokio::task::spawn_blocking(move || {
-        RgbLibWallet::new(
+    let indexer_url_owned = indexer_url.to_string();
+    #[cfg(feature = "vss")]
+    let rgb_vss_backup = match (&static_state.vss_url, &vss_identity) {
+        (Some(vss_url), Some(identity)) => Some((
+            vss_url.clone(),
+            format!("{}_rgb", identity.pubkey_hex),
+            identity.signing_key,
+        )),
+        _ => None,
+    };
+    // go_online and configure_vss_backup drive blocking rgb-lib HTTP clients;
+    // run them off the async runtime so they don't fail on a single-vCPU host.
+    let (rgb_wallet, rgb_online) = tokio::task::spawn_blocking(move || {
+        let mut rgb_wallet = RgbLibWallet::new(
             WalletData {
                 data_dir,
                 bitcoin_network,
@@ -4275,40 +4299,31 @@ pub(crate) async fn start_ldk(
             },
             keys,
         )
-        .expect("valid rgb-lib wallet")
+        .expect("valid rgb-lib wallet");
+        let rgb_online = rgb_wallet.go_online(OnlineOptions {
+            indexer_url: indexer_url_owned,
+            skip_consistency_check: false,
+            vanilla_sync_lookback: 20,
+        })?;
+        #[cfg(feature = "vss")]
+        if let Some((vss_url, rgb_store_id, signing_key)) = rgb_vss_backup {
+            let vss_config =
+                rgb_lib::wallet::vss::VssBackupConfig::new(vss_url, rgb_store_id, signing_key)
+                    .with_encryption(true)
+                    .with_auto_backup(true)
+                    .with_backup_mode(rgb_lib::wallet::vss::VssBackupMode::Blocking);
+            // Fail closed: a misconfigured backup must not silently run local-only.
+            rgb_wallet.configure_vss_backup(vss_config).map_err(|e| {
+                APIError::FailedVssInit(format!(
+                    "Failed to configure VSS backup for RGB wallet: {e}"
+                ))
+            })?;
+            tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
+        }
+        Ok::<_, APIError>((rgb_wallet, rgb_online))
     })
     .await
-    .unwrap();
-    let rgb_online = rgb_wallet.go_online(OnlineOptions {
-        indexer_url: indexer_url.to_string(),
-        skip_consistency_check: false,
-        vanilla_sync_lookback: 20,
-    })?;
-
-    // Configure VSS backup for the RGB wallet if VSS is enabled. Reuses the
-    // identity derived once at the top of this function — see N3.1 / the
-    // `derive_vss_identity` helper.
-    #[cfg(feature = "vss")]
-    if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
-        let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
-        let vss_config = rgb_lib::wallet::vss::VssBackupConfig::new(
-            vss_url.clone(),
-            rgb_store_id,
-            identity.signing_key,
-        )
-        .with_encryption(true)
-        .with_auto_backup(true)
-        // Blocking: each RGB op waits until its VSS backup is durable.
-        .with_backup_mode(rgb_lib::wallet::vss::VssBackupMode::Blocking);
-
-        // Fail closed: a misconfigured backup must not silently run local-only.
-        rgb_wallet.configure_vss_backup(vss_config).map_err(|e| {
-            APIError::FailedVssInit(format!(
-                "Failed to configure VSS backup for RGB wallet: {e}"
-            ))
-        })?;
-        tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
-    }
+    .map_err(|e| APIError::Unexpected(format!("rgb-lib wallet setup task failed: {e}")))??;
     save_config(
         &static_state.db(),
         kv_store.as_ref(),
@@ -5086,6 +5101,11 @@ pub(crate) async fn start_ldk(
     tracing::info!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
     tracing::info!("Local Node ID is {}", channel_manager.get_our_node_id());
 
+    #[cfg(feature = "vss")]
+    if let Some(guard) = fence_guard.as_mut() {
+        guard.disarm();
+    }
+
     Ok((
         LdkBackgroundServices {
             stop_processing,
@@ -5173,6 +5193,27 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
 
     if let Some(join_handle) = app_state.stop_ldk() {
         join_handle.await.unwrap().unwrap();
+    }
+
+    // Graceful teardown (lock, shutdown, signal): release the VSS fence so
+    // the next unlock — a fresh instance id — takes over without an explicit
+    // /vssclearfence. Hard kills still leave the fence behind by design.
+    #[cfg(feature = "vss")]
+    {
+        let kv_store = app_state
+            .get_unlocked_app_state()
+            .await
+            .as_ref()
+            .map(|unlocked| Arc::clone(&unlocked.kv_store));
+        if let Some(kv_store) = kv_store {
+            match tokio::task::spawn_blocking(move || kv_store.release_vss_fence_if_owned()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "failed to release VSS fence during shutdown")
+                }
+                Err(e) => tracing::warn!(error = %e, "VSS fence release task failed"),
+            }
+        }
     }
 
     // connect to the peer port so it can be released

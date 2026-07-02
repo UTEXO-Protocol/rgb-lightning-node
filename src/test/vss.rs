@@ -553,6 +553,153 @@ mod tests {
         store.delete_fence().expect("second delete is no-op");
     }
 
+    /// `release_fence_if_owned` frees the fence for the owner and is a no-op
+    /// for everyone else, so an aborted unlock can roll back its own fence
+    /// without clobbering one another instance holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vss_release_fence_if_owned_semantics() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let (signing_key, store_id) = generate_test_keys();
+        let store_a =
+            VssKvStore::new(VSS_URL.to_string(), store_id.clone(), signing_key).expect("store a");
+        store_a.acquire_fence().expect("a acquires fence");
+
+        // A non-owner release is a no-op: the fence stays with A.
+        let store_b =
+            VssKvStore::new(VSS_URL.to_string(), store_id.clone(), signing_key).expect("store b");
+        store_b
+            .release_fence_if_owned()
+            .expect("non-owner release must not error");
+        store_b
+            .acquire_fence()
+            .expect_err("fence must still be owned by a");
+
+        // The owner's release frees the fence for the next instance.
+        store_a.release_fence_if_owned().expect("owner release");
+        store_b
+            .acquire_fence()
+            .expect("b acquires after a released");
+
+        // Releasing with no owned fence stays a no-op and leaves B's fence.
+        store_a
+            .release_fence_if_owned()
+            .expect("stale owner release must not error");
+        let store_c = VssKvStore::new(VSS_URL.to_string(), store_id, signing_key).expect("store c");
+        store_c
+            .acquire_fence()
+            .expect_err("fence must still be owned by b");
+    }
+
+    /// A failed unlock must roll back what it acquired: the VSS fence is
+    /// released and the changing-state flag is cleared, so a retry (failed or
+    /// successful) is never wedged behind a stranded fence.
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn vss_failed_unlock_releases_fence_and_allows_retry() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            failed_unlock_releases_fence_inner(),
+        )
+        .await
+        .expect("vss_failed_unlock_releases_fence_and_allows_retry timed out");
+    }
+
+    async fn failed_unlock_releases_fence_inner() {
+        crate::test::initialize();
+
+        let test_dir_node = "tmp/vss_failed_unlock_retry/node1";
+        let node_address = crate::test::start_daemon_with_vss(
+            test_dir_node,
+            crate::test::NODE1_PEER_PORT,
+            false,
+            Some(VSS_URL.to_string()),
+            false,
+        )
+        .await;
+        let password = "vss_failed_unlock_retry";
+        crate::test::init(node_address, password, None).await;
+
+        // Unlock against an unreachable indexer: fails after the fence acquire.
+        let mut payload = crate::test::unlock_req(password);
+        payload.indexer_url = Some("127.0.0.1:1".to_string());
+        let client = reqwest::Client::new();
+        for attempt in 1..=2 {
+            let res = client
+                .post(format!("http://{node_address}/unlock"))
+                .json(&payload)
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                !res.status().is_success(),
+                "unlock with unreachable indexer must fail"
+            );
+            let body = res.text().await.unwrap();
+            // Every attempt must fail on the indexer itself, not on a fence
+            // stranded by the previous attempt or a stuck changing-state flag.
+            assert!(
+                !body.contains("owned by another"),
+                "attempt {attempt} hit a stranded fence: {body}"
+            );
+            assert!(
+                !body.contains("changing state"),
+                "attempt {attempt} hit a stuck changing-state flag: {body}"
+            );
+        }
+
+        // With the fence rolled back a retry with good parameters succeeds.
+        crate::test::unlock(node_address, password).await;
+
+        crate::test::shutdown(&[node_address]).await;
+    }
+
+    /// A graceful lock must release the VSS fence: the next unlock runs under
+    /// a fresh instance id and must take over without `/vssclearfence`.
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn vss_lock_releases_fence_for_next_unlock() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            lock_releases_fence_inner(),
+        )
+        .await
+        .expect("vss_lock_releases_fence_for_next_unlock timed out");
+    }
+
+    async fn lock_releases_fence_inner() {
+        crate::test::initialize();
+
+        let test_dir_node = "tmp/vss_lock_release_fence/node1";
+        let node_address = crate::test::start_daemon_with_vss(
+            test_dir_node,
+            crate::test::NODE1_PEER_PORT,
+            false,
+            Some(VSS_URL.to_string()),
+            false,
+        )
+        .await;
+        let password = "vss_lock_release_fence";
+        crate::test::init(node_address, password, None).await;
+
+        crate::test::unlock(node_address, password).await;
+        crate::test::lock(node_address).await;
+        crate::test::unlock(node_address, password).await;
+
+        crate::test::shutdown(&[node_address]).await;
+    }
+
     /// End-to-end happy-path that mirrors what the SDK does for a legitimate
     /// "wipe device and restore" flow:
     ///
@@ -616,8 +763,8 @@ mod tests {
                 .expect("original write");
         }
 
-        // Graceful shutdown: drop the instance. The fence is intentionally not
-        // released — this is the source of the bug the SDK escape hatch fixes.
+        // Abrupt exit (crash/kill): drop the instance without releasing the
+        // fence — the case the SDK escape hatch exists for.
         drop(original);
 
         // --- Fresh device, same mnemonic ---

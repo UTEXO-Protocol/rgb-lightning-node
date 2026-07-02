@@ -5028,28 +5028,22 @@ pub(crate) async fn unlock(
             }
         }
 
-        let mnemonic = match check_password_validity(&payload.password, &state.db()) {
-            Ok(mnemonic) => mnemonic,
-            Err(e) => {
-                state.update_changing_state(false);
-                return Err(e);
-            }
-        };
+        // Clear the changing-state flag on any exit — including a panic during
+        // startup — so a failed unlock can't wedge the node in ChangingState.
+        let _changing_state_guard = crate::utils::CallOnDrop::new({
+            let state = state.clone();
+            move || state.update_changing_state(false)
+        });
+
+        let mnemonic = check_password_validity(&payload.password, &state.db())?;
 
         tracing::debug!("Starting LDK...");
-        let (new_ldk_background_services, new_unlocked_app_state) = match start_ldk(
+        let (new_ldk_background_services, new_unlocked_app_state) = start_ldk(
             state.clone(),
             crate::core_types::NodeKeySource::InternalMnemonic(mnemonic),
             payload.into(),
         )
-        .await
-        {
-            Ok((nlbs, nuap)) => (nlbs, nuap),
-            Err(e) => {
-                state.update_changing_state(false);
-                return Err(e);
-            }
-        };
+        .await?;
         tracing::debug!("LDK started");
 
         state
@@ -5057,8 +5051,6 @@ pub(crate) async fn unlock(
             .await;
 
         state.update_ldk_background_services(Some(new_ldk_background_services));
-
-        state.update_changing_state(false);
 
         tracing::info!("Unlock completed");
         Ok(Json(EmptyResponse {}))

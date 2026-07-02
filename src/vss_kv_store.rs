@@ -308,6 +308,52 @@ impl VssKvStore {
         }
     }
 
+    /// Deletes the fence only if VSS still records this instance as the owner,
+    /// so a failed unlock can roll back its own fence without clobbering one
+    /// another instance may have taken over.
+    pub fn release_fence_if_owned(&self) -> Result<(), io::Error> {
+        let get_req = GetObjectRequest {
+            store_id: self.store_id.clone(),
+            key: FENCE_KEY.to_string(),
+        };
+        let existing = match self.block_on(self.client.get_object(&get_req)) {
+            Ok(resp) => match resp.value {
+                Some(kv) => kv,
+                None => return Ok(()),
+            },
+            Err(VssError::NoSuchKeyError(_)) => return Ok(()),
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("VSS fence read failed: {e}"),
+                ));
+            }
+        };
+        if String::from_utf8_lossy(&existing.value) != self.instance_id.to_string() {
+            return Ok(());
+        }
+        let request = PutObjectRequest {
+            store_id: self.store_id.clone(),
+            global_version: None,
+            transaction_items: vec![],
+            delete_items: vec![KeyValue {
+                key: FENCE_KEY.to_string(),
+                version: existing.version,
+                value: vec![],
+            }],
+        };
+        match self.block_on(self.client.put_object(&request)) {
+            Ok(_) | Err(VssError::NoSuchKeyError(_)) => {
+                tracing::info!(instance_id = %self.instance_id, "VSS fence released");
+                Ok(())
+            }
+            Err(e) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("VSS fence release failed: {e}"),
+            )),
+        }
+    }
+
     /// Periodic re-check of the fence; panics if the fence has been taken over
     /// by another instance, since at that point our writes would corrupt the
     /// other instance's state.
@@ -730,5 +776,66 @@ impl KVStoreSync for VssKvStore {
         }
 
         Ok(keys)
+    }
+}
+
+/// Releases the VSS single-writer fence on drop unless disarmed. Armed after
+/// `acquire_fence`, disarmed once the node starts; a failed unlock in between
+/// releases the fence so it doesn't wedge the next attempt.
+pub(crate) struct FenceReleaseGuard {
+    release: Option<Box<dyn FnMut() + Send>>,
+}
+
+impl FenceReleaseGuard {
+    pub(crate) fn new(release: impl FnMut() + Send + 'static) -> Self {
+        Self {
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.release = None;
+    }
+}
+
+impl Drop for FenceReleaseGuard {
+    fn drop(&mut self) {
+        if let Some(mut release) = self.release.take() {
+            release();
+        }
+    }
+}
+
+#[cfg(test)]
+mod fence_release_guard_tests {
+    use super::FenceReleaseGuard;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn armed_guard_runs_release_on_drop() {
+        let released = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&released);
+        {
+            let _guard = FenceReleaseGuard::new(move || flag.store(true, Ordering::SeqCst));
+        }
+        assert!(
+            released.load(Ordering::SeqCst),
+            "an armed guard must run its release action when dropped"
+        );
+    }
+
+    #[test]
+    fn disarmed_guard_skips_release_on_drop() {
+        let released = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&released);
+        {
+            let mut guard = FenceReleaseGuard::new(move || flag.store(true, Ordering::SeqCst));
+            guard.disarm();
+        }
+        assert!(
+            !released.load(Ordering::SeqCst),
+            "a disarmed guard must not run its release action"
+        );
     }
 }
