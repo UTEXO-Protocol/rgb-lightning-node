@@ -26,8 +26,8 @@ use lightning::chain::{BestBlock, ChannelMonitorUpdateStatus};
 use lightning::events::Event;
 use lightning::events::{EventsProvider, ReplayEvent};
 use lightning::ln::channelmanager::{
-    Bolt11InvoiceParameters, ChainParameters, ChannelManagerReadArgs, PaymentId,
-    RecipientOnionFields, Retry, SimpleArcChannelManager,
+    Bolt11InvoiceParameters, ChainParameters, ChannelFundingType, ChannelManagerReadArgs,
+    PaymentId, RecipientOnionFields, Retry, SimpleArcChannelManager,
 };
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerHandleError, PeerManager, SocketDescriptor,
@@ -84,6 +84,31 @@ pub fn register_rgb_wallet_for_runtime(
     RGB_WALLET_REGISTRY.with(|reg| {
         reg.borrow_mut().insert(runtime_key.to_string(), wallet);
     });
+}
+
+thread_local! {
+    /// Maps LDK runtime_key → whether trusted virtual channels v0 are enabled for that node.
+    /// Set from `RlnWasmNode::set_enable_virtual_channels_v0` (and at node construction); read by the
+    /// live backend's `Event::OpenChannelRequest` handler to decide whether to accept an inbound
+    /// scid-privacy channel as a 0-conf virtual channel. Mirrors the native node's
+    /// `static_state.enable_virtual_channels_v0` gate (`src/ldk.rs`).
+    static VIRTUAL_CHANNELS_V0_REGISTRY: RefCell<HashMap<String, bool>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Record whether trusted virtual channels v0 are enabled for a given LDK runtime key.
+pub fn set_virtual_channels_v0_for_runtime(runtime_key: &str, enabled: bool) {
+    VIRTUAL_CHANNELS_V0_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(runtime_key.to_string(), enabled);
+    });
+}
+
+/// Whether trusted virtual channels v0 are enabled for a given LDK runtime key.
+/// Defaults to `false` (opt-in, matching the native node) when no value has been registered.
+fn virtual_channels_v0_enabled(runtime_key: &str) -> bool {
+    VIRTUAL_CHANNELS_V0_REGISTRY
+        .with(|reg| reg.borrow().get(runtime_key).copied())
+        .unwrap_or(false)
 }
 
 /// Pending RGB open intent keyed by `user_channel_id`.
@@ -1196,13 +1221,31 @@ impl WasmLdkLiveBackend {
             Arc::clone(&network_graph),
             Arc::clone(&keys_manager),
         ));
-        let mut user_config = UserConfig::default();
-        // Act as a routing intermediary for multi-hop payments: forward HTLCs whose
-        // outgoing hop is one of our *private* (unannounced) channels. With the default `false`,
-        // LDK returns `PrivateChannelForward` and refuses to forward over private channels
-        // (`can_forward_htlc_to_outgoing_channel`), which would break native-A -> WASM -> native-B
-        // where the WASM->payee channel is private and reached via an invoice route hint.
-        user_config.accept_forwards_to_priv_channels = true;
+        // `accept_forwards_to_priv_channels = true`: act as a routing intermediary for multi-hop
+        // payments — forward HTLCs whose outgoing hop is one of our *private* (unannounced) channels.
+        // With the default `false`, LDK returns `PrivateChannelForward` and refuses to forward over
+        // private channels (`can_forward_htlc_to_outgoing_channel`), which would break
+        // native-A -> WASM -> native-B where the WASM->payee channel is private and reached via an
+        // invoice route hint.
+        // `manually_accept_inbound_channels = true`: accept inbound channels the LSP opens to us (see
+        // the `Event::OpenChannelRequest` handler). Without manual acceptance LDK auto-accepts with a
+        // hardcoded 354-sat dust floor, which rejects virtual RGB channels (dust=1:
+        // "dust_limit_satoshis (1) is less than the implementation limit (354)").
+        let mut user_config = UserConfig {
+            accept_forwards_to_priv_channels: true,
+            manually_accept_inbound_channels: true,
+            ..Default::default()
+        };
+        // Drop the announcement-preference constraint (the default `true` rejects public channels
+        // whose announcement preference differs from ours: "their announcement preference is
+        // different from ours") and negotiate anchors so the anchor channel types the LSP proposes
+        // (mandatory for colored RGB channels) are accepted — mirroring the native node (`src/ldk.rs`).
+        user_config
+            .channel_handshake_limits
+            .force_announced_channel_preference = false;
+        user_config
+            .channel_handshake_config
+            .negotiate_anchors_zero_fee_htlc_tx = true;
         let chain_params = ChainParameters {
             network: bitcoin::Network::Regtest,
             best_block: BestBlock::from_network(bitcoin::Network::Regtest),
@@ -1427,6 +1470,55 @@ impl WasmLdkLiveBackend {
                 self.pending_rgb_funding_work
                     .borrow_mut()
                     .push_back(PendingRgbFundingWork::ProcessPendingTransactions);
+            }
+            // ---- Inbound channel open request (LSP opens a channel to this node) ----
+            // With `manually_accept_inbound_channels = true` LDK surfaces every inbound open here
+            // instead of auto-accepting under a hardcoded 354-sat dust floor. Mirror the native
+            // node (`src/ldk.rs` `Event::OpenChannelRequest`): a channel advertising SCID privacy
+            // is a virtual channel (dust=1, never broadcast) and must be accepted 0-conf as
+            // `ChannelFundingType::Virtual` so the monitor is marked manual-broadcast and the dust
+            // floor is bypassed; any other channel is a regular (public/private) channel accepted
+            // normally.
+            Event::OpenChannelRequest {
+                temporary_channel_id,
+                counterparty_node_id,
+                channel_type,
+                ..
+            } => {
+                let user_channel_id = self.next_user_channel_id();
+                // Gate the 0-conf virtual accept on this node's `enable_virtual_channels_v0` flag
+                // (mirrors the native node's `static_state.enable_virtual_channels_v0`). When the
+                // flag is disabled, a scid-privacy channel falls through to the regular accept path,
+                // which rejects it at the 354-sat dust floor — the intended opt-in behavior.
+                let is_virtual = virtual_channels_v0_enabled(&self.runtime_key)
+                    && channel_type.supports_scid_privacy();
+                let counterparty_hex = hex::encode(counterparty_node_id.serialize());
+                let res = if is_virtual {
+                    g.channel_manager
+                        .accept_inbound_channel_from_trusted_peer_0conf(
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                            user_channel_id,
+                            None,
+                            ChannelFundingType::Virtual,
+                        )
+                } else {
+                    g.channel_manager.accept_inbound_channel(
+                        &temporary_channel_id,
+                        &counterparty_node_id,
+                        user_channel_id,
+                        None,
+                    )
+                };
+                match res {
+                    Ok(()) => ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] accepted inbound {} channel {temporary_channel_id} from {counterparty_hex}",
+                        if is_virtual { "virtual" } else { "regular" }
+                    )),
+                    Err(e) => ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] failed to accept inbound channel {temporary_channel_id} from {counterparty_hex}: {e:?}"
+                    )),
+                }
             }
             // ---- Channel closed (cooperative or force): record for runtime-view removal ----
             // The live ChannelManager is authoritative for close completion; we propagate this to
@@ -2814,6 +2906,10 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             status,
             ready,
             is_usable,
+            // The outbound-open RGB asset is tracked via the open intent/cache and surfaced by
+            // `list_live_channels` once its RGB info is persisted; not known at this return point.
+            asset_id: None,
+            asset_local_amount: None,
         })
     }
 
@@ -2904,20 +3000,35 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             .channel_manager
             .list_channels()
             .into_iter()
-            .map(|details| LdkRuntimeOpenChannelResultData {
-                temporary_channel_id: format!("{}", details.channel_id),
-                channel_id: format!("{}", details.channel_id),
-                peer_pubkey: details.counterparty.node_id.to_string(),
-                capacity_sat: details.channel_value_satoshis,
-                status: if details.is_usable {
-                    "ready".to_string()
-                } else if details.is_channel_ready {
-                    "pending".to_string()
-                } else {
-                    "opening".to_string()
-                },
-                ready: details.is_channel_ready,
-                is_usable: details.is_usable,
+            .map(|details| {
+                let channel_id_str = format!("{}", details.channel_id);
+                // Read the channel's RGB info from the kv store, mirroring the native node's
+                // `list_channels` (`src/routes.rs`). This surfaces `asset_id` for *inbound*
+                // (LSP-opened) RGB channels too — previously the runtime only knew the asset for
+                // channels this node opened itself (from the outbound-open cache), so accepted RGB
+                // channels showed up as vanilla. The info is written once the channel's RGB funding
+                // consignment is validated.
+                let rgb_info = g
+                    .rgb_kv_store
+                    .read_rgb_channel_info(&channel_id_str, false)
+                    .ok();
+                LdkRuntimeOpenChannelResultData {
+                    temporary_channel_id: channel_id_str.clone(),
+                    channel_id: channel_id_str,
+                    peer_pubkey: details.counterparty.node_id.to_string(),
+                    capacity_sat: details.channel_value_satoshis,
+                    status: if details.is_usable {
+                        "ready".to_string()
+                    } else if details.is_channel_ready {
+                        "pending".to_string()
+                    } else {
+                        "opening".to_string()
+                    },
+                    ready: details.is_channel_ready,
+                    is_usable: details.is_usable,
+                    asset_id: rgb_info.as_ref().map(|i| i.contract_id.to_string()),
+                    asset_local_amount: rgb_info.as_ref().map(|i| i.local_rgb_amount),
+                }
             })
             .collect();
         Ok(channels)

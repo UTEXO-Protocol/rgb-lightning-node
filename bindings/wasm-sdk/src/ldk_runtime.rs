@@ -226,6 +226,13 @@ pub struct LdkRuntimeOpenChannelResultData {
     pub status: String,
     pub ready: bool,
     pub is_usable: bool,
+    /// RGB contract id of the channel's asset, read from the RGB kv store for *every* live channel
+    /// (both outbound-opened and inbound-accepted). `None` for vanilla (BTC-only) channels.
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    /// This node's local RGB amount held in the channel.
+    #[serde(default)]
+    pub asset_local_amount: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1429,8 +1436,16 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
                 } else {
                     existing.as_ref().map(|e| e.capacity_sat).unwrap_or(0)
                 },
-                asset_id: existing.as_ref().and_then(|e| e.asset_id.clone()),
-                asset_local_amount: existing.as_ref().and_then(|e| e.asset_local_amount),
+                // Prefer the live channel's RGB info (now surfaced by `list_live_channels` for both
+                // inbound-accepted and outbound-opened channels); fall back to the cached entry for
+                // channels whose RGB info is not yet persisted (e.g. an outbound open still funding).
+                asset_id: ch
+                    .asset_id
+                    .clone()
+                    .or_else(|| existing.as_ref().and_then(|e| e.asset_id.clone())),
+                asset_local_amount: ch
+                    .asset_local_amount
+                    .or_else(|| existing.as_ref().and_then(|e| e.asset_local_amount)),
                 virtual_open_mode: existing.as_ref().and_then(|e| e.virtual_open_mode.clone()),
             };
             self.upsert_channel(state);

@@ -9,9 +9,13 @@ success.
 ## Flows
 
 - **`run_e2e_full_flow.mjs`** (page `rgb_e2e_full_flow.html` + `manual_js_rgb_e2e_full_flow.js`):
-  full single-peer flow — open a vanilla (BTC) channel and an RGB channel, settle real
-  BTC / BOLT11 / HODL payments both directions, settle RGB BOLT11 + keysend both
-  directions, then close and verify channel state is restored from persistence.
+  full single-peer flow over **trusted virtual channels**. The native node acts as an **LSP** that
+  *opens* both a vanilla (BTC) and an RGB virtual channel **to** the wasm node (0-conf, scid-privacy,
+  never-broadcast dust=1 funding); the wasm node **accepts** them via its `Event::OpenChannelRequest`
+  handler and holds the BTC + RGB liquidity the LSP pushes. The LSP issues the RGB asset. Then settle
+  real BTC / BOLT11 / HODL payments both directions and RGB BOLT11 + keysend both directions; finally
+  the LSP abandons both virtual channels and we verify state is restored from persistence.
+  **Requires the native LSP to run with `--enable-virtual-channels-v0`.**
 - **`run_multihop_flow.mjs`** (page `rgb_multihop_flow.html` + `manual_js_rgb_multihop_flow.js`):
   multi-hop forwarding `native-A -> WASM -> native-B` (boots two native nodes).
 - **`run_apay_lsp_flow.mjs`** (page `apay_lsp_flow.html` + `manual_js_apay_lsp_flow.js`):
@@ -47,6 +51,13 @@ The `rgb-native-phase5-node` harness binary must be available at the path the dr
 expects (`run_multihop_flow.mjs` resolves it under
 `../rust-lightning/contrib/rgb-cross-variant-harness/target/debug/`). A headless Chrome
 and a `puppeteer-core` install are also required (see env vars below).
+
+> **Virtual-channel full flow (`run_e2e_full_flow.mjs`):** the native LSP node
+> (LN peer `127.0.0.1:9802`, REST `127.0.0.1:3101`) must be started with
+> `--enable-virtual-channels-v0`. In this flow the LSP is the channel opener/funder **and** the RGB
+> asset issuer — it opens both virtual channels to the wasm node and pushes BTC + RGB liquidity; the
+> wasm node only accepts. The LSP wallet is funded on-chain by the flow itself via the gateway
+> regtest faucet, so it just needs to be unlocked and online.
 
 ## Run
 

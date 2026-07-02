@@ -588,6 +588,13 @@ impl RlnWasmNode {
             &self.persistence_keys.ldk_manager_registry_key,
             Rc::clone(&wallet),
         );
+        // Seed the live-backend virtual-channels flag registry with this node's current value
+        // (default/persisted) before the LDK object graph is first built, so the
+        // `Event::OpenChannelRequest` handler sees the right gate even if the setter is never called.
+        crate::ldk_live_backend::set_virtual_channels_v0_for_runtime(
+            &self.persistence_keys.ldk_manager_registry_key,
+            *self.enable_virtual_channels_v0.borrow(),
+        );
         *self.wallet.borrow_mut() = Some(wallet);
     }
 
@@ -651,6 +658,13 @@ impl RlnWasmNode {
         *self.enable_virtual_channels_v0.borrow_mut() = enabled;
         persist_virtual_channels_v0_flag(
             &self.persistence_keys.virtual_channels_v0_storage_key,
+            enabled,
+        );
+        // Mirror the flag into the live-backend registry so the `Event::OpenChannelRequest` handler
+        // (which decides whether to accept inbound scid-privacy channels as 0-conf virtual channels)
+        // can read it by runtime key.
+        crate::ldk_live_backend::set_virtual_channels_v0_for_runtime(
+            &self.persistence_keys.ldk_manager_registry_key,
             enabled,
         );
     }
