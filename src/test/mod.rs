@@ -33,6 +33,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing_test::traced_test;
 
+use crate::asset_link::AssetLinkSendPaymentRequest;
 use crate::core_types::{HTLCStatus, SwapStatus, FEE_RATE, HTLC_MIN_MSAT, VIRTUAL_HTLC_MIN_MSAT};
 use crate::disk::LDK_LOGS_FILE;
 use crate::error::{APIError, APIErrorResponse};
@@ -595,6 +596,51 @@ async fn asset_link_create(
         .await
         .unwrap()
         .asset_link
+}
+
+async fn asset_link_send_payment_raw(
+    node_address: SocketAddr,
+    invoice: &str,
+    asset_id: &str,
+    host_pubkey: &str,
+) -> reqwest::Response {
+    println!(
+        "sending linked-asset payment with asset {asset_id} for invoice {invoice} \
+         from node {node_address} via host {host_pubkey}"
+    );
+    let payload = AssetLinkSendPaymentRequest {
+        invoice: invoice.to_string(),
+        asset_id: asset_id.to_string(),
+        host_pubkey: host_pubkey.to_string(),
+    };
+    reqwest::Client::new()
+        .post(format!("http://{node_address}/assetlink/sendpayment"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn asset_link_send_payment(
+    node_address: SocketAddr,
+    invoice: &str,
+    asset_id: &str,
+    host_pubkey: &str,
+) -> Payment {
+    let res = check_response_is_ok(
+        asset_link_send_payment_raw(node_address, invoice, asset_id, host_pubkey).await,
+    )
+    .await
+    .json::<SendPaymentResponse>()
+    .await
+    .unwrap();
+    wait_for_ln_payment_by_type(
+        node_address,
+        &res.payment_hash.unwrap(),
+        PaymentType::Outbound,
+        HTLCStatus::Succeeded,
+    )
+    .await
 }
 
 async fn backup(node_address: SocketAddr, backup_path: &str, password: &str) {

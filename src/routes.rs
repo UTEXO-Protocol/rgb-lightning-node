@@ -72,14 +72,18 @@ use tokio::{
     time::timeout,
 };
 
+use crate::asset_link::{
+    AssetLinkAuthorizeParamsWire, AssetLinkSendPaymentRequest, ASSET_LINK_PROTOCOL_VERSION,
+};
 use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
-    AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    AsyncOrderOutboundInvoiceResultWire,
 };
 use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
     AsyncOrderOutboundInvoiceResponse,
 };
+use crate::custom_msg_rpc::JSONRPC_MSG_RESPONSE_TIMEOUT_SECS;
 use crate::ldk::{
     clear_rgb_payment_pending, peer_has_live_channel, start_ldk, stop_ldk, LdkBackgroundServices,
     VirtualChannelSessionStatus,
@@ -241,7 +245,7 @@ pub(crate) struct AssetLinkCreateResponse {
     pub(crate) asset_link: AssetLink,
 }
 
-fn asset_link_read_record(
+pub(crate) fn asset_link_read_record(
     kv_store: &dyn KVStoreSync,
     asset_id: &str,
 ) -> Result<AssetLink, APIError> {
@@ -1716,7 +1720,7 @@ pub(crate) async fn async_order_new(
         .map_err(|err| APIError::InvalidRequest(err.message))?;
     unlocked_state.peer_manager.process_events();
     let order_state_value = match timeout(
-        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        Duration::from_secs(JSONRPC_MSG_RESPONSE_TIMEOUT_SECS),
         response_rx,
     )
     .await
@@ -1810,7 +1814,7 @@ pub(crate) async fn async_order_outbound_invoice(
     unlocked_state.peer_manager.process_events();
 
     let response_value = match timeout(
-        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        Duration::from_secs(JSONRPC_MSG_RESPONSE_TIMEOUT_SECS),
         response_rx,
     )
     .await
@@ -1957,6 +1961,222 @@ pub(crate) async fn asset_link_create(
     asset_link_write_record(unlocked_state.kv_store.as_ref(), &asset_link)?;
 
     Ok(Json(AssetLinkCreateResponse { asset_link }))
+}
+
+pub(crate) async fn asset_link_send_payment(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<AssetLinkSendPaymentRequest>, APIError>,
+) -> Result<Json<SendPaymentResponse>, APIError> {
+    no_cancel(async move {
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
+
+        let host_pubkey =
+            PublicKey::from_str(&payload.host_pubkey).map_err(|_| APIError::InvalidPubkey)?;
+        let asset_contract_id = ContractId::from_str(&payload.asset_id)
+            .map_err(|_| APIError::InvalidAssetID(payload.asset_id.clone()))?;
+
+        let invoice = Bolt11Invoice::from_str(&payload.invoice)
+            .map_err(|e| APIError::InvalidInvoice(e.to_string()))?;
+        let (linked_contract_id, asset_amount) =
+            match (invoice.rgb_contract_id(), invoice.rgb_amount()) {
+                (Some(contract_id), Some(amount)) => (contract_id, amount),
+                _ => {
+                    return Err(APIError::InvalidInvoice(s!(
+                        "linked payment requires an RGB invoice with contract ID and amount"
+                    )))
+                }
+            };
+        if linked_contract_id == asset_contract_id {
+            return Err(APIError::InvalidRequest(
+                "asset_id and the invoice asset must be different".to_string(),
+            ));
+        }
+        let amt_msat = match invoice.amount_milli_satoshis() {
+            Some(amt) if amt > 0 => amt,
+            _ => {
+                return Err(APIError::InvalidAmount(s!(
+                    "linked payment requires an invoice with a msat amount"
+                )))
+            }
+        };
+
+        let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+        let payment_secret = *invoice.payment_secret();
+        let receiver_pubkey = invoice.recover_payee_pub_key();
+
+        let params = AssetLinkAuthorizeParamsWire {
+            protocol_version: ASSET_LINK_PROTOCOL_VERSION,
+            payment_hash: hex_str(&payment_hash.0),
+            asset_id: payload.asset_id.clone(),
+            linked_asset_id: linked_contract_id.to_string(),
+            amount: asset_amount,
+            expiry_sec: invoice.expiry_time().as_secs(),
+        };
+        let request_id = new_jsonrpc_request_id();
+        let response_rx = unlocked_state
+            .asset_link_handler
+            .queue_asset_link_authorize(host_pubkey, Value::String(request_id.clone()), params)
+            .map_err(|err| APIError::InvalidRequest(err.message))?;
+        unlocked_state.peer_manager.process_events();
+        match timeout(
+            Duration::from_secs(JSONRPC_MSG_RESPONSE_TIMEOUT_SECS),
+            response_rx,
+        )
+        .await
+        {
+            Ok(Ok(Ok(_result))) => {}
+            Ok(Ok(Err(err))) => {
+                return Err(APIError::InvalidRequest(format!(
+                    "asset_link host error {}: {}",
+                    err.code, err.message
+                )));
+            }
+            Ok(Err(_)) => {
+                return Err(APIError::Network(s!(
+                    "/assetlink/sendpayment response channel closed before the host replied"
+                )));
+            }
+            Err(_) => {
+                unlocked_state
+                    .asset_link_handler
+                    .forget_asset_link_response(host_pubkey, &request_id);
+                return Err(APIError::Network(s!(
+                    "/assetlink/sendpayment timed out waiting for host authorization"
+                )));
+            }
+        }
+
+        let first_leg = get_route(
+            &unlocked_state.channel_manager,
+            &unlocked_state.router,
+            unlocked_state.kv_store.as_ref(),
+            unlocked_state.runtime_node_id(),
+            host_pubkey,
+            Some(amt_msat),
+            Some((asset_contract_id, asset_amount)),
+            vec![],
+        );
+        let second_leg = get_route(
+            &unlocked_state.channel_manager,
+            &unlocked_state.router,
+            unlocked_state.kv_store.as_ref(),
+            host_pubkey,
+            receiver_pubkey,
+            Some(amt_msat),
+            Some((linked_contract_id, asset_amount)),
+            invoice.route_hints(),
+        );
+        let (mut first_leg, mut second_leg) = match (first_leg, second_leg) {
+            (Some(f), Some(s)) => (f, s),
+            _ => {
+                return Err(APIError::NoRoute);
+            }
+        };
+
+        second_leg.paths[0].hops[0].short_channel_id |= IS_SWAP_SCID;
+
+        first_leg.paths[0]
+            .hops
+            .last_mut()
+            .expect("Path not to be empty")
+            .fee_msat = 0;
+
+        let fullpaths = first_leg.paths[0]
+            .hops
+            .clone()
+            .into_iter()
+            .map(|mut hop| {
+                hop.rgb_payment = Some((asset_contract_id, asset_amount));
+                hop
+            })
+            .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
+                hop.rgb_payment = Some((linked_contract_id, asset_amount));
+                hop
+            }))
+            .collect::<Vec<_>>();
+
+        let total_fee = fullpaths
+            .iter()
+            .rev()
+            .skip(1)
+            .map(|hop| hop.fee_msat)
+            .sum::<u64>();
+
+        if total_fee >= MAX_SWAP_FEE_MSAT {
+            return Err(APIError::FailedPayment(format!(
+                "Fee too high: {total_fee}"
+            )));
+        }
+
+        let route = Route {
+            paths: vec![LnPath {
+                hops: fullpaths,
+                blinded_tail: None,
+            }],
+            route_params: None,
+        };
+
+        let created_at = get_current_timestamp();
+        let payment_id = PaymentId(payment_hash.0);
+        let mut status = HTLCStatus::Pending;
+        unlocked_state.add_outbound_payment(
+            payment_id,
+            PaymentInfo {
+                preimage: None,
+                secret: Some(payment_secret),
+                status,
+                amt_msat: Some(amt_msat),
+                created_at,
+                updated_at: created_at,
+                payee_pubkey: invoice.get_payee_pub_key(),
+                expires_at: None,
+                claim_deadline_height: None,
+                invoice_type: None,
+                description_hash: description_hash_from_invoice(&invoice),
+                payment_idx: None,
+                async_hash_index: None,
+                async_host_node_id: None,
+            },
+        )?;
+        write_rgb_payment_info_file(
+            &payment_hash,
+            asset_contract_id,
+            asset_amount,
+            false,
+            false,
+            unlocked_state.kv_store.as_ref(),
+        );
+
+        match unlocked_state.channel_manager.send_payment_with_route(
+            route,
+            payment_hash,
+            RecipientOnionFields::secret_only(payment_secret),
+            payment_id,
+        ) {
+            Ok(()) => {
+                tracing::info!(
+                    "EVENT: sent linked-asset payment of {} to {}",
+                    asset_amount,
+                    receiver_pubkey
+                );
+            }
+            Err(e) => {
+                tracing::error!("ERROR: failed to send linked-asset payment: {:?}", e);
+                clear_rgb_payment_pending(&payment_hash, false, unlocked_state.kv_store.as_ref());
+                status = HTLCStatus::Failed;
+                unlocked_state.update_outbound_payment_status(payment_id, status);
+            }
+        }
+
+        Ok(Json(SendPaymentResponse {
+            payment_id: hex_str(&payment_id.0),
+            payment_hash: Some(hex_str(&payment_hash.0)),
+            payment_secret: Some(hex_str(&payment_secret.0)),
+            status,
+        }))
+    })
+    .await
 }
 
 pub(crate) async fn asset_metadata(

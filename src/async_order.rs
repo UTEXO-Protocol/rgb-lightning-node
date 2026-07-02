@@ -25,11 +25,16 @@ use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tracing::warn;
 
+use crate::custom_msg_rpc::{
+    jsonrpc_error_value, jsonrpc_result_value, resolve_pending_response,
+    CustomMsgPeerAccessControl, CustomMsgRpcEnvelope, CustomMsgRpcResponseReceiver,
+    JsonRpcErrorWire, PendingResponses, JSONRPC_INVALID_PARAMS, JSONRPC_METHOD_NOT_FOUND,
+    JSONRPC_VERSION,
+};
 use crate::utils::{hex_str, validate_and_parse_description_hash, validate_and_parse_payment_hash};
 
 pub(crate) const ASYNC_ORDER_MESSAGE_TYPE_ID: u16 = 37915;
 pub(crate) const ASYNC_ORDER_MAX_HASH_BATCH_SIZE: usize = 200;
-pub(crate) const ASYNC_ORDER_RESPONSE_TIMEOUT_SECS: u64 = 30;
 const ASYNC_ERROR_DUPLICATE_INDEX_CONFLICT: i64 = 1004;
 const ASYNC_ERROR_DUPLICATE_HASH_CONFLICT: i64 = 1005;
 const ASYNC_ERROR_INVALID_HASH_BATCH: i64 = 1003;
@@ -39,12 +44,6 @@ const ASYNC_ORDER_NEW_METHOD: &str = "async_order.new";
 const ASYNC_ORDER_REQUEST_INVOICE_METHOD: &str = "async_order.request_invoice";
 const ASYNC_ORDER_PAYMENT_SENT_PATH: &str = "/internal/async_order/payment_sent";
 const ASYNC_ERROR_UNSUPPORTED_PROTOCOL_VERSION: i64 = 1000;
-const JSONRPC_INVALID_REQUEST: i64 = -32600;
-const JSONRPC_INVALID_PARAMS: i64 = -32602;
-const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
-const JSONRPC_PARSE_ERROR: i64 = -32700;
-const JSONRPC_VERSION: &str = "2.0";
 const PROTOCOL_VERSION: u64 = 1;
 const ASYNC_ORDER_LSP_REQUEST_TIMEOUT_SECS: u64 = 25; // Must be above utexo-lsp's default 15s HTTP timeout with a buffer.
 const ASYNC_ORDER_FIRST_HASH_INDEX: u64 = 1;
@@ -80,21 +79,6 @@ impl LengthReadable for AsyncOrderMessage {
             payload: payload_without_length.0,
         })
     }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct AsyncOrderEnvelope {
-    jsonrpc: String,
-    #[serde(default)]
-    id: Option<Value>,
-    #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    params: Option<Value>,
-    #[serde(default)]
-    result: Option<Value>,
-    #[serde(default)]
-    error: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -329,12 +313,6 @@ struct AsyncOrderHttpResponseWire {
     error: Option<JsonRpcErrorWire>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct JsonRpcErrorWire {
-    pub(crate) code: i64,
-    pub(crate) message: String,
-}
-
 #[derive(Clone)]
 pub(crate) struct AsyncPaymentsPreimageRoot {
     account_xprv: Xpriv,
@@ -397,10 +375,6 @@ pub(crate) fn write_async_payments_next_hash_index(
         })
 }
 
-pub(crate) trait AsyncOrderAccessControl: Send + Sync {
-    fn allows_peer(&self, peer: &PublicKey) -> bool;
-}
-
 pub(crate) trait AsyncOrderInvoiceProvider: Send + Sync {
     fn request_outbound_invoice(
         &self,
@@ -412,14 +386,14 @@ pub(crate) trait AsyncOrderInvoiceProvider: Send + Sync {
 #[derive(Debug)]
 struct AllowFreeAccess;
 
-impl AsyncOrderAccessControl for AllowFreeAccess {
+impl CustomMsgPeerAccessControl for AllowFreeAccess {
     fn allows_peer(&self, _peer: &PublicKey) -> bool {
         true
     }
 }
 
 pub(crate) struct AsyncOrderMessageHandler {
-    access_control: Arc<dyn AsyncOrderAccessControl>,
+    access_control: Arc<dyn CustomMsgPeerAccessControl>,
     invoice_provider: Arc<Mutex<Option<Arc<dyn AsyncOrderInvoiceProvider>>>>,
     lsp_client: Option<AsyncOrderLspClient>,
     runtime_handle: Option<Handle>,
@@ -430,13 +404,9 @@ struct AsyncOrderState {
     next_order_id: u64,
     peers: HashMap<PublicKey, PeerOrderState>,
     pending: Vec<(PublicKey, AsyncOrderMessage)>,
-    pending_responses: HashMap<(PublicKey, String), AsyncOrderResponseSender>,
+    pending_responses: PendingResponses,
     request_invoice_cache: HashMap<(PublicKey, String), AsyncOrderRequestInvoiceCacheEntry>,
 }
-
-type AsyncOrderResponse = Result<Value, JsonRpcErrorWire>;
-type AsyncOrderResponseSender = oneshot::Sender<AsyncOrderResponse>;
-pub(crate) type AsyncOrderResponseReceiver = oneshot::Receiver<AsyncOrderResponse>;
 
 #[derive(Debug, Default)]
 struct PeerOrderState {
@@ -857,7 +827,7 @@ impl AsyncPaymentsPreimageRoot {
 }
 
 impl AsyncOrderMessageHandler {
-    pub(crate) fn new(access_control: Arc<dyn AsyncOrderAccessControl>) -> Self {
+    pub(crate) fn new(access_control: Arc<dyn CustomMsgPeerAccessControl>) -> Self {
         Self {
             access_control,
             invoice_provider: Arc::new(Mutex::new(None)),
@@ -868,7 +838,7 @@ impl AsyncOrderMessageHandler {
     }
 
     pub(crate) fn new_with_lsp_client(
-        access_control: Arc<dyn AsyncOrderAccessControl>,
+        access_control: Arc<dyn CustomMsgPeerAccessControl>,
         lsp_base_url: String,
         lsp_bearer_token: Option<String>,
         runtime_handle: Handle,
@@ -901,7 +871,7 @@ impl AsyncOrderMessageHandler {
         id: Value,
         method: &'static str,
         params: impl Serialize,
-    ) -> Result<AsyncOrderResponseReceiver, JsonRpcErrorWire> {
+    ) -> Result<CustomMsgRpcResponseReceiver, JsonRpcErrorWire> {
         let Some(request_id) = id.as_str().map(str::to_owned) else {
             return Err(JsonRpcErrorWire::invalid_request());
         };
@@ -952,14 +922,7 @@ impl AsyncOrderMessageHandler {
     }
 
     fn queue_jsonrpc_result<T: Serialize>(&self, peer: PublicKey, id: Value, result: T) {
-        self.queue_jsonrpc_value(
-            peer,
-            json!({
-                "jsonrpc": JSONRPC_VERSION,
-                "id": id,
-                "result": result,
-            }),
-        );
+        self.queue_jsonrpc_value(peer, jsonrpc_result_value(id, result));
     }
 
     pub(crate) fn queue_async_order_new(
@@ -967,7 +930,7 @@ impl AsyncOrderMessageHandler {
         host_node_id: PublicKey,
         id: Value,
         params: AsyncOrderNewParamsWire,
-    ) -> Result<AsyncOrderResponseReceiver, JsonRpcErrorWire> {
+    ) -> Result<CustomMsgRpcResponseReceiver, JsonRpcErrorWire> {
         Self::validate_async_order_new_params(&params)?;
         self.queue_async_order_request(host_node_id, id, ASYNC_ORDER_NEW_METHOD, params)
     }
@@ -977,7 +940,7 @@ impl AsyncOrderMessageHandler {
         peer_node_id: PublicKey,
         id: Value,
         params: AsyncOrderRequestInvoiceParamsWire,
-    ) -> Result<AsyncOrderResponseReceiver, JsonRpcErrorWire> {
+    ) -> Result<CustomMsgRpcResponseReceiver, JsonRpcErrorWire> {
         self.queue_async_order_request(peer_node_id, id, ASYNC_ORDER_REQUEST_INVOICE_METHOD, params)
     }
 
@@ -1002,14 +965,13 @@ impl AsyncOrderMessageHandler {
         Self::queue_jsonrpc_value_to_state(
             state,
             peer,
-            json!({
-                "jsonrpc": JSONRPC_VERSION,
-                "id": id,
-                "error": JsonRpcErrorWire {
+            jsonrpc_error_value(
+                id,
+                JsonRpcErrorWire {
                     code,
                     message: message.to_owned(),
                 },
-            }),
+            ),
         );
     }
 
@@ -1019,36 +981,20 @@ impl AsyncOrderMessageHandler {
         id: Value,
         result: impl Serialize,
     ) {
-        Self::queue_jsonrpc_value_to_state(
-            state,
-            peer,
-            json!({
-                "jsonrpc": JSONRPC_VERSION,
-                "id": id,
-                "result": result,
-            }),
-        );
+        Self::queue_jsonrpc_value_to_state(state, peer, jsonrpc_result_value(id, result));
     }
 
     fn queue_jsonrpc_parse_error(&self, peer: PublicKey) {
         self.queue_jsonrpc_value(
             peer,
-            json!({
-                "jsonrpc": JSONRPC_VERSION,
-                "id": Value::Null,
-                "error": JsonRpcErrorWire::parse_error(),
-            }),
+            jsonrpc_error_value(Value::Null, JsonRpcErrorWire::parse_error()),
         );
     }
 
     fn queue_jsonrpc_invalid_request(&self, peer: PublicKey) {
         self.queue_jsonrpc_value(
             peer,
-            json!({
-                "jsonrpc": JSONRPC_VERSION,
-                "id": Value::Null,
-                "error": JsonRpcErrorWire::invalid_request(),
-            }),
+            jsonrpc_error_value(Value::Null, JsonRpcErrorWire::invalid_request()),
         );
     }
 
@@ -1059,36 +1005,15 @@ impl AsyncOrderMessageHandler {
         result: Option<Value>,
         error: Option<Value>,
     ) {
-        let Some(Value::String(request_id)) = id else {
-            warn!(peer = %sender_node_id, "ignoring async_order response with missing or non-string id");
-            return;
-        };
-
-        let response = match (result, error) {
-            (Some(result), None) => Ok(result),
-            (None, Some(error)) => match serde_json::from_value::<JsonRpcErrorWire>(error) {
-                Ok(err) => Err(err),
-                Err(err) => Err(JsonRpcErrorWire::internal_error(format!(
-                    "invalid_async_order_response_error: {err}"
-                ))),
-            },
-            (Some(_), Some(_)) => Err(JsonRpcErrorWire::internal_error(
-                "invalid_async_order_response: contained both result and error".to_owned(),
-            )),
-            (None, None) => Err(JsonRpcErrorWire::internal_error(
-                "invalid_async_order_response: missing result and error".to_owned(),
-            )),
-        };
-
-        let response_sender = {
-            let mut state = self.state.lock().unwrap();
-            state
-                .pending_responses
-                .remove(&(sender_node_id, request_id))
-        };
-        if let Some(response_sender) = response_sender {
-            let _ = response_sender.send(response);
-        }
+        let mut state = self.state.lock().unwrap();
+        resolve_pending_response(
+            &mut state.pending_responses,
+            "async_order",
+            sender_node_id,
+            id,
+            result,
+            error,
+        );
     }
 
     fn receive_async_order_request_invoice(
@@ -1314,7 +1239,7 @@ impl CustomMessageHandler for AsyncOrderMessageHandler {
             return Ok(());
         }
 
-        let envelope: AsyncOrderEnvelope = match serde_json::from_str(&msg.payload) {
+        let envelope: CustomMsgRpcEnvelope = match serde_json::from_str(&msg.payload) {
             Ok(envelope) => envelope,
             Err(err) => {
                 warn!(
@@ -1333,10 +1258,7 @@ impl CustomMessageHandler for AsyncOrderMessageHandler {
             return Ok(());
         }
 
-        let response_like = envelope.result.is_some()
-            || envelope.error.is_some()
-            || (envelope.method.is_none() && envelope.id.is_some() && envelope.params.is_none());
-        if response_like {
+        if envelope.is_response_like() {
             if envelope.method.is_some() {
                 warn!(
                     peer = %sender_node_id,
@@ -1582,13 +1504,6 @@ impl AsyncOrderRecord {
 }
 
 impl JsonRpcErrorWire {
-    fn parse_error() -> Self {
-        Self {
-            code: JSONRPC_PARSE_ERROR,
-            message: "parse error".to_owned(),
-        }
-    }
-
     fn duplicate_index_conflict() -> Self {
         Self {
             code: ASYNC_ERROR_DUPLICATE_INDEX_CONFLICT,
@@ -1603,38 +1518,10 @@ impl JsonRpcErrorWire {
         }
     }
 
-    pub(crate) fn application_error(code: i64, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn internal_error(message: String) -> Self {
-        Self {
-            code: JSONRPC_INTERNAL_ERROR,
-            message,
-        }
-    }
-
     fn invalid_hash_batch() -> Self {
         Self {
             code: ASYNC_ERROR_INVALID_HASH_BATCH,
             message: "invalid_hash_batch".to_owned(),
-        }
-    }
-
-    pub(crate) fn invalid_params(message: impl Into<String>) -> Self {
-        Self {
-            code: JSONRPC_INVALID_PARAMS,
-            message: message.into(),
-        }
-    }
-
-    fn invalid_request() -> Self {
-        Self {
-            code: JSONRPC_INVALID_REQUEST,
-            message: "invalid request".to_owned(),
         }
     }
 
@@ -1704,6 +1591,9 @@ fn validate_async_payments_next_hash_index(next_index: u64) -> Result<(), JsonRp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::custom_msg_rpc::{
+        JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_REQUEST, JSONRPC_PARSE_ERROR,
+    };
     use crate::kv_store::test_support::MemoryKvStore;
     use crate::utils::new_jsonrpc_request_id;
     use axum::{extract::Json, http::StatusCode, routing::post, Router};
@@ -1742,7 +1632,7 @@ mod tests {
         }
     }
 
-    impl AsyncOrderAccessControl for DenyAllAccess {
+    impl CustomMsgPeerAccessControl for DenyAllAccess {
         fn allows_peer(&self, _peer: &PublicKey) -> bool {
             false
         }

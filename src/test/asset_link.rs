@@ -92,3 +92,145 @@ async fn asset_link_create_is_persisted_and_idempotent() {
     .await;
     assert_eq!(after_restart, asset_link);
 }
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn asset_link_send_payment_swaps_virtual_to_reserve_asset() {
+    initialize();
+
+    const LINK_AMT: u64 = 100;
+    const CHANNEL_AMT: u64 = 300;
+
+    let test_dir_host = format!("{TEST_DIR_BASE}host");
+    let test_dir_payer = format!("{TEST_DIR_BASE}payer");
+    let test_dir_receiver = format!("{TEST_DIR_BASE}receiver");
+
+    let host_peer_port = next_peer_port();
+    let payer_peer_port = next_peer_port();
+    let receiver_peer_port = next_peer_port();
+
+    let (host_addr, _) =
+        start_node_with_virtual_options(&test_dir_host, host_peer_port, false, true, vec![]).await;
+    let host_info = node_info(host_addr).await;
+    let (payer_addr, _) = start_node_with_virtual_options(
+        &test_dir_payer,
+        payer_peer_port,
+        false,
+        true,
+        vec![PublicKey::from_str(&host_info.pubkey).unwrap()],
+    )
+    .await;
+    let (receiver_addr, _) = start_node(&test_dir_receiver, receiver_peer_port, false).await;
+
+    fund_and_create_utxos(host_addr, None).await;
+    fund_and_create_utxos(receiver_addr, None).await;
+
+    let asset_v = issue_asset_nia(host_addr).await.asset_id;
+    let asset_r = issue_asset_nia(host_addr).await.asset_id;
+    asset_link_create(host_addr, &asset_v, &asset_r).await;
+
+    let payer_info = node_info(payer_addr).await;
+    open_virtual_channel(
+        host_addr,
+        &payer_info.pubkey,
+        Some(payer_peer_port),
+        Some(100_000),
+        Some(10_000_000),
+        Some(CHANNEL_AMT),
+        Some(&asset_v),
+        Some(CHANNEL_AMT - LINK_AMT),
+    )
+    .await;
+
+    let receiver_info = node_info(receiver_addr).await;
+    open_channel_raw(
+        host_addr,
+        &receiver_info.pubkey,
+        Some(receiver_peer_port),
+        Some(100_000),
+        Some(10_000_000),
+        Some(CHANNEL_AMT),
+        Some(&asset_r),
+        Some(CHANNEL_AMT - LINK_AMT),
+        None,
+        None,
+        None,
+        true,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let invoice = ln_invoice(
+        receiver_addr,
+        Some(3_000_000),
+        Some(&asset_r),
+        Some(LINK_AMT),
+        3600,
+    )
+    .await
+    .invoice;
+
+    let payment = asset_link_send_payment(payer_addr, &invoice, &asset_v, &host_info.pubkey).await;
+    let payment_hash = payment.payment_hash.clone();
+    check_preimage_matches_hash(&payment, &payment_hash);
+    assert_eq!(payment.asset_id.as_deref(), Some(asset_v.as_str()));
+    assert_eq!(payment.asset_amount, Some(LINK_AMT));
+
+    wait_for_ln_balance(receiver_addr, &asset_r, CHANNEL_AMT).await;
+    wait_for_ln_balance(payer_addr, &asset_v, CHANNEL_AMT - LINK_AMT * 2).await;
+    wait_for_ln_balance(host_addr, &asset_v, LINK_AMT * 2).await;
+    wait_for_ln_balance(host_addr, &asset_r, 0).await;
+
+    let receiver_payment = wait_for_ln_payment_by_type(
+        receiver_addr,
+        &payment_hash,
+        PaymentType::InboundAutoClaim,
+        HTLCStatus::Succeeded,
+    )
+    .await;
+    assert_eq!(receiver_payment.asset_id.as_deref(), Some(asset_r.as_str()));
+    assert_eq!(receiver_payment.asset_amount, Some(LINK_AMT));
+
+    let host_swaps = list_swaps(host_addr).await;
+    let linked_swap = host_swaps
+        .taker
+        .iter()
+        .find(|swap| swap.payment_hash == payment_hash)
+        .expect("linked swap whitelist entry on the host");
+    assert_eq!(linked_swap.from_asset.as_deref(), Some(asset_r.as_str()));
+    assert_eq!(linked_swap.to_asset.as_deref(), Some(asset_v.as_str()));
+    assert_eq!(linked_swap.qty_from, LINK_AMT);
+    assert_eq!(linked_swap.qty_to, LINK_AMT);
+
+    let asset_unlinked = issue_asset_nia(host_addr).await.asset_id;
+    let r_invoice_unlinked = ln_invoice(
+        receiver_addr,
+        Some(3_000_000),
+        Some(&asset_r),
+        Some(1),
+        3600,
+    )
+    .await
+    .invoice;
+    let res = asset_link_send_payment_raw(
+        payer_addr,
+        &r_invoice_unlinked,
+        &asset_unlinked,
+        &host_info.pubkey,
+    )
+    .await;
+    check_response_is_nok(
+        res,
+        StatusCode::BAD_REQUEST,
+        "unknown_link",
+        "InvalidRequest",
+    )
+    .await;
+    wait_for_ln_balance(receiver_addr, &asset_r, CHANNEL_AMT).await;
+    wait_for_ln_balance(host_addr, &asset_r, 0).await;
+
+    shutdown(&[payer_addr, host_addr, receiver_addr]).await;
+}

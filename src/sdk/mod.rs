@@ -3,13 +3,14 @@
 
 use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
-    AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    AsyncOrderOutboundInvoiceResultWire,
 };
 use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
     AsyncOrderOutboundInvoiceResponse,
 };
 use crate::core_types::{FEE_RATE, MIN_CHANNEL_CONFIRMATIONS, VIRTUAL_HTLC_MIN_MSAT};
+use crate::custom_msg_rpc::JSONRPC_MSG_RESPONSE_TIMEOUT_SECS;
 use crate::error::APIError;
 use crate::ldk::{
     clear_rgb_payment_pending, peer_has_live_channel, start_ldk, write_rgb_payment_info_file,
@@ -1212,7 +1213,7 @@ pub(crate) async fn async_order_new(
         .map_err(|err| APIError::InvalidRequest(err.message))?;
     unlocked_state.peer_manager.process_events();
     let order_state_value = match timeout(
-        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        Duration::from_secs(JSONRPC_MSG_RESPONSE_TIMEOUT_SECS),
         response_rx,
     )
     .await
@@ -1303,7 +1304,7 @@ pub(crate) async fn async_order_outbound_invoice(
     unlocked_state.peer_manager.process_events();
 
     let response_value = match timeout(
-        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        Duration::from_secs(JSONRPC_MSG_RESPONSE_TIMEOUT_SECS),
         response_rx,
     )
     .await

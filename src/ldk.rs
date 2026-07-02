@@ -1,9 +1,14 @@
-use crate::async_order::{
-    AsyncOrderAccessControl, AsyncOrderInvoiceProvider, AsyncOrderMessageHandler,
-    AsyncOrderOutboundInvoiceResultWire, AsyncOrderRequestInvoiceParamsWire,
-    AsyncPaymentsPreimageRoot, JsonRpcErrorWire, ASYNC_ERROR_INVOICE_HASH_MISMATCH,
-    ASYNC_ERROR_STALE_FLOW,
+use crate::asset_link::{
+    AssetLinkAuthorizeParamsWire, AssetLinkAuthorizer, AssetLinkMessageHandler,
+    ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH, ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY,
+    ASSET_LINK_ERROR_UNKNOWN_LINK,
 };
+use crate::async_order::{
+    AsyncOrderInvoiceProvider, AsyncOrderMessageHandler, AsyncOrderOutboundInvoiceResultWire,
+    AsyncOrderRequestInvoiceParamsWire, AsyncPaymentsPreimageRoot,
+    ASYNC_ERROR_INVOICE_HASH_MISMATCH, ASYNC_ERROR_STALE_FLOW,
+};
+use crate::custom_msg_rpc::{CustomMessenger, CustomMsgPeerAccessControl, JsonRpcErrorWire};
 use crate::synced_kv_store::SyncedKvStore;
 use amplify::{map, s};
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -147,6 +152,7 @@ use crate::rgb::{
     check_rgb_proxy_endpoint, get_rgb_channel_info_optional, RgbBumpWalletSource,
     RgbLibWalletWrapper,
 };
+use crate::routes::asset_link_read_record;
 use crate::signer::vls_adapter::{ExternalSignerBackend, VlsSignerAdapter};
 use crate::signer::{
     read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
@@ -156,12 +162,13 @@ use crate::signer::{
     ActiveSignerRef, DynRlnChannelSigner, DynRlnSigner, LightningEntropySource, RlnKeysInterface,
     SystemEntropySource,
 };
-use crate::swap::SwapData;
+use crate::swap::{SwapData, SwapInfo};
 use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, do_connect_peer, get_current_timestamp,
-    hex_str, validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState,
-    StaticState, UnlockedAppState, ELECTRUM_URL_MAINNET, ELECTRUM_URL_REGTEST, ELECTRUM_URL_SIGNET,
-    ELECTRUM_URL_TESTNET, ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
+    get_max_local_rgb_amount, hex_str, validate_and_parse_payment_hash,
+    validate_and_parse_payment_preimage, AppState, StaticState, UnlockedAppState,
+    ELECTRUM_URL_MAINNET, ELECTRUM_URL_REGTEST, ELECTRUM_URL_SIGNET, ELECTRUM_URL_TESTNET,
+    ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
 };
 
 const VIRTUAL_CHANNEL_DOMAIN_SEPARATOR: &[u8] = b"rln_virtual_channels_v0";
@@ -1051,7 +1058,7 @@ pub(crate) type PeerManager = LdkPeerManager<
     Arc<RoutingMessageHandler>,
     Arc<OnionMessenger>,
     Arc<FilesystemLogger>,
-    Arc<AsyncOrderMessageHandler>,
+    Arc<CustomMessenger>,
     ActiveSignerRef,
     Arc<ChainMonitor>,
 >;
@@ -1180,9 +1187,95 @@ impl LiveChannelAccess {
     }
 }
 
-impl AsyncOrderAccessControl for LiveChannelAccess {
+impl CustomMsgPeerAccessControl for LiveChannelAccess {
     fn allows_peer(&self, peer: &PublicKey) -> bool {
         self.lookup.peer_has_live_channel(peer)
+    }
+}
+
+struct NodeAssetLinkAuthorizer {
+    channel_manager: Arc<ChannelManager>,
+    kv_store: Arc<SyncedKvStore>,
+    taker_swaps: Arc<Mutex<SwapMap>>,
+}
+
+impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
+    fn authorize_swap(
+        &self,
+        sender_node_id: PublicKey,
+        params: &AssetLinkAuthorizeParamsWire,
+    ) -> Result<(), JsonRpcErrorWire> {
+        let payment_hash = validate_and_parse_payment_hash(&params.payment_hash)
+            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_payment_hash"))?;
+        let asset_contract_id = ContractId::from_str(&params.asset_id)
+            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_asset_id"))?;
+        let linked_contract_id = ContractId::from_str(&params.linked_asset_id)
+            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_linked_asset_id"))?;
+        if params.amount == 0 {
+            return Err(JsonRpcErrorWire::invalid_params("invalid_amount"));
+        }
+        if params.expiry_sec == 0 {
+            return Err(JsonRpcErrorWire::invalid_params("invalid_expiry_sec"));
+        }
+
+        let record =
+            asset_link_read_record(self.kv_store.as_ref(), &params.asset_id).map_err(|_| {
+                JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_LINK, "unknown_link")
+            })?;
+        if record.linked_asset_id.as_deref() != Some(params.linked_asset_id.as_str())
+            || record.signature.is_none()
+        {
+            return Err(JsonRpcErrorWire::application_error(
+                ASSET_LINK_ERROR_UNKNOWN_LINK,
+                "unknown_link",
+            ));
+        }
+
+        let max_balance = get_max_local_rgb_amount(
+            linked_contract_id,
+            self.channel_manager.list_channels().iter(),
+            self.kv_store.as_ref(),
+        );
+        if params.amount > max_balance {
+            return Err(JsonRpcErrorWire::application_error(
+                ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY,
+                "insufficient_liquidity",
+            ));
+        }
+
+        let mut taker_swaps = self.taker_swaps.lock().unwrap();
+        if taker_swaps.swaps.contains_key(&payment_hash) {
+            return Err(JsonRpcErrorWire::application_error(
+                ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH,
+                "duplicate_payment_hash",
+            ));
+        }
+
+        let swap_info = SwapInfo {
+            qty_from: params.amount,
+            qty_to: params.amount,
+            from_asset: Some(linked_contract_id),
+            to_asset: Some(asset_contract_id),
+            expiry: get_current_timestamp() + params.expiry_sec,
+        };
+        taker_swaps
+            .swaps
+            .insert(payment_hash, SwapData::create_from_swap_info(&swap_info));
+        self.kv_store
+            .write("", "", TAKER_SWAPS_KEY, taker_swaps.encode())
+            .map_err(|e| {
+                JsonRpcErrorWire::internal_error(format!("taker_swaps_write_failed: {e}"))
+            })?;
+
+        tracing::info!(
+            peer = %sender_node_id,
+            payment_hash = %hex_str(&payment_hash.0),
+            asset_id = %params.asset_id,
+            linked_asset_id = %params.linked_asset_id,
+            amount = params.amount,
+            "authorized linked-asset payment"
+        );
+        Ok(())
     }
 }
 
@@ -3057,7 +3150,11 @@ async fn handle_ldk_events(
                 .channel_manager
                 .list_channels()
                 .into_iter()
-                .find(|details| details.short_channel_id == Some(requested_next_hop_scid))
+                .find(|details| {
+                    details.short_channel_id == Some(requested_next_hop_scid)
+                        || details.outbound_scid_alias == Some(requested_next_hop_scid)
+                        || details.inbound_scid_alias == Some(requested_next_hop_scid)
+                })
                 .expect("Should always be a valid channel");
 
             let inbound_rgb_info = get_rgb_info(&inbound_channel.channel_id);
@@ -4679,13 +4776,18 @@ pub(crate) async fn start_ldk(
     let live_channel_access = Arc::new(LiveChannelAccess::new(channel_manager.clone()));
     let async_order_handler = match static_state.lsp_base_url.as_ref() {
         Some(lsp_base_url) => Arc::new(AsyncOrderMessageHandler::new_with_lsp_client(
-            live_channel_access,
+            live_channel_access.clone(),
             lsp_base_url.clone(),
             static_state.lsp_bearer_token.clone(),
             Handle::current(),
         )),
-        None => Arc::new(AsyncOrderMessageHandler::new(live_channel_access)),
+        None => Arc::new(AsyncOrderMessageHandler::new(live_channel_access.clone())),
     };
+    let asset_link_handler = Arc::new(AssetLinkMessageHandler::new(live_channel_access));
+    let custom_messenger = Arc::new(CustomMessenger {
+        async_order: Arc::clone(&async_order_handler),
+        asset_link: Arc::clone(&asset_link_handler),
+    });
     let async_payments_preimage_root = Arc::new(
         match internal_mnemonic.as_ref() {
             Some(mnemonic) => AsyncPaymentsPreimageRoot::build_from_mnemonic(
@@ -4712,7 +4814,7 @@ pub(crate) async fn start_ldk(
         chan_handler: channel_manager.clone(),
         route_handler: Arc::clone(&route_handler),
         onion_message_handler: onion_messenger.clone(),
-        custom_message_handler: Arc::clone(&async_order_handler),
+        custom_message_handler: Arc::clone(&custom_messenger),
         send_only_message_handler: Arc::clone(&chain_monitor),
     };
     let peer_manager: Arc<PeerManager> = Arc::new(PeerManager::new(
@@ -5029,6 +5131,12 @@ pub(crate) async fn start_ldk(
         external_signer: external_signer.clone(),
     }));
 
+    asset_link_handler.set_authorizer(Arc::new(NodeAssetLinkAuthorizer {
+        channel_manager: Arc::clone(&channel_manager),
+        kv_store: Arc::clone(&kv_store),
+        taker_swaps: Arc::clone(&taker_swaps),
+    }));
+
     let unlocked_state = Arc::new(UnlockedAppState {
         channel_manager: Arc::clone(&channel_manager),
         gossip_source: Arc::clone(&gossip_source),
@@ -5041,6 +5149,7 @@ pub(crate) async fn start_ldk(
         outbound_payments,
         peer_manager: Arc::clone(&peer_manager),
         async_order_handler,
+        asset_link_handler,
         async_payments_preimage_root,
         kv_store: Arc::clone(&kv_store),
         #[cfg(feature = "vss")]
