@@ -1847,7 +1847,7 @@ async fn handle_ldk_events(
                         &temporary_channel_id,
                         unlocked_state.kv_store.as_ref(),
                     );
-                    let channel_rgb_amount = rgb_info.local_rgb_amount;
+                    let channel_rgb_amount = rgb_info.local_rgb_amount + rgb_info.remote_rgb_amount;
                     let asset_id = rgb_info.contract_id.to_string();
                     let assignment = match rgb_info.schema {
                         AssetSchema::Nia | AssetSchema::Cfa | AssetSchema::Ifa => {
