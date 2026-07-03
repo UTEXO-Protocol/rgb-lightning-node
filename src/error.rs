@@ -361,6 +361,9 @@ pub enum APIError {
     #[error("Layer 1 {0} is not supported")]
     UnsupportedLayer1(String),
 
+    #[error("Asset schema {0} is not supported on this network")]
+    UnsupportedSchema(String),
+
     #[error("Transport type is not supported")]
     UnsupportedTransportType,
 
@@ -479,6 +482,9 @@ impl From<RgbLibError> for APIError {
                 APIError::UnsupportedInflation(format!("{asset_schema}"))
             }
             RgbLibError::UnsupportedLayer1 { layer_1 } => APIError::UnsupportedLayer1(layer_1),
+            RgbLibError::UnsupportedSchema { asset_schema } => {
+                APIError::UnsupportedSchema(format!("{asset_schema}"))
+            }
             RgbLibError::UnsupportedTransportType => APIError::UnsupportedTransportType,
             _ => {
                 tracing::debug!("Unexpected rgb-lib error: {error:?}");
@@ -601,6 +607,7 @@ impl IntoResponse for APIError {
             | APIError::UnlockedNode
             | APIError::UnsupportedInflation(_)
             | APIError::UnsupportedLayer1(_)
+            | APIError::UnsupportedSchema(_)
             | APIError::UnsupportedTransportType
             | APIError::UnsupportedInExternalSignerMode(_) => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
@@ -698,5 +705,22 @@ impl IntoResponse for AuthError {
             )
                 .into_response(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_schema_maps_to_dedicated_error() {
+        let err = APIError::from(RgbLibError::UnsupportedSchema {
+            asset_schema: rgb_lib::AssetSchema::Ifa,
+        });
+        assert!(matches!(err, APIError::UnsupportedSchema(_)));
+        assert_eq!(
+            err.to_string(),
+            "Asset schema Ifa is not supported on this network"
+        );
     }
 }

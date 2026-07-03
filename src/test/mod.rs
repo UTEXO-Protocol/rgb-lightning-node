@@ -2935,6 +2935,7 @@ mod gossip_p2p;
 mod gossip_rgs;
 mod hodl_invoice;
 mod htlc_amount_checks;
+mod ifa_channel;
 mod inflate;
 mod init;
 mod init_electrum;

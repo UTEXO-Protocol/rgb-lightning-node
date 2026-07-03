@@ -5,7 +5,6 @@ const TEST_DIR_BASE: &str = "tmp/inflate/";
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-#[ignore = "IFA removed from supported_schemas"]
 async fn success() {
     initialize();
 

@@ -1681,11 +1681,10 @@ async fn handle_ldk_events(
                     let channel_rgb_amount = rgb_info.local_rgb_amount;
                     let asset_id = rgb_info.contract_id.to_string();
                     let assignment = match rgb_info.schema {
-                        AssetSchema::Nia | AssetSchema::Cfa => {
+                        AssetSchema::Nia | AssetSchema::Cfa | AssetSchema::Ifa => {
                             Assignment::Fungible(channel_rgb_amount)
                         }
                         AssetSchema::Uda => Assignment::NonFungible,
-                        AssetSchema::Ifa => todo!(),
                     };
                     let recipient_id =
                         recipient_id_from_script_buf(script_buf, static_state.network);
@@ -3649,6 +3648,15 @@ pub(crate) fn select_chain_backend(
     }
 }
 
+// rgb-lib rejects wallets supporting IFA on mainnet
+fn supported_asset_schemas(bitcoin_network: BitcoinNetwork) -> Vec<AssetSchema> {
+    let mut schemas = vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda];
+    if bitcoin_network != BitcoinNetwork::Mainnet {
+        schemas.push(AssetSchema::Ifa);
+    }
+    schemas
+}
+
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     key_source: NodeKeySource,
@@ -4270,7 +4278,7 @@ pub(crate) async fn start_ldk(
                 bitcoin_network,
                 database_type: DatabaseType::Sqlite,
                 max_allocations_per_utxo: 1,
-                supported_schemas: vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda],
+                supported_schemas: supported_asset_schemas(bitcoin_network),
                 reuse_addresses,
             },
             keys,
@@ -5519,5 +5527,23 @@ mod tests {
         assert_eq!(km.get_expanded_key(), ExpandedKey::new(a));
         assert_eq!(km.get_peer_storage_key().inner, b);
         assert_eq!(km.get_receive_auth_key().0, c);
+    }
+
+    #[test]
+    fn ifa_supported_on_all_networks_but_mainnet() {
+        assert!(!supported_asset_schemas(BitcoinNetwork::Mainnet).contains(&AssetSchema::Ifa));
+        for network in [
+            BitcoinNetwork::Testnet,
+            BitcoinNetwork::Testnet4,
+            BitcoinNetwork::Signet,
+            BitcoinNetwork::SignetCustom,
+            BitcoinNetwork::Regtest,
+        ] {
+            let schemas = supported_asset_schemas(network);
+            assert!(schemas.contains(&AssetSchema::Ifa));
+            assert!(schemas.contains(&AssetSchema::Nia));
+            assert!(schemas.contains(&AssetSchema::Cfa));
+            assert!(schemas.contains(&AssetSchema::Uda));
+        }
     }
 }
