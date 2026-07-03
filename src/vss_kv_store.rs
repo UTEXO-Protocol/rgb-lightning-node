@@ -713,23 +713,51 @@ impl KVStoreSync for VssKvStore {
 
         self.check_fence_periodic();
 
+        // VSS honors `version = -1` only for puts; `delete_items` require the
+        // object's current version, so a blind delete is rejected with a
+        // version conflict and, once queued, retries forever without ever
+        // converging. Read the current version and issue a conditional delete;
+        // an absent key means the removal goal is already met.
+        let get_req = GetObjectRequest {
+            store_id: self.store_id.clone(),
+            key: vss_key.clone(),
+        };
+        let existing_version = match self.block_on(self.client.get_object(&get_req)) {
+            Ok(resp) => match resp.value {
+                Some(kv) => kv.version,
+                None => return Ok(()),
+            },
+            Err(VssError::NoSuchKeyError(_)) => return Ok(()),
+            Err(e) => {
+                tracing::error!(vss_key, error = %e, "VssKvStore remove read failed");
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("VSS remove read failed: {e}"),
+                ));
+            }
+        };
+
         let request = PutObjectRequest {
             store_id: self.store_id.clone(),
             global_version: None,
             transaction_items: vec![],
             delete_items: vec![KeyValue {
                 key: vss_key.clone(),
-                version: -1,
+                version: existing_version,
                 value: vec![],
             }],
         };
 
-        self.block_on(self.client.put_object(&request))
-            .map_err(|e| {
+        match self.block_on(self.client.put_object(&request)) {
+            Ok(_) | Err(VssError::NoSuchKeyError(_)) => Ok(()),
+            Err(e) => {
                 tracing::error!(vss_key, error = %e, "VssKvStore remove failed");
-                io::Error::new(io::ErrorKind::Other, format!("VSS remove failed: {e}"))
-            })?;
-        Ok(())
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("VSS remove failed: {e}"),
+                ))
+            }
+        }
     }
 
     fn list(

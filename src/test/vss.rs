@@ -126,6 +126,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vss_kv_store_remove_is_idempotent() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let (signing_key, store_id) = generate_test_keys();
+        let store = VssKvStore::new(VSS_URL.to_string(), store_id, signing_key).expect("vss store");
+
+        let ns = "monitors";
+        let sub_ns = "funding";
+        let key = "mon";
+
+        // Removing a key that was never written must succeed (no version to
+        // conflict on) — this is the case that used to loop forever.
+        store
+            .remove(ns, sub_ns, key, false)
+            .expect("remove of absent key must be a no-op success");
+
+        // Write then remove: the removal must succeed and the key must be gone.
+        store
+            .write(ns, sub_ns, key, b"data".to_vec())
+            .expect("write");
+        store
+            .remove(ns, sub_ns, key, false)
+            .expect("remove of existing key must succeed");
+        let err = store.read(ns, sub_ns, key).unwrap_err();
+        assert_eq!(err.kind(), bitcoin::io::ErrorKind::NotFound);
+
+        // Removing again (already gone) must still succeed, so a queued retry
+        // can drain instead of re-failing on a version conflict.
+        store
+            .remove(ns, sub_ns, key, false)
+            .expect("second remove of same key must be a no-op success");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn vss_kv_store_multiple_namespaces() {
         if !vss_server_available() {
             eprintln!("SKIP: VSS server not available at {VSS_URL}");
