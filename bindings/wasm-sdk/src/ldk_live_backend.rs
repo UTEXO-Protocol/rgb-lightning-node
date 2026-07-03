@@ -181,6 +181,18 @@ pub trait LdkLiveBackend {
             "close_live_channel is not supported by this backend",
         ))
     }
+    /// Abandon our own side of a never-broadcast virtual channel (client-side teardown). Used when
+    /// the counterparty (LSP/host) has abandoned the channel without notifying us.
+    fn virtual_channel_abandon_local(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+    ) -> Result<(), JsValue> {
+        let _ = (channel_id, peer_pubkey);
+        Err(JsValue::from_str(
+            "virtual_channel_abandon_local is not supported by this backend",
+        ))
+    }
     /// Send a real keysend (spontaneous) HTLC over a live channel, optionally carrying RGB.
     fn keysend_live(
         &self,
@@ -302,10 +314,13 @@ pub trait LdkLiveBackend {
         _host_node_id: String,
         _username: Option<String>,
         _domain: Option<String>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>,
-    > {
-        Box::pin(async { Err(JsValue::from_str("apay_new is not supported by this backend")) })
+    ) -> Pin<Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>>
+    {
+        Box::pin(async {
+            Err(JsValue::from_str(
+                "apay_new is not supported by this backend",
+            ))
+        })
     }
 }
 
@@ -1559,6 +1574,23 @@ impl WasmLdkLiveBackend {
                     "[rln-wasm-sdk ldk-live] PaymentFailed hash={hash_hex}"
                 ));
             }
+            // Surface HTLC-handling failures the live `ChannelManager` would otherwise swallow. For
+            // an inbound payment this is the ONLY signal that an HTLC was rejected in the receive or
+            // forward path *before* any `PaymentClaimable` (failed onion decode, unknown next hop, a
+            // failed receive-path check, etc.). `failure_type` distinguishes `Receive` (we were the
+            // final hop and rejected it) from `Forward`/`UnknownNextHop`/`InvalidForward` (misrouted
+            // as a forward), and `failure_reason` carries the concrete LDK cause.
+            Event::HTLCHandlingFailed {
+                prev_channel_id,
+                failure_type,
+                failure_reason,
+                ..
+            } => {
+                let best_h = g.channel_manager.current_best_block().height;
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk ldk-live] HTLCHandlingFailed prev_channel={prev_channel_id} wasm_best_height={best_h} type={failure_type:?} reason={failure_reason:?}"
+                ));
+            }
             // ---- Real payment lifecycle (inbound, this node is the payee) ----
             Event::PaymentClaimable {
                 payment_hash,
@@ -1602,7 +1634,10 @@ impl WasmLdkLiveBackend {
                 // Async-payment recipient invoices: we already know the preimage (derived
                 // deterministically when we answered the host's `request_invoice`), so claim
                 // immediately rather than holding like a normal external-hash/hodl invoice.
-                if let Some(preimage) = self.async_recipient_preimages.borrow_mut().remove(&hash_hex)
+                if let Some(preimage) = self
+                    .async_recipient_preimages
+                    .borrow_mut()
+                    .remove(&hash_hex)
                 {
                     self.hodl_payment_hashes.borrow_mut().remove(&hash_hex);
                     g.channel_manager.claim_funds(preimage);
@@ -2101,6 +2136,41 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                     .close_channel(&channel_id, &peer_pubkey)
                     .map_err(|e| JsValue::from_str(&format!("live channel close failed: {e:?}")))?;
             }
+            g.peer_manager.borrow().process_events();
+            persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
+            Ok(())
+        })
+    }
+
+    fn virtual_channel_abandon_local(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+    ) -> Result<(), JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        let channel_id_bytes = hex::decode(channel_id)
+            .map_err(|e| JsValue::from_str(&format!("invalid channel id: {e}")))?;
+        let channel_id_bytes: [u8; 32] = channel_id_bytes
+            .try_into()
+            .map_err(|_| JsValue::from_str("invalid channel id length"))?;
+        let channel_id = lightning::ln::types::ChannelId::from_bytes(channel_id_bytes);
+        let peer_pubkey_bytes = hex::decode(peer_pubkey)
+            .map_err(|e| JsValue::from_str(&format!("invalid peer pubkey: {e}")))?;
+        let peer_pubkey = SecpPublicKey::from_slice(&peer_pubkey_bytes)
+            .map_err(|e| JsValue::from_str(&format!("invalid peer pubkey: {e}")))?;
+
+        self.with_graph(|g| {
+            // Drop our side of a never-broadcast virtual channel. The counterparty (LSP/host) uses
+            // `ErrorAction::IgnoreError` when it abandons, so it never notifies us — a client that has
+            // drained its value must therefore tear down its own side. `abandon_virtual_channel`
+            // removes the channel and fires `Event::ChannelClosed`, which the authoritative reconcile
+            // then propagates to our channel views. `dangerous_ack=true` acknowledges that any
+            // remaining (sub-HTLC-minimum dust) balance is forfeited.
+            g.channel_manager
+                .abandon_virtual_channel(&channel_id, &peer_pubkey, true)
+                .map_err(|e| {
+                    JsValue::from_str(&format!("virtual channel abandon failed: {e:?}"))
+                })?;
             g.peer_manager.borrow().process_events();
             persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
             Ok(())
@@ -2780,8 +2850,12 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         // 3M-msat HTLC floor; 6-conf funding; LND-compatible 2016-block to_self_delay.
         let with_anchors = rgb_open.is_some();
         let mut override_config = UserConfig::default();
-        override_config.channel_handshake_config.announce_for_forwarding = request.public;
-        override_config.channel_handshake_config.our_htlc_minimum_msat = OPEN_CHANNEL_HTLC_MIN_MSAT;
+        override_config
+            .channel_handshake_config
+            .announce_for_forwarding = request.public;
+        override_config
+            .channel_handshake_config
+            .our_htlc_minimum_msat = OPEN_CHANNEL_HTLC_MIN_MSAT;
         override_config.channel_handshake_config.minimum_depth = MIN_CHANNEL_CONFIRMATIONS;
         override_config
             .channel_handshake_config
@@ -2910,6 +2984,11 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             // `list_live_channels` once its RGB info is persisted; not known at this return point.
             asset_id: None,
             asset_local_amount: None,
+            // A just-opened channel has no spendable outbound yet; refreshed on the next reconcile.
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
+            // The live channel's virtual flag is surfaced by the next reconcile.
+            virtual_open_mode: None,
         })
     }
 
@@ -3028,6 +3107,15 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                     is_usable: details.is_usable,
                     asset_id: rgb_info.as_ref().map(|i| i.contract_id.to_string()),
                     asset_local_amount: rgb_info.as_ref().map(|i| i.local_rgb_amount),
+                    outbound_msat: details.outbound_capacity_msat,
+                    next_outbound_htlc_limit_msat: details.next_outbound_htlc_limit_msat,
+                    // A never-broadcast virtual channel — recognized for both opened and accepted
+                    // channels, so a client can tear down its accepted virtual channel.
+                    virtual_open_mode: if details.trusted_no_broadcast {
+                        Some("trusted_no_broadcast".to_string())
+                    } else {
+                        None
+                    },
                 }
             })
             .collect();
@@ -3063,9 +3151,8 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         host_node_id: String,
         username: Option<String>,
         domain: Option<String>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>,
-    > {
+    ) -> Pin<Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>>
+    {
         let maybe_this = self.self_weak.borrow().upgrade();
         Box::pin(async move {
             let this = maybe_this
@@ -3124,11 +3211,9 @@ impl WasmLdkLiveBackend {
             let host_node_hex = apay::hex_str(&host_pubkey.serialize());
 
             // Derive the next hash batch from this node's seed.
-            let start_index = apay::read_async_payments_next_hash_index(
-                g.rgb_kv_store.as_ref(),
-                &host_pubkey,
-            )
-            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let start_index =
+                apay::read_async_payments_next_hash_index(g.rgb_kv_store.as_ref(), &host_pubkey)
+                    .map_err(|err| JsValue::from_str(&err.to_string()))?;
             let seed = this.derive_seed32();
             let preimage_root = apay::AsyncPaymentsPreimageRoot::build_from_seed(
                 &seed,
@@ -3198,30 +3283,28 @@ impl WasmLdkLiveBackend {
 
         // Await the host response, bounded by a timeout. The JS websocket pump keeps calling
         // `process_events` as reply frames arrive, which completes `response_rx`.
-        let response_value = match Self::apay_await_response(
-            response_rx,
-            apay::ASYNC_ORDER_RESPONSE_TIMEOUT_MS,
-        )
-        .await
-        {
-            ApayAwaitOutcome::Response(Ok(value)) => value,
-            ApayAwaitOutcome::Response(Err(err)) => {
-                return Err(JsValue::from_str(&err.to_string()));
-            }
-            ApayAwaitOutcome::PeerClosed => {
-                return Err(JsValue::from_str(
-                    "apay_new: peer connection closed before the host replied",
-                ));
-            }
-            ApayAwaitOutcome::TimedOut => {
-                if let Some(g) = this.object_graph.borrow().as_ref() {
-                    g.fork_custom_wire.forget_response(host_pubkey, &request_id);
+        let response_value =
+            match Self::apay_await_response(response_rx, apay::ASYNC_ORDER_RESPONSE_TIMEOUT_MS)
+                .await
+            {
+                ApayAwaitOutcome::Response(Ok(value)) => value,
+                ApayAwaitOutcome::Response(Err(err)) => {
+                    return Err(JsValue::from_str(&err.to_string()));
                 }
-                return Err(JsValue::from_str(
-                    "apay_new: timed out waiting for the host response",
-                ));
-            }
-        };
+                ApayAwaitOutcome::PeerClosed => {
+                    return Err(JsValue::from_str(
+                        "apay_new: peer connection closed before the host replied",
+                    ));
+                }
+                ApayAwaitOutcome::TimedOut => {
+                    if let Some(g) = this.object_graph.borrow().as_ref() {
+                        g.fork_custom_wire.forget_response(host_pubkey, &request_id);
+                    }
+                    return Err(JsValue::from_str(
+                        "apay_new: timed out waiting for the host response",
+                    ));
+                }
+            };
 
         let result: apay::AsyncOrderNewResultWire = serde_json::from_value(response_value)
             .map_err(|err| JsValue::from_str(&format!("apay_new: invalid host response: {err}")))?;
@@ -3264,7 +3347,8 @@ impl WasmLdkLiveBackend {
         for (sender, request_id, params_value) in requests {
             match self.process_one_request_invoice(g, sender, params_value) {
                 Ok(result) => {
-                    let result_value = serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
+                    let result_value =
+                        serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
                     g.fork_custom_wire
                         .queue_async_order_result(sender, &request_id, result_value);
                     ldk_live_debug(&format!(
@@ -3342,10 +3426,15 @@ impl WasmLdkLiveBackend {
         let hash_hex = apay::hex_str(&payment_hash.0);
 
         // Refuse to re-mint while a prior invoice for this hash is still live.
-        if self.async_recipient_preimages.borrow().contains_key(&hash_hex)
-            || self.live_payments.borrow().get(&hash_hex).is_some_and(|p| {
-                matches!(p.status.as_str(), "pending" | "claimable" | "claiming")
-            })
+        if self
+            .async_recipient_preimages
+            .borrow()
+            .contains_key(&hash_hex)
+            || self
+                .live_payments
+                .borrow()
+                .get(&hash_hex)
+                .is_some_and(|p| matches!(p.status.as_str(), "pending" | "claimable" | "claiming"))
         {
             return Err(JsonRpcErrorWire::application_error(1105, "stale_flow"));
         }
@@ -3625,9 +3714,8 @@ async fn apay_sleep_ms(ms: u32) {
     {
         let promise = js_sys::Promise::new(&mut |resolve, _reject| {
             if let Some(window) = web_sys::window() {
-                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                    &resolve, ms as i32,
-                );
+                let _ = window
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32);
             } else {
                 let _ = resolve.call0(&JsValue::NULL);
             }

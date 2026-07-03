@@ -12,10 +12,12 @@
 // us so we have outbound capacity for the wasm→native payment steps.
 //
 // Steps:
-//   0. the LSP issues NIA + opens a vanilla (BTC-only) AND an RGB (NIA) virtual channel to us; we accept
-//   1. transfer regular BTC — real keysend / BOLT11 / HODL HTLCs over the vanilla virtual channel
-//   2. transfer RGB assets — real BOLT11 invoice + keysend HTLCs over the RGB virtual channel
-//   3. the LSP abandons both virtual channels; reopen (page reload) and verify persisted state
+//   0. the LSP issues NIA + opens ONE RGB (NIA) virtual channel to us (native allows one virtual
+//      channel per peer pair); we accept it 0-conf. Also (0d) a regression check that invoiceStatus
+//      does not trap the wasm node (is_expired() -> would_expire(unix_now_secs()) fix).
+//   1. transfer regular BTC — real keysend / BOLT11 / HODL HTLCs over the virtual channel
+//   2. transfer RGB assets — real BOLT11 invoice + keysend HTLCs over the virtual channel
+//   3. the LSP abandons the virtual channel; reopen (page reload) and verify persisted state
 //
 // Driven headlessly by run_e2e_full_flow.mjs, or manually via rgb_e2e_full_flow.html.
 //
@@ -318,6 +320,47 @@ async function nativeOpenVirtualChannel(cfg, wasmPubkeyHex, { assetId, assetAmou
   return res;
 }
 
+// Wait until the native LSP node reports the WASM node as a connected peer. Our LN connection to the
+// LSP only completes (and stays alive) while we pump our event loop, so we drive chainSyncTick while
+// polling the LSP's /listpeers. This must hold BEFORE the LSP's /openchannel runs, because its
+// connect_peer_if_necessary short-circuits only when we are already in its list_peers — otherwise it
+// tries to dial our dummy address and fails with FailedPeerConnection.
+function wasmPeerView(node) {
+  try {
+    return JSON.parse(node.listPeersJson()).map((p) => ({ pk: (p.pubkey || "").slice(0, 12), started: p.started }));
+  } catch (_e) {
+    return "n/a";
+  }
+}
+
+async function waitForNativePeer(node, nativeMgmtUrl, wasmPubkeyHex, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let iter = 0;
+  while (Date.now() < deadline) {
+    await node.chainSyncTickValue().catch(() => {}); // pump peer events → completes/keeps the LN handshake
+    let nativePeers = [];
+    try {
+      const resp = await fetch(`${nativeMgmtUrl}/listpeers`, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (resp.ok) nativePeers = (await resp.json()).peers || [];
+    } catch (_e) {
+      /* keep polling */
+    }
+    if (nativePeers.some((p) => p.pubkey === wasmPubkeyHex)) return true;
+    if (iter % 4 === 0) {
+      // DIAGNOSTIC: compare what the WASM node thinks (its own peers + `started`) vs what the LSP sees.
+      log(`waitForNativePeer[${iter}]`, {
+        wasmSees: wasmPeerView(node),
+        lspSees: nativePeers.map((p) => (p.pubkey || "").slice(0, 12)),
+      });
+    }
+    iter++;
+    await sleep(500);
+  }
+  throw new Error(`native LSP did not see us (${wasmPubkeyHex.slice(0, 12)}) as a peer within ${timeoutMs}ms`);
+}
+
 async function fundWallet(gatewayUrl, wallet, online, address) {
   log("Funding wallet on-chain...", { address });
   const resp = await fetch(`${gatewayUrl}/dev/regtest/fund`, {
@@ -432,6 +475,101 @@ async function drainPeerEvents(node, iterations = 8) {
   }
 }
 
+// Converge the native LSP (payer) and the wasm node (payee) on the same chain tip before an inbound
+// payment. The wasm node syncs to the chain tip aggressively (on-demand `chainSyncTickValue` ticks),
+// while the native LSP's `SpvClient` polls once per second. Right after an earlier block-mining burst
+// the native payer can still be a couple blocks behind the tip the wasm node already applied. If it
+// pays while behind, it sets the HTLC `cltv_expiry` from its lower height, and the wasm node then
+// rejects the inbound HTLC with `PaymentClaimBuffer` ("final CLTV expiry too soon"), because LDK
+// requires `cltv_expiry > current_height + HTLC_FAIL_BACK_BUFFER + 1` and the ~2-block default margin
+// is exhausted by the skew. STEP 1c mines no blocks, so a brief settle (native polls every ~1s and
+// catches up to the tip in a single poll) drives the skew to zero. This mirrors a real deployment,
+// where a well-run LSP payer tracks the tip rather than lagging it.
+async function settleChainConvergence(node, rounds = 6, gapMs = 900) {
+  for (let i = 0; i < rounds; i++) {
+    try {
+      await node.chainSyncTickValue(); // keep the wasm node pinned to the stable tip
+    } catch (_e) {
+      /* non-fatal: the peer/event loop is still advancing */
+    }
+    await sleep(gapMs); // let the native LSP's 1s SpvClient poll catch up to the same tip
+  }
+}
+
+// Pay our spendable BTC balance on a channel back to the counterparty (the LSP). A never-broadcast
+// virtual channel is torn down by the LSP abandoning it, which forfeits whatever BTC the client still
+// holds — so the LSP's guard refuses to abandon while our counterparty BTC floor is > 0. We drain by
+// keysending the LSP up to `next_outbound_htlc_limit_msat` (LDK's max single HTLC, already net of the
+// channel reserve + fee buffer) each round until nothing meaningful is left to send.
+async function drainOutboundToNative(node, nativePubkey, channelId) {
+  // The RGB virtual channel enforces a minimum HTLC of `rgb_htlc_min_msat` (3,000,000 msat here), so
+  // we can never send the last sub-3k-sat sliver over LN — but the commitment-fee accounting drives
+  // the counterparty BTC floor to 0 once only that dust remains, which is what the LSP's guard needs.
+  const MIN_HTLC_MSAT = 3_000_000n;
+  for (let round = 0; round < 60; round++) {
+    const ch = node.listChannelsValue().find((c) => c.channel_id === channelId);
+    if (!ch) {
+      log("drain: channel no longer present", { round });
+      break;
+    }
+    const outbound = BigInt(ch.outbound_msat ?? 0);
+    const limit = BigInt(ch.next_outbound_htlc_limit_msat ?? 0);
+    // Whatever remains below one HTLC minimum is unspendable via LN — stop cleanly.
+    if (limit < MIN_HTLC_MSAT) {
+      log("drain: remaining outbound below HTLC minimum", { round, outbound_msat: outbound.toString(), limit_msat: limit.toString() });
+      break;
+    }
+    // Send the FULL available HTLC. The virtual channel has no counterparty reserve, so paying the
+    // exact `next_outbound_htlc_limit_msat` drains our spendable balance to 0 (leaving nothing to keep
+    // the counterparty BTC floor above 0). If a feerate shift between query and send rejects the exact
+    // amount, retry one notch smaller (but never below the HTLC minimum).
+    let amount = limit;
+    let ks;
+    try {
+      ks = node.keysendLiveValue(nativePubkey, amount, null, null);
+    } catch (_e) {
+      amount = limit > MIN_HTLC_MSAT + 1_000_000n ? limit - 1_000_000n : MIN_HTLC_MSAT;
+      ks = node.keysendLiveValue(nativePubkey, amount, null, null);
+    }
+    const settled = await waitLivePayment(node, ks.payment_hash, PAYMENT_TIMEOUT_MS).catch(() => null);
+    log(`drain round ${round}`, {
+      sent_msat: amount.toString(),
+      outbound_before_msat: outbound.toString(),
+      status: settled?.status ?? "unsettled",
+    });
+    if (!settled || settled.status !== "succeeded") break;
+  }
+}
+
+// Pay our RGB asset balance on a channel back to the LSP. This must run BEFORE the BTC drain (an RGB
+// keysend carries BTC, so we cannot move the asset once BTC is gone) and before the abandon (the LSP's
+// guard also refuses while our counterparty RGB balance is > 0). Each keysend carries the asset plus
+// RGB_KEYSEND_MSAT of BTC; we send in chunks of a proven-routable size (STEP 2c moved 100 units).
+async function drainRgbToNative(node, nativePubkey, channelId, assetId) {
+  const RGB_CHUNK = 100n;
+  for (let round = 0; round < 40; round++) {
+    const ch = node.listChannelsValue().find((c) => c.channel_id === channelId);
+    if (!ch) {
+      log("drain-rgb: channel no longer present", { round });
+      break;
+    }
+    const rgb = BigInt(ch.asset_local_amount ?? 0);
+    if (rgb <= 0n) {
+      log("drain-rgb: no RGB left to send", { round });
+      break;
+    }
+    const amount = rgb < RGB_CHUNK ? rgb : RGB_CHUNK;
+    const ks = node.keysendLiveValue(nativePubkey, RGB_KEYSEND_MSAT, assetId, amount);
+    const settled = await waitLivePayment(node, ks.payment_hash, PAYMENT_TIMEOUT_MS).catch(() => null);
+    log(`drain-rgb round ${round}`, {
+      sent_rgb: amount.toString(),
+      rgb_before: rgb.toString(),
+      status: settled?.status ?? "unsettled",
+    });
+    if (!settled || settled.status !== "succeeded") break;
+  }
+}
+
 async function waitForChannelGone(node, channelId, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -462,7 +600,10 @@ async function runFlow(cfg, runtimeId) {
 
   const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, runtimeId);
   const myPubkey = JSON.parse(node.nodePubkeyJson());
-  const myPubkeyHex =
+  // NOTE: before the live LDK backend is initialized (which connectPeer does), nodePubkeyJson returns
+  // a fallback signing identity that does NOT match the node's on-wire LN pubkey. We refresh this
+  // after connectPeer below, so `let` (not `const`).
+  let myPubkeyHex =
     (typeof myPubkey === "string" ? myPubkey : myPubkey?.pubkey ?? myPubkey?.node_pubkey) || "";
   // The LSP opens channels TO us by pubkey, so we must know our own pubkey up front.
   assert(myPubkeyHex, "could not determine wasm node pubkey (needed for the LSP to open channels to us)");
@@ -503,12 +644,10 @@ async function runFlow(cfg, runtimeId) {
   // inside the wait loops.
   node.chainSyncStartValue(cfg.esploraUrl, 3_600_000);
 
-  // --- connect to the native node ---
+  // --- native node info (we connect right before the opens, in 0b below) ---
   const nativeInfo = await fetchNativeInfo(cfg.nativeMgmtUrl);
   const nativePubkey = nativeInfo.node_id;
   log("Native node info", nativeInfo);
-  await node.connectPeer(cfg.nativePeerAddr, nativePubkey);
-  log("Connected to native node");
 
   // === STEP 0: the native LSP OPENS both channels to us as TRUSTED VIRTUAL channels ===
   // This is the whole point of this example. The LSP opens 0-conf, scid-privacy, never-broadcast
@@ -517,33 +656,45 @@ async function runFlow(cfg, runtimeId) {
   // this example exercises). The LSP also pushes BTC + RGB liquidity so we have OUTBOUND capacity for
   // the wasm→native payment steps. NOTE: the LSP must run with `--enable-virtual-channels-v0`.
 
-  // 0a: the LSP issues the RGB asset it will commit into the RGB channel.
+  // 0a: the LSP issues the RGB asset it will commit into the RGB channel. Done BEFORE we connect so
+  // there is no idle gap between establishing our LN connection and the LSP opening channels to us —
+  // our connection to the LSP only completes/stays alive while we pump our event loop.
   const assetId = await nativeBootstrapRgbAsset(cfg, walletAddress);
   const assetBalAfterIssue = null; // the asset is issued on the LSP now, not on this wasm wallet
 
-  // 0b: the LSP opens the VANILLA (BTC-only) virtual channel to us; we accept it 0-conf.
-  log("Requesting native LSP to open a vanilla virtual channel to us...");
-  await drainPeerEvents(node, 4); // let the LSP register our inbound peer connection first
-  await withRetry(
-    () => nativeOpenVirtualChannel(cfg, myPubkeyHex, {}),
-    5,
-    () => drainPeerEvents(node, 3),
-  );
-  const vanillaChannel = await waitForUsableChannel(node, nativePubkey, false, cfg.gatewayUrl, walletAddress, CHANNEL_READY_TIMEOUT_MS);
-  const vanillaChannelId = vanillaChannel.channel_id;
-  // Part 4 coverage (negative case): a BTC-only channel must carry NO asset_id — the RGB-info
-  // enrichment of the channel view must not mislabel vanilla channels as RGB.
-  assert(!vanillaChannel.asset_id, `vanilla channel must have no asset_id, got ${vanillaChannel.asset_id}`);
-  log("✅ VANILLA virtual channel usable (accepted 0-conf from LSP; no asset_id)", { id: vanillaChannelId, capacity: vanillaChannel.capacity_sat });
+  // 0b: connect to the LSP and pump until IT reports us as a peer — required before its /openchannel,
+  // whose connect_peer_if_necessary short-circuits only when we are already in its list_peers.
+  await node.connectPeer(cfg.nativePeerAddr, nativePubkey);
+  // Refresh our on-wire pubkey now that the live LDK backend is initialized: this is the pubkey the
+  // LSP actually sees for us and must target when it opens channels back to us (the pre-connect
+  // nodePubkeyJson was a fallback identity that does not match).
+  {
+    const live = JSON.parse(node.nodePubkeyJson());
+    const liveHex = (typeof live === "string" ? live : live?.pubkey ?? live?.node_pubkey) || "";
+    if (liveHex && liveHex !== myPubkeyHex) {
+      log("on-wire pubkey refreshed after connect", { initial: myPubkeyHex.slice(0, 16), live: liveHex.slice(0, 16) });
+      myPubkeyHex = liveHex;
+    }
+  }
+  log("connectPeer returned; WASM peer view", wasmPeerView(node)); // DIAGNOSTIC
+  await waitForNativePeer(node, cfg.nativeMgmtUrl, myPubkeyHex, 60_000);
+  log("✅ connected to the LSP; it now reports us as a peer");
+  // Reconnect + re-establish if a brief idle around a /openchannel retry dropped the connection.
+  const reconnectAndWaitForPeer = async () => {
+    await node.connectPeer(cfg.nativePeerAddr, nativePubkey).catch(() => {});
+    await waitForNativePeer(node, cfg.nativeMgmtUrl, myPubkeyHex, 20_000).catch(() => {});
+  };
 
-  // 0c: the LSP opens the RGB (NIA) virtual channel to us, committing 1000 RGB and pushing 500 to us.
+  // 0c: the LSP opens a SINGLE RGB (NIA) virtual channel to us, committing 1000 RGB and pushing 500
+  // RGB + BTC liquidity to us. Native allows only ONE virtual channel per peer pair, so this one
+  // channel carries BOTH the BTC and the RGB payments below (its sat capacity handles the BTC HTLCs).
   // We learn the asset from the channel-open consignment the LSP posts (pulled via driveRgbFundingWork
   // inside waitForUsableChannel), so no wasm-side issuance is needed.
   log("Requesting native LSP to open an RGB virtual channel to us...", { assetId, asset: String(ASSET_CHANNEL_AMOUNT) });
   await withRetry(
     () => nativeOpenVirtualChannel(cfg, myPubkeyHex, { assetId, assetAmount: ASSET_CHANNEL_AMOUNT, pushAssetAmount: ASSET_PUSH_AMOUNT }),
     5,
-    () => drainPeerEvents(node, 3),
+    reconnectAndWaitForPeer,
   );
   const rgbChannel = await waitForUsableChannel(node, nativePubkey, true, cfg.gatewayUrl, walletAddress, CHANNEL_READY_TIMEOUT_MS);
   const rgbChannelId = rgbChannel.channel_id;
@@ -568,8 +719,45 @@ async function runFlow(cfg, runtimeId) {
     assetLocalAmount: rgbChannel.asset_local_amount,
   });
 
-  const assetBalAfterOpen = wallet.getAssetBalanceValue(assetId);
-  log("Asset balance after RGB channel open (pushed RGB now our off-chain balance)", assetBalAfterOpen);
+  // The asset was ISSUED on the LSP; we know it as an off-chain *channel* asset (proven above via
+  // rgbChannel.asset_id / asset_local_amount from the LN backend), but our rgb-lib WALLET has no
+  // on-chain holding of it — so a wallet-level asset-balance lookup can legitimately fail. Non-fatal.
+  let assetBalAfterOpen = null;
+  try {
+    assetBalAfterOpen = wallet.getAssetBalanceValue(assetId);
+  } catch (e) {
+    log("wallet asset-balance lookup for LSP-issued asset unavailable (expected; it is a channel asset)", String(e));
+  }
+  log("Asset balance after RGB channel open (off-chain channel RGB)", assetBalAfterOpen);
+
+  // === STEP 0d: invoiceStatus regression coverage (wasm SystemTime-trap fix) ===
+  // Before the fix, `invoiceStatus` on a PENDING invoice called `Bolt11Invoice::is_expired()`, which
+  // reads `SystemTime::now()` — unimplemented on wasm32 — so it TRAPPED and poisoned the whole node
+  // ("time not implemented on this platform"; every later call became `RuntimeError: unreachable`).
+  // The fix uses `would_expire(unix_now_secs())`. That expiry check is only reached while the invoice
+  // is still "pending", so we drive both outcomes of it on pending invoices:
+  // NOTE: use the non-live `createLnInvoiceValue` here — it registers the invoice in the same
+  // runtime payment view that `invoiceStatus` reads (the live variant registers only in the backend,
+  // so invoiceStatus would report "unknown LN invoice"). This step doesn't pay the invoice; it only
+  // needs it registered + pending so invoiceStatus reaches the would_expire check.
+  {
+    // (a) fresh invoice → invoiceStatus must NOT trap and must report "pending" (would_expire=false).
+    const pendingInv = node.createLnInvoiceValue(BOLT11_RECEIVE_MSAT, 3600, null, null);
+    const pendingStatus = JSON.parse(node.invoiceStatusJson(pendingInv.invoice));
+    assert(
+      pendingStatus.status === "pending",
+      `invoiceStatus on a fresh invoice should be 'pending', got ${safeJson(pendingStatus)}`,
+    );
+    // (b) 1s-expiry invoice, after it lapses → would_expire=true → status transitions to "expired".
+    const expiringInv = node.createLnInvoiceValue(BOLT11_RECEIVE_MSAT, 1, null, null);
+    await sleep(3000); // let the 1s-expiry invoice lapse
+    const expiredStatus = JSON.parse(node.invoiceStatusJson(expiringInv.invoice));
+    assert(
+      expiredStatus.status === "expired",
+      `invoiceStatus on a lapsed invoice should be 'expired', got ${safeJson(expiredStatus)}`,
+    );
+    log("✅ STEP 0d — invoiceStatus regression coverage passed (would_expire on pending; no SystemTime trap on wasm)");
+  }
 
   // === STEP 1: transfer regular BTC — REAL keysend HTLC (settles end-to-end) ===
   log("STEP 1: real BTC keysend...", { amtMsat: BTC_KEYSEND_MSAT.toString() });
@@ -592,6 +780,12 @@ async function runFlow(cfg, runtimeId) {
   log("✅ real BOLT11 payment settled wasm→native", bolt11SendSettled);
 
   // === STEP 1c: receive and auto-claim a real BOLT11 payment ===
+  // Let the payer (native LSP) and payee (wasm) settle on the same chain tip first. Both track the
+  // same chain, but the LSP's SpvClient polls once per second while the wasm node syncs on demand, so
+  // right after an earlier mining burst the payer can briefly lag the payee. If it pays while behind,
+  // the inbound HTLC's cltv is too close to our height and LDK rejects it with PaymentClaimBuffer
+  // ("final CLTV expiry too soon"). A brief settle drives that transient skew to zero.
+  await settleChainConvergence(node);
   const wasmInvoice = node.createLnInvoiceLiveValue(BOLT11_RECEIVE_MSAT, 3600, null, null);
   const decodedWasmInvoice = node.decodeLnInvoiceValue(wasmInvoice.invoice);
   await nativePayInvoice(node, cfg.nativeMgmtUrl, {
@@ -726,13 +920,24 @@ async function runFlow(cfg, runtimeId) {
   const rgbStatus = rgbSettled.status;
   log("✅ STEP 2 done — real RGB HTLC settled", rgbSettled);
 
-  // === STEP 3: tear down both VIRTUAL channels from the LSP side ===
+  // === STEP 3: tear down the VIRTUAL channel from BOTH sides ===
   // Virtual channels have never-broadcast (dust=1) funding, so there is no on-chain cooperative/force
-  // close. The LSP is the opener and holds the virtual-channel session, so IT abandons the channels
-  // (native /closechannel → abandon_virtual_channel); we then drive our event loop until both channels
-  // leave our live view. force=true is intentionally NOT used — it is unsupported for virtual channels.
-  log("STEP 3: LSP abandons both virtual channels...");
-  for (const [id, label] of [[rgbChannelId, "RGB"], [vanillaChannelId, "vanilla"]]) {
+  // close. The LSP is the opener: IT abandons its side (native /closechannel → abandon_virtual_channel).
+  // That abandon is silent (ErrorAction::IgnoreError) — it never notifies us — so, once we have drained
+  // our value, WE abandon our own side (node.closeChannelWithOptions → client-side
+  // abandon_virtual_channel) to drop the channel from our view. force=true is intentionally NOT used —
+  // it is unsupported for virtual channels.
+  // Drain our residual RGB and BTC back to the LSP first: it pushed us both on open, and the
+  // never-broadcast virtual channel is torn down by the LSP *abandoning* it (which would forfeit any
+  // value we still hold). The LSP's guard therefore refuses to abandon while our counterparty RGB or
+  // BTC balance is > 0. RGB must go first — an RGB keysend carries BTC, so we cannot move the asset
+  // once BTC is gone.
+  log("STEP 3: draining our RGB + BTC balances back to the LSP before teardown...");
+  await drainRgbToNative(node, nativePubkey, rgbChannelId, assetId);
+  await drainOutboundToNative(node, nativePubkey, rgbChannelId);
+
+  log("STEP 3: LSP abandons the virtual channel...");
+  for (const [id, label] of [[rgbChannelId, "RGB"]]) {
     try {
       const r = await nativePost(cfg.nativeMgmtUrl, "/closechannel", {
         channel_id: id, peer_pubkey: myPubkeyHex, force: false,
@@ -744,11 +949,18 @@ async function runFlow(cfg, runtimeId) {
     }
   }
 
+  // The LSP's abandon is silent, so drop our own side too (guarded by the drained-to-zero check).
+  try {
+    node.closeChannelWithOptions(rgbChannelId, nativePubkey, false);
+    log("client-side abandon requested for RGB virtual channel");
+  } catch (e) {
+    log("client-side abandon returned", String(e));
+  }
+
   const closeDeadline = Date.now() + CLOSE_TIMEOUT_MS;
   let rgbGone = false;
-  let vanillaGone = false;
   let citer = 0;
-  while (Date.now() < closeDeadline && !(rgbGone && vanillaGone)) {
+  while (Date.now() < closeDeadline && !rgbGone) {
     try {
       await node.chainSyncTickValue(); // pump peer/event loop so the abandonment propagates to us
     } catch (e) {
@@ -761,15 +973,14 @@ async function runFlow(cfg, runtimeId) {
     }
     const ids = new Set(node.listChannelsValue().map((c) => c.channel_id));
     rgbGone = !ids.has(rgbChannelId);
-    vanillaGone = !ids.has(vanillaChannelId);
     if (citer % 5 === 0) {
-      log("closing…", { rgbGone, vanillaGone, channels: node.listChannelsValue().map((c) => ({ id: c.channel_id.slice(0, 12), status: c.status, usable: c.is_usable })) });
+      log("closing…", { rgbGone, channels: node.listChannelsValue().map((c) => ({ id: c.channel_id.slice(0, 12), status: c.status, usable: c.is_usable })) });
     }
     await sleep(1500);
     citer++;
   }
-  log("Virtual channels closed?", { rgbGone, vanillaGone });
-  assert(rgbGone && vanillaGone, `virtual channels did not fully close: rgbGone=${rgbGone} vanillaGone=${vanillaGone}`);
+  log("Virtual channel closed?", { rgbGone });
+  assert(rgbGone, `virtual channel did not fully close: rgbGone=${rgbGone}`);
 
   const channelsAfterClose = node.listChannelsValue();
   const assetBalAfterClose = null;
@@ -785,7 +996,6 @@ async function runFlow(cfg, runtimeId) {
     nativePubkey,
     myPubkey,
     walletAddress,
-    vanillaChannelId,
     rgbChannelId,
     btcPaymentHash: btcKeysend.payment_hash,
     rgbPaymentHash: rgbKeysend?.payment_hash ?? null,
@@ -829,13 +1039,11 @@ async function runFlow(cfg, runtimeId) {
     assetId,
     nativePubkey,
     myPubkey,
-    vanillaChannelId,
     rgbChannelId,
     btcKeysend: btcSettled,
     rgbKeysend: rgbSettled,
     rgbKeysendStatus: rgbStatus,
     rgbGone,
-    vanillaGone,
     assetBalAfterIssue,
     assetBalAfterOpen,
     assetBalAfterClose,
@@ -855,7 +1063,7 @@ async function verifyFlow(cfg, runtimeId) {
   const raw = window.localStorage.getItem(lsKey(runtimeId));
   assert(raw, `no run-phase snapshot found for runtimeId=${runtimeId}`);
   const snap = JSON.parse(raw);
-  log("Loaded run snapshot", { savedPubkey: snap.myPubkey, vanilla: snap.vanillaChannelId, rgb: snap.rgbChannelId });
+  log("Loaded run snapshot", { savedPubkey: snap.myPubkey, rgb: snap.rgbChannelId });
 
   // Reopen the SDK + node with the SAME identity/runtimeId — this is the "reopen".
   const sdk = new RlnWasmSdk();

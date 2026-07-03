@@ -102,6 +102,11 @@ pub struct RlnWasmNodeChannelData {
     pub asset_id: Option<String>,
     pub asset_local_amount: Option<u64>,
     pub virtual_open_mode: Option<String>,
+    /// This node's spendable outbound BTC capacity, in msat.
+    pub outbound_msat: u64,
+    /// The largest single outbound HTLC this node can currently send, in msat. Callers draining a
+    /// channel (e.g. before a virtual-channel close) should pay in chunks bounded by this value.
+    pub next_outbound_htlc_limit_msat: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2907,7 +2912,12 @@ impl RlnWasmNode {
                 .map(|entry| entry.data.clone())
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN))?
         };
-        if payment.status == "pending" && parsed.is_expired() {
+        // `Bolt11Invoice::is_expired()` reads the system clock via `SystemTime::now()`, which is
+        // unimplemented on wasm32 and traps ("time not implemented on this platform"), poisoning the
+        // whole node. Use the explicit-time variant with the crate's cfg-gated `unix_now_secs()`
+        // helper instead — same semantics, no `SystemTime`.
+        if payment.status == "pending" && parsed.would_expire(Duration::from_secs(unix_now_secs()))
+        {
             let _ =
                 self.apply_payment_status_via_event_stream(&payment_hash, "expired", "node_api")?;
         }
@@ -3195,12 +3205,13 @@ impl RlnWasmNode {
                 .or_else(|| asset_id.clone())
                 .and_then(|id| {
                     self.with_attached_wallet(|wallet| {
-                        Ok(wallet.get_asset_metadata(id).ok().map(|m| {
-                            match m.asset_schema {
+                        Ok(wallet
+                            .get_asset_metadata(id)
+                            .ok()
+                            .map(|m| match m.asset_schema {
                                 rgb_lib_wasm::AssetSchema::Ifa => "ifa".to_string(),
                                 _ => "nia".to_string(),
-                            }
-                        }))
+                            }))
                     })
                     .ok()
                     .flatten()
@@ -3278,6 +3289,10 @@ impl RlnWasmNode {
             asset_id,
             asset_local_amount,
             virtual_open_mode: normalized_virtual_open_mode,
+            // A freshly-opened channel has no spendable outbound yet; `list_channels_value` overlays
+            // live balances from the channel manager once the channel is usable.
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         };
 
         if self.use_runtime_state_for_ln_views() {
@@ -3582,17 +3597,37 @@ impl RlnWasmNode {
                     "cannot find the channel with the provided peer pubkey",
                 ));
             }
-            let Some(session) = virtual_session.as_ref() else {
-                return Err(JsValue::from_str(
-                    "virtual cleanup is host-only and requires a host-side session",
-                ));
-            };
-            if session.status == LdkRuntimeVirtualChannelSessionStatusData::AbandonPending {
-                return Err(JsValue::from_str(
-                    sdk_contracts::ERR_VIRTUAL_CLEANUP_IN_PROGRESS,
-                ));
+            match virtual_session.as_ref() {
+                Some(session) => {
+                    if session.status == LdkRuntimeVirtualChannelSessionStatusData::AbandonPending {
+                        return Err(JsValue::from_str(
+                            sdk_contracts::ERR_VIRTUAL_CLEANUP_IN_PROGRESS,
+                        ));
+                    }
+                    self.ensure_virtual_cleanup_has_no_client_value(&channel, session)?;
+                }
+                None => {
+                    // Client (accepter) path: we accepted this channel and hold no host-side session.
+                    // The LSP/host abandons silently (`ErrorAction::IgnoreError`) without notifying us,
+                    // so once we have drained our value we must tear down our own side. Guard on the
+                    // live channel balances, then abandon locally — `abandon_virtual_channel` fires
+                    // `Event::ChannelClosed`, which the authoritative reconcile propagates to our views.
+                    if force {
+                        return Err(JsValue::from_str(
+                            "force=true is not supported for trusted virtual channels",
+                        ));
+                    }
+                    // `peer_pubkey` was validated and unwrapped to a trimmed `String` above.
+                    self.ensure_virtual_cleanup_client_no_local_value(&channel)?;
+                    self.ldk_runtime
+                        .virtual_channel_abandon_local(&channel_id, &peer_pubkey)?;
+                    self.ldk_runtime.remove_channel(&channel_id);
+                    self.unregister_trusted_virtual_scope_channel(&channel_id);
+                    self.ldk_runtime.record_channel_closed();
+                    self.persist_runtime_event_log_state();
+                    return Ok(());
+                }
             }
-            self.ensure_virtual_cleanup_has_no_client_value(&channel, session)?;
         }
         if force {
             if is_virtual_channel {
@@ -3680,6 +3715,28 @@ impl RlnWasmNode {
         self.unregister_trusted_virtual_scope_channel(&channel_id);
         self.ldk_runtime.record_channel_closed();
         self.persist_runtime_event_log_state();
+        Ok(())
+    }
+
+    /// Guard for client-side virtual-channel cleanup (we accepted the channel; no host session).
+    /// Refuse to abandon while we still hold value: RGB must be fully drained (units are valuable),
+    /// and BTC must be down to sub-HTLC-minimum dust (unspendable over LN, forfeited by the abandon).
+    fn ensure_virtual_cleanup_client_no_local_value(
+        &self,
+        channel: &RlnWasmNodeChannelData,
+    ) -> Result<(), JsValue> {
+        let rgb = channel.asset_local_amount.unwrap_or(0);
+        if rgb > 0 {
+            return Err(JsValue::from_str(&format!(
+                "virtual cleanup blocked: {rgb} RGB units remain on the channel — drain them to the LSP first"
+            )));
+        }
+        if channel.outbound_msat >= SDK_HTLC_MIN_MSAT {
+            return Err(JsValue::from_str(&format!(
+                "virtual cleanup blocked: {} msat of spendable BTC remains — drain it to the LSP first",
+                channel.outbound_msat
+            )));
+        }
         Ok(())
     }
 
@@ -4538,6 +4595,8 @@ impl RlnWasmNode {
             asset_id: data.asset_id.clone(),
             asset_local_amount: data.asset_local_amount,
             virtual_open_mode: data.virtual_open_mode.clone(),
+            outbound_msat: data.outbound_msat,
+            next_outbound_htlc_limit_msat: data.next_outbound_htlc_limit_msat,
         }
     }
 
@@ -4580,6 +4639,8 @@ impl RlnWasmNode {
             asset_id: state.asset_id,
             asset_local_amount: state.asset_local_amount,
             virtual_open_mode: state.virtual_open_mode,
+            outbound_msat: state.outbound_msat,
+            next_outbound_htlc_limit_msat: state.next_outbound_htlc_limit_msat,
         }
     }
 

@@ -61,7 +61,6 @@ const DEFAULTS = {
   lnAddressDomain: "127.0.0.1:8080",
 };
 
-const VANILLA_CAPACITY_SAT = 1_000_000n;
 const EXPECTED_BATCH_SIZE = 200; // ASYNC_ORDER_MAX_HASH_BATCH_SIZE
 // Recipient A keysends this to the host so the host has outbound liquidity to later pay A's
 // `request_invoice` invoice (the host→A leg of the async settlement).
@@ -167,44 +166,35 @@ async function fundWallet(gatewayUrl, wallet, online, address) {
 
 // Pull the LDK funding request for the just-opened channel, build a funding tx from the wallet's
 // BTC, submit it back to LDK, and broadcast it to the indexer so mining confirms it.
-async function fundVanillaChannel(node, wallet, online, gatewayUrl, esploraUrl, nativePubkey) {
-  const deadline = Date.now() + 60_000;
+// Wait until the native invoice-host reports us (`wasmPubkeyHex`) as a connected peer, so the LSP's
+// reconcile cron targets us when it auto-opens a trusted virtual channel. Drives our event loop so
+// the LN handshake completes.
+async function waitForHostPeer(node, nativeMgmtUrl, wasmPubkeyHex, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let iter = 0;
   while (Date.now() < deadline) {
-    await node.chainSyncTickValue();
-    const reqs = node.listPendingFundingRequestsValue();
-    if (Array.isArray(reqs) && reqs.length > 0) {
-      const req = reqs[0];
-      log("Vanilla funding request", req);
-      await wallet.syncOnline(online);
-      const built = JSON.parse(
-        await wallet.buildLightningFundingTxJson(
-          online,
-          req.output_script_hex,
-          BigInt(req.channel_value_satoshis),
-          1n
-        )
-      );
-      node.submitFundingTransactionValue({
-        temporary_channel_id: req.temporary_channel_id,
-        counterparty_node_id: req.counterparty_node_id || nativePubkey,
-        funding_tx_hex: built.funding_tx_hex,
+    await node.chainSyncTickValue().catch(() => {}); // pump peer events → completes the LN handshake
+    let hostPeers = [];
+    try {
+      const resp = await fetch(`${nativeMgmtUrl}/listpeers`, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
-      log("Submitted vanilla funding tx to LDK", { txid: built.txid });
-      try {
-        const resp = await fetch(`${esploraUrl}/tx`, {
-          method: "POST",
-          headers: { "content-type": "text/plain" },
-          body: built.funding_tx_hex,
-        });
-        log("Funding tx broadcast to esplora", { status: resp.status });
-      } catch (e) {
-        log("explicit funding broadcast error", String(e));
-      }
-      return;
+      if (resp.ok) hostPeers = (await resp.json()).peers || [];
+    } catch (_e) {
+      /* keep polling */
     }
-    await sleep(1500);
+    if (hostPeers.some((p) => p.pubkey === wasmPubkeyHex)) return true;
+    if (iter % 6 === 0) {
+      log(`waitForHostPeer[${iter}]`, {
+        hostSees: hostPeers.map((p) => (p.pubkey || "").slice(0, 12)),
+      });
+    }
+    iter++;
+    await sleep(500);
   }
-  throw new Error("no pending vanilla funding request appeared");
+  throw new Error(
+    `native invoice-host did not see us (${wasmPubkeyHex.slice(0, 12)}) as a peer within ${timeoutMs}ms`
+  );
 }
 
 async function waitForUsableChannel(node, peer, gatewayUrl, walletAddress, timeoutMs) {
@@ -227,7 +217,7 @@ async function waitForUsableChannel(node, peer, gatewayUrl, walletAddress, timeo
     if (found) return found;
     if (iter % 4 === 2) await mineBlocks(gatewayUrl, walletAddress, 3);
     if (iter % 5 === 0) {
-      log("waiting vanilla channel usable", node.listChannelsValue().map((c) => ({
+      log("waiting for the LSP to open a usable virtual channel", node.listChannelsValue().map((c) => ({
         id: c.channel_id.slice(0, 12),
         status: c.status,
         usable: c.is_usable,
@@ -236,7 +226,7 @@ async function waitForUsableChannel(node, peer, gatewayUrl, walletAddress, timeo
     await sleep(2000);
     iter++;
   }
-  throw new Error(`vanilla channel to ${peer.slice(0, 12)} not usable within ${timeoutMs}ms`);
+  throw new Error(`LSP virtual channel to ${peer.slice(0, 12)} not usable within ${timeoutMs}ms`);
 }
 
 // Compact view of an apay order response (the full `hashes` array is 200 entries — too noisy to log).
@@ -352,9 +342,9 @@ async function resolveLnAddressInvoice(lnAddressDomain, recipientPubkey, amountM
 // ---------------------------------------------------------------------------
 
 // Boot one wasm recipient node (its own SDK identity, wallet and runtime scope), fund it, connect
-// to the shared native invoice-host and open a live vanilla channel. Returns the handles the
-// registration step needs. `label` ("a"/"b") keeps the two recipients isolated: distinct runtime
-// id (→ distinct persistence scope + node seed), distinct wallet keys, distinct data dir.
+// to the shared native invoice-host and wait for the LSP to auto-open a trusted virtual channel to
+// it. Returns the handles the registration step needs. `label` ("a"/"b") keeps the two recipients
+// isolated: distinct runtime id (→ distinct persistence scope + node seed), distinct wallet keys.
 async function provisionRecipient(cfg, runtimeId, label, hostPubkey) {
   const scopedRuntimeId = `${runtimeId}-${label}`;
   log(`[${label}] provisioning recipient`, { runtimeId: scopedRuntimeId });
@@ -382,6 +372,9 @@ async function provisionRecipient(cfg, runtimeId, label, hostPubkey) {
     })
   );
   const online = await wallet.goOnlineValue(true, cfg.esploraUrl);
+  // Accept the LSP's trusted virtual-channel opens (0-conf, scid-privacy, never-broadcast). Set before
+  // attachWallet, which seeds the backend's flag registry (mirrors the RGB full-flow).
+  node.setEnableVirtualChannelsV0(true);
   node.attachWallet(wallet);
   const walletAddress = wallet.getAddress();
   log(`[${label}] wallet online + attached`, { walletAddress });
@@ -392,23 +385,27 @@ async function provisionRecipient(cfg, runtimeId, label, hostPubkey) {
   await node.connectPeer(cfg.nativePeerAddr, hostPubkey);
   log(`[${label}] connected to native invoice-host`);
 
-  // apay_new requires a live channel with the host.
-  log(`[${label}] opening vanilla channel to host...`);
-  const vanillaOpen = node.openChannelValueWithOptions(
-    hostPubkey, VANILLA_CAPACITY_SAT, false, null, null, null, null, null
-  );
-  log(`[${label}] vanilla channel open initiated`, { tempChannelId: vanillaOpen.channel_id });
-  await fundVanillaChannel(node, wallet, online, cfg.gatewayUrl, cfg.esploraUrl, hostPubkey);
-  const channel = await waitForUsableChannel(node, hostPubkey, cfg.gatewayUrl, walletAddress, CHANNEL_READY_TIMEOUT_MS);
-  log(`[${label}] ✅ vanilla channel usable`, { id: channel.channel_id, capacity: channel.capacity_sat });
-
-  // Re-read the pubkey now that the LDK runtime is up: before the runtime is ready nodePubkeyJson
-  // falls back to the signing-identity key, but the LSP registers this node under its real LDK node
-  // id (what apay_new signs with and what the host peers as), so capture that.
+  // Re-read the pubkey now that the LDK runtime is up (connectPeer initializes the live backend):
+  // before that nodePubkeyJson falls back to the signing-identity key, but the LSP peers/opens under
+  // this real LDK node id (what apay_new signs with and what the host sees on the wire).
   const livePubkey = JSON.parse(node.nodePubkeyJson());
   const livePubkeyHex =
     typeof livePubkey === "string" ? livePubkey : livePubkey?.pubkey ?? livePubkey?.node_pubkey;
   log(`[${label}] live LDK node id`, { pubkey: livePubkeyHex });
+
+  // apay_new requires a live channel with the host. Rather than opening a vanilla channel ourselves,
+  // let the LSP auto-open a *trusted virtual* channel to us: its reconcile cron
+  // (DEFAULT_VIRTUAL_OPEN_MODE=trusted_no_broadcast) opens a 0-conf, never-broadcast channel to every
+  // peer the host is connected to, which we accept (setEnableVirtualChannelsV0 above) — no on-chain
+  // funding by us. First make sure the host sees us as a peer so the cron targets us.
+  await waitForHostPeer(node, cfg.nativeMgmtUrl, livePubkeyHex, CHANNEL_READY_TIMEOUT_MS);
+  log(`[${label}] waiting for the LSP to auto-open a virtual channel to us...`);
+  const channel = await waitForUsableChannel(node, hostPubkey, cfg.gatewayUrl, walletAddress, CHANNEL_READY_TIMEOUT_MS);
+  log(`[${label}] ✅ virtual channel usable (LSP-opened)`, {
+    id: channel.channel_id,
+    capacity: channel.capacity_sat,
+    virtual_open_mode: channel.virtual_open_mode,
+  });
 
   return { label, node, myPubkey: livePubkeyHex, walletAddress };
 }

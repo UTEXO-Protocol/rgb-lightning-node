@@ -119,9 +119,10 @@ async function main() {
         console.log(t);
       } else if (
         process.env.E2E_VERBOSE &&
-        // Narrow filter: ONLY the router's path-finding decision lines. A broad filter floods
-        // the CDP channel (every LDK log mentions "rgb"), which stalls the browser event loop.
-        /routing::router|RouteNotFound|next_outbound_htlc_limit_rgb|HTLC RGB maximum|Ignoring .* due to|Failed to find/i.test(t)
+        // Narrow filter: the router's path-finding decision lines, plus HTLC-handling failures
+        // (one line per failed HTLC). A broad filter floods the CDP channel (every LDK log mentions
+        // "rgb"), which stalls the browser event loop.
+        /routing::router|RouteNotFound|next_outbound_htlc_limit_rgb|HTLC RGB maximum|Ignoring .* due to|Failed to find|HTLCHandlingFailed/i.test(t)
       ) {
         console.log(`[wasm] ${t.slice(0, 280)}`);
       }
