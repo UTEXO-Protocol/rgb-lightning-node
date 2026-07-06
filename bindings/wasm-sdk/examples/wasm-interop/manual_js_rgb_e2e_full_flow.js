@@ -598,7 +598,7 @@ async function runFlow(cfg, runtimeId) {
   await sdk.unlock(JSON.stringify({ password: sdkPassword }));
   log("SDK initialized + unlocked");
 
-  const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, runtimeId);
+  const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, runtimeId, "Regtest");
   const myPubkey = JSON.parse(node.nodePubkeyJson());
   // NOTE: before the live LDK backend is initialized (which connectPeer does), nodePubkeyJson returns
   // a fallback signing identity that does NOT match the node's on-wire LN pubkey. We refresh this
@@ -1072,7 +1072,7 @@ async function verifyFlow(cfg, runtimeId) {
   await sdk.unlock(JSON.stringify({ password: snap.sdkPassword }));
   log("SDK re-initialized from persisted state");
 
-  const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, runtimeId);
+  const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, runtimeId, "Regtest");
   const reopenedPubkey = JSON.parse(node.nodePubkeyJson());
   log("Node reopened", reopenedPubkey);
 

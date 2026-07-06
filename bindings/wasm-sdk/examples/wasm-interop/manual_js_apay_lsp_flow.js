@@ -353,7 +353,7 @@ async function provisionRecipient(cfg, runtimeId, label, hostPubkey) {
   // LDK identity is still distinct because `node_signing_identity` hashes in the node_runtime_id,
   // so a shared SDK seed + a per-recipient runtime id yields two independent nodes.
   const keys = rgbGenerateKeysValue("regtest");
-  const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, scopedRuntimeId);
+  const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, scopedRuntimeId, "Regtest");
   const myPubkey = JSON.parse(node.nodePubkeyJson());
   log(`[${label}] wasm node created`, myPubkey);
 

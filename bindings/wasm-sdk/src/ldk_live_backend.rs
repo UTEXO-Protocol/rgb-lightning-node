@@ -111,6 +111,74 @@ fn virtual_channels_v0_enabled(runtime_key: &str) -> bool {
         .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------
+// Selecting the node's Bitcoin network
+// ---------------------------------------------------------------------------
+//
+// The node takes an explicit network, mirroring the native node's `--network`. That network is fed
+// into this registry (keyed by runtime_key) and consumed when the backend lazily builds its
+// `ChannelManager`/`NetworkGraph`, so the `Init` handshake advertises the matching genesis/chain hash
+// in its `networks` field (Signet `f61eee3b…`, Regtest `06226e46…`, etc.). Two entry points populate
+// it (both in `src/ln_node.rs`):
+//
+//   1. Explicit selection — `RlnWasmNode.newWithNodeRuntimeId(proxy, rid, network)` parses the
+//      network (`"mainnet" | "testnet" | "testnet4" | "signet" | "regtest"`) and calls
+//      `set_network_for_runtime` at construction, before the object graph exists. `attachWallet` then
+//      validates the wallet's network against it and rejects a mismatch.
+//   2. Adopt-from-wallet — the bare `RlnWasmNode::new` / SDK-facade path leaves the node unconfigured;
+//      `attach_wallet_shared` reads the attached wallet's network
+//      (`get_wallet_data().bitcoin_network`), maps it via `rgb_network_to_bitcoin_network`, and calls
+//      `set_network_for_runtime` (still before the object graph is built).
+//
+// Consequences:
+//   - The network is captured at object-graph build time and cannot change afterward (a
+//     `ChannelManager`'s chain hash is fixed for its lifetime). In the adopt-from-wallet path, attach
+//     the wallet before connecting to any peer.
+//   - A mismatch between your wallet network and the peer's (e.g. wallet on Regtest, LSP on Signet)
+//     surfaces as "Peer does not support any of our supported chains" + a handshake disconnect.
+//   - `SignetCustom` (custom/mutinynet-style signets) maps to standard `Signet` for LDK purposes.
+//
+// The `Regtest` default below only applies before either path has run (e.g. early bring-up / tests),
+// matching the historical hardcoded behaviour.
+thread_local! {
+    /// Maps LDK runtime_key → the Bitcoin network the node operates on.
+    /// Set from `attach_wallet_shared` (derived from the attached RGB wallet); consumed when the live
+    /// backend builds the `ChannelManager`/`NetworkGraph` so the LDK handshake advertises the correct
+    /// chain (the `networks` field of the `Init` message) instead of the historical Regtest default.
+    static NETWORK_REGISTRY: RefCell<HashMap<String, bitcoin::Network>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Record the Bitcoin network for a given LDK runtime key.
+///
+/// Must be called before the LDK object graph is first built for that runtime (done automatically
+/// from `attach_wallet_shared`, whose wallet carries the configured network).
+pub fn set_network_for_runtime(runtime_key: &str, network: bitcoin::Network) {
+    NETWORK_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(runtime_key.to_string(), network);
+    });
+}
+
+/// The Bitcoin network registered for a given LDK runtime key.
+/// Defaults to `Regtest` (the historical hardcoded value) when nothing has been registered yet.
+fn network_for_runtime(runtime_key: &str) -> bitcoin::Network {
+    NETWORK_REGISTRY
+        .with(|reg| reg.borrow().get(runtime_key).copied())
+        .unwrap_or(bitcoin::Network::Regtest)
+}
+
+/// Map an rgb-lib WASM network to the `lightning::bitcoin` network used by LDK.
+pub fn rgb_network_to_bitcoin_network(network: rgb_lib_wasm::BitcoinNetwork) -> bitcoin::Network {
+    match network {
+        rgb_lib_wasm::BitcoinNetwork::Mainnet => bitcoin::Network::Bitcoin,
+        rgb_lib_wasm::BitcoinNetwork::Testnet => bitcoin::Network::Testnet,
+        rgb_lib_wasm::BitcoinNetwork::Testnet4 => bitcoin::Network::Testnet4,
+        rgb_lib_wasm::BitcoinNetwork::Signet => bitcoin::Network::Signet,
+        rgb_lib_wasm::BitcoinNetwork::Regtest => bitcoin::Network::Regtest,
+        rgb_lib_wasm::BitcoinNetwork::SignetCustom => bitcoin::Network::Signet,
+    }
+}
+
 /// Pending RGB open intent keyed by `user_channel_id`.
 /// Stored when `open_channel_non_virtual` is called with an `asset_id`; consumed on
 /// `FundingGenerationReady` in Phase E.
@@ -1093,6 +1161,7 @@ fn load_channel_manager_snapshot(runtime_key: &str) -> Result<Option<Vec<u8>>, J
 
 fn load_network_graph_snapshot(
     runtime_key: &str,
+    network: bitcoin::Network,
     logger: Arc<WasmLdkLogger>,
 ) -> Result<(Arc<WasmNetworkGraph>, bool), JsValue> {
     let Some(bytes) = load_bytes_snapshot(
@@ -1103,7 +1172,7 @@ fn load_network_graph_snapshot(
     )?
     else {
         return Ok((
-            Arc::new(NetworkGraph::new(bitcoin::Network::Regtest, logger)),
+            Arc::new(NetworkGraph::new(network, logger)),
             false,
         ));
     };
@@ -1165,6 +1234,7 @@ impl WasmLdkLiveBackend {
         if self.object_graph.borrow().is_some() {
             return Ok(());
         }
+        let network = network_for_runtime(&self.runtime_key);
         let seed = self.derive_seed32();
         let logger = Arc::new(WasmLdkLogger);
         let fee_estimator = Arc::new(FixedFeeEstimator);
@@ -1219,7 +1289,7 @@ impl WasmLdkLiveBackend {
         let restored_monitors = load_persisted_monitors(&self.runtime_key, &keys_manager)?;
         let has_persisted_monitors = !restored_monitors.is_empty();
         let (network_graph, _network_graph_restored) =
-            load_network_graph_snapshot(&self.runtime_key, Arc::clone(&logger))?;
+            load_network_graph_snapshot(&self.runtime_key, network, Arc::clone(&logger))?;
         let (scorer, _scorer_restored) = load_scorer_snapshot(
             &self.runtime_key,
             Arc::clone(&network_graph),
@@ -1262,8 +1332,8 @@ impl WasmLdkLiveBackend {
             .channel_handshake_config
             .negotiate_anchors_zero_fee_htlc_tx = true;
         let chain_params = ChainParameters {
-            network: bitcoin::Network::Regtest,
-            best_block: BestBlock::from_network(bitcoin::Network::Regtest),
+            network,
+            best_block: BestBlock::from_network(network),
         };
         let mut channel_manager_restored = false;
         let mut monitors_restored = false;
@@ -3217,7 +3287,7 @@ impl WasmLdkLiveBackend {
             let seed = this.derive_seed32();
             let preimage_root = apay::AsyncPaymentsPreimageRoot::build_from_seed(
                 &seed,
-                bitcoin::Network::Regtest,
+                network_for_runtime(&this.runtime_key),
                 &local_node_id,
             )
             .map_err(|err| JsValue::from_str(&err.to_string()))?;
@@ -3412,7 +3482,7 @@ impl WasmLdkLiveBackend {
         let seed = self.derive_seed32();
         let preimage_root = apay::AsyncPaymentsPreimageRoot::build_from_seed(
             &seed,
-            bitcoin::Network::Regtest,
+            network_for_runtime(&self.runtime_key),
             &local_node_id,
         )?;
         let (payment_preimage, payment_hash) = preimage_root.derive_hash_material(hash_index)?;
@@ -3591,7 +3661,7 @@ impl WasmLdkLiveBackend {
                     output_script,
                     channel_value_satoshis,
                     consignment_endpoint: intent.consignment_endpoint,
-                    network: bitcoin::Network::Regtest,
+                    network: network_for_runtime(&this.runtime_key),
                     fee_rate: intent.fee_rate,
                     min_confirmations: intent.min_confirmations,
                 };

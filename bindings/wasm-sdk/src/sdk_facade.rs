@@ -508,7 +508,7 @@ impl RlnWasmSdk {
         node_runtime_id: String,
     ) -> Result<RlnWasmNode, JsValue> {
         ensure_sdk_node_runtime_allowed()?;
-        let node = RlnWasmNode::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id))?;
+        let node = RlnWasmNode::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id), None)?;
         maybe_attach_default_wallet_to_node(&node);
         Ok(node)
     }
@@ -528,7 +528,7 @@ impl RlnWasmSdk {
         node_runtime_id: String,
     ) -> Result<RlnWasmSdkNodeHandle, JsValue> {
         ensure_sdk_node_runtime_allowed()?;
-        let node = RlnWasmNode::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id))?;
+        let node = RlnWasmNode::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id), None)?;
         maybe_attach_default_wallet_to_node(&node);
         Ok(RlnWasmSdkNodeHandle { inner: node })
     }

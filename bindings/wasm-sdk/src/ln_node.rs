@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -392,6 +393,10 @@ pub struct RlnWasmNode {
     node_instance_nonce: u64,
     next_runtime_event_seq: Rc<RefCell<u64>>,
     network: RefCell<String>,
+    /// Whether the network was explicitly selected at construction (native-style `--network`).
+    /// When `true`, `attach_wallet_shared` validates the wallet's network against it and errors on
+    /// mismatch. When `false` (bare `new`/facade path), the node adopts the attached wallet's network.
+    network_configured: Cell<bool>,
     wallet: RefCell<Option<std::rc::Rc<RefCell<rgb_lib_wasm::Wallet>>>>,
     relay_session_auth: RefCell<Option<RlnWasmNodeRelaySessionAuthData>>,
     enable_virtual_channels_v0: RefCell<bool>,
@@ -464,22 +469,33 @@ impl RlnWasmNode {
         }
     }
 
+    /// Bare constructor. The network is left unset and adopted from the first attached wallet
+    /// (regtest defaults apply until then). For an explicit, native-style network selection use
+    /// [`new_with_node_runtime_id`](Self::new_with_node_runtime_id).
     #[wasm_bindgen(constructor)]
     pub fn new(proxy_url: String) -> Result<RlnWasmNode, JsValue> {
-        Self::new_with_runtime_id_opt(proxy_url, None)
+        Self::new_with_runtime_id_opt(proxy_url, None, None)
     }
 
+    /// Construct a node with an explicit Bitcoin network, mirroring the native node's `--network`.
+    /// The `network` string is one of `"mainnet" | "testnet" | "testnet4" | "signet" | "regtest"`
+    /// (case-insensitive). The node owns this network as its single source of truth: it drives the
+    /// LDK `ChannelManager`/`NetworkGraph` (and therefore the `Init` handshake chain), and
+    /// `attachWallet` will reject a wallet created on a different network.
     #[wasm_bindgen(js_name = newWithNodeRuntimeId)]
     pub fn new_with_node_runtime_id(
         proxy_url: String,
         node_runtime_id: String,
+        network: String,
     ) -> Result<RlnWasmNode, JsValue> {
-        Self::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id))
+        let network = crate::WasmRlnNetwork::parse(&network)?;
+        Self::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id), Some(network))
     }
 
     pub(crate) fn new_with_runtime_id_opt(
         proxy_url: String,
         node_runtime_id: Option<String>,
+        network: Option<crate::WasmRlnNetwork>,
     ) -> Result<RlnWasmNode, JsValue> {
         if proxy_url.trim().is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_PROXY_URL_EMPTY));
@@ -518,11 +534,22 @@ impl RlnWasmNode {
         )?;
         let runtime_core =
             NativeLnRuntimeCore::new(persistence_keys.ldk_manager_registry_key.clone());
+        // When a network is explicitly selected it becomes the node's single source of truth (like
+        // the native node's `--network`); otherwise fall back to the historical `regtest` default and
+        // let the first attached wallet supply the network.
+        let configured_rgb_network = network.map(|n| n.as_rgb());
+        let default_network_label = configured_rgb_network
+            .map(rgb_network_label)
+            .unwrap_or("regtest");
         let chain_sync = WasmChainSyncDriver::new(
             persistence_keys.ldk_manager_registry_key.clone(),
-            "regtest".to_string(),
+            default_network_label.to_string(),
         )?;
-        let restored_network = chain_sync.status().network;
+        let restored_network = if configured_rgb_network.is_some() {
+            default_network_label.to_string()
+        } else {
+            chain_sync.status().network
+        };
         let enable_virtual_channels_v0 =
             load_virtual_channels_v0_flag(&persistence_keys.virtual_channels_v0_storage_key)
                 .unwrap_or_else(crate::sdk_default_enable_virtual_channels_v0);
@@ -545,6 +572,7 @@ impl RlnWasmNode {
             node_instance_nonce: Self::next_node_instance_nonce(),
             next_runtime_event_seq: Rc::new(RefCell::new(next_runtime_event_seq)),
             network: RefCell::new(restored_network),
+            network_configured: Cell::new(configured_rgb_network.is_some()),
             wallet: RefCell::new(None),
             relay_session_auth: RefCell::new(None),
             enable_virtual_channels_v0: RefCell::new(enable_virtual_channels_v0),
@@ -553,6 +581,15 @@ impl RlnWasmNode {
             auto_drive_running: Rc::new(RefCell::new(false)),
             auto_drive_interval_ms: Rc::new(RefCell::new(AUTO_DRIVE_DEFAULT_INTERVAL_MS)),
         };
+        // For an explicitly-selected network, register it with the LDK backend now — before the
+        // object graph (ChannelManager/NetworkGraph) is first built — so the handshake advertises the
+        // configured chain even if a wallet is never attached.
+        if let Some(rgb_network) = configured_rgb_network {
+            crate::ldk_live_backend::set_network_for_runtime(
+                &node.persistence_keys.ldk_manager_registry_key,
+                crate::ldk_live_backend::rgb_network_to_bitcoin_network(rgb_network),
+            );
+        }
         // Keep live LDK backend identity aligned with node_signing_identity pubkey.
         let (node_secret_key, _) = node.node_signing_identity()?;
         node.ldk_runtime
@@ -584,11 +621,41 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = attachWallet)]
     pub fn attach_wallet(&self, wallet: &crate::RlnWasmWallet) -> Result<(), JsValue> {
-        self.attach_wallet_shared(Rc::clone(&wallet.inner));
-        Ok(())
+        self.attach_wallet_shared(Rc::clone(&wallet.inner))
     }
 
-    pub(crate) fn attach_wallet_shared(&self, wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>) {
+    pub(crate) fn attach_wallet_shared(
+        &self,
+        wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>,
+    ) -> Result<(), JsValue> {
+        // Reconcile the wallet's network with the node's.
+        //
+        // - Network selected explicitly at construction (`network_configured`): the node owns the
+        //   network (like the native `--network`), so the wallet MUST match. A mismatch is a
+        //   configuration error and is rejected up front — mirroring the native node's
+        //   `NetworkMismatch`, and preventing the LDK side from advertising a chain the wallet can't
+        //   actually operate on.
+        // - Otherwise: adopt the wallet's network as the node's, and propagate it to the LDK backend
+        //   (so the `ChannelManager`/`NetworkGraph`, and thus the `networks` field of the `Init`
+        //   handshake, advertise the right chain) and to the node's own network string (invoice
+        //   currency, chain-sync status).
+        let bitcoin_network = wallet.borrow().get_wallet_data().bitcoin_network;
+        let wallet_label = rgb_network_label(bitcoin_network);
+        if self.network_configured.get() {
+            let node_label = self.network.borrow().clone();
+            if wallet_label != node_label {
+                return Err(JsValue::from_str(&format!(
+                    "wallet network ({wallet_label}) does not match the node's configured network ({node_label})"
+                )));
+            }
+        } else {
+            *self.network.borrow_mut() = wallet_label.to_string();
+            let _ = self.chain_sync.set_network(wallet_label);
+        }
+        crate::ldk_live_backend::set_network_for_runtime(
+            &self.persistence_keys.ldk_manager_registry_key,
+            crate::ldk_live_backend::rgb_network_to_bitcoin_network(bitcoin_network),
+        );
         crate::ldk_live_backend::register_rgb_wallet_for_runtime(
             &self.persistence_keys.ldk_manager_registry_key,
             Rc::clone(&wallet),
@@ -601,6 +668,7 @@ impl RlnWasmNode {
             *self.enable_virtual_channels_v0.borrow(),
         );
         *self.wallet.borrow_mut() = Some(wallet);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = setRelaySessionAuth)]
@@ -4161,7 +4229,7 @@ impl RlnWasmNode {
                 runtime_backend.trim()
             )));
         }
-        Self::new_with_runtime_id_opt(proxy_url, node_runtime_id)
+        Self::new_with_runtime_id_opt(proxy_url, node_runtime_id, None)
     }
 }
 
@@ -5205,6 +5273,20 @@ impl Drop for RlnWasmNode {
 
 fn unix_now_secs() -> u64 {
     (js_sys::Date::now() as u64) / 1000
+}
+
+/// The node-level network string (as consumed by `invoice_currency` and the chain-sync driver)
+/// for a given rgb-lib WASM network. `SignetCustom` collapses to `"signet"`, matching the LDK
+/// network mapping in `ldk_live_backend::rgb_network_to_bitcoin_network`.
+fn rgb_network_label(network: rgb_lib_wasm::BitcoinNetwork) -> &'static str {
+    match network {
+        rgb_lib_wasm::BitcoinNetwork::Mainnet => "mainnet",
+        rgb_lib_wasm::BitcoinNetwork::Testnet => "testnet",
+        rgb_lib_wasm::BitcoinNetwork::Testnet4 => "testnet4",
+        rgb_lib_wasm::BitcoinNetwork::Signet => "signet",
+        rgb_lib_wasm::BitcoinNetwork::Regtest => "regtest",
+        rgb_lib_wasm::BitcoinNetwork::SignetCustom => "signet",
+    }
 }
 
 fn normalize_payment_status(status: &str) -> Result<String, JsValue> {

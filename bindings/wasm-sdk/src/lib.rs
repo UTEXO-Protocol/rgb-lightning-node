@@ -71,7 +71,7 @@ pub enum WasmRlnNetwork {
 }
 
 impl WasmRlnNetwork {
-    fn parse(value: &str) -> Result<Self, JsValue> {
+    pub(crate) fn parse(value: &str) -> Result<Self, JsValue> {
         match value.to_ascii_lowercase().as_str() {
             "mainnet" => Ok(Self::Mainnet),
             "testnet" => Ok(Self::Testnet),
@@ -82,7 +82,7 @@ impl WasmRlnNetwork {
         }
     }
 
-    fn as_rgb(self) -> rgb_lib_wasm::BitcoinNetwork {
+    pub(crate) fn as_rgb(self) -> rgb_lib_wasm::BitcoinNetwork {
         match self {
             Self::Mainnet => rgb_lib_wasm::BitcoinNetwork::Mainnet,
             Self::Testnet => rgb_lib_wasm::BitcoinNetwork::Testnet,
@@ -257,7 +257,9 @@ async fn bootstrap_default_wallet_from_lifecycle() -> Result<(), JsValue> {
 fn maybe_attach_default_wallet_to_node(node: &RlnWasmNode) {
     WASM_SDK_DEFAULT_WALLET.with(|slot| {
         if let Some(wallet) = slot.borrow().as_ref() {
-            node.attach_wallet_shared(Rc::clone(wallet));
+            // Best-effort default-wallet attach. Nodes built via the facade have no explicit network,
+            // so they adopt the wallet's network (no mismatch is possible here); any error is ignored.
+            let _ = node.attach_wallet_shared(Rc::clone(wallet));
         }
     });
 }
