@@ -21,7 +21,7 @@ success.
 - **`run_apay_lsp_flow.mjs`** (page `apay_lsp_flow.html` + `manual_js_apay_lsp_flow.js`):
   **async payments with LSP** — two independent wasm recipient nodes each open a channel to a
   native invoice-host node and call `apayNewWithAddress` / `apayNew` to register signed hash
-  batches with a real [`utexo-lsp`](../../../../../utexo-lsp); the flow asserts the LSP tracked
+  batches with a real `utexo-lsp`; the flow asserts the LSP tracked
   them as separate orders. See the dedicated section below.
 
 ## Prerequisites
@@ -116,7 +116,7 @@ Useful env vars:
 
 `wasm_e2e_harness.html` + `wasm_e2e_harness.js` are not a standalone flow: they construct
 the SDK (`RlnWasmNode` + `RlnWasmWallet`), bring the wallet online, and expose everything on
-`window.__sdk` without driving anything. The Playwright suite under `../../../../e2e-specs`
+`window.__sdk` without driving anything. The Playwright suite under `../../e2e-specs`
 drives this harness, so keep it in sync with the SDK surface.
 
 ## Async payments with LSP (`run_apay_lsp_flow.mjs`)
