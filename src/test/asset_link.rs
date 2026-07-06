@@ -222,13 +222,7 @@ async fn asset_link_send_payment_swaps_virtual_to_reserve_asset() {
         &host_info.pubkey,
     )
     .await;
-    check_response_is_nok(
-        res,
-        StatusCode::BAD_REQUEST,
-        "unknown_link",
-        "InvalidRequest",
-    )
-    .await;
+    check_response_is_nok(res, StatusCode::FORBIDDEN, "No route found", "NoRoute").await;
     wait_for_ln_balance(receiver_addr, &asset_r, CHANNEL_AMT).await;
     wait_for_ln_balance(host_addr, &asset_r, 0).await;
 

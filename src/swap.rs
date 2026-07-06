@@ -1,4 +1,7 @@
-use lightning::{impl_writeable_tlv_based, types::payment::PaymentHash};
+use bitcoin::secp256k1::PublicKey;
+use lightning::{
+    impl_writeable_tlv_based, ln::channelmanager::InterceptId, types::payment::PaymentHash,
+};
 use rgb_lib::ContractId;
 use std::convert::TryInto;
 use std::fmt;
@@ -16,6 +19,8 @@ pub(crate) struct SwapData {
     pub(crate) requested_at: u64,
     pub(crate) initiated_at: Option<u64>,
     pub(crate) completed_at: Option<u64>,
+    pub(crate) pending_intercept_id: Option<InterceptId>,
+    pub(crate) authorized_peer: Option<PublicKey>,
 }
 
 impl_writeable_tlv_based!(SwapData, {
@@ -24,6 +29,8 @@ impl_writeable_tlv_based!(SwapData, {
     (2, requested_at, required),
     (3, initiated_at, option),
     (4, completed_at, option),
+    (5, pending_intercept_id, option),
+    (6, authorized_peer, option),
 });
 
 impl SwapData {
@@ -34,6 +41,8 @@ impl SwapData {
             requested_at: get_current_timestamp(),
             initiated_at: None,
             completed_at: None,
+            pending_intercept_id: None,
+            authorized_peer: None,
         }
     }
 }

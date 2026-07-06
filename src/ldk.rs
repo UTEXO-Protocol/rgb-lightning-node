@@ -136,6 +136,7 @@ const OUTBOUND_PAYMENTS_KEY: &str = "outbound_payments";
 const CHANNEL_IDS_KEY: &str = "channel_ids";
 const MAKER_SWAPS_KEY: &str = "maker_swaps";
 const TAKER_SWAPS_KEY: &str = "taker_swaps";
+const ASSET_LINK_SWAP_AUTHORIZATION_MAX_EXPIRY_SECS: u64 = 24 * 60 * 60;
 const OUTPUT_SPENDER_TXES_KEY: &str = "output_spender_txes";
 const PSBT_NAMESPACE: &str = "psbt";
 const PENDING_FUNDING_NAMESPACE: &str = "pending_funding";
@@ -457,12 +458,26 @@ impl UnlockedAppState {
         self.save_taker_swaps(taker_swaps);
     }
 
+    pub(crate) fn update_taker_swap_pending_intercept(
+        &self,
+        payment_hash: &PaymentHash,
+        intercept_id: channelmanager::InterceptId,
+    ) {
+        let mut taker_swaps = self.get_taker_swaps();
+        let taker_swap = taker_swaps.swaps.get_mut(payment_hash).unwrap();
+        taker_swap.status = SwapStatus::Pending;
+        taker_swap.initiated_at = Some(get_current_timestamp());
+        taker_swap.pending_intercept_id = Some(intercept_id);
+        self.save_taker_swaps(taker_swaps);
+    }
+
     pub(crate) fn update_taker_swap_status(&self, payment_hash: &PaymentHash, status: SwapStatus) {
         let mut taker_swaps = self.get_taker_swaps();
         let taker_swap = taker_swaps.swaps.get_mut(payment_hash).unwrap();
         match &status {
             SwapStatus::Succeeded | SwapStatus::Failed | SwapStatus::Expired => {
-                taker_swap.completed_at = Some(get_current_timestamp())
+                taker_swap.completed_at = Some(get_current_timestamp());
+                taker_swap.pending_intercept_id = None;
             }
             SwapStatus::Pending => taker_swap.initiated_at = Some(get_current_timestamp()),
             SwapStatus::Waiting => panic!("this doesn't make sense: swap starts in Waiting status"),
@@ -1251,16 +1266,19 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
             ));
         }
 
+        let expiry_sec = params
+            .expiry_sec
+            .min(ASSET_LINK_SWAP_AUTHORIZATION_MAX_EXPIRY_SECS);
         let swap_info = SwapInfo {
             qty_from: params.amount,
             qty_to: params.amount,
             from_asset: Some(linked_contract_id),
             to_asset: Some(asset_contract_id),
-            expiry: get_current_timestamp() + params.expiry_sec,
+            expiry: get_current_timestamp().saturating_add(expiry_sec),
         };
-        taker_swaps
-            .swaps
-            .insert(payment_hash, SwapData::create_from_swap_info(&swap_info));
+        let mut swap_data = SwapData::create_from_swap_info(&swap_info);
+        swap_data.authorized_peer = Some(sender_node_id);
+        taker_swaps.swaps.insert(payment_hash, swap_data);
         self.kv_store
             .write("", "", TAKER_SWAPS_KEY, taker_swaps.encode())
             .map_err(|e| {
@@ -3120,12 +3138,18 @@ async fn handle_ldk_events(
             requested_next_hop_scid,
             prev_outbound_scid_alias,
         } => {
-            if !is_swap {
-                tracing::warn!("Intercepted an HTLC that's not related to a swap");
-                unlocked_state
+            let reject_intercept = |reason: &str| {
+                if let Err(e) = unlocked_state
                     .channel_manager
                     .fail_intercepted_htlc(intercept_id)
-                    .unwrap();
+                {
+                    tracing::debug!("could not fail intercepted HTLC ({reason}): {e:?}");
+                }
+            };
+
+            if !is_swap {
+                tracing::warn!("Intercepted an HTLC that's not related to a swap");
+                reject_intercept("not a swap");
                 return Ok(());
             }
 
@@ -3140,59 +3164,109 @@ async fn handle_ldk_events(
                     })
             };
 
-            let inbound_channel = unlocked_state
+            let Some(inbound_channel) = unlocked_state
                 .channel_manager
                 .list_channels()
                 .into_iter()
                 .find(|details| details.outbound_scid_alias == Some(prev_outbound_scid_alias))
-                .expect("Should always be a valid channel");
-            let outbound_channel = unlocked_state
+            else {
+                tracing::error!(
+                    "ERROR: no inbound channel matches the intercepted HTLC prev scid alias {prev_outbound_scid_alias}, rejecting it"
+                );
+                reject_intercept("no inbound channel");
+                return Ok(());
+            };
+            let Some(outbound_channel) = unlocked_state
                 .channel_manager
                 .list_channels()
                 .into_iter()
                 .find(|details| {
                     details.short_channel_id == Some(requested_next_hop_scid)
                         || details.outbound_scid_alias == Some(requested_next_hop_scid)
-                        || details.inbound_scid_alias == Some(requested_next_hop_scid)
                 })
-                .expect("Should always be a valid channel");
+            else {
+                tracing::error!(
+                    "ERROR: no outbound channel matches the intercepted HTLC next hop scid {requested_next_hop_scid}, rejecting it"
+                );
+                reject_intercept("no outbound channel");
+                return Ok(());
+            };
 
             let inbound_rgb_info = get_rgb_info(&inbound_channel.channel_id);
             let outbound_rgb_info = get_rgb_info(&outbound_channel.channel_id);
 
             tracing::debug!("EVENT: Requested swap with params inbound_msat={} outbound_msat={} inbound_rgb={:?} outbound_rgb={:?} inbound_contract_id={:?}, outbound_contract_id={:?}", inbound_amount_msat, expected_outbound_amount_msat, inbound_rgb_amount, expected_outbound_rgb_payment.map(|(_, a)| a), inbound_rgb_info.map(|i| i.0), expected_outbound_rgb_payment.map(|(c, _)| c));
 
-            let swaps_lock = unlocked_state.taker_swaps.lock().unwrap();
-            let whitelist_swap = match swaps_lock.swaps.get(&payment_hash) {
-                None => {
-                    tracing::error!("ERROR: rejecting non-whitelisted swap");
-                    unlocked_state
-                        .channel_manager
-                        .fail_intercepted_htlc(intercept_id)
-                        .unwrap();
-                    return Ok(());
+            let (whitelist_swap_info, whitelist_swap_status, pending_intercept_id, authorized_peer) = {
+                let swaps_lock = unlocked_state.taker_swaps.lock().unwrap();
+                match swaps_lock.swaps.get(&payment_hash) {
+                    None => {
+                        tracing::error!("ERROR: rejecting non-whitelisted swap");
+                        reject_intercept("non-whitelisted swap");
+                        return Ok(());
+                    }
+                    Some(x) => (
+                        x.swap_info.clone(),
+                        x.status,
+                        x.pending_intercept_id,
+                        x.authorized_peer,
+                    ),
                 }
-                Some(x) => x,
             };
 
+            match whitelist_swap_status {
+                SwapStatus::Waiting => {}
+                SwapStatus::Pending if pending_intercept_id == Some(intercept_id) => {}
+                _ => {
+                    tracing::error!(
+                        "ERROR: swap whitelist entry is not in a forwardable state (status {whitelist_swap_status:?}), rejecting it"
+                    );
+                    reject_intercept(&format!(
+                        "whitelist entry not forwardable (status {whitelist_swap_status:?})"
+                    ));
+                    return Ok(());
+                }
+            }
+
+            if let Some(authorized_peer) = authorized_peer {
+                if inbound_channel.counterparty.node_id != authorized_peer {
+                    tracing::error!(
+                        "ERROR: swap whitelist entry was authorized for peer {}, but intercepted HTLC came from {}, rejecting it",
+                        authorized_peer,
+                        inbound_channel.counterparty.node_id
+                    );
+                    reject_intercept("unauthorized peer");
+                    return Ok(());
+                }
+            }
+
+            if get_current_timestamp() > whitelist_swap_info.expiry {
+                tracing::error!("ERROR: swap whitelist entry expired, rejecting it");
+                unlocked_state.update_taker_swap_status(&payment_hash, SwapStatus::Expired);
+                reject_intercept("whitelist entry expired");
+                return Ok(());
+            }
+
             let mut fail = false;
-            if whitelist_swap.swap_info.is_from_btc() {
+            if whitelist_swap_info.is_from_btc() {
                 let net_msat_diff = expected_outbound_amount_msat.checked_sub(inbound_amount_msat);
 
-                if inbound_rgb_amount != Some(whitelist_swap.swap_info.qty_to)
-                    || inbound_rgb_info.map(|x| x.0) != whitelist_swap.swap_info.to_asset
-                    || net_msat_diff != Some(whitelist_swap.swap_info.qty_from)
+                if inbound_rgb_amount != Some(whitelist_swap_info.qty_to)
+                    || inbound_rgb_info.map(|x| x.0) != whitelist_swap_info.to_asset
+                    || net_msat_diff != Some(whitelist_swap_info.qty_from)
                 {
                     fail = true;
                 }
-            } else if whitelist_swap.swap_info.is_to_btc() {
+            } else if whitelist_swap_info.is_to_btc() {
                 let net_msat_diff =
                     inbound_amount_msat.saturating_sub(expected_outbound_amount_msat);
 
-                if expected_outbound_rgb_payment.map(|(_, a)| a)
-                    != Some(whitelist_swap.swap_info.qty_from)
-                    || outbound_rgb_info.map(|x| x.0) != whitelist_swap.swap_info.from_asset
-                    || net_msat_diff != whitelist_swap.swap_info.qty_to
+                if expected_outbound_rgb_payment
+                    != whitelist_swap_info
+                        .from_asset
+                        .map(|asset| (asset, whitelist_swap_info.qty_from))
+                    || outbound_rgb_info.map(|x| x.0) != whitelist_swap_info.from_asset
+                    || net_msat_diff != whitelist_swap_info.qty_to
                 {
                     fail = true;
                 }
@@ -3200,41 +3274,39 @@ async fn handle_ldk_events(
                 let net_msat_diff = inbound_amount_msat.checked_sub(expected_outbound_amount_msat);
 
                 if net_msat_diff != Some(0)
-                    || expected_outbound_rgb_payment.map(|(_, a)| a)
-                        != Some(whitelist_swap.swap_info.qty_from)
-                    || outbound_rgb_info.map(|x| x.0) != whitelist_swap.swap_info.from_asset
-                    || inbound_rgb_amount != Some(whitelist_swap.swap_info.qty_to)
-                    || inbound_rgb_info.map(|x| x.0) != whitelist_swap.swap_info.to_asset
+                    || expected_outbound_rgb_payment
+                        != whitelist_swap_info
+                            .from_asset
+                            .map(|asset| (asset, whitelist_swap_info.qty_from))
+                    || outbound_rgb_info.map(|x| x.0) != whitelist_swap_info.from_asset
+                    || inbound_rgb_amount != Some(whitelist_swap_info.qty_to)
+                    || inbound_rgb_info.map(|x| x.0) != whitelist_swap_info.to_asset
                 {
                     fail = true;
                 }
             }
 
-            drop(swaps_lock);
-
             if fail {
                 tracing::error!("ERROR: swap doesn't match the whitelisted info, rejecting it");
                 unlocked_state.update_taker_swap_status(&payment_hash, SwapStatus::Failed);
-                unlocked_state
-                    .channel_manager
-                    .fail_intercepted_htlc(intercept_id)
-                    .unwrap();
+                reject_intercept("whitelist mismatch");
                 return Ok(());
             }
 
             tracing::debug!("Swap is whitelisted, forwarding the htlc...");
-            unlocked_state.update_taker_swap_status(&payment_hash, SwapStatus::Pending);
+            unlocked_state.update_taker_swap_pending_intercept(&payment_hash, intercept_id);
 
-            unlocked_state
-                .channel_manager
-                .forward_intercepted_htlc(
-                    intercept_id,
-                    channelmanager::NextHopForward::ShortChannelId(requested_next_hop_scid),
-                    outbound_channel.counterparty.node_id,
-                    expected_outbound_amount_msat,
-                    expected_outbound_rgb_payment,
-                )
-                .expect("Forward should be valid");
+            if let Err(e) = unlocked_state.channel_manager.forward_intercepted_htlc(
+                intercept_id,
+                channelmanager::NextHopForward::ShortChannelId(requested_next_hop_scid),
+                outbound_channel.counterparty.node_id,
+                expected_outbound_amount_msat,
+                expected_outbound_rgb_payment,
+            ) {
+                tracing::error!("ERROR: failed to forward whitelisted swap HTLC: {e:?}");
+                unlocked_state.update_taker_swap_status(&payment_hash, SwapStatus::Failed);
+                reject_intercept("forward failed");
+            }
         }
         Event::OnionMessageIntercepted { .. } => {
             // We don't use the onion message interception feature, so this event should never be

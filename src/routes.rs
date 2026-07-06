@@ -73,7 +73,8 @@ use tokio::{
 };
 
 use crate::asset_link::{
-    AssetLinkAuthorizeParamsWire, AssetLinkSendPaymentRequest, ASSET_LINK_PROTOCOL_VERSION,
+    AssetLinkAuthorizeParamsWire, AssetLinkAuthorizeResultWire, AssetLinkSendPaymentRequest,
+    ASSET_LINK_PROTOCOL_VERSION,
 };
 use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
@@ -1978,6 +1979,10 @@ pub(crate) async fn asset_link_send_payment(
 
         let invoice = Bolt11Invoice::from_str(&payload.invoice)
             .map_err(|e| APIError::InvalidInvoice(e.to_string()))?;
+        if invoice.is_expired() {
+            return Err(APIError::InvalidInvoice(s!("invoice has expired")));
+        }
+
         let (linked_contract_id, asset_amount) =
             match (invoice.rgb_contract_id(), invoice.rgb_amount()) {
                 (Some(contract_id), Some(amount)) => (contract_id, amount),
@@ -2005,46 +2010,10 @@ pub(crate) async fn asset_link_send_payment(
         let payment_secret = *invoice.payment_secret();
         let receiver_pubkey = invoice.recover_payee_pub_key();
 
-        let params = AssetLinkAuthorizeParamsWire {
-            protocol_version: ASSET_LINK_PROTOCOL_VERSION,
-            payment_hash: hex_str(&payment_hash.0),
-            asset_id: payload.asset_id.clone(),
-            linked_asset_id: linked_contract_id.to_string(),
-            amount: asset_amount,
-            expiry_sec: invoice.expiry_time().as_secs(),
-        };
-        let request_id = new_jsonrpc_request_id();
-        let response_rx = unlocked_state
-            .asset_link_handler
-            .queue_asset_link_authorize(host_pubkey, Value::String(request_id.clone()), params)
-            .map_err(|err| APIError::InvalidRequest(err.message))?;
-        unlocked_state.peer_manager.process_events();
-        match timeout(
-            Duration::from_secs(JSONRPC_MSG_RESPONSE_TIMEOUT_SECS),
-            response_rx,
-        )
-        .await
-        {
-            Ok(Ok(Ok(_result))) => {}
-            Ok(Ok(Err(err))) => {
-                return Err(APIError::InvalidRequest(format!(
-                    "asset_link host error {}: {}",
-                    err.code, err.message
-                )));
-            }
-            Ok(Err(_)) => {
-                return Err(APIError::Network(s!(
-                    "/assetlink/sendpayment response channel closed before the host replied"
-                )));
-            }
-            Err(_) => {
-                unlocked_state
-                    .asset_link_handler
-                    .forget_asset_link_response(host_pubkey, &request_id);
-                return Err(APIError::Network(s!(
-                    "/assetlink/sendpayment timed out waiting for host authorization"
-                )));
-            }
+        if host_pubkey == unlocked_state.runtime_node_id() || host_pubkey == receiver_pubkey {
+            return Err(APIError::InvalidRequest(
+                "host_pubkey must differ from this node and the invoice receiver".to_string(),
+            ));
         }
 
         let first_leg = get_route(
@@ -2082,7 +2051,7 @@ pub(crate) async fn asset_link_send_payment(
             .expect("Path not to be empty")
             .fee_msat = 0;
 
-        let fullpaths = first_leg.paths[0]
+        let mut fullpaths = first_leg.paths[0]
             .hops
             .clone()
             .into_iter()
@@ -2095,6 +2064,12 @@ pub(crate) async fn asset_link_send_payment(
                 hop
             }))
             .collect::<Vec<_>>();
+
+        if let Some(last_hop) = fullpaths.last_mut() {
+            last_hop.cltv_expiry_delta = last_hop
+                .cltv_expiry_delta
+                .max(invoice.min_final_cltv_expiry_delta() as u32);
+        }
 
         let total_fee = fullpaths
             .iter()
@@ -2109,13 +2084,79 @@ pub(crate) async fn asset_link_send_payment(
             )));
         }
 
+        let mut recipient_onion = RecipientOnionFields::secret_only(payment_secret);
+        recipient_onion.payment_metadata = invoice.payment_metadata().cloned();
+
+        let mut route_params = RouteParameters::from_payment_params_and_value(
+            PaymentParameters::from_bolt11_invoice(&invoice),
+            amt_msat,
+            Some((linked_contract_id, asset_amount)),
+        );
+        route_params
+            .set_max_path_length(
+                &recipient_onion,
+                false,
+                unlocked_state.channel_manager.current_best_block().height,
+            )
+            .map_err(|()| APIError::FailedPayment(s!("onion packet size exceeded")))?;
         let route = Route {
             paths: vec![LnPath {
                 hops: fullpaths,
                 blinded_tail: None,
             }],
-            route_params: None,
+            route_params: Some(route_params),
         };
+
+        let params = AssetLinkAuthorizeParamsWire {
+            protocol_version: ASSET_LINK_PROTOCOL_VERSION,
+            payment_hash: hex_str(&payment_hash.0),
+            asset_id: payload.asset_id.clone(),
+            linked_asset_id: linked_contract_id.to_string(),
+            amount: asset_amount,
+            expiry_sec: invoice.duration_until_expiry().as_secs(),
+        };
+        let request_id = new_jsonrpc_request_id();
+        let response_rx = unlocked_state
+            .asset_link_handler
+            .queue_asset_link_authorize(host_pubkey, Value::String(request_id.clone()), params)
+            .map_err(|err| APIError::InvalidRequest(err.message))?;
+        unlocked_state.peer_manager.process_events();
+        match timeout(
+            Duration::from_secs(JSONRPC_MSG_RESPONSE_TIMEOUT_SECS),
+            response_rx,
+        )
+        .await
+        {
+            Ok(Ok(Ok(result))) => {
+                let authorized = serde_json::from_value::<AssetLinkAuthorizeResultWire>(result)
+                    .map(|r| r.authorized)
+                    .unwrap_or(false);
+                if !authorized {
+                    return Err(APIError::InvalidRequest(s!(
+                        "host did not authorize the linked payment"
+                    )));
+                }
+            }
+            Ok(Ok(Err(err))) => {
+                return Err(APIError::InvalidRequest(format!(
+                    "asset_link host error {}: {}",
+                    err.code, err.message
+                )));
+            }
+            Ok(Err(_)) => {
+                return Err(APIError::Network(s!(
+                    "/assetlink/sendpayment response channel closed before the host replied"
+                )));
+            }
+            Err(_) => {
+                unlocked_state
+                    .asset_link_handler
+                    .forget_asset_link_response(host_pubkey, &request_id);
+                return Err(APIError::Network(s!(
+                    "/assetlink/sendpayment timed out waiting for host authorization"
+                )));
+            }
+        }
 
         let created_at = get_current_timestamp();
         let payment_id = PaymentId(payment_hash.0);
@@ -2143,7 +2184,7 @@ pub(crate) async fn asset_link_send_payment(
             &payment_hash,
             asset_contract_id,
             asset_amount,
-            false,
+            true,
             false,
             unlocked_state.kv_store.as_ref(),
         );
@@ -2151,7 +2192,7 @@ pub(crate) async fn asset_link_send_payment(
         match unlocked_state.channel_manager.send_payment_with_route(
             route,
             payment_hash,
-            RecipientOnionFields::secret_only(payment_secret),
+            recipient_onion,
             payment_id,
         ) {
             Ok(()) => {
