@@ -10,9 +10,13 @@ pub(crate) mod entropy;
 pub(crate) mod external;
 #[cfg(test)]
 pub(crate) mod in_process_transport;
+#[cfg(feature = "vls")]
+pub(crate) mod in_process_vls;
 pub(crate) mod internal;
 pub(crate) mod key_source;
 pub(crate) mod proto;
+#[cfg(feature = "remote-signer")]
+pub(crate) mod remote;
 pub(crate) mod transport;
 pub(crate) mod types;
 pub(crate) mod vls_adapter;
@@ -23,7 +27,7 @@ pub(crate) use external::{ExternalSigner, ExternalSignerAttachment};
 #[allow(unused_imports)]
 pub(crate) use key_source::{
     read_key_source_file, validate_key_source_matches_bootstrap, write_key_source_file,
-    KeySourceFile,
+    write_restricted_file, KeySourceFile,
 };
 pub(crate) use transport::ExternalSignerTransport;
 #[allow(unused_imports)]

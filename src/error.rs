@@ -63,6 +63,9 @@ pub enum APIError {
     #[error("External signer identity does not match persisted node identity")]
     ExternalSignerMismatch,
 
+    #[error("External-signer mode requires authentication; refusing to run with --disable-authentication, since /unlock has no other credential when there is no mnemonic password")]
+    ExternalSignerRequiresAuthentication,
+
     #[error("Unsupported in external signer mode: {0}")]
     UnsupportedInExternalSignerMode(String),
 
@@ -575,6 +578,7 @@ impl IntoResponse for APIError {
             | APIError::CannotFailBatchTransfer
             | APIError::ChangingState
             | APIError::ExternalSignerRequired
+            | APIError::ExternalSignerRequiresAuthentication
             | APIError::DuplicatePayment(_)
             | APIError::FailedBdkSync(_)
             | APIError::FailedBitcoindConnection(_)

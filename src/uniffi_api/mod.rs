@@ -104,6 +104,9 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
         vss_url: request.vss_url,
         vss_allow_empty_restore: request.vss_allow_empty_restore,
         reuse_addresses: request.reuse_addresses,
+        // `SdkInitRequest` (the uniffi FFI-facing type) doesn't expose this yet — extending the FFI
+        // surface (and mobile-side bindings) for remote-signer support is a separate, larger change.
+        remote_signer_listen_addr: None,
     };
     block_on_app(NodeHandle::new(config))
 }

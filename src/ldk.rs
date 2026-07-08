@@ -3670,9 +3670,16 @@ pub(crate) async fn start_ldk(
         external_bootstrap,
         external_signer,
         external_node_id,
+        external_signer_reconnect_notify,
     ) = match key_source {
-        NodeKeySource::InternalMnemonic(mnemonic) => (Some(mnemonic), false, None, None, None),
+        NodeKeySource::InternalMnemonic(mnemonic) => {
+            (Some(mnemonic), false, None, None, None, None)
+        }
         NodeKeySource::External(external) => {
+            // Grab this before the transport is wrapped into `ExternalSigner` below: `Some` only for
+            // transports that can genuinely go unreachable and recover (the remote-signer daemon
+            // link), `None` for e.g. an in-process uniffi signer that can never be unreachable.
+            let reconnect_notify = external.signer_attachment.transport.reconnect_notify();
             let signer = ExternalSigner::from_attachment(&external.signer_attachment)
                 .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
             let bootstrap = external.signer_attachment.bootstrap.clone();
@@ -3699,6 +3706,7 @@ pub(crate) async fn start_ldk(
                 Some(bootstrap),
                 Some(Arc::new(signer)),
                 external_node_id,
+                reconnect_notify,
             )
         }
     };
@@ -5050,6 +5058,43 @@ pub(crate) async fn start_ldk(
             }
         }
     });
+
+    // Remote external signer force-close resilience. When the signer daemon is briefly unreachable, a
+    // channel signing call returns LDK's async-unavailable sentinel (`Err(())`) and the operation parks
+    // instead of failing the channel. Periodically drive `signer_unblocked` so parked operations retry
+    // — which is what makes the transport actually attempt to reconnect, since nothing else calls it
+    // while everything is parked; `signer_unblocked(None)` is a cheap no-op when nothing is pending.
+    //
+    // Only spawned when the transport can genuinely go unreachable and recover
+    // (`external_signer_reconnect_notify` is `Some` only for the remote-signer daemon link — an
+    // in-process uniffi signer can never be unreachable). Without this gate, `signer_unblocked` walks
+    // every peer's channel map under `total_consistency_lock` and unconditionally forces a
+    // `ChannelManager` re-persist on every tick, for a signer that would never have anything to
+    // unblock — pure waste for the node's whole lifetime.
+    //
+    // Reacts immediately when the transport actually reconnects (via `reconnect_notify`) instead of
+    // waiting up to the full tick interval; the interval itself remains as the backstop that drives
+    // the retry attempts in the first place.
+    if let Some(reconnect_notify) = external_signer_reconnect_notify {
+        let su_channel_manager = Arc::clone(&channel_manager);
+        let su_chain_monitor = Arc::clone(&chain_monitor);
+        let su_stop = Arc::clone(&stop_processing);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = reconnect_notify.notified() => {}
+                }
+                if su_stop.load(Ordering::Acquire) {
+                    return;
+                }
+                su_chain_monitor.signer_unblocked(None);
+                su_channel_manager.signer_unblocked(None);
+            }
+        });
+    }
 
     // Regularly broadcast our node_announcement. This is only required (or possible) if we have
     // some public channels.

@@ -111,6 +111,7 @@ mod uniffi_smoke_tests {
                 vss_url: None,
                 vss_allow_empty_restore: false,
                 reuse_addresses: false,
+                remote_signer_listen_addr: None,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),

@@ -1787,21 +1787,8 @@ pub(crate) async fn init_with_external_signer(
     state: Arc<AppState>,
     key_source: KeySourceFile,
 ) -> Result<(), APIError> {
-    if key_source.api_level != SUPPORTED_SIGNER_API_LEVEL {
-        return Err(APIError::ExternalSignerProtocolError(format!(
-            "unsupported external signer api_level {}, expected {}",
-            key_source.api_level, SUPPORTED_SIGNER_API_LEVEL
-        )));
-    }
     let _unlocked_state = check_locked(&state).await?;
-    check_already_initialized(&state.db())?;
-
-    if read_key_source_file(&state.static_state.storage_dir_path)
-        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
-        .is_some()
-    {
-        return Err(APIError::AlreadyInitialized);
-    }
+    crate::utils::validate_external_signer_init(&state, key_source.api_level)?;
 
     write_key_source_file(&state.static_state.storage_dir_path, &key_source)
         .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
@@ -4369,6 +4356,7 @@ mod tests {
                 vss_url: None,
                 vss_allow_empty_restore: false,
                 reuse_addresses: false,
+                remote_signer_listen_addr: None,
             }),
             cancel_token: CancellationToken::new(),
             unlocked_app_state: Arc::new(TokioMutex::new(None)),

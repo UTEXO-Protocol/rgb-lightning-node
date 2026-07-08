@@ -85,6 +85,13 @@ struct Args {
     /// `/rotateaddress` endpoint.
     #[arg(long, default_value_t = false)]
     reuse_addresses: bool,
+
+    /// Socket address (`host:port`) of the remote external signer daemon to connect to (Option A).
+    /// The daemon holds the seed and answers all signing over a framed TCP link. Required to unlock in
+    /// external-signer mode.
+    #[cfg(feature = "remote-signer")]
+    #[arg(long = "remote-signer-addr")]
+    remote_signer_listen_addr: Option<std::net::SocketAddr>,
 }
 
 pub(crate) struct UserArgs {
@@ -101,6 +108,12 @@ pub(crate) struct UserArgs {
     pub(crate) vss_url: Option<String>,
     pub(crate) vss_allow_empty_restore: bool,
     pub(crate) reuse_addresses: bool,
+    /// `None` when the `remote-signer` feature isn't compiled in — always present so downstream
+    /// structs and their (many) test constructors don't need to repeat `#[cfg(feature =
+    /// "remote-signer")]` just to set this field to `None`. The cfg lives only at the two seams where
+    /// it's load-bearing: the `--remote-signer-addr` clap arg above, and the code that actually
+    /// connects to the daemon in `routes::unlock`.
+    pub(crate) remote_signer_listen_addr: Option<std::net::SocketAddr>,
 }
 
 pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
@@ -128,6 +141,13 @@ pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
         crate::utils::validate_vss_url(url, args.vss_allow_http)?;
     }
 
+    // The clap arg only exists under `remote-signer` (see `Args`); bridge to the always-present
+    // `UserArgs` field here so nothing downstream needs to cfg-gate it.
+    #[cfg(feature = "remote-signer")]
+    let remote_signer_listen_addr = args.remote_signer_listen_addr;
+    #[cfg(not(feature = "remote-signer"))]
+    let remote_signer_listen_addr = None;
+
     Ok(UserArgs {
         storage_dir_path: args.storage_directory_path,
         daemon_listening_port,
@@ -142,5 +162,6 @@ pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
         vss_url: args.vss_url,
         vss_allow_empty_restore: args.vss_allow_empty_restore,
         reuse_addresses: args.reuse_addresses,
+        remote_signer_listen_addr,
     })
 }

@@ -58,12 +58,19 @@ pub(crate) fn write_key_source_file(
     let path = key_source_path(storage_dir);
     let bytes = serde_json::to_vec_pretty(key_source)
         .map_err(|e| RlnSignerError::Protocol(format!("failed to encode key source file: {e}")))?;
-    write_restricted_file(&path, &bytes)?;
+    write_restricted_file(&path, &bytes)
+        .map_err(|e| RlnSignerError::Protocol(format!("failed to write key source file: {e}")))?;
     Ok(())
 }
 
-#[allow(dead_code)]
-fn write_restricted_file(path: &Path, bytes: &[u8]) -> Result<(), RlnSignerError> {
+/// Atomically create `path` with 0600 permissions (unix) and write `bytes` to it. There is no window
+/// where the file exists with broader (e.g. default-umask) permissions — `mode` is applied by the
+/// underlying `open(2)` call itself, not a separate `chmod` after the fact.
+///
+/// Returns a plain `io::Error` (rather than the crate-internal `RlnSignerError`) so this stays usable
+/// from outside the crate — it's re-exported at the crate root (see `lib.rs`) for the
+/// `rln-signer-daemon` binary to reuse for its seed file.
+pub fn write_restricted_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -72,25 +79,15 @@ fn write_restricted_file(path: &Path, bytes: &[u8]) -> Result<(), RlnSignerError
             .truncate(true)
             .write(true)
             .mode(0o600)
-            .open(path)
-            .map_err(|e| {
-                RlnSignerError::Protocol(format!(
-                    "failed to open key source file with restricted permissions: {e}"
-                ))
-            })?;
-        file.write_all(bytes).map_err(|e| {
-            RlnSignerError::Protocol(format!("failed to write key source file: {e}"))
-        })?;
-        file.sync_all().map_err(|e| {
-            RlnSignerError::Protocol(format!("failed to sync key source file: {e}"))
-        })?;
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
         Ok(())
     }
 
     #[cfg(not(unix))]
     {
         fs::write(path, bytes)
-            .map_err(|e| RlnSignerError::Protocol(format!("failed to write key source file: {e}")))
     }
 }
 

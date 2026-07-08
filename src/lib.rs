@@ -44,6 +44,16 @@ mod vss_kv_store;
 
 pub use node::{NodeConfig, NodeHandle};
 
+/// Atomically create a file with 0600 permissions, for the `rln-signer-daemon` binary's seed file (no
+/// window where it exists with broader permissions, unlike `fs::write` followed by a `chmod`).
+#[cfg(feature = "remote-signer")]
+pub use signer::key_source::write_restricted_file;
+/// Remote external signer daemon (Option A) entry points, for the `rln-signer-daemon` binary.
+#[cfg(feature = "remote-signer")]
+pub use signer::remote::daemon::{
+    run as run_signer_daemon, DaemonBootstrap, DaemonConfig, DaemonSigner, DaemonTlsConfig,
+};
+
 #[cfg(feature = "uniffi")]
 pub use uniffi_api::*;
 #[cfg(feature = "uniffi")]

@@ -59,6 +59,8 @@ use crate::args::UserArgs;
 use crate::auth::conditional_auth_middleware;
 use crate::error::AppError;
 use crate::ldk::stop_ldk;
+#[cfg(feature = "remote-signer")]
+use crate::routes::init_external_signer;
 use crate::routes::{
     address, asset_balance, asset_metadata, async_order_new, async_order_outbound_invoice, backup,
     btc_balance, cancel_hodl_invoice, change_password, check_indexer_url, check_proxy_endpoint,
@@ -194,6 +196,9 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/vssbackup", post(vss_backup))
         .route("/vssbackupinfo", get(vss_backup_info))
         .route("/vssclearfence", post(vss_clear_fence));
+
+    #[cfg(feature = "remote-signer")]
+    let router = router.route("/initexternalsigner", post(init_external_signer));
 
     let router = router
         .layer(

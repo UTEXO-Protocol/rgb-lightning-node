@@ -38,6 +38,7 @@ pub fn mock_locked_app_state() -> TestAppState {
             vss_url: None,
             vss_allow_empty_restore: false,
             reuse_addresses: false,
+            remote_signer_listen_addr: None,
         }),
         cancel_token: CancellationToken::new(),
         unlocked_app_state: Arc::new(TokioMutex::new(None)),

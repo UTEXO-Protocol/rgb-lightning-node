@@ -21,6 +21,11 @@ pub struct NodeConfig {
     pub vss_url: Option<String>,
     pub vss_allow_empty_restore: bool,
     pub reuse_addresses: bool,
+    /// Socket address of the remote external signer daemon to connect to (Option A). Required to
+    /// unlock in external-signer mode — without it, `NodeHandle`-embedding callers can configure
+    /// external-signer mode (via `key_source.json`) but can never actually unlock, since there is no
+    /// other way to reach the daemon. Always present (`None` when `remote-signer` isn't compiled in).
+    pub remote_signer_listen_addr: Option<std::net::SocketAddr>,
 }
 
 #[derive(Clone)]
@@ -54,6 +59,7 @@ impl NodeHandle {
             vss_url: config.vss_url,
             vss_allow_empty_restore: config.vss_allow_empty_restore,
             reuse_addresses: config.reuse_addresses,
+            remote_signer_listen_addr: config.remote_signer_listen_addr,
         };
         let state = start_daemon(&args).await?;
         Ok(Self { state })
@@ -72,5 +78,47 @@ impl NodeHandle {
     #[cfg(feature = "uniffi")]
     pub fn unregister_for_uniffi(&self) {
         crate::clear_uniffi_app_state();
+    }
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod tests {
+    use super::*;
+
+    /// A `NodeConfig` embedder (a direct Rust consumer, not the uniffi FFI surface — see the `None`
+    /// left in `uniffi_api::handle_from_request`) must be able to configure the remote-signer daemon
+    /// address; without this field, `NodeHandle`-embedding callers could configure external-signer
+    /// mode but could never actually unlock, since there'd be no way to reach the daemon. The field is
+    /// unconditional (not `#[cfg(feature = "remote-signer")]`), so this threading works — and this
+    /// test runs — regardless of whether that feature is compiled in.
+    #[tokio::test]
+    async fn node_handle_new_threads_remote_signer_listen_addr_through() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let addr: std::net::SocketAddr = "127.0.0.1:9737".parse().expect("addr");
+
+        let handle = NodeHandle::new(NodeConfig {
+            storage_dir_path: tmp.path().to_path_buf(),
+            daemon_listening_port: 0,
+            ldk_peer_listening_port: 0,
+            network: BitcoinNetwork::Regtest,
+            max_media_upload_size_mb: 1,
+            root_public_key: None,
+            enable_virtual_channels_v0: false,
+            virtual_peer_pubkeys: vec![],
+            lsp_base_url: None,
+            lsp_bearer_token: None,
+            vss_url: None,
+            vss_allow_empty_restore: false,
+            reuse_addresses: false,
+            remote_signer_listen_addr: Some(addr),
+        })
+        .await
+        .expect("node handle new");
+
+        assert_eq!(
+            handle.app_state().static_state.remote_signer_listen_addr,
+            Some(addr),
+            "NodeConfig::remote_signer_listen_addr did not thread through to StaticState"
+        );
     }
 }

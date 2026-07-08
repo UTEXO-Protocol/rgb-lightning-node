@@ -41,7 +41,7 @@ use crate::core_types::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT, VIRTUAL_
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::signer::{
-    read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment,
+    read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment, KeySourceFile,
     RlnEntropySource,
 };
 use crate::{
@@ -148,6 +148,11 @@ pub(crate) struct StaticState {
     /// When true, the RGB wallet returns a pinned address instead of a fresh
     /// one on each `/address` call. Set from the `--reuse-addresses` flag.
     pub(crate) reuse_addresses: bool,
+    /// Socket address of the remote external signer daemon the node connects to (Option A). The daemon
+    /// holds the seed and answers all signing; required to unlock in external-signer mode. Set from
+    /// `--remote-signer-addr`. Always present (`None` when `remote-signer` isn't compiled in) — see
+    /// `UserArgs::remote_signer_listen_addr` for why this field isn't cfg-gated.
+    pub(crate) remote_signer_listen_addr: Option<std::net::SocketAddr>,
 }
 
 impl StaticState {
@@ -376,15 +381,52 @@ impl Writeable for UserOnionMessageContents {
     }
 }
 
+/// Read `key_source.json` if external-signer mode has been configured, `None` otherwise. Callers that
+/// only need presence (not the parsed value) should use [`is_external_signer_mode_configured`]
+/// instead — this exists so callers that need the value too (e.g. `unlock`) don't have to read the
+/// file a second time just to get what the presence check already parsed.
+pub(crate) fn read_external_signer_key_source(
+    state: &Arc<AppState>,
+) -> Result<Option<KeySourceFile>, APIError> {
+    read_key_source_file(&state.static_state.storage_dir_path)
+        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))
+}
+
 pub(crate) fn is_external_signer_mode_configured(state: &Arc<AppState>) -> Result<bool, APIError> {
-    Ok(read_key_source_file(&state.static_state.storage_dir_path)
-        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
-        .is_some())
+    Ok(read_external_signer_key_source(state)?.is_some())
 }
 
 pub(crate) fn check_already_initialized(database: &DatabaseConnection) -> Result<(), APIError> {
     let db = crate::database::RlnDatabase::new(database.clone());
     if db.mnemonic_exists()? {
+        return Err(APIError::AlreadyInitialized);
+    }
+    Ok(())
+}
+
+/// Shared init-time checks for external-signer mode: validate `api_level`, then confirm the node
+/// isn't already initialized (internal mnemonic) or already configured for external-signer mode.
+/// Used by both `routes::init_external_signer` (HTTP) and `sdk::init_with_external_signer` (SDK), so
+/// the two entry points can't drift on check order or content. Callers must have already confirmed
+/// the node is locked (`AppState::check_locked` / the SDK's own `check_locked`) before calling this —
+/// that check is itself duplicated between the two for an unrelated reason (private `AppState`
+/// methods vs. a free function `sdk` needs) and is out of scope here.
+///
+/// Lives here rather than in `sdk` because `routes.rs` is compiled by both the `main` binary and the
+/// library crate-type targets, while `sdk` is compiled only by the library targets — `main.rs` has no
+/// `mod sdk`, so `routes.rs` cannot call into `sdk` directly.
+pub(crate) fn validate_external_signer_init(
+    state: &Arc<AppState>,
+    api_level: u32,
+) -> Result<(), APIError> {
+    if api_level != crate::signer::SUPPORTED_SIGNER_API_LEVEL {
+        return Err(APIError::ExternalSignerProtocolError(format!(
+            "unsupported external signer api_level {api_level}, expected {}",
+            crate::signer::SUPPORTED_SIGNER_API_LEVEL
+        )));
+    }
+    check_already_initialized(&state.db())?;
+    if is_external_signer_mode_configured(state)? {
         return Err(APIError::AlreadyInitialized);
     }
     Ok(())
@@ -685,6 +727,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         vss_url: args.vss_url.clone(),
         vss_allow_empty_restore: args.vss_allow_empty_restore,
         reuse_addresses: args.reuse_addresses,
+        remote_signer_listen_addr: args.remote_signer_listen_addr,
     });
 
     let app_state = Arc::new(AppState {
