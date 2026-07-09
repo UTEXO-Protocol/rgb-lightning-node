@@ -2360,13 +2360,13 @@ impl RlnWasmWallet {
 
     #[wasm_bindgen(js_name = getWalletDataValue)]
     pub fn get_wallet_data_value(&self) -> Result<JsValue, JsValue> {
-        let data = self.inner.borrow().get_wallet_data();
+        let data = self.wallet_ref()?.get_wallet_data();
         js_obj(&data)
     }
 
     #[wasm_bindgen(js_name = getWalletDataJson)]
     pub fn get_wallet_data_json(&self) -> Result<String, JsValue> {
-        let data = self.inner.borrow().get_wallet_data();
+        let data = self.wallet_ref()?.get_wallet_data();
         js_to_json(&data)
     }
 
@@ -2448,8 +2448,35 @@ impl RlnWasmWallet {
         }
     }
 
+    /// Non-panicking shared borrow of the underlying rgb-lib-wasm wallet.
+    ///
+    /// Several async wallet methods legitimately hold the wallet borrow across a network
+    /// `.await` (the rgb-lib-wasm API is `&mut self` for the whole operation). While one of
+    /// them is suspended, ANY panicking `borrow()` on this cell — from another JS call, the
+    /// drive tick, or LDK's inbound colored-channel handling — aborts the whole wasm instance
+    /// (`core::cell::panic_already_borrowed` → `RuntimeError: unreachable`). Every borrow of
+    /// this cell must therefore be non-panicking: collisions become a catchable JS error the
+    /// caller can retry.
+    fn wallet_ref(&self) -> Result<std::cell::Ref<'_, rgb_lib_wasm::Wallet>, JsValue> {
+        self.inner.try_borrow().map_err(|_| {
+            JsValue::from_str("RGB wallet is busy with another operation; retry shortly")
+        })
+    }
+
+    /// Non-panicking exclusive borrow of the underlying rgb-lib-wasm wallet (see `wallet_ref`).
+    fn wallet_mut(&self) -> Result<std::cell::RefMut<'_, rgb_lib_wasm::Wallet>, JsValue> {
+        self.inner.try_borrow_mut().map_err(|_| {
+            JsValue::from_str("RGB wallet is busy with another operation; retry shortly")
+        })
+    }
+
     fn rgb_proxy_transport_key(&self) -> String {
-        self.inner.borrow().idb_key()
+        // Non-panicking: if the wallet is mid-operation (borrow held across an await), treat
+        // the transport config as unavailable rather than aborting the wasm instance.
+        self.inner
+            .try_borrow()
+            .map(|wallet| wallet.idb_key())
+            .unwrap_or_default()
     }
 
     fn current_rgb_proxy_transport(&self) -> Option<RlnWasmRgbProxyTransportConfigData> {
@@ -2667,7 +2694,7 @@ impl RlnWasmWallet {
             })?;
         let recipient_map = recipient_map_from_groups(request.recipient_groups)?;
 
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         let unsigned_psbt = wallet
             .send_begin(
                 request.online,
@@ -2867,7 +2894,7 @@ impl RlnWasmWallet {
         if indexer_url.trim().is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_INDEXER_URL_EMPTY));
         }
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         let online = wallet
             .go_online(skip_consistency_check, indexer_url)
             .await
@@ -2895,7 +2922,7 @@ impl RlnWasmWallet {
     #[wasm_bindgen(js_name = syncOnline)]
     pub async fn sync_online(&self, online_js: JsValue) -> Result<(), JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .sync(online)
             .await
@@ -2909,7 +2936,7 @@ impl RlnWasmWallet {
         blocks: u16,
     ) -> Result<f64, JsValue> {
         let online = parse_online(online_js)?;
-        let wallet = self.inner.borrow();
+        let wallet = self.wallet_ref()?;
         wallet
             .get_fee_estimation(online, blocks)
             .await
@@ -2937,7 +2964,7 @@ impl RlnWasmWallet {
         skip_sync: bool,
     ) -> Result<String, JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .create_utxos_begin(online, up_to, num, size, fee_rate, skip_sync)
             .await
@@ -2952,7 +2979,7 @@ impl RlnWasmWallet {
         skip_sync: bool,
     ) -> Result<u8, JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .create_utxos_end(online, signed_psbt, skip_sync)
             .await
@@ -2985,7 +3012,7 @@ impl RlnWasmWallet {
         let recipient_map: HashMap<String, Vec<rgb_lib_wasm::wallet::Recipient>> =
             serde_wasm_bindgen::from_value(recipient_map_js)
                 .map_err(|e| JsValue::from_str(&format!("Invalid recipient map: {e}")))?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .send_begin(
                 online,
@@ -3007,7 +3034,7 @@ impl RlnWasmWallet {
         skip_sync: bool,
     ) -> Result<JsValue, JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         let result = wallet
             .send_end(online, signed_psbt, skip_sync)
             .await
@@ -3042,7 +3069,7 @@ impl RlnWasmWallet {
             return Err(JsValue::from_str(sdk_contracts::ERR_ADDRESS_EMPTY));
         }
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .send_btc_begin(online, address, amount, fee_rate, skip_sync)
             .await
@@ -3057,7 +3084,7 @@ impl RlnWasmWallet {
         skip_sync: bool,
     ) -> Result<String, JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .send_btc_end(online, signed_psbt, skip_sync)
             .await
@@ -3109,7 +3136,7 @@ impl RlnWasmWallet {
         // hands out standard scripts (P2WSH for non-anchor channels, P2TR for
         // taproot channels), so this conversion is lossless for everything LDK
         // emits in `FundingGenerationReady`.
-        let bitcoin_network = self.inner.borrow().get_wallet_data().bitcoin_network;
+        let bitcoin_network = self.wallet_ref()?.get_wallet_data().bitcoin_network;
         let network = match bitcoin_network {
             rgb_lib_wasm::BitcoinNetwork::Mainnet => lightning::bitcoin::Network::Bitcoin,
             rgb_lib_wasm::BitcoinNetwork::Testnet => lightning::bitcoin::Network::Testnet,
@@ -3129,7 +3156,7 @@ impl RlnWasmWallet {
 
         // begin → unsigned PSBT.
         let unsigned_psbt_raw = {
-            let mut wallet = self.inner.borrow_mut();
+            let mut wallet = self.wallet_mut()?;
             wallet
                 .send_btc_begin(online, address_str.clone(), amount_sat, fee_rate, false)
                 .await
@@ -3218,7 +3245,7 @@ impl RlnWasmWallet {
         let filter: Vec<rgb_lib_wasm::wallet::RefreshFilter> =
             serde_wasm_bindgen::from_value(filter_js)
                 .map_err(|e| JsValue::from_str(&format!("Invalid filter: {e}")))?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         let result = wallet
             .refresh(online, asset_id, filter, skip_sync)
             .await
@@ -3250,7 +3277,7 @@ impl RlnWasmWallet {
         skip_sync: bool,
     ) -> Result<bool, JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .fail_transfers(online, batch_transfer_idx, no_asset_only, skip_sync)
             .await
@@ -3283,7 +3310,7 @@ impl RlnWasmWallet {
             return Err(JsValue::from_str(sdk_contracts::ERR_ADDRESS_EMPTY));
         }
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .drain_to_begin(online, address, destroy_assets, fee_rate)
             .await
@@ -3297,7 +3324,7 @@ impl RlnWasmWallet {
         signed_psbt: String,
     ) -> Result<String, JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .drain_to_end(online, signed_psbt)
             .await
@@ -3319,7 +3346,7 @@ impl RlnWasmWallet {
         let online = parse_online(online_js)?;
         let inflation_amounts: Vec<u64> = serde_wasm_bindgen::from_value(inflation_amounts_js)
             .map_err(|e| JsValue::from_str(&format!("Invalid inflation_amounts array: {e}")))?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         wallet
             .inflate_begin(
                 online,
@@ -3339,7 +3366,7 @@ impl RlnWasmWallet {
         signed_psbt: String,
     ) -> Result<JsValue, JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         let result = wallet
             .inflate_end(online, signed_psbt)
             .await
@@ -3366,7 +3393,7 @@ impl RlnWasmWallet {
         skip_sync: bool,
     ) -> Result<JsValue, JsValue> {
         let online = parse_online(online_js)?;
-        let mut wallet = self.inner.borrow_mut();
+        let mut wallet = self.wallet_mut()?;
         let unspents = wallet
             .list_unspents_vanilla(online, min_confirmations, skip_sync)
             .await
@@ -3450,18 +3477,21 @@ impl RlnWasmWallet {
                 .map_err(|e| JsValue::from_str(&format!("Invalid signing key: {e}")))?;
         let config =
             rgb_lib_wasm::wallet::vss::VssBackupConfig::new(server_url, store_id, signing_key);
-        self.inner.borrow_mut().configure_vss_backup(&config);
+        self.wallet_mut()?.configure_vss_backup(&config);
         Ok(())
     }
 
     #[wasm_bindgen(js_name = disableVssBackup)]
     pub fn disable_vss_backup(&self) {
-        self.inner.borrow_mut().disable_vss_backup();
+        // Non-panicking: skip rather than abort if the wallet is mid-operation.
+        if let Ok(mut wallet) = self.inner.try_borrow_mut() {
+            wallet.disable_vss_backup();
+        }
     }
 
     #[wasm_bindgen(js_name = vssBackupValue)]
     pub async fn vss_backup_value(&self) -> Result<JsValue, JsValue> {
-        let wallet = self.inner.borrow();
+        let wallet = self.wallet_ref()?;
         let version = wallet
             .vss_backup()
             .await
@@ -3487,7 +3517,7 @@ impl RlnWasmWallet {
 
     #[wasm_bindgen(js_name = vssBackupInfoValue)]
     pub async fn vss_backup_info_value(&self) -> Result<JsValue, JsValue> {
-        let wallet = self.inner.borrow();
+        let wallet = self.wallet_ref()?;
         let info = wallet
             .vss_backup_info()
             .await

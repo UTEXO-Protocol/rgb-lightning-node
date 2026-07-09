@@ -907,12 +907,18 @@ impl RlnWasmNode {
         }
         // Always force a clean transport/runtime session before reconnect to avoid stale
         // descriptor/socket state leaking across retries.
-        if let Some(existing) = self
+        //
+        // Bind the session clone on its own statement so the `peers` Ref guard drops BEFORE the
+        // `close().await`: under edition 2021 an inline `.borrow()` in the `if let` scrutinee
+        // lives to the end of the block, holding the borrow across the await — and the 1s drive
+        // tick's event draining does `peers.borrow_mut()`, which would panic the whole wasm
+        // instance ("already borrowed") if it fired during that suspension.
+        let existing_session = self
             .peers
             .borrow()
             .get(&peer_pubkey)
-            .map(|entry| Rc::clone(&entry.session))
-        {
+            .map(|entry| Rc::clone(&entry.session));
+        if let Some(existing) = existing_session {
             let _ = existing.close().await;
         }
         self.peers.borrow_mut().remove(&peer_pubkey);
@@ -5962,6 +5968,20 @@ async fn node_drive_tick_once(
 ) -> Result<(), JsValue> {
     let use_runtime_state_for_ln_views = ldk_runtime.status().backend == "wasm_native_ldk";
 
+    // Drain pending RGB work BEFORE processing peer messages. Colored-channel signing is gated on
+    // durably persisted commitment/HTLC fascia (`is_transaction_durable`), and inbound funding
+    // needs its consignment validated (`RgbFundingValidationRequired`) before the channel can
+    // progress. Without this drain a client that only pumps `chainSyncTick`/`autoDrive` (i.e.
+    // never calls `driveRgbFundingWork` explicitly) leaves the first real RGB HTLC's
+    // commitment_signed deferred forever: the payment sticks at Pending until the counterparty
+    // disconnects with "timeout awaiting response". Errors are transient (the failed item is
+    // re-queued internally), so they must not fail the whole drive tick.
+    if let Err(err) = ldk_runtime.drive_rgb_funding_work_boxed().await {
+        wasm_debug(&format!(
+            "[rln-wasm-sdk node-drive] pre-tick RGB work drain deferred: {err:?}"
+        ));
+    }
+
     chain_sync.tick().await?;
     apply_chain_sync_to_live_ldk(chain_sync, ldk_runtime).await?;
 
@@ -5994,6 +6014,30 @@ async fn node_drive_tick_once(
         next_runtime_event_seq,
         label,
     )?;
+
+    // Drain RGB work queued by the peer messages just processed (funding validations, freshly
+    // prepared commitment/HTLC fascia), then run one more peer pass: the durable-fascia sweep
+    // calls `signer_unblocked`, which releases any commitment_signed/RAA that was deferred on
+    // `is_transaction_durable`, and those messages only reach the wire through
+    // `peer_process_events`. Without the second pass the release would wait a full extra tick.
+    if let Err(err) = ldk_runtime.drive_rgb_funding_work_boxed().await {
+        wasm_debug(&format!(
+            "[rln-wasm-sdk node-drive] post-events RGB work drain deferred: {err:?}"
+        ));
+    } else {
+        ldk_runtime.peer_process_events()?;
+        let _ = drain_pending_peer_hook_events(
+            ldk_runtime,
+            use_runtime_state_for_ln_views,
+            peers,
+            channels,
+            payments,
+            pending_peer_hook_events,
+            runtime_events,
+            next_runtime_event_seq,
+            label,
+        )?;
+    }
 
     // Reconcile the cached channel snapshot from the live backend LAST, so the authoritative live
     // `ChannelManager` set is the final word for this pass and purges any pre-funding temporary-id

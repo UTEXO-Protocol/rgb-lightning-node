@@ -534,6 +534,13 @@ pub struct WasmLdkLiveBackend {
     pending_funding_requests: RefCell<HashMap<String, LdkRuntimeFundingRequestData>>,
     pending_rgb_open_intents: RefCell<HashMap<u128, PendingRgbOpenIntent>>,
     pending_rgb_funding_work: RefCell<VecDeque<PendingRgbFundingWork>>,
+    /// Re-entrancy guard for `drive_rgb_funding_work_impl`. The drive tick, the autonomous
+    /// loop, and application `driveRgbFundingWork()` calls can all overlap on the JS event loop
+    /// (async, no Send bound); without this flag two invocations can pop/re-queue the same
+    /// funding item and — worse — run `resync_rgb_wallet_best_effort` concurrently, where one
+    /// holds the RGB wallet `RefCell` across the `sync().await` suspension while the other
+    /// borrows it again → `already borrowed` panic → wasm abort.
+    rgb_funding_work_active: Cell<bool>,
     pending_rgb_prepare_results: RefCell<HashMap<String, String>>,
     submitted_funding_txids: RefCell<HashSet<Txid>>,
     /// Real payments tracked from the live `ChannelManager` event stream, keyed by hex payment hash.
@@ -1219,6 +1226,7 @@ impl WasmLdkLiveBackend {
             pending_funding_requests: RefCell::new(HashMap::new()),
             pending_rgb_open_intents: RefCell::new(HashMap::new()),
             pending_rgb_funding_work: RefCell::new(VecDeque::new()),
+            rgb_funding_work_active: Cell::new(false),
             pending_rgb_prepare_results: RefCell::new(HashMap::new()),
             submitted_funding_txids: RefCell::new(HashSet::new()),
             live_payments: RefCell::new(HashMap::new()),
@@ -3578,6 +3586,23 @@ impl WasmLdkLiveBackend {
         }
     }
     async fn drive_rgb_funding_work_impl(this: Rc<Self>) -> Result<(), JsValue> {
+        // Re-entrancy guard: the drive tick (which drains RGB work twice per pass), the
+        // autonomous loop, and explicit `driveRgbFundingWork()` calls can overlap on the JS
+        // event loop whenever an item suspends at an await (network I/O). Overlap is unsafe:
+        // two loops can pop/re-queue the same funding item (double
+        // `funding_transaction_generated`) and two failures can run
+        // `resync_rgb_wallet_best_effort` concurrently on the shared RGB wallet RefCell.
+        // Treat "already running" as a successful no-op — the in-flight invocation will finish
+        // the queue, and callers poll again on the next tick anyway.
+        if this.rgb_funding_work_active.replace(true) {
+            return Ok(());
+        }
+        let result = Self::drive_rgb_funding_work_guarded(Rc::clone(&this)).await;
+        this.rgb_funding_work_active.set(false);
+        result
+    }
+
+    async fn drive_rgb_funding_work_guarded(this: Rc<Self>) -> Result<(), JsValue> {
         loop {
             let work_item = this.pending_rgb_funding_work.borrow_mut().pop_front();
             let Some(item) = work_item else { break };
@@ -3735,13 +3760,24 @@ impl WasmLdkLiveBackend {
 
     /// Re-syncs the shared RGB wallet's BDK chain view. Best-effort: any error is swallowed so
     /// the caller's own (re-queued) error remains the surfaced failure.
+    ///
+    /// Uses only non-panicking borrows: this future suspends at the network-bound
+    /// `sync().await` while holding the wallet `RefMut`, and the wallet `RefCell` is shared
+    /// with the signer's coloring path and other async wallet ops. A panicking `borrow()`
+    /// here turned any overlap into `core::cell::panic_already_borrowed` → wasm abort
+    /// (`RuntimeError: unreachable`), killing the whole node instance. If the wallet is busy,
+    /// skipping the resync is fine — it is a best-effort retry aid.
     async fn resync_rgb_wallet_best_effort(this: &Rc<Self>) {
         let wallet_rc =
             RGB_WALLET_REGISTRY.with(|reg| reg.borrow().get(&this.runtime_key).cloned());
         let Some(wallet_rc) = wallet_rc else { return };
-        let online = wallet_rc.borrow().get_online();
+        let online = match wallet_rc.try_borrow() {
+            Ok(wallet) => wallet.get_online(),
+            Err(_) => return,
+        };
         let Some(online) = online else { return };
-        let _ = wallet_rc.borrow_mut().sync(online).await;
+        let Ok(mut wallet) = wallet_rc.try_borrow_mut() else { return };
+        let _ = wallet.sync(online).await;
     }
 
     pub(crate) async fn run_process_pending_rgb_transactions(&self) -> Result<(), JsValue> {
