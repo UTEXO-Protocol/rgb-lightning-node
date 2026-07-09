@@ -85,6 +85,49 @@ impl NativeExternalSigner {
         Ok(Arc::new(Self { backend, transport }))
     }
 
+    /// Like [`Self::new`], but with a disk-backed VLS store under `storage_dir_path`, so a
+    /// process restart restores the signer's channel state (channels, commitment counters, dbid
+    /// high-water mark) instead of starting over.
+    ///
+    /// The ephemeral [`Self::new`] signer loses all VLS channel state on restart: it can
+    /// re-derive channel keys from the seed, but a stateful validating signer cannot validate
+    /// commitment state it never tracked, so payments over channels restored from LDK
+    /// persistence fail (`Failed to validate our commitment` → channel force-close). Hosts that
+    /// keep channels across process restarts (the "device restarts and unlocks again" flow)
+    /// must use this constructor with a stable directory. Same disk layout as the remote
+    /// signer daemon (`redb` KVV store).
+    #[uniffi::constructor]
+    pub fn new_with_storage(
+        seed_hex: String,
+        network: String,
+        permissive_policy: Option<bool>,
+        storage_dir_path: String,
+    ) -> Result<Arc<Self>, RlnError> {
+        use lightning_signer::persist::Persist;
+        use vls_persist::kvv::redb::RedbKVVStore;
+        use vls_persist::kvv::{JsonFormat, KVVPersister};
+
+        let network = Self::parse_network(&network)?;
+        let seed = Self::parse_seed_hex(&seed_hex)?;
+        std::fs::create_dir_all(&storage_dir_path).map_err(|_| RlnError::Internal)?;
+        let persister: Arc<dyn Persist> =
+            Arc::new(KVVPersister(RedbKVVStore::new(&storage_dir_path), JsonFormat));
+        let transport = Arc::new(
+            InProcessVlsTransport::new(network, seed, permissive_policy.unwrap_or(true), persister)
+                .context("native signer persistent transport init failed")
+                .map_err(|_| RlnError::Internal)?,
+        );
+        let backend: Arc<dyn ExternalSignerBackend> = Arc::new(VlsSignerAdapter::new(
+            RealVlsClient::new_with_network_seed_and_next_dbid(
+                transport.clone(),
+                network.to_string(),
+                Some(seed),
+                transport.initial_next_dbid(),
+            ),
+        ));
+        Ok(Arc::new(Self { backend, transport }))
+    }
+
     pub fn bootstrap(&self) -> Result<SdkExternalSignerBootstrap, RlnError> {
         let bootstrap = match self.backend.call(SignerRequest::Bootstrap).map_err(|e| {
             tracing::error!(error = ?e, "native external signer bootstrap failed");

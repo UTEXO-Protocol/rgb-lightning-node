@@ -106,6 +106,25 @@ fn make_native_signer(
         .expect("create native signer")
 }
 
+/// Like [`make_native_signer`], but with a disk-backed VLS store: required whenever the test
+/// simulates a process restart with channels that must stay usable (a stateful validating
+/// signer cannot validate commitment state it never tracked).
+fn make_native_signer_with_storage(
+    storage_dir: &std::path::Path,
+    seed_hex: Option<String>,
+) -> Arc<rgb_lightning_node::NativeExternalSigner> {
+    let seed_hex = seed_hex.unwrap_or_else(|| {
+        std::env::var("RLN_TEST_NATIVE_SIGNER_SEED_HEX").unwrap_or_else(|_| "11".repeat(32))
+    });
+    rgb_lightning_node::NativeExternalSigner::new_with_storage(
+        seed_hex,
+        "regtest".to_string(),
+        Some(true),
+        storage_dir.display().to_string(),
+    )
+    .expect("create native signer with storage")
+}
+
 #[test]
 #[serial]
 fn external_init_unlock_and_restart_same_signer() {
@@ -847,5 +866,221 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
         panic!(
             "rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain failed"
         );
+    }
+}
+
+/// End-to-end regression for the restored-virtual-channel signing failure: a
+/// `trusted_no_broadcast` virtual channel opened by a node with an in-process
+/// `NativeExternalSigner` (disk-backed VLS store) must keep settling payments in both
+/// directions after the LDK node restarts on the same storage.
+///
+/// This exercises the two-part fix together:
+/// 1. `NativeExternalSigner::new_with_storage` persists the VLS node (channels, commitment
+///    counters, dbid high-water mark) so a stateful validating signer can still validate
+///    commitment state after a restart — without it, the restored channel force-closes with
+///    "Failed to validate our commitment".
+/// 2. The signer-external `derive_stub_per_commitment_point` fix keeps the synthesized
+///    pre-setup commitment-point fallback from panicking on a 41-byte CLN-style `ChannelId`
+///    (`copy_from_slice: source slice length (41) does not match destination slice length (32)`
+///    at vls-core `channel.rs:119`), which on a tokio worker poisoned the LDK `ChannelManager`
+///    mutex and bricked the node.
+///
+/// The unit-level proof that the fallback no longer panics (and now derives the same point a
+/// real vls-core node would) lives in signer-external's
+/// `stub_per_commitment_point_matches_vls_node_derivation` parity test; this integration test
+/// covers the surrounding restart-and-pay flow.
+#[test]
+#[serial]
+fn external_signer_virtual_channel_survives_restart() {
+    ensure_regtest_available();
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    const PORT_OFF: u16 = 150;
+    let da = NODE_A_DAEMON_PORT + PORT_OFF;
+    let pa = NODE_A_PEER_PORT + PORT_OFF;
+    let db = NODE_B_DAEMON_PORT + PORT_OFF;
+    let pb = NODE_B_PEER_PORT + PORT_OFF;
+
+    let test_dir = test_dir("sdk_external_signer_virtual_restart");
+    if test_dir.exists() {
+        fs::remove_dir_all(&test_dir).expect("remove previous lib_sdk test dir");
+    }
+    fs::create_dir_all(&test_dir).expect("create lib_sdk test dir");
+    let host_dir = test_dir.join("host");
+    let device_dir = test_dir.join("device");
+    let signer_dir = test_dir.join("signer_device");
+
+    // The device holds the in-process VLS signer and is the side that restarts. Its node id is
+    // known up front (derived from the signer seed), which lets us allowlist it on the host
+    // before either node runs.
+    let signer = make_native_signer_with_storage(&signer_dir, None);
+    let device_pubkey = signer
+        .bootstrap()
+        .expect("signer bootstrap")
+        .node_id
+        .parse::<bitcoin::secp256k1::PublicKey>()
+        .expect("device pubkey");
+
+    let host = make_node_with_virtual(&host_dir, da, pa, Some(vec![device_pubkey]));
+    let device = make_node_with_virtual(&device_dir, db, pb, None);
+
+    let unlock_device = |node: &SdkNode,
+                         signer: &Arc<rgb_lightning_node::NativeExternalSigner>| {
+        node.unlock_with_native_external_signer(
+            signer.clone(),
+            Some("user".to_string()),
+            Some("password".to_string()),
+            Some("localhost".to_string()),
+            Some(18443),
+            Some("127.0.0.1:50001".to_string()),
+            Some(PROXY_ENDPOINT_LOCAL.to_string()),
+            vec![],
+            Some("RLN_virtual_device".to_string()),
+        )
+    };
+
+    let wait_virtual_channel_usable = |node: &SdkNode, peer: &str, label: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let usable = node
+                .list_channels()
+                .unwrap_or_default()
+                .into_iter()
+                .any(|c| c.peer_pubkey.to_string() == peer && c.ready && c.is_usable);
+            if usable {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "virtual channel not usable within 60s ({label})"
+            );
+            thread::sleep(Duration::from_millis(500));
+        }
+    };
+
+    let pay = |payer: &SdkNode, payee: &SdkNode, amt_msat: u64, label: &str| {
+        let invoice = payee
+            .ln_invoice(LnInvoiceRequest {
+                amt_msat: Some(amt_msat),
+                expiry_sec: 900,
+                asset_id: None,
+                asset_amount: None,
+                payment_hash: None,
+                description_hash: None,
+                min_final_cltv_expiry_delta: None,
+            })
+            .unwrap_or_else(|e| panic!("{label}: ln_invoice: {e:?}"))
+            .invoice;
+        let send = payer
+            .sendpayment(SdkSendPaymentRequest {
+                invoice: invoice.to_string(),
+                amt_msat: None,
+                asset_id: None,
+                asset_amount: None,
+            })
+            .unwrap_or_else(|e| panic!("{label}: sendpayment: {e:?}"));
+        let payment_hash = send.payment_hash.expect("payment_hash");
+        wait_for_payment_status(payer, &payment_hash, Duration::from_secs(120));
+        wait_for_payment_status(payee, &payment_hash, Duration::from_secs(120));
+    };
+
+    let host_pubkey_cell: OnceLock<String> = OnceLock::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        host.init("hostPass".to_string(), None).expect("host init");
+        device
+            .init_with_native_external_signer(signer.clone())
+            .expect("device init with signer");
+
+        host.unlock(unlock_request("hostPass")).expect("host unlock");
+        unlock_device(&device, &signer).expect("device unlock");
+
+        let host_pubkey = host.node_info().expect("host node_info").pubkey.to_string();
+        host_pubkey_cell.set(host_pubkey.clone()).unwrap();
+
+        // The device (opener) needs on-chain funds for the never-broadcast virtual funding.
+        ensure_funded(&device, 200_000, "device");
+        mine(1);
+        device.sync().expect("device sync after fund");
+        host.sync().expect("host sync");
+
+        let host_uri = format!("{host_pubkey}@127.0.0.1:{pa}");
+        device.connectpeer(host_uri.clone()).expect("connectpeer");
+
+        device
+            .openchannel(SdkOpenChannelRequest {
+                peer_pubkey_and_opt_addr: host_uri,
+                capacity_sat: 100_000,
+                push_msat: 30_000_000,
+                public: false,
+                with_anchors: true,
+                fee_base_msat: None,
+                fee_proportional_millionths: None,
+                temporary_channel_id: None,
+                asset_id: None,
+                asset_amount: None,
+                push_asset_amount: None,
+                virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+            })
+            .expect("device opens trusted virtual channel");
+
+        wait_virtual_channel_usable(&device, &host_pubkey, "device, fresh");
+        let device_pubkey_str = device_pubkey.to_string();
+        wait_virtual_channel_usable(&host, &device_pubkey_str, "host, fresh");
+
+        // Fresh-channel baseline (works even without the fix).
+        pay(&device, &host, PAYMENT_MSAT, "fresh device->host");
+        pay(&host, &device, PAYMENT_MSAT, "fresh host->device");
+
+        // Restart the device process: same storage, same signer seed — the virtual channel is
+        // restored from persistence while the in-process VLS node starts over.
+        device.shutdown();
+        thread::sleep(Duration::from_millis(500));
+    }));
+    if result.is_err() {
+        host.shutdown();
+        panic!("external_signer_virtual_channel_survives_restart failed before restart");
+    }
+
+    // Release the pre-restart device node (its LDK state persists to `device_dir`).
+    drop(device);
+
+    // Restart the device node on the same storage, REUSING the signer instance.
+    //
+    // This is an in-process restart: a fresh `NativeExternalSigner::new_with_storage` cannot
+    // open the redb store while the pre-restart signer still holds its exclusive lock (only a
+    // real process exit releases it, which a single test process cannot do). The signer's VLS
+    // store is write-through to disk, so its live in-memory state is byte-identical to what a
+    // fresh process would restore from `signer_dir` — reusing the instance exercises the same
+    // restored-channel-state code path without fighting the single-writer lock. What actually
+    // restarts is the LDK node (a new `SdkNode` over the persisted channel).
+    //
+    // The persistent store (`new_with_storage`) is what makes the restored channel usable at
+    // all; the signer-external fix is what keeps its stub commitment-point fallback from
+    // panicking in `ldk_channel_keys_id()`. With the ephemeral `NativeExternalSigner::new`
+    // (no disk store) this scenario is unrecoverable after a real restart.
+    let device = make_node_with_virtual(&device_dir, db, pb, None);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unlock_device(&device, &signer).expect("device unlock after restart");
+
+        let host_pubkey = host_pubkey_cell.get().expect("host pubkey").clone();
+        let host_uri = format!("{host_pubkey}@127.0.0.1:{pa}");
+        device
+            .connectpeer(host_uri)
+            .expect("reconnect after restart");
+        wait_virtual_channel_usable(&device, &host_pubkey, "device, restored");
+
+        // The regression: the first payments over the RESTORED virtual channel. Pre-fix, the
+        // background commitment signing panicked in ldk_channel_keys_id() and the payment
+        // never settled (node bricked with a poisoned ChannelManager mutex).
+        pay(&device, &host, PAYMENT_MSAT, "restored device->host");
+        pay(&host, &device, PAYMENT_MSAT, "restored host->device");
+
+        device.shutdown();
+        host.shutdown();
+        thread::sleep(Duration::from_millis(300));
+    }));
+
+    if result.is_err() {
+        panic!("external_signer_virtual_channel_survives_restart failed after restart");
     }
 }

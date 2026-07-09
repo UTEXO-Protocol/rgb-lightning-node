@@ -27,7 +27,7 @@ unexpected_cfgs = "allow"
 [features]
 default = []
 test-utils = []
-vls = ["signer-external/with-vls"]
+vls = ["signer-external/with-vls", "dep:vls-persist"]
 vss = ["rgb-lib/vss", "dep:vss-client"]
 remote-signer = ["dep:vls-persist", "dep:tokio-rustls", "dep:rustls-pemfile", "vls"]
 
@@ -145,14 +145,6 @@ lightning-transaction-sync = { path = "./rust-lightning/lightning-transaction-sy
 # Use the UTEXO RGB compatibility branches; no sibling local checkout required.
 vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
 vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
-
-# Local fork of signer-external (rln-external-signer @ 594d8c0 + the `new_with_network_seed_and_next_dbid`
-# restart-safe dbid allocator, on branch feat/remote-signer-dbid-restart-safety) so `RealVlsClient` can
-# seed its dbid allocator from a restart-safe starting value for the remote external signer daemon
-# (Option A). Requires a sibling checkout at ../rln-external-signer; switch to a `git = ..., branch = ...`
-# dependency once that branch is pushed and merged upstream, to drop the sibling-checkout requirement.
-[patch."https://github.com/UTEXO-Protocol/rln-external-signer.git"]
-signer-external = { path = "../rln-external-signer" }
 
 [lints.rust.unexpected_cfgs]
 level = "allow"

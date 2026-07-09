@@ -246,6 +246,35 @@ pub(crate) fn make_node_with_vss(
     )
 }
 
+/// Like [`make_node`], but with trusted virtual channels (v0) enabled. `virtual_peer_pubkeys`
+/// is the acceptor-side allowlist: inbound `trusted_no_broadcast` opens are only accepted from
+/// these peers. Openers just need the feature enabled (pass `None`).
+#[allow(dead_code)] // used by the external-signer virtual-channel restart test
+pub(crate) fn make_node_with_virtual(
+    storage_dir_path: &Path,
+    daemon_listening_port: u16,
+    ldk_peer_listening_port: u16,
+    virtual_peer_pubkeys: Option<Vec<bitcoin::secp256k1::PublicKey>>,
+) -> SdkNode {
+    fs::create_dir_all(storage_dir_path).expect("create storage dir");
+    SdkNode::create(SdkInitRequest {
+        storage_dir_path: storage_dir_path.display().to_string(),
+        daemon_listening_port,
+        ldk_peer_listening_port,
+        network: "regtest".to_string(),
+        max_media_upload_size_mb: 20,
+        enable_virtual_channels_v0: Some(true),
+        virtual_peer_pubkeys,
+        lsp_base_url: None,
+        lsp_bearer_token: None,
+        vss_url: None,
+        vss_allow_http: true,
+        vss_allow_empty_restore: false,
+        reuse_addresses: false,
+    })
+    .expect("create SDK node")
+}
+
 fn make_node_inner(
     storage_dir_path: &Path,
     daemon_listening_port: u16,
