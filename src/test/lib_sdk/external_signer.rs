@@ -91,6 +91,25 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Block until every `127.0.0.1:<port>` in `ports` is bindable (i.e. released by a prior node),
+/// or `timeout` elapses. `SdkNode::shutdown()` returns before the OS tears down its listeners,
+/// so restarting a node on the same ports needs this to avoid an "Address already in use" race.
+fn wait_ports_free(ports: &[u16], timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    for &port in ports {
+        loop {
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "port {port} was not released within {timeout:?}"
+            );
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
+
 fn make_native_signer(
     storage_dir: &std::path::Path,
     seed_hex: Option<String>,
@@ -924,8 +943,7 @@ fn external_signer_virtual_channel_survives_restart() {
     let host = make_node_with_virtual(&host_dir, da, pa, Some(vec![device_pubkey]));
     let device = make_node_with_virtual(&device_dir, db, pb, None);
 
-    let unlock_device = |node: &SdkNode,
-                         signer: &Arc<rgb_lightning_node::NativeExternalSigner>| {
+    let unlock_device = |node: &SdkNode, signer: &Arc<rgb_lightning_node::NativeExternalSigner>| {
         node.unlock_with_native_external_signer(
             signer.clone(),
             Some("user".to_string()),
@@ -991,7 +1009,8 @@ fn external_signer_virtual_channel_survives_restart() {
             .init_with_native_external_signer(signer.clone())
             .expect("device init with signer");
 
-        host.unlock(unlock_request("hostPass")).expect("host unlock");
+        host.unlock(unlock_request("hostPass"))
+            .expect("host unlock");
         unlock_device(&device, &signer).expect("device unlock");
 
         let host_pubkey = host.node_info().expect("host node_info").pubkey.to_string();
@@ -1044,6 +1063,13 @@ fn external_signer_virtual_channel_survives_restart() {
     // Release the pre-restart device node (its LDK state persists to `device_dir`).
     drop(device);
 
+    // Wait for the device node's daemon + peer listeners to actually free their ports before
+    // rebinding them for the restarted node. `shutdown()` returns before the OS has fully
+    // released the sockets, so on a loaded machine an immediate rebind races the old listener
+    // and the restarted node fails to start ("Address already in use") — a failure that shows
+    // up under load but not on an idle box.
+    wait_ports_free(&[db, pb], Duration::from_secs(30));
+
     // Restart the device node on the same storage, REUSING the signer instance.
     //
     // This is an in-process restart: a fresh `NativeExternalSigner::new_with_storage` cannot
@@ -1064,9 +1090,17 @@ fn external_signer_virtual_channel_survives_restart() {
 
         let host_pubkey = host_pubkey_cell.get().expect("host pubkey").clone();
         let host_uri = format!("{host_pubkey}@127.0.0.1:{pa}");
-        device
-            .connectpeer(host_uri)
-            .expect("reconnect after restart");
+        // Reconnect may briefly race the restarted node's peer-handler coming up; retry.
+        let reconnect_deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match device.connectpeer(host_uri.clone()) {
+                Ok(_) => break,
+                Err(_) if std::time::Instant::now() < reconnect_deadline => {
+                    thread::sleep(Duration::from_millis(500));
+                }
+                Err(e) => panic!("reconnect after restart failed: {e:?}"),
+            }
+        }
         wait_virtual_channel_usable(&device, &host_pubkey, "device, restored");
 
         // The regression: the first payments over the RESTORED virtual channel. Pre-fix, the

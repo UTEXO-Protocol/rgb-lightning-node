@@ -110,8 +110,10 @@ impl NativeExternalSigner {
         let network = Self::parse_network(&network)?;
         let seed = Self::parse_seed_hex(&seed_hex)?;
         std::fs::create_dir_all(&storage_dir_path).map_err(|_| RlnError::Internal)?;
-        let persister: Arc<dyn Persist> =
-            Arc::new(KVVPersister(RedbKVVStore::new(&storage_dir_path), JsonFormat));
+        let persister: Arc<dyn Persist> = Arc::new(KVVPersister(
+            RedbKVVStore::new(&storage_dir_path),
+            JsonFormat,
+        ));
         let transport = Arc::new(
             InProcessVlsTransport::new(network, seed, permissive_policy.unwrap_or(true), persister)
                 .context("native signer persistent transport init failed")

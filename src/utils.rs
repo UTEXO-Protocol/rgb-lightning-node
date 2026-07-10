@@ -151,7 +151,9 @@ pub(crate) struct StaticState {
     /// Socket address of the remote external signer daemon the node connects to (Option A). The daemon
     /// holds the seed and answers all signing; required to unlock in external-signer mode. Set from
     /// `--remote-signer-addr`. Always present (`None` when `remote-signer` isn't compiled in) — see
-    /// `UserArgs::remote_signer_listen_addr` for why this field isn't cfg-gated.
+    /// `UserArgs::remote_signer_listen_addr` for why this field isn't cfg-gated. Only read by the
+    /// `remote-signer`-gated unlock path, so it is dead code when that feature is off.
+    #[cfg_attr(not(feature = "remote-signer"), allow(dead_code))]
     pub(crate) remote_signer_listen_addr: Option<std::net::SocketAddr>,
 }
 
@@ -415,6 +417,11 @@ pub(crate) fn check_already_initialized(database: &DatabaseConnection) -> Result
 /// Lives here rather than in `sdk` because `routes.rs` is compiled by both the `main` binary and the
 /// library crate-type targets, while `sdk` is compiled only by the library targets — `main.rs` has no
 /// `mod sdk`, so `routes.rs` cannot call into `sdk` directly.
+///
+/// In the `main` binary the only caller is the `remote-signer`-gated `routes::init_external_signer`
+/// (the binary has no `mod sdk`), so this is dead code in the binary when that feature is off; the
+/// library targets always reach it via `sdk::init_with_external_signer`.
+#[cfg_attr(not(feature = "remote-signer"), allow(dead_code))]
 pub(crate) fn validate_external_signer_init(
     state: &Arc<AppState>,
     api_level: u32,
