@@ -1,4 +1,4 @@
-name: Release SDK (Swift + Kotlin)
+name: Release SDK (Swift + Kotlin + WASM)
 
 on:
   workflow_dispatch:
@@ -9,6 +9,11 @@ on:
         type: string
       publish_to_maven:
         description: "Publish Kotlin Android artifact to Maven"
+        required: false
+        default: true
+        type: boolean
+      publish_to_npm:
+        description: "Publish WASM package to npm"
         required: false
         default: true
         type: boolean
@@ -30,6 +35,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
       publish_to_maven: ${{ steps.resolve.outputs.publish_to_maven }}
+      publish_to_npm: ${{ steps.resolve.outputs.publish_to_npm }}
     steps:
       - name: Resolve version
         id: resolve
@@ -38,9 +44,83 @@ jobs:
           VERSION="${RAW_VERSION#v}"
           TAG="v${VERSION}"
           PUBLISH_TO_MAVEN="${{ inputs.publish_to_maven }}"
+          PUBLISH_TO_NPM="${{ inputs.publish_to_npm }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "publish_to_maven=${PUBLISH_TO_MAVEN}" >> "$GITHUB_OUTPUT"
+          echo "publish_to_npm=${PUBLISH_TO_NPM}" >> "$GITHUB_OUTPUT"
+
+  wasm-sdk:
+    name: Build WASM SDK and publish npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: resolve-version
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          rustflags: ""
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack@0.14.0
+
+      - name: Build WASM package
+        run: |
+          cd bindings/wasm-sdk
+          wasm-pack build --target web --release --out-dir pkg
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Set WASM package version and metadata
+        working-directory: bindings/wasm-sdk/pkg
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.name = '@utexo/rln-wasm';
+            pkg.version = process.env.VERSION;
+            pkg.repository = { type: 'git', url: 'https://github.com/UTEXO-Protocol/rgb-lightning-node.git' };
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+
+      - name: Copy README into package
+        run: cp bindings/wasm-sdk/README.md bindings/wasm-sdk/pkg/README.md
+
+      - name: Publish WASM package to npm
+        if: needs.resolve-version.outputs.publish_to_npm == 'true'
+        working-directory: bindings/wasm-sdk/pkg
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Package WASM release artifact
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          mkdir -p release
+          (cd bindings/wasm-sdk && tar -czf "../../release/rln-wasm-sdk-pkg-${VERSION}.tar.gz" pkg/)
+
+      - name: Upload WASM bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-sdk-release
+          if-no-files-found: error
+          path: release/rln-wasm-sdk-pkg-${{ needs.resolve-version.outputs.version }}.tar.gz
 
   kotlin-android:
     name: Build Kotlin Android and publish Maven
@@ -259,7 +339,7 @@ jobs:
   github-release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
-    needs: [resolve-version, kotlin-android, swift-ios]
+    needs: [resolve-version, kotlin-android, swift-ios, wasm-sdk]
     steps:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
@@ -278,11 +358,18 @@ jobs:
             Includes release bundles for:
             - Swift XCFramework
             - Kotlin Android bindings + JNI artifacts
+            - WASM SDK package (`@utexo/rln-wasm`)
+
+            npm:
+            ```bash
+            npm install @utexo/rln-wasm@${{ needs.resolve-version.outputs.version }}
+            ```
           draft: false
           prerelease: ${{ contains(needs.resolve-version.outputs.version, 'alpha') || contains(needs.resolve-version.outputs.version, 'beta') || contains(needs.resolve-version.outputs.version, 'rc') }}
           files: |
             release-assets/**/rgb-lightning-node-swift-${{ needs.resolve-version.outputs.version }}.zip
             release-assets/**/rgb-lightning-node-kotlin-android-${{ needs.resolve-version.outputs.version }}.zip
+            release-assets/**/rln-wasm-sdk-pkg-${{ needs.resolve-version.outputs.version }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

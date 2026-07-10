@@ -104,6 +104,53 @@ If ports are busy, either stop conflicting services or edit `compose.wasm.yaml` 
 The SDK surface is object-handle based (same direction as UniFFI SDK instance
 model) and avoids REST coupling.
 
+## Selecting the Bitcoin network
+
+The node takes an **explicit network**, mirroring the native node's `--network` flag: it is the node's
+single source of truth and drives the LDK `ChannelManager`/`NetworkGraph` (and therefore the chain
+advertised in the `Init` handshake). Pass it as the third argument to `newWithNodeRuntimeId`, then
+create the wallet on the **same** network:
+
+```js
+// 1. Create the node with an explicit network: "mainnet" | "testnet" | "testnet4" | "signet" |
+//    "regtest" (case-insensitive).
+const node = RlnWasmNode.newWithNodeRuntimeId(proxyUrl, runtimeId, "Signet");
+
+// 2. Create the wallet on the SAME network.
+const keys = rgbRestoreKeysValue("signet", mnemonic);
+const wallet = await RlnWasmWallet.create(/* ... */ { bitcoin_network: "Signet", /* ... */ });
+
+// 3. Attach the wallet BEFORE connecting to any peer. attachWallet validates that the wallet's
+//    network matches the node's; a mismatch throws (like the native node's NetworkMismatch).
+node.attachWallet(wallet);
+
+// 4. Now start chain sync / connect. The Init handshake advertises the matching chain hash in its
+//    `networks` field.
+node.chainSyncStartValue(esploraUrl, pollIntervalMs);
+```
+
+Notes and gotchas:
+
+- **Node owns the network.** With an explicit network the node registers it with the LDK backend at
+  construction (before the object graph exists), so the correct chain is advertised even if no wallet
+  is ever attached.
+- **`attachWallet` validates.** If the wallet's network differs from the node's configured network,
+  `attachWallet` throws `wallet network (…) does not match the node's configured network (…)`. This
+  catches the common "created the wallet on the wrong chain" mistake up front.
+- **Wallet/peer mismatch.** If your (matching) network still differs from the peer's — e.g. you are on
+  Regtest but the LSP is on Signet — the connection is rejected with
+  `Peer does not support any of our supported chains` and the handshake disconnects. The `networks`
+  field in the LDK `Init` log is the genesis/chain hash — Signet `f61eee3b…`, Regtest `06226e46…`,
+  Testnet `43497fd7…`, Mainnet `6fe28c0a…`.
+- **`SignetCustom`** (custom / mutinynet-style signets) maps to standard `Signet` for LDK purposes.
+- **Bare constructor / facade.** `new RlnWasmNode(proxyUrl)` (and the SDK-facade `newNode*` helpers)
+  do not take a network: the node stays unconfigured and **adopts** the first attached wallet's network
+  (falling back to `Regtest` until then). Use this only for dev/regtest or when the wallet is the
+  intended source of truth.
+
+Implementation: `NETWORK_REGISTRY` / `set_network_for_runtime` in `src/ldk_live_backend.rs`; network
+selection and validation in `new_with_runtime_id_opt` / `attach_wallet_shared` in `src/ln_node.rs`.
+
 ## Examples
 
 - WASM example flow: `bindings/wasm-sdk/examples/`

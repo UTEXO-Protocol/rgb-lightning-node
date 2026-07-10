@@ -91,7 +91,7 @@ function buildWalletData(keys, runtimeId) {
     const indexerUrl = getQueryParam("indexerUrl", DEFAULT_INDEXER_URL);
     const nodeProxyUrl = baseProxyUrl.split("#runtime:")[0];
 
-    const node = RlnWasmNode.newWithNodeRuntimeId(nodeProxyUrl, rid);
+    const node = RlnWasmNode.newWithNodeRuntimeId(nodeProxyUrl, rid, "Regtest");
     node.installAutoPeerManagerHooks();
     node.chainSyncStartValue(indexerUrl, 5000);
     try {

@@ -4,7 +4,7 @@ This document is the **canonical architecture reference** for the WASM-related s
 
 - **WASM SDK crate**: `bindings/wasm-sdk` (browser-facing `wasm-bindgen` SDK)
 - **WS↔TCP gateway + dev helpers**: `tools/wasm-proxy-gateway`
-- **Browser E2E**: `e2e-specs` + `scripts/ci/wasm_regular_rln_e2e.sh`
+- **Browser E2E**: `bindings/wasm-sdk/e2e-specs` + `scripts/ci/wasm_regular_rln_e2e.sh`
 - **Shared contracts**: the `sdk-contracts` crate (git dependency; types + stable error strings)
 
 ## Components
@@ -81,5 +81,5 @@ E2E_AUTO_PROVISION_REGULAR_RLN=1 ./scripts/ci/wasm_regular_rln_e2e.sh
 
 - See:
   - `bindings/wasm-sdk/README.md` (local env and examples)
-  - `e2e-specs/README.md` (Playwright scenarios and ports)
+  - `bindings/wasm-sdk/e2e-specs/README.md` (Playwright scenarios and ports)
 

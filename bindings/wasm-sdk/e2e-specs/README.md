@@ -148,7 +148,7 @@ From the **repository root**:
 5. **Playwright** (installs browsers under the user cache, not in this repo):
 
    ```bash
-   cd e2e-specs
+   cd bindings/wasm-sdk/e2e-specs
    npm ci
    npx playwright install chromium
    npm run test:wasm-regular-rln-e2e
