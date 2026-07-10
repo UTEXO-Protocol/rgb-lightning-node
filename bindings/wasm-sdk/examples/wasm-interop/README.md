@@ -38,23 +38,12 @@ cd bindings/wasm-sdk
 wasm-pack build --target web --dev --out-dir pkg
 ```
 
-The `rgb-native-phase5-node` harness binary must be available at the path the driver
-expects (`run_multihop_flow.mjs` resolves it under
-`../rust-lightning/contrib/rgb-cross-variant-harness/target/debug/`). A headless Chrome
-and a `puppeteer-core` install are also required (see env vars below).
-
 ## Run
 
 ```sh
 PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome \
 E2E_PUPPETEER=/tmp/e2e-driver/node_modules/puppeteer-core \
 node bindings/wasm-sdk/examples/wasm-interop/run_e2e_full_flow.mjs
-```
-
-```sh
-PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome \
-E2E_PUPPETEER=/tmp/e2e-driver/node_modules/puppeteer-core \
-node bindings/wasm-sdk/examples/wasm-interop/run_multihop_flow.mjs
 ```
 
 A successful run ends with `✅✅✅ ... PASSED` and exit code 0.

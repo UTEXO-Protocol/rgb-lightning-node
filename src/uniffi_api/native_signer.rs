@@ -5,16 +5,12 @@
 //! commitment signing uses the VLS summary RPC (`SignRemoteCommitmentTx2`) like vanilla channels;
 //! the wire transaction may differ on RGB outputs while balances match the negotiated commitment.
 use super::{ExternalSignerHost, RlnError, SdkExternalSignerBootstrap};
-use crate::signer::in_process_vls::InProcessVlsTransport;
-use crate::signer::proto::{decode_signer_request, encode_signer_response};
-use anyhow::Context;
+use crate::signer::in_process_vls::{self, InProcessVlsTransport};
 use bitcoin::hex::FromHex;
 use bitcoin::Network;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use signer_external::contract::{BootstrapData, ExternalSignerBackend, SignerRequest};
-use signer_external::vls_adapter::vls_real::RealVlsClient;
-use signer_external::vls_adapter::VlsSignerAdapter;
 use std::sync::Arc;
 
 #[derive(uniffi::Object)]
@@ -70,18 +66,15 @@ impl NativeExternalSigner {
         // Host must supply a stable 32-byte seed (e.g. loaded from Android Keystore / iOS Keychain)
         // and pass it in-memory; this signer helper does not persist secrets.
         let seed = Self::parse_seed_hex(&seed_hex)?;
-        let transport = Arc::new(
-            InProcessVlsTransport::new_ephemeral(network, seed, permissive_policy.unwrap_or(true))
-                .context("native signer transport init failed")
-                .map_err(|_| RlnError::Internal)?,
-        );
-        let backend: Arc<dyn ExternalSignerBackend> = Arc::new(VlsSignerAdapter::new(
-            RealVlsClient::new_with_network_and_seed(
-                transport.clone(),
-                network.to_string(),
-                Some(seed),
-            ),
-        ));
+        let (backend, transport) = in_process_vls::build_backend_ephemeral(
+            network,
+            seed,
+            permissive_policy.unwrap_or(true),
+        )
+        .map_err(|e| {
+            tracing::error!(error = ?e, "native signer transport init failed");
+            RlnError::Internal
+        })?;
         Ok(Arc::new(Self { backend, transport }))
     }
 
@@ -114,19 +107,16 @@ impl NativeExternalSigner {
             RedbKVVStore::new(&storage_dir_path),
             JsonFormat,
         ));
-        let transport = Arc::new(
-            InProcessVlsTransport::new(network, seed, permissive_policy.unwrap_or(true), persister)
-                .context("native signer persistent transport init failed")
-                .map_err(|_| RlnError::Internal)?,
-        );
-        let backend: Arc<dyn ExternalSignerBackend> = Arc::new(VlsSignerAdapter::new(
-            RealVlsClient::new_with_network_seed_and_next_dbid(
-                transport.clone(),
-                network.to_string(),
-                Some(seed),
-                transport.initial_next_dbid(),
-            ),
-        ));
+        let (backend, transport) = in_process_vls::build_backend(
+            network,
+            seed,
+            permissive_policy.unwrap_or(true),
+            persister,
+        )
+        .map_err(|e| {
+            tracing::error!(error = ?e, "native signer persistent transport init failed");
+            RlnError::Internal
+        })?;
         Ok(Arc::new(Self { backend, transport }))
     }
 
@@ -147,29 +137,11 @@ impl NativeExternalSigner {
 
 impl ExternalSignerHost for NativeExternalSigner {
     fn call(&self, request: Vec<u8>) -> Result<Vec<u8>, RlnError> {
-        let signer_request: SignerRequest = decode_signer_request(&request).map_err(|e| {
-            tracing::error!(error = ?e, "native external signer protobuf decode failed");
-            RlnError::Internal
-        })?;
-        let signer_response = match self.backend.call(signer_request.clone()) {
-            Ok(response) => response,
-            Err(e) => match self.transport.fallback_for(&signer_request) {
-                Some(fallback) => {
-                    tracing::debug!(
-                        ?fallback,
-                        "native external signer backend fallback response"
-                    );
-                    fallback
-                }
-                None => {
-                    tracing::error!(error = ?e, "native external signer backend call failed");
-                    return Err(RlnError::Internal);
-                }
+        in_process_vls::handle_envelope(self.backend.as_ref(), &self.transport, &request).map_err(
+            |e| {
+                tracing::error!(error = ?e, "native external signer envelope failed");
+                RlnError::Internal
             },
-        };
-        encode_signer_response(&signer_response).map_err(|e| {
-            tracing::error!(error = %e, "native external signer response encode failed");
-            RlnError::Internal
-        })
+        )
     }
 }

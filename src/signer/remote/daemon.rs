@@ -12,26 +12,21 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bitcoin::Network;
-#[cfg(test)]
-use lightning_signer::persist::DummyPersister;
 use lightning_signer::persist::Persist;
 use signer_external::contract::{ExternalSignerBackend, SignerRequest, SignerResponse};
-use signer_external::vls_adapter::vls_real::RealVlsClient;
-use signer_external::vls_adapter::VlsSignerAdapter;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use vls_persist::kvv::redb::RedbKVVStore;
 use vls_persist::kvv::{JsonFormat, KVVPersister};
 
-use crate::signer::in_process_vls::InProcessVlsTransport;
-use crate::signer::proto::{decode_signer_request, encode_signer_response};
-
-/// Max envelope frame the daemon will read (defensive; RGB PSBTs can be sizeable but not huge).
-const MAX_FRAME_LEN: u32 = 8 * 1024 * 1024;
+use super::framing;
+use crate::signer::in_process_vls::{self, InProcessVlsTransport};
+use crate::signer::types::{BootstrapData, SignerIdentity};
 
 /// The daemon's public identity — feed these fields to the node's `POST /initexternalsigner`. Also
 /// serves directly as that endpoint's request body (see `routes::init_external_signer`): the two used
-/// to be independently-defined, field-for-field-identical structs.
+/// to be independently-defined, field-for-field-identical structs. A flattening of [`BootstrapData`]
+/// (kept distinct so the HTTP/`--print-bootstrap` JSON shape stays flat and copy-pasteable); the
+/// `From` impls below are the only conversions — add new identity fields there, nowhere else.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct DaemonBootstrap {
     pub node_id: String,
@@ -40,6 +35,34 @@ pub struct DaemonBootstrap {
     pub master_fingerprint: String,
     pub protocol_version: String,
     pub api_level: u32,
+}
+
+impl From<BootstrapData> for DaemonBootstrap {
+    fn from(data: BootstrapData) -> Self {
+        Self {
+            node_id: data.identity.node_id,
+            account_xpub_vanilla: data.identity.account_xpub_vanilla,
+            account_xpub_colored: data.identity.account_xpub_colored,
+            master_fingerprint: data.identity.master_fingerprint,
+            protocol_version: data.protocol_version,
+            api_level: data.api_level,
+        }
+    }
+}
+
+impl From<DaemonBootstrap> for BootstrapData {
+    fn from(bootstrap: DaemonBootstrap) -> Self {
+        Self {
+            identity: SignerIdentity {
+                node_id: bootstrap.node_id,
+                account_xpub_vanilla: bootstrap.account_xpub_vanilla,
+                account_xpub_colored: bootstrap.account_xpub_colored,
+                master_fingerprint: bootstrap.master_fingerprint,
+            },
+            protocol_version: bootstrap.protocol_version,
+            api_level: bootstrap.api_level,
+        }
+    }
 }
 
 /// The daemon's signer: the RLN backend over the in-process VLS handlers, holding the seed.
@@ -73,8 +96,10 @@ impl DaemonSigner {
         network: Network,
         permissive_policy: bool,
     ) -> anyhow::Result<Self> {
-        let persister: Arc<dyn Persist> = Arc::new(DummyPersister {});
-        Self::new_with_persister(seed, network, permissive_policy, persister)
+        let (backend, transport) =
+            in_process_vls::build_backend_ephemeral(network, seed, permissive_policy)
+                .context("daemon signer transport init failed")?;
+        Ok(Self { backend, transport })
     }
 
     fn new_with_persister(
@@ -83,18 +108,9 @@ impl DaemonSigner {
         permissive_policy: bool,
         persister: Arc<dyn Persist>,
     ) -> anyhow::Result<Self> {
-        let transport = Arc::new(
-            InProcessVlsTransport::new(network, seed, permissive_policy, persister)
-                .context("daemon signer transport init failed")?,
-        );
-        let backend: Arc<dyn ExternalSignerBackend> = Arc::new(VlsSignerAdapter::new(
-            RealVlsClient::new_with_network_seed_and_next_dbid(
-                transport.clone(),
-                network.to_string(),
-                Some(seed),
-                transport.initial_next_dbid(),
-            ),
-        ));
+        let (backend, transport) =
+            in_process_vls::build_backend(network, seed, permissive_policy, persister)
+                .context("daemon signer transport init failed")?;
         Ok(Self { backend, transport })
     }
 
@@ -108,30 +124,14 @@ impl DaemonSigner {
             .call(SignerRequest::Bootstrap)
             .map_err(|e| anyhow::anyhow!("bootstrap backend call failed: {e:?}"))?
         {
-            SignerResponse::Bootstrap(data) => Ok(DaemonBootstrap {
-                node_id: data.identity.node_id,
-                account_xpub_vanilla: data.identity.account_xpub_vanilla,
-                account_xpub_colored: data.identity.account_xpub_colored,
-                master_fingerprint: data.identity.master_fingerprint,
-                protocol_version: data.protocol_version,
-                api_level: data.api_level,
-            }),
+            SignerResponse::Bootstrap(data) => Ok(data.into()),
             other => anyhow::bail!("unexpected bootstrap response: {other:?}"),
         }
     }
 
     /// Handle one RLN signer envelope (protobuf bytes) → response envelope bytes.
     pub fn handle_envelope(&self, request: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let signer_request: SignerRequest =
-            decode_signer_request(request).context("decode signer request")?;
-        let signer_response = match self.backend.call(signer_request.clone()) {
-            Ok(response) => response,
-            Err(e) => self
-                .transport
-                .fallback_for(&signer_request)
-                .ok_or_else(|| anyhow::anyhow!("backend call failed: {e:?}"))?,
-        };
-        encode_signer_response(&signer_response).context("encode signer response")
+        in_process_vls::handle_envelope(self.backend.as_ref(), &self.transport, request)
     }
 }
 
@@ -245,38 +245,34 @@ pub async fn serve(
     }
 }
 
-async fn serve_connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     mut stream: S,
     signer: Arc<DaemonSigner>,
 ) -> anyhow::Result<()> {
     loop {
-        let len = match stream.read_u32().await {
-            Ok(len) => len,
-            Err(_) => return Ok(()), // peer closed
+        let buf = match framing::read_frame_async(&mut stream)
+            .await
+            .context("read frame")?
+        {
+            Some(buf) => buf,
+            None => return Ok(()), // peer closed
         };
-        anyhow::ensure!(len <= MAX_FRAME_LEN, "frame too large: {len}");
-        let mut buf = vec![0u8; len as usize];
-        stream.read_exact(&mut buf).await.context("read frame")?;
 
         // Signing can block; run it on a blocking thread so the reactor stays free.
         let signer = Arc::clone(&signer);
         let reply = tokio::task::spawn_blocking(move || signer.handle_envelope(&buf))
             .await
             .context("join")?;
-        match reply {
-            Ok(bytes) => {
-                stream
-                    .write_u32(bytes.len() as u32)
-                    .await
-                    .context("write len")?;
-                stream.write_all(&bytes).await.context("write frame")?;
-            }
+        let frame = match &reply {
+            Ok(bytes) => bytes.as_slice(),
             Err(e) => {
                 tracing::error!(error = ?e, "remote signer handler error");
-                stream.write_u32(0).await.context("write err len")?; // zero-length = handler error
+                &[] // zero-length = handler error
             }
-        }
-        stream.flush().await.context("flush")?;
+        };
+        framing::write_frame_async(&mut stream, frame)
+            .await
+            .context("write frame")?;
     }
 }
 

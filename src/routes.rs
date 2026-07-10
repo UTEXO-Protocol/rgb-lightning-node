@@ -2728,45 +2728,21 @@ pub(crate) async fn init_external_signer(
         let _unlocked_state = state.check_locked().await?;
         crate::utils::validate_external_signer_init(&state, payload.api_level)?;
 
-        let submitted = crate::signer::types::BootstrapData {
-            identity: crate::signer::types::SignerIdentity {
-                node_id: payload.node_id,
-                account_xpub_vanilla: payload.account_xpub_vanilla,
-                account_xpub_colored: payload.account_xpub_colored,
-                master_fingerprint: payload.master_fingerprint,
-            },
-            protocol_version: payload.protocol_version,
-            api_level: payload.api_level,
-        };
+        let submitted: crate::signer::types::BootstrapData = payload.into();
 
-        let daemon_addr = state
-            .static_state
-            .remote_signer_listen_addr
-            .ok_or_else(|| {
-                APIError::ExternalSignerProtocolError(
-                    "external-signer mode requires --remote-signer-addr".to_string(),
-                )
-            })?;
-        let storage_dir_path = state.static_state.storage_dir_path.clone();
-        // Connect + probe are synchronous and can each take up to the transport's IO timeout; run on
-        // the blocking pool instead of stalling this tokio worker (same pattern as `/unlock`).
-        let live_bootstrap = tokio::task::spawn_blocking(move || {
-            let tls = crate::signer::remote::tls::node_client_config_from_dir(&storage_dir_path)
-                .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
-            crate::signer::remote::build_external_signer_attachment_via_daemon(daemon_addr, tls)
-                .map(|attachment| attachment.bootstrap)
-        })
-        .await
-        .map_err(|e| APIError::Unexpected(e.to_string()))??;
+        // Same connect recipe as `/unlock`; here only the probed bootstrap identity is needed.
+        let live_bootstrap = crate::signer::remote::connect_daemon_attachment(&state)
+            .await?
+            .bootstrap;
 
         let submitted_key_source = crate::signer::KeySourceFile::from_bootstrap(&submitted);
         let live_key_source = crate::signer::KeySourceFile::from_bootstrap(&live_bootstrap);
         if submitted_key_source != live_key_source {
             return Err(APIError::ExternalSignerProtocolError(format!(
-                "submitted identity does not match a live probe of the daemon at {daemon_addr} \
-                 (check the payload was copied from that daemon's --print-bootstrap output and \
-                 --remote-signer-addr points at the intended daemon); submitted node_id {}, daemon \
-                 reports node_id {}",
+                "submitted identity does not match a live probe of the daemon at \
+                 --remote-signer-addr (check the payload was copied from that daemon's \
+                 --print-bootstrap output and --remote-signer-addr points at the intended daemon); \
+                 submitted node_id {}, daemon reports node_id {}",
                 submitted_key_source.node_id, live_key_source.node_id,
             )));
         }
@@ -5090,15 +5066,42 @@ pub(crate) async fn taker(
     .await
 }
 
+/// The unlock key source for external-signer mode: connect to the signer daemon and wrap the live
+/// attachment. Split by cfg so a build without the `remote-signer` feature gets a clean
+/// `ExternalSignerRequired` error — the "feature off ⇒ external mode cannot proceed" invariant is
+/// structural here, instead of an `unreachable!()` in `unlock` argued from a guard dozens of lines
+/// away.
+#[cfg(feature = "remote-signer")]
+async fn external_signer_key_source(
+    state: &Arc<AppState>,
+) -> Result<crate::core_types::NodeKeySource, APIError> {
+    // Remote external signer (Option A): the daemon holds the seed and answers all signing
+    // (identity/scripts/channel/node-crypto/RGB PSBT) over framed TCP. The persisted
+    // key_source.json is validated against the daemon's bootstrap inside start_ldk.
+    let attachment = crate::signer::remote::connect_daemon_attachment(state).await?;
+    Ok(crate::core_types::NodeKeySource::External(
+        crate::core_types::ExternalKeySource {
+            bootstrap: attachment.bootstrap.clone(),
+            signer_attachment: attachment,
+        },
+    ))
+}
+
+#[cfg(not(feature = "remote-signer"))]
+async fn external_signer_key_source(
+    _state: &Arc<AppState>,
+) -> Result<crate::core_types::NodeKeySource, APIError> {
+    Err(APIError::ExternalSignerRequired)
+}
+
 pub(crate) async fn unlock(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<UnlockRequest>, APIError>,
 ) -> Result<Json<EmptyResponse>, APIError> {
     tracing::info!("Unlock started");
     no_cancel(async move {
-        let external_key_source = crate::utils::read_external_signer_key_source(&state)?;
-        let external_configured = external_key_source.is_some();
-        // External-signer mode holds no mnemonic, so this branch below never checks
+        let external_configured = is_external_signer_mode_configured(&state)?;
+        // External-signer mode holds no mnemonic, so that branch below never checks
         // `payload.password` — the biscuit token is the only credential guarding `/unlock`. Refuse to
         // unlock rather than let anyone who can reach the HTTP port unlock the node when
         // authentication is disabled. Checked unconditionally (not just under `remote-signer`) since
@@ -5106,10 +5109,6 @@ pub(crate) async fn unlock(
         // `key_source.json` from having been written by another path.
         if external_configured && state.root_public_key.is_none() {
             return Err(APIError::ExternalSignerRequiresAuthentication);
-        }
-        #[cfg(not(feature = "remote-signer"))]
-        if external_configured {
-            return Err(APIError::ExternalSignerRequired);
         }
 
         match state.check_locked().await {
@@ -5133,59 +5132,7 @@ pub(crate) async fn unlock(
         });
 
         let key_source = if external_configured {
-            // Remote external signer (Option A): connect to the signer daemon, which holds the seed and
-            // answers all signing (identity/scripts/channel/node-crypto/RGB PSBT) over framed TCP. The
-            // persisted key_source.json is validated against the daemon's bootstrap inside start_ldk.
-            #[cfg(feature = "remote-signer")]
-            {
-                // No need to re-check "external mode was actually initialized" here — we're inside
-                // `if external_configured`, which is exactly `external_key_source.is_some()`.
-                let daemon_addr =
-                    state
-                        .static_state
-                        .remote_signer_listen_addr
-                        .ok_or_else(|| {
-                            APIError::ExternalSignerProtocolError(
-                                "external-signer mode requires --remote-signer-addr".to_string(),
-                            )
-                        })?;
-                let storage_dir_path = state.static_state.storage_dir_path.clone();
-                // TLS material loading (blocking file reads), the daemon TCP connect, and the
-                // bootstrap probe round-trip are all synchronous and each can take up to the
-                // transport's IO timeout; run them on the blocking pool instead of stalling this
-                // tokio worker (same pattern as `sync_chain_data`).
-                let attachment = tokio::task::spawn_blocking(move || {
-                    // TLS/mTLS material by convention under <storage_dir>/remote-signer-tls/ (ca.pem +
-                    // optional client.pem/client.key). Absent → plaintext (localhost / trusted link).
-                    let tls =
-                        crate::signer::remote::tls::node_client_config_from_dir(&storage_dir_path)
-                            .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
-                    crate::signer::remote::build_external_signer_attachment_via_daemon(
-                        daemon_addr,
-                        tls,
-                    )
-                })
-                .await
-                .map_err(|e| APIError::Unexpected(e.to_string()))??;
-                crate::core_types::NodeKeySource::External(crate::core_types::ExternalKeySource {
-                    bootstrap: attachment.bootstrap.clone(),
-                    signer_attachment: attachment,
-                })
-            }
-            #[cfg(not(feature = "remote-signer"))]
-            {
-                // Provably unreachable, not merely unlikely: reaching this `if external_configured`
-                // arm at all already required surviving the `#[cfg(not(feature = "remote-signer"))]
-                // if external_configured { return Err(ExternalSignerRequired) }` guard above — in a
-                // build without the feature, that guard already returned before we got here. Kept as
-                // `unreachable!()` (not deleted) purely because both cfg arms of this `if` must
-                // produce the same `NodeKeySource` type; deleting it would fail to compile under
-                // `not(remote-signer)`. If this ever actually fires, the guard above was removed or
-                // reordered — that's a real bug, not a normal runtime condition.
-                unreachable!(
-                    "external_configured must already have returned ExternalSignerRequired above"
-                )
-            }
+            external_signer_key_source(&state).await?
         } else {
             let mnemonic = check_password_validity(&payload.password, &state.db())?;
             crate::core_types::NodeKeySource::InternalMnemonic(mnemonic)

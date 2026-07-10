@@ -4,12 +4,13 @@
 //! needs no VLS client stack of its own — see [`daemon`] for the daemon side.
 
 pub(crate) mod daemon;
+pub(crate) mod framing;
 pub(crate) mod tls;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::signer::transport::ExternalSignerTransport;
+use crate::signer::transport::{ExternalSignerTransport, SignerLinkWatch};
 use crate::signer::types::RlnSignerError;
 
 /// Build the external-signer attachment for native unlock via the **custom daemon** (Option A): the
@@ -23,6 +24,37 @@ pub(crate) fn build_external_signer_attachment_via_daemon(
     let transport = DaemonEnvelopeTransport::connect(addr, tls)
         .map_err(|e| crate::error::APIError::ExternalSignerUnavailable(e.to_string()))?;
     crate::ldk::attach_external_signer_transport(Arc::new(transport))
+}
+
+/// Resolve `--remote-signer-addr`, load the node's TLS material from the storage dir, and
+/// connect-and-probe the daemon — the one connect recipe shared by `/initexternalsigner` (probe) and
+/// `/unlock` (attach), so the two entry points cannot drift. TLS material loading (blocking file
+/// reads), the daemon TCP connect, and the bootstrap probe round-trip are all synchronous and each
+/// can take up to [`DAEMON_IO_TIMEOUT`]; they run on the blocking pool instead of stalling a tokio
+/// worker.
+pub(crate) async fn connect_daemon_attachment(
+    state: &Arc<crate::utils::AppState>,
+) -> Result<crate::signer::ExternalSignerAttachment, crate::error::APIError> {
+    use crate::error::APIError;
+
+    let daemon_addr = state
+        .static_state
+        .remote_signer_listen_addr
+        .ok_or_else(|| {
+            APIError::ExternalSignerProtocolError(
+                "external-signer mode requires --remote-signer-addr".to_string(),
+            )
+        })?;
+    let storage_dir_path = state.static_state.storage_dir_path.clone();
+    tokio::task::spawn_blocking(move || {
+        // TLS/mTLS material by convention under <storage_dir>/remote-signer-tls/ (ca.pem + optional
+        // client.pem/client.key). Absent → plaintext (localhost / trusted link).
+        let tls = tls::node_client_config_from_dir(&storage_dir_path)
+            .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
+        build_external_signer_attachment_via_daemon(daemon_addr, tls)
+    })
+    .await
+    .map_err(|e| APIError::Unexpected(e.to_string()))?
 }
 
 /// Blanket over the two concrete stream kinds the node uses: plain `TcpStream` (dev/localhost) and
@@ -39,18 +71,18 @@ pub(crate) struct DaemonEnvelopeTransport {
     tls: Option<std::sync::Arc<rustls::ClientConfig>>,
     /// `None` when disconnected; re-established on the next call. Force-close resilience: a transient
     /// blip (brief network drop, or a daemon process restart — the daemon persists its VLS node and
-    /// channel state, so a restarted process resumes signing for existing channels once LDK's normal
-    /// setup-channel-before-every-commitment-sig flow re-establishes them) is absorbed by reconnecting
-    /// and retrying once, so it never surfaces to LDK as a signing error. A sustained outage returns
-    /// `Err` → the channel signer maps it to LDK's async-pending sentinel, and [`Self::reconnected`]
-    /// drives `signer_unblocked` once we're back.
+    /// channel state, and [`Self::reconnect`] replays the Bootstrap handshake so a restarted process
+    /// re-initializes its VLS handler stack and resumes signing for existing channels) is absorbed by
+    /// reconnecting and retrying once, so it never surfaces to LDK as a signing error. A sustained
+    /// outage returns `Err` → the channel signer maps it to LDK's async-pending sentinel, and
+    /// [`Self::link`] drives `signer_unblocked` once we're back.
     stream: std::sync::Mutex<Option<Box<dyn ReadWrite>>>,
-    /// Notified when [`Self::call_blocking`] successfully re-establishes `stream` after finding it
-    /// empty — i.e. a genuine "we just recovered from an outage" event, not the initial connect in
-    /// [`Self::connect`] (nothing is parked waiting on that yet). Exposed via
-    /// [`ExternalSignerTransport::reconnect_notify`] so `start_ldk` can drive `signer_unblocked`
-    /// exactly when there's a reason to, instead of polling forever.
-    reconnected: Arc<tokio::sync::Notify>,
+    /// Pre-encoded `SignerRequest::Bootstrap` envelope, replayed by [`Self::reconnect`].
+    bootstrap_request: Vec<u8>,
+    /// Marked down when a call observes a broken connection and up when one re-establishes it.
+    /// Exposed via [`ExternalSignerTransport::link_watch`] so `start_ldk` drives `signer_unblocked`
+    /// exactly while there's an outage to recover from, instead of polling forever.
+    link: Arc<SignerLinkWatch>,
 }
 
 impl DaemonEnvelopeTransport {
@@ -60,13 +92,19 @@ impl DaemonEnvelopeTransport {
         addr: SocketAddr,
         tls: Option<std::sync::Arc<rustls::ClientConfig>>,
     ) -> Result<Self, RlnSignerError> {
+        let bootstrap_request = crate::signer::proto::encode_signer_request(
+            &signer_external::contract::SignerRequest::Bootstrap,
+        )
+        .map_err(|e| RlnSignerError::Protocol(format!("encode bootstrap request: {e}")))?;
         let transport = Self {
             addr,
             tls,
             stream: std::sync::Mutex::new(None),
-            reconnected: Arc::new(tokio::sync::Notify::new()),
+            bootstrap_request,
+            link: Arc::new(SignerLinkWatch::new_connected()),
         };
-        // Establish eagerly so attach-time failures are surfaced immediately.
+        // Establish eagerly so attach-time failures are surfaced immediately. No handshake replay
+        // here: every attach flow probes `SignerRequest::Bootstrap` itself right after connecting.
         let stream = transport.new_stream()?;
         *transport.stream.lock().expect("stream lock") = Some(stream);
         Ok(transport)
@@ -97,22 +135,39 @@ impl DaemonEnvelopeTransport {
     /// One request/response over an established stream. `Ok(None)` = the daemon's 0-length handler-error
     /// sentinel (a valid response, not an IO failure — do NOT reconnect).
     fn framed_call(stream: &mut dyn ReadWrite, request: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
-        use std::io::{Read, Write};
-        stream.write_all(&(request.len() as u32).to_be_bytes())?;
-        stream.write_all(request)?;
-        stream.flush()?;
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf)?;
-        let len = u32::from_be_bytes(len_buf);
-        if len == 0 {
-            return Ok(None);
+        framing::write_frame(stream, request)?;
+        framing::read_frame(stream)
+    }
+
+    /// Establish a fresh connection and replay the Bootstrap handshake over it before anything else
+    /// is sent: a restarted daemon process starts with an uninitialized VLS handler stack (the
+    /// `HsmdInit2` init runs once per process), so without the replay every op after a daemon restart
+    /// would fail forever — the very restart the daemon's persisted state exists to absorb. On an
+    /// already-initialized daemon (the outage was on our side) the replay is an idempotent no-op.
+    fn reconnect(&self) -> Result<Box<dyn ReadWrite>, RlnSignerError> {
+        let mut stream = self.new_stream()?;
+        match Self::framed_call(stream.as_mut(), &self.bootstrap_request) {
+            Ok(Some(_)) => Ok(stream),
+            Ok(None) => Err(RlnSignerError::Transport(
+                "remote signer daemon rejected the bootstrap handshake replayed on reconnect"
+                    .into(),
+            )),
+            Err(e) => Err(RlnSignerError::Transport(format!(
+                "remote signer bootstrap replay on reconnect: {e}"
+            ))),
         }
-        let mut buf = vec![0u8; len as usize];
-        stream.read_exact(&mut buf)?;
-        Ok(Some(buf))
     }
 
     fn call_blocking(&self, request: &[u8]) -> Result<Vec<u8>, RlnSignerError> {
+        if request.len() > framing::MAX_FRAME_LEN as usize {
+            // Reject before touching the connection: the daemon would refuse the frame by dropping
+            // the socket, tearing down a perfectly good link and surfacing an opaque IO error.
+            return Err(RlnSignerError::Transport(format!(
+                "signer request of {} bytes exceeds the {} byte frame limit",
+                request.len(),
+                framing::MAX_FRAME_LEN
+            )));
+        }
         let mut guard = self
             .stream
             .lock()
@@ -123,12 +178,12 @@ impl DaemonEnvelopeTransport {
         let mut last_err: Option<RlnSignerError> = None;
         for _ in 0..2 {
             if guard.is_none() {
-                match self.new_stream() {
+                match self.reconnect() {
                     Ok(stream) => {
                         *guard = Some(stream);
                         // We were disconnected and just re-established the link: wake anything
                         // waiting to re-drive parked signer operations.
-                        self.reconnected.notify_one();
+                        self.link.mark_reconnected();
                     }
                     Err(e) => {
                         last_err = Some(e);
@@ -147,6 +202,7 @@ impl DaemonEnvelopeTransport {
                 Err(e) => {
                     // Broken connection: drop it so the next iteration reconnects.
                     *guard = None;
+                    self.link.mark_disconnected();
                     last_err = Some(RlnSignerError::Transport(format!("remote signer io: {e}")));
                 }
             }
@@ -166,21 +222,24 @@ impl DaemonEnvelopeTransport {
 
 impl ExternalSignerTransport for DaemonEnvelopeTransport {
     fn call(&self, request: &[u8]) -> Result<Vec<u8>, RlnSignerError> {
-        // LDK invokes signer calls synchronously, sometimes from a tokio worker thread (this node
-        // runs a multi-thread runtime). A round-trip here can block for up to `DAEMON_IO_TIMEOUT`
-        // (doubled by the reconnect-and-retry in `call_blocking`); without `block_in_place`, that
-        // would stall every other task scheduled on this worker for the same duration.
-        // `block_in_place` tells the runtime to move those tasks to another worker first. Only valid
-        // (and only needed) when actually on a runtime thread — e.g. not when called from the daemon
-        // binary's own plain OS threads in tests.
+        // LDK invokes signer calls synchronously, sometimes from a tokio worker thread. A round-trip
+        // here can block for up to `DAEMON_IO_TIMEOUT` (doubled by the reconnect-and-retry in
+        // `call_blocking`); without `block_in_place`, that would stall every other task scheduled on
+        // this worker for the same duration. `block_in_place` tells the runtime to move those tasks
+        // to another worker first. Only valid on a multi-thread runtime worker: it panics on a
+        // current_thread runtime (which a `NodeHandle` embedder may well be running us on — the
+        // runtime flavor is the caller's choice, not ours), and is neither valid nor needed on a
+        // plain OS thread (e.g. the daemon binary's own threads in tests).
         match tokio::runtime::Handle::try_current() {
-            Ok(_) => tokio::task::block_in_place(|| self.call_blocking(request)),
-            Err(_) => self.call_blocking(request),
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| self.call_blocking(request))
+            }
+            _ => self.call_blocking(request),
         }
     }
 
-    fn reconnect_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
-        Some(Arc::clone(&self.reconnected))
+    fn link_watch(&self) -> Option<Arc<SignerLinkWatch>> {
+        Some(Arc::clone(&self.link))
     }
 }
 
@@ -353,9 +412,9 @@ mod tests {
     }
 
     /// The event-driven half of the `signer_unblocked` resilience fix in `start_ldk`: a genuine
-    /// reconnect (recovering from a dropped connection, not the initial connect) must fire
-    /// `reconnect_notify()`'s notification, so a waiting task can react immediately instead of
-    /// waiting out a polling interval.
+    /// reconnect (recovering from a dropped connection, not the initial connect) must fire the
+    /// link watch's `changed()` signal with `is_connected` back to `true`, so a waiting task can
+    /// react immediately instead of waiting out a polling interval.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn daemon_transport_notifies_on_reconnect_after_blip() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -374,9 +433,9 @@ mod tests {
                 .expect("join blocking")
                 .expect("connect"),
         );
-        let notify = transport
-            .reconnect_notify()
-            .expect("remote transport must expose a reconnect notify");
+        let link = transport
+            .link_watch()
+            .expect("remote transport must expose a link watch");
         let req = encode_signer_request(&SignerRequest::Bootstrap).expect("encode bootstrap");
 
         // First call over the live connection — establishes a working link, no reconnect yet, so no
@@ -392,12 +451,15 @@ mod tests {
 
         transport.force_disconnect();
 
-        // `notify_one()` buffers a permit if called before anyone is waiting, so this is robust to
-        // whichever of these two tasks the scheduler runs first.
-        let wait_for_notify = tokio::spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
-                .await
-                .expect("reconnect notify did not fire within timeout")
+        // `mark_reconnected` buffers a permit if it fires before anyone is waiting, so this is
+        // robust to whichever of these two tasks the scheduler runs first.
+        let wait_for_notify = tokio::spawn({
+            let link = Arc::clone(&link);
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(5), link.changed())
+                    .await
+                    .expect("reconnect signal did not fire within timeout")
+            }
         });
 
         // The call that actually observes the dropped connection and reconnects.
@@ -408,6 +470,93 @@ mod tests {
             .expect("reconnect call failed");
 
         wait_for_notify.await.expect("notify task join");
+        assert!(link.is_connected(), "link must report connected again");
+    }
+
+    /// A daemon **process restart** must be absorbed transparently: the restarted daemon starts with
+    /// an uninitialized VLS handler stack (`HsmdInit2` runs once per process), so the transport's
+    /// reconnect path must replay the Bootstrap handshake before resending the pending envelope.
+    /// Without the replay, every op after a daemon restart fails forever — the exact outage the
+    /// daemon's persisted state exists to absorb. Ephemeral daemons keep this focused on the
+    /// transport's replay (a fresh signer over the same seed is exactly "uninitialized handler
+    /// stack"); state restoration across restarts is covered by
+    /// `daemon_restart_with_persistence_never_reissues_a_dbid`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn daemon_transport_replays_bootstrap_after_daemon_process_restart() {
+        use signer_external::contract::{NodeRequest, NodeResponse};
+
+        let seed = [21u8; 32];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let signer = std::sync::Arc::new(
+            super::daemon::DaemonSigner::new_ephemeral(seed, bitcoin::Network::Regtest, true)
+                .expect("daemon signer"),
+        );
+        let serve_task = tokio::spawn(super::daemon::serve(listener, signer, None));
+
+        let transport = Arc::new(
+            tokio::task::spawn_blocking(move || DaemonEnvelopeTransport::connect(addr, None))
+                .await
+                .expect("join blocking")
+                .expect("connect"),
+        );
+        // ECDH goes straight through the VLS root handler (no lazy xpub fetch that would initialize
+        // the handler stack as a side effect), so it only succeeds on an initialized daemon —
+        // exactly what makes it prove the handshake replay happened.
+        let peer_key = bitcoin::secp256k1::SecretKey::from_slice(&[3u8; 32])
+            .expect("secret key")
+            .public_key(&bitcoin::secp256k1::Secp256k1::new());
+        let node_op = encode_signer_request(&SignerRequest::Node(NodeRequest::Ecdh {
+            recipient: "node".to_string(),
+            other_key: peer_key.to_string(),
+            tweak: None,
+        }))
+        .expect("encode node op");
+
+        // Normal session: bootstrap (as every attach flow does), then a node op that requires the
+        // initialized root handler.
+        {
+            let transport = Arc::clone(&transport);
+            let node_op = node_op.clone();
+            tokio::task::spawn_blocking(move || {
+                let bootstrap =
+                    encode_signer_request(&SignerRequest::Bootstrap).expect("encode bootstrap");
+                transport.call(&bootstrap).expect("bootstrap");
+                transport.call(&node_op).expect("node op before restart");
+            })
+            .await
+            .expect("join blocking");
+        }
+
+        // "Restart" the daemon process: drop the node's connection, stop the old serve loop, and
+        // bring up a fresh daemon (uninitialized VLS handler stack) over the same seed and address.
+        transport.force_disconnect();
+        serve_task.abort();
+        let _ = serve_task.await;
+        let listener = tokio::net::TcpListener::bind(addr).await.expect("rebind");
+        let signer = std::sync::Arc::new(
+            super::daemon::DaemonSigner::new_ephemeral(seed, bitcoin::Network::Regtest, true)
+                .expect("restarted daemon signer"),
+        );
+        tokio::spawn(super::daemon::serve(listener, signer, None));
+
+        // The very next op must succeed: reconnect + Bootstrap handshake replay, then the envelope.
+        let reply = tokio::task::spawn_blocking({
+            let transport = Arc::clone(&transport);
+            move || transport.call(&node_op)
+        })
+        .await
+        .expect("join blocking")
+        .expect("node op after daemon restart");
+        match decode_signer_response(&reply).expect("decode") {
+            SignerResponse::Node(NodeResponse::Ecdh { shared_secret_hex }) => {
+                assert_eq!(shared_secret_hex.len(), 64, "not a 32-byte shared secret")
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     /// Restart safety: VLS derives each channel's keys from `seed + dbid`, so a dbid must never be
@@ -487,24 +636,22 @@ mod tests {
     /// pinned by the blocking TCP read.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn daemon_transport_call_does_not_starve_other_tasks_on_single_worker() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        // A raw stub daemon: reads one length-prefixed frame, sleeps (simulating a slow daemon under
-        // load), then replies with the 0-length handler-error sentinel.
+        // A raw stub daemon: reads one frame, sleeps (simulating a slow daemon under load), then
+        // replies with the 0-length handler-error sentinel.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await.expect("read len");
-            let len = u32::from_be_bytes(len_buf) as usize;
-            let mut buf = vec![0u8; len];
-            stream.read_exact(&mut buf).await.expect("read body");
+            framing::read_frame_async(&mut stream)
+                .await
+                .expect("read frame")
+                .expect("open frame");
             tokio::time::sleep(Duration::from_millis(300)).await;
-            stream.write_u32(0).await.expect("write reply len");
-            stream.flush().await.expect("flush");
+            framing::write_frame_async(&mut stream, &[])
+                .await
+                .expect("write handler-error sentinel");
         });
 
         let transport = DaemonEnvelopeTransport::connect(addr, None).expect("connect");

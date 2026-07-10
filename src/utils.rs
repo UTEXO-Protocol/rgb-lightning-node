@@ -41,7 +41,7 @@ use crate::core_types::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT, VIRTUAL_
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::signer::{
-    read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment, KeySourceFile,
+    read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment,
     RlnEntropySource,
 };
 use crate::{
@@ -383,19 +383,13 @@ impl Writeable for UserOnionMessageContents {
     }
 }
 
-/// Read `key_source.json` if external-signer mode has been configured, `None` otherwise. Callers that
-/// only need presence (not the parsed value) should use [`is_external_signer_mode_configured`]
-/// instead — this exists so callers that need the value too (e.g. `unlock`) don't have to read the
-/// file a second time just to get what the presence check already parsed.
-pub(crate) fn read_external_signer_key_source(
-    state: &Arc<AppState>,
-) -> Result<Option<KeySourceFile>, APIError> {
-    read_key_source_file(&state.static_state.storage_dir_path)
-        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))
-}
-
+/// Whether external-signer mode has been configured (a `key_source.json` exists in the storage
+/// dir). Presence-only by design: the parsed contents are validated where they are actually
+/// consumed, inside `start_ldk`.
 pub(crate) fn is_external_signer_mode_configured(state: &Arc<AppState>) -> Result<bool, APIError> {
-    Ok(read_external_signer_key_source(state)?.is_some())
+    Ok(read_key_source_file(&state.static_state.storage_dir_path)
+        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
+        .is_some())
 }
 
 pub(crate) fn check_already_initialized(database: &DatabaseConnection) -> Result<(), APIError> {

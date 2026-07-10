@@ -3670,7 +3670,7 @@ pub(crate) async fn start_ldk(
         external_bootstrap,
         external_signer,
         external_node_id,
-        external_signer_reconnect_notify,
+        external_signer_link_watch,
     ) = match key_source {
         NodeKeySource::InternalMnemonic(mnemonic) => {
             (Some(mnemonic), false, None, None, None, None)
@@ -3679,7 +3679,7 @@ pub(crate) async fn start_ldk(
             // Grab this before the transport is wrapped into `ExternalSigner` below: `Some` only for
             // transports that can genuinely go unreachable and recover (the remote-signer daemon
             // link), `None` for e.g. an in-process uniffi signer that can never be unreachable.
-            let reconnect_notify = external.signer_attachment.transport.reconnect_notify();
+            let link_watch = external.signer_attachment.transport.link_watch();
             let signer = ExternalSigner::from_attachment(&external.signer_attachment)
                 .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
             let bootstrap = external.signer_attachment.bootstrap.clone();
@@ -3706,7 +3706,7 @@ pub(crate) async fn start_ldk(
                 Some(bootstrap),
                 Some(Arc::new(signer)),
                 external_node_id,
-                reconnect_notify,
+                link_watch,
             )
         }
     };
@@ -5061,37 +5061,66 @@ pub(crate) async fn start_ldk(
 
     // Remote external signer force-close resilience. When the signer daemon is briefly unreachable, a
     // channel signing call returns LDK's async-unavailable sentinel (`Err(())`) and the operation parks
-    // instead of failing the channel. Periodically drive `signer_unblocked` so parked operations retry
-    // — which is what makes the transport actually attempt to reconnect, since nothing else calls it
-    // while everything is parked; `signer_unblocked(None)` is a cheap no-op when nothing is pending.
+    // instead of failing the channel. While an outage is outstanding, periodically drive
+    // `signer_unblocked` so parked operations retry — which is what makes the transport actually
+    // attempt to reconnect, since nothing else calls it while everything is parked.
     //
     // Only spawned when the transport can genuinely go unreachable and recover
-    // (`external_signer_reconnect_notify` is `Some` only for the remote-signer daemon link — an
-    // in-process uniffi signer can never be unreachable). Without this gate, `signer_unblocked` walks
-    // every peer's channel map under `total_consistency_lock` and unconditionally forces a
-    // `ChannelManager` re-persist on every tick, for a signer that would never have anything to
-    // unblock — pure waste for the node's whole lifetime.
+    // (`external_signer_link_watch` is `Some` only for the remote-signer daemon link — an in-process
+    // uniffi signer can never be unreachable), and only ticking while the link is actually down:
+    // `signer_unblocked(None)` is NOT a cheap no-op — it walks every peer's channel map under
+    // `total_consistency_lock` and unconditionally forces a `ChannelManager` re-persist — so a
+    // healthy node must not pay it every few seconds forever.
     //
-    // Reacts immediately when the transport actually reconnects (via `reconnect_notify`) instead of
-    // waiting up to the full tick interval; the interval itself remains as the backstop that drives
-    // the retry attempts in the first place.
-    if let Some(reconnect_notify) = external_signer_reconnect_notify {
+    // The link watch is state-based (see `SignerLinkWatch`): every wake-up re-checks `is_connected`
+    // rather than trusting the wake-up itself, so buffered/spurious signals only ever cost one extra
+    // `signer_unblocked` pass, never a stuck loop.
+    if let Some(link) = external_signer_link_watch {
         let su_channel_manager = Arc::clone(&channel_manager);
         let su_chain_monitor = Arc::clone(&chain_monitor);
         let su_stop = Arc::clone(&stop_processing);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tokio::select! {
-                    _ = interval.tick() => {}
-                    _ = reconnect_notify.notified() => {}
-                }
+                // Healthy: idle until the link reports a change (with a coarse timer only to notice
+                // node shutdown — it drives no signer work).
+                let link_event = tokio::select! {
+                    _ = link.changed() => true,
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => false,
+                };
                 if su_stop.load(Ordering::Acquire) {
                     return;
                 }
-                su_chain_monitor.signer_unblocked(None);
-                su_channel_manager.signer_unblocked(None);
+                if link_event && link.is_connected() {
+                    // The link dropped and recovered while we slept: one pass covers anything that
+                    // parked in between.
+                    su_chain_monitor.signer_unblocked(None);
+                    su_channel_manager.signer_unblocked(None);
+                    continue;
+                }
+                if link.is_connected() {
+                    continue;
+                }
+                // Outage: drive retries until the transport reports the link is back, then one final
+                // pass for anything that parked right around the transition. Reacts immediately to
+                // the reconnect signal instead of waiting out the tick interval; the interval is the
+                // backstop that drives the reconnect attempts in the first place (its first tick
+                // completes immediately).
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = link.changed() => {}
+                    }
+                    if su_stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    su_chain_monitor.signer_unblocked(None);
+                    su_channel_manager.signer_unblocked(None);
+                    if link.is_connected() {
+                        break;
+                    }
+                }
             }
         });
     }

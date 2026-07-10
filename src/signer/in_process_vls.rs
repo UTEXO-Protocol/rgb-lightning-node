@@ -6,9 +6,16 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use bitcoin::hex::{DisplayHex, FromHex};
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::Network;
+use signer_external::contract::{
+    ChannelOp, ChannelRequest, ChannelResponse, ExternalSignerBackend, SignerRequest,
+    SignerResponse,
+};
+use signer_external::vls_adapter::vls_real::RealVlsClient;
+use signer_external::vls_adapter::VlsSignerAdapter;
 use vls_protocol::msgs;
 use vls_protocol_client::{Error as VlsClientError, Transport};
 use vls_protocol_signer::approver::WarningPositiveApprover;
@@ -185,31 +192,107 @@ impl InProcessVlsTransport {
     }
 
     /// Pre-setup `GetPerCommitmentPoint` may arrive before `SetupChannel` on an inbound open;
-    /// synthesize it from the channel stub so those still work. Shared by the uniffi in-process signer
-    /// and the remote-signer daemon (both need the identical dbid-parse + response-shape). `None` if
-    /// `request` isn't a `GetPerCommitmentPoint` op, `channel_keys_id_hex` is malformed, or no
-    /// matching stub/channel exists — callers treat that as "no fallback available".
-    pub(crate) fn fallback_for(
+    /// synthesize it from the channel stub so those still work. `None` if `channel_keys_id_hex` is
+    /// malformed or no matching stub/channel exists — callers treat that as "no fallback available".
+    fn per_commitment_point_fallback(
         &self,
-        request: &signer_external::contract::SignerRequest,
-    ) -> Option<signer_external::contract::SignerResponse> {
-        use signer_external::contract::{
-            ChannelOp, ChannelRequest, ChannelResponse, SignerRequest,
-        };
-
-        let SignerRequest::Channel(ChannelRequest::Op {
-            channel_keys_id_hex,
-            op: ChannelOp::GetPerCommitmentPoint { idx },
-        }) = request
-        else {
-            return None;
-        };
+        channel_keys_id_hex: &str,
+        idx: u64,
+    ) -> Option<SignerResponse> {
         let dbid = dbid_from_channel_keys_id_hex(channel_keys_id_hex)?;
-        let point_hex = self.synthesize_stub_commitment_point(dbid, *idx)?;
-        Some(signer_external::contract::SignerResponse::Channel(
+        let point_hex = self.synthesize_stub_commitment_point(dbid, idx)?;
+        Some(SignerResponse::Channel(
             ChannelResponse::PerCommitmentPoint { point_hex },
         ))
     }
+}
+
+/// Build the complete in-process signer stack over `persister`: the [`InProcessVlsTransport`] plus
+/// the [`ExternalSignerBackend`] wired through `RealVlsClient` with the transport's dbid high-water
+/// mark. The single construction site shared by the remote-signer daemon and the uniffi in-process
+/// signer — the `initial_next_dbid` threading is safety-critical (a copy that dropped it would
+/// reissue dbids and hand a new channel an existing channel's revocable keys), so it must not be
+/// hand-wired per caller.
+pub(crate) fn build_backend(
+    network: Network,
+    seed: [u8; 32],
+    permissive_policy: bool,
+    persister: Arc<dyn Persist>,
+) -> anyhow::Result<(Arc<dyn ExternalSignerBackend>, Arc<InProcessVlsTransport>)> {
+    let transport = Arc::new(InProcessVlsTransport::new(
+        network,
+        seed,
+        permissive_policy,
+        persister,
+    )?);
+    let backend: Arc<dyn ExternalSignerBackend> = Arc::new(VlsSignerAdapter::new(
+        RealVlsClient::new_with_network_seed_and_next_dbid(
+            transport.clone(),
+            network.to_string(),
+            Some(seed),
+            transport.initial_next_dbid(),
+        ),
+    ));
+    Ok((backend, transport))
+}
+
+/// [`build_backend`] over a [`DummyPersister`]: no on-disk state — see
+/// [`InProcessVlsTransport::new_ephemeral`] for when that is (and is not) appropriate.
+pub(crate) fn build_backend_ephemeral(
+    network: Network,
+    seed: [u8; 32],
+    permissive_policy: bool,
+) -> anyhow::Result<(Arc<dyn ExternalSignerBackend>, Arc<InProcessVlsTransport>)> {
+    build_backend(
+        network,
+        seed,
+        permissive_policy,
+        Arc::new(DummyPersister {}),
+    )
+}
+
+/// Handle one RLN signer envelope (protobuf request bytes → response envelope bytes): decode →
+/// backend call → (on a backend error) the pre-`SetupChannel` per-commitment-point fallback →
+/// encode. The single envelope pipeline shared by the remote-signer daemon and the uniffi in-process
+/// signer, so the fallback dispatch and error mapping cannot drift between the two.
+pub(crate) fn handle_envelope(
+    backend: &dyn ExternalSignerBackend,
+    transport: &InProcessVlsTransport,
+    request: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let signer_request =
+        crate::signer::proto::decode_signer_request(request).context("decode signer request")?;
+    // Extracted up front (a few bytes) so the request itself can be passed to the backend by value
+    // without cloning — RGB PSBT sign requests can be megabytes.
+    let fallback_params = fallback_params(&signer_request);
+    let signer_response = match backend.call(signer_request) {
+        Ok(response) => response,
+        Err(e) => fallback_params
+            .and_then(|(channel_keys_id_hex, idx)| {
+                transport.per_commitment_point_fallback(&channel_keys_id_hex, idx)
+            })
+            .inspect(|fallback| {
+                tracing::debug!(?fallback, "external signer backend fallback response");
+            })
+            .ok_or_else(|| anyhow::anyhow!("backend call failed: {e:?}"))?,
+    };
+    crate::signer::proto::encode_signer_response(&signer_response).context("encode signer response")
+}
+
+/// The `(channel_keys_id_hex, idx)` a [`handle_envelope`] fallback would need — `Some` only for the
+/// pre-setup `GetPerCommitmentPoint` op, the one request [`per_commitment_point_fallback`] can
+/// answer.
+///
+/// [`per_commitment_point_fallback`]: InProcessVlsTransport::per_commitment_point_fallback
+fn fallback_params(request: &SignerRequest) -> Option<(String, u64)> {
+    let SignerRequest::Channel(ChannelRequest::Op {
+        channel_keys_id_hex,
+        op: ChannelOp::GetPerCommitmentPoint { idx },
+    }) = request
+    else {
+        return None;
+    };
+    Some((channel_keys_id_hex.clone(), *idx))
 }
 
 /// Parse a 32-byte `channel_keys_id_hex` (dbid encoded big-endian in the first 8 bytes) back into the
@@ -235,11 +318,23 @@ fn secp256k1_all() -> &'static Secp256k1<bitcoin::secp256k1::All> {
 
 impl Transport for InProcessVlsTransport {
     fn node_call(&self, message: Vec<u8>) -> Result<Vec<u8>, VlsClientError> {
-        let msg_name = msgs::message_name_from_vec(&message);
         let msg = msgs::from_vec(message).map_err(VlsClientError::Protocol)?;
+        let is_hsmd_init2 = matches!(msg, msgs::Message::HsmdInit2(_));
         let mut state = self.state.lock().map_err(|_| VlsClientError::Transport)?;
 
         if state.root_handler.is_none() {
+            // Only init-phase messages may reach the `InitHandler`: vls-protocol-signer's handler
+            // ends in `unimplemented!()` for anything else, which would panic while the state Mutex
+            // is held and poison it — wedging every later call on every connection. A non-init
+            // message here means the caller skipped the Bootstrap handshake (e.g. a node talking to
+            // a restarted daemon without replaying it); reject the one call instead of taking the
+            // whole signer down.
+            if !matches!(
+                msg,
+                msgs::Message::Ping(_) | msgs::Message::HsmdInit(_) | msgs::Message::HsmdInit2(_)
+            ) {
+                return Err(VlsClientError::Transport);
+            }
             let init = state
                 .init_handler
                 .as_mut()
@@ -247,7 +342,7 @@ impl Transport for InProcessVlsTransport {
             let (done, reply_opt) = init.handle(msg).map_err(|_| VlsClientError::Transport)?;
             let reply = reply_opt.ok_or(VlsClientError::Transport)?;
             let reply_vec = reply.as_vec();
-            if msg_name == "HsmdInit2" {
+            if is_hsmd_init2 {
                 state.cached_hsmd_init2_reply = Some(reply_vec.clone());
             }
             if done {
@@ -257,7 +352,7 @@ impl Transport for InProcessVlsTransport {
             return Ok(reply_vec);
         }
 
-        if msg_name == "HsmdInit2" {
+        if is_hsmd_init2 {
             return state
                 .cached_hsmd_init2_reply
                 .clone()
@@ -269,6 +364,9 @@ impl Transport for InProcessVlsTransport {
             .as_ref()
             .cloned()
             .ok_or(VlsClientError::Transport)?;
+        // The handler work only needs the (cloned) root handler, not the transport state; release
+        // the lock so concurrent node calls don't serialize behind it.
+        drop(state);
         let reply = root.handle(msg).map_err(|_| VlsClientError::Transport)?;
         Ok(reply.as_vec())
     }
@@ -279,7 +377,6 @@ impl Transport for InProcessVlsTransport {
         peer_id: vls_protocol::model::PubKey,
         message: Vec<u8>,
     ) -> Result<Vec<u8>, VlsClientError> {
-        let msg_name = msgs::message_name_from_vec(&message);
         let msg = msgs::from_vec(message).map_err(VlsClientError::Protocol)?;
         let mut state = self.state.lock().map_err(|_| VlsClientError::Transport)?;
         let root = state
@@ -288,7 +385,11 @@ impl Transport for InProcessVlsTransport {
             .cloned()
             .ok_or(VlsClientError::Transport)?;
 
-        if matches!(msg_name.as_str(), "NewChannel" | "GetChannelBasepoints") {
+        if matches!(
+            msg,
+            msgs::Message::NewChannel(_) | msgs::Message::GetChannelBasepoints(_)
+        ) {
+            drop(state);
             let reply = root.handle(msg).map_err(|_| VlsClientError::Transport)?;
             return Ok(reply.as_vec());
         }
