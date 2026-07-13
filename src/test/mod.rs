@@ -2985,3 +2985,5 @@ mod vanilla_payment_on_rgb_channel;
 mod virtual_channels;
 #[cfg(feature = "vss")]
 mod vss;
+#[cfg(feature = "vss")]
+mod vss_offline_force_close;

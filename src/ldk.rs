@@ -4931,6 +4931,8 @@ pub(crate) async fn start_ldk(
         async_order_handler,
         async_payments_preimage_root,
         kv_store: Arc::clone(&kv_store),
+        #[cfg(feature = "vss")]
+        monitor_kv_store: Arc::clone(&monitor_kv_store),
         bump_tx_event_handler,
         rgb_wallet_wrapper,
         maker_swaps,
@@ -5208,12 +5210,21 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
     // /vssclearfence. Hard kills still leave the fence behind by design.
     #[cfg(feature = "vss")]
     {
-        let kv_store = app_state
+        let stores = app_state
             .get_unlocked_app_state()
             .await
             .as_ref()
-            .map(|unlocked| Arc::clone(&unlocked.kv_store));
-        if let Some(kv_store) = kv_store {
+            .map(|unlocked| {
+                (
+                    Arc::clone(&unlocked.kv_store),
+                    Arc::clone(&unlocked.monitor_kv_store),
+                )
+            });
+        if let Some((kv_store, monitor_kv_store)) = stores {
+            // Abort outage-pending monitor writes before giving up the fence:
+            // a retry landing after another instance owns the store would
+            // corrupt its state.
+            monitor_kv_store.stop();
             match tokio::task::spawn_blocking(move || kv_store.release_vss_fence_if_owned()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {

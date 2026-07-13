@@ -92,10 +92,12 @@ mod tests {
         assert_eq!(store.read(ns, sub, key).await.expect("read"), data);
     }
 
-    /// If the VSS write fails, the whole write must resolve `Err` — never a
-    /// silent local-only `Ok`. The local store must be left untouched.
+    /// While VSS is unreachable a write must neither resolve nor mirror
+    /// locally — never a silent local-only `Ok`. It keeps retrying until
+    /// [`RemoteFirstKvStore::stop`] aborts it at node teardown, at which point
+    /// it resolves `Err` with the local store still untouched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn remote_first_write_fails_when_vss_unreachable() {
+    async fn remote_first_write_pends_when_vss_unreachable() {
         let (signing_key, store_id) = generate_test_keys();
         let local = Arc::new(SeaOrmKvStore::from_connection(create_test_sqlite()));
         // Point the remote at a closed port so every VSS write errors.
@@ -107,17 +109,33 @@ mod tests {
 
         let (ns, sub, key) = ("monitors", "", "chan1");
 
-        let err = store
-            .write(ns, sub, key, b"should-not-persist".to_vec())
-            .await
-            .expect_err("write must fail when VSS is unreachable");
-        eprintln!("expected write failure: {err}");
+        let mut write = std::pin::pin!(store.write(ns, sub, key, b"should-not-persist".to_vec()));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), write.as_mut())
+                .await
+                .is_err(),
+            "write must stay pending (retrying) while VSS is unreachable"
+        );
 
-        // No silent local-only write: local must still be empty for this key.
+        // No silent local-only write while the retry loop runs.
         let local_read = KVStoreSync::read(&*local, ns, sub, key);
         assert!(
             matches!(&local_read, Err(e) if e.kind() == bitcoin::io::ErrorKind::NotFound),
-            "local store must not contain the key after a failed remote-first write, got {local_read:?}"
+            "local store must not contain the key while the VSS write is pending, got {local_read:?}"
+        );
+
+        // Node teardown aborts the retry loop and the write resolves Err.
+        store.stop();
+        let err = tokio::time::timeout(Duration::from_secs(15), write)
+            .await
+            .expect("write must resolve once stop() aborts the retries")
+            .expect_err("write must fail once retries are aborted");
+        eprintln!("expected write failure: {err}");
+
+        let local_read = KVStoreSync::read(&*local, ns, sub, key);
+        assert!(
+            matches!(&local_read, Err(e) if e.kind() == bitcoin::io::ErrorKind::NotFound),
+            "local store must not contain the key after an aborted remote-first write, got {local_read:?}"
         );
     }
 }

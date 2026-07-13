@@ -35,6 +35,34 @@ static VSS_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::La
 /// means the key disappeared between list and get (race; benign).
 type FetchResult = Result<Option<(String, Vec<u8>)>, VssError>;
 
+/// Whether a VSS failure is worth retrying: transport failures (connection
+/// refused/timeouts surface as `InternalError`) and server 5xx. Auth,
+/// bad-request and version-conflict errors are permanent.
+fn is_transient_vss_error(e: &VssError) -> bool {
+    matches!(
+        e,
+        VssError::InternalServerError(_) | VssError::InternalError(_)
+    )
+}
+
+/// Maps a `VssError` to `io::Error`, encoding transience in the kind so
+/// callers (see `RemoteFirstKvStore`) can decide whether to retry.
+/// [`is_transient_io_error`] is the matching decoder.
+fn vss_err_to_io(e: VssError, msg: String) -> io::Error {
+    let kind = if is_transient_vss_error(&e) {
+        io::ErrorKind::TimedOut
+    } else {
+        io::ErrorKind::Other
+    };
+    io::Error::new(kind, msg)
+}
+
+/// True when the error came from a VSS outage (see [`vss_err_to_io`]) rather
+/// than a permanent failure.
+pub(crate) fn is_transient_io_error(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::TimedOut
+}
+
 /// HKDF info tag used to derive this KV stream's per-value encryption key.
 /// Domain-separates it from rgb-lib's wallet-backup stream so the two derived
 /// keys are distinct even when the signing key and salt happen to match.
@@ -452,7 +480,8 @@ impl VssKvStore {
         };
         self.client.put_object(&request).await.map_err(|e| {
             tracing::error!(vss_key, error = %e, "VssKvStore write_async failed");
-            io::Error::new(io::ErrorKind::Other, format!("VSS write failed: {e}"))
+            let msg = format!("VSS write failed: {e}");
+            vss_err_to_io(e, msg)
         })?;
         Ok(())
     }
@@ -477,7 +506,8 @@ impl VssKvStore {
         };
         self.client.put_object(&request).await.map_err(|e| {
             tracing::error!(vss_key, error = %e, "VssKvStore remove_async failed");
-            io::Error::new(io::ErrorKind::Other, format!("VSS remove failed: {e}"))
+            let msg = format!("VSS remove failed: {e}");
+            vss_err_to_io(e, msg)
         })?;
         Ok(())
     }

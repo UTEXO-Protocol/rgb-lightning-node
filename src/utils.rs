@@ -170,6 +170,8 @@ pub(crate) struct UnlockedAppState {
     pub(crate) async_order_handler: Arc<AsyncOrderMessageHandler>,
     pub(crate) async_payments_preimage_root: Arc<AsyncPaymentsPreimageRoot>,
     pub(crate) kv_store: Arc<SyncedKvStore>,
+    #[cfg(feature = "vss")]
+    pub(crate) monitor_kv_store: Arc<crate::async_kv_store::RemoteFirstKvStore>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,
