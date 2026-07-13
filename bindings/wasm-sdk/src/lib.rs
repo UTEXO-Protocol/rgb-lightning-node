@@ -37,6 +37,8 @@ mod swap_runtime;
 #[cfg(test)]
 #[path = "tests/test_utils.rs"]
 mod test_utils;
+mod vss_kv_store;
+mod vss_replicator;
 mod wasm_node_persistence;
 mod wasm_runtime_paths;
 // Prefer `crate::prelude::*` for downstream imports. Keep module paths stable for now.

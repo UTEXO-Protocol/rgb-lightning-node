@@ -379,6 +379,8 @@ fn hook_payload_transport_event_updates_native_channel_state() {
                 asset_id: None,
                 asset_local_amount: None,
                 virtual_open_mode: None,
+                outbound_msat: 0,
+                next_outbound_htlc_limit_msat: 0,
             },
         },
     );
@@ -429,6 +431,8 @@ fn hook_payload_transport_event_updates_bridge_runtime_state() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     apply_runtime_hook_payload(
@@ -913,6 +917,8 @@ fn hook_payload_mixed_stream_preserves_event_order_and_terminal_payment_state_co
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
     node.ldk_runtime.upsert_payment(LdkRuntimePaymentStateData {
         amt_msat: Some(SDK_HTLC_MIN_MSAT),
@@ -1193,6 +1199,8 @@ fn bridge_backend_channel_views_use_runtime_state_contract() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     let channels_js = node.list_channels_value().expect("list channels");
@@ -1348,6 +1356,8 @@ fn bridge_backend_disconnect_peer_without_local_session_contract() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     block_on(node.disconnect_peer(pubkey.to_string())).expect("disconnect should succeed");
@@ -1394,6 +1404,8 @@ fn bridge_backend_close_all_peers_clears_runtime_peers_without_sessions_contract
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
     }
 
@@ -1430,6 +1442,8 @@ fn bridge_backend_runtime_state_restores_across_node_instances_contract() {
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
     node_a
         .ldk_runtime
@@ -1671,8 +1685,9 @@ fn wasm_two_node_handles_same_proxy_distinct_runtime_ids_contract() {
     crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.runtime-id-isolation.example".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
-        .expect("node A should build");
+    let node_a =
+        RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
+            .expect("node A should build");
     let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()), None)
         .expect("node B should build");
 
@@ -1703,8 +1718,9 @@ fn wasm_signing_identity_differs_by_runtime_id_contract() {
     crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.signing-identity-runtime-id.example".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
-        .expect("node A should build");
+    let node_a =
+        RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
+            .expect("node A should build");
     let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()), None)
         .expect("node B should build");
 
@@ -1754,8 +1770,9 @@ fn wasm_channel_payment_state_does_not_cross_runtime_ids_contract() {
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
-        .expect("node A should build");
+    let node_a =
+        RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
+            .expect("node A should build");
     let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()), None)
         .expect("node B should build");
 
@@ -2050,6 +2067,8 @@ fn channel_transport_events_update_node_channel_state_and_logs() {
                 asset_id: None,
                 asset_local_amount: None,
                 virtual_open_mode: None,
+                outbound_msat: 0,
+                next_outbound_htlc_limit_msat: 0,
             },
         },
     );
@@ -2132,6 +2151,8 @@ fn peer_disconnected_event_cleans_stale_channels_without_peer_entry() {
                 asset_id: None,
                 asset_local_amount: None,
                 virtual_open_mode: None,
+                outbound_msat: 0,
+                next_outbound_htlc_limit_msat: 0,
             },
         },
     );
@@ -2224,6 +2245,8 @@ fn ingest_runtime_transport_event_value_applies_and_returns_contract_data() {
                 asset_id: None,
                 asset_local_amount: None,
                 virtual_open_mode: None,
+                outbound_msat: 0,
+                next_outbound_htlc_limit_msat: 0,
             },
         },
     );
@@ -2266,6 +2289,8 @@ fn ingest_runtime_transport_event_json_returns_json_payload() {
                 asset_id: None,
                 asset_local_amount: None,
                 virtual_open_mode: None,
+                outbound_msat: 0,
+                next_outbound_htlc_limit_msat: 0,
             },
         },
     );
@@ -3674,6 +3699,8 @@ fn bridge_send_payment_on_usable_channel_finalizes_via_runtime_channel_payment_e
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
 
     let send_js = sender
@@ -3766,6 +3793,8 @@ fn bridge_send_payment_propagates_receiver_terminal_status_and_rgb_transfer_cont
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
 
     let send_js = sender
@@ -3911,6 +3940,8 @@ fn close_channel_regular_coop_and_force_contracts() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
     node.close_channel_with_options(
         "chan-close-regular-1".to_string(),
@@ -3937,6 +3968,8 @@ fn close_channel_regular_coop_and_force_contracts() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
     node.close_channel_with_options("chan-close-regular-2".to_string(), Some(peer_pubkey), true)
         .expect("regular force close");
@@ -3977,6 +4010,8 @@ fn close_channel_regular_coop_persists_across_node_recreation_contract() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     node.close_channel_with_options("chan-close-restart-1".to_string(), Some(peer_pubkey), false)
@@ -4042,6 +4077,8 @@ fn close_channel_regular_force_records_channel_closed_sequence_contract() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     node.close_channel_with_options(channel_id, Some(peer_pubkey), true)
@@ -4104,6 +4141,8 @@ fn close_channel_counterparty_event_persists_across_node_recreation_contract() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     let closed_payload_hex = hex::encode("channel_closed:chan-close-counterparty-1");
@@ -4175,6 +4214,8 @@ fn close_channel_force_after_restart_records_sequence_contract() {
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
     let usable_payload_hex = hex::encode(format!("channel_usable:{channel_id}"));
     first
@@ -4293,6 +4334,8 @@ fn multi_hop_route_without_direct_payee_finalizes_via_runtime_routed_engine_cont
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
 
     let send_js = sender
@@ -4401,6 +4444,8 @@ fn multi_hop_route_prefers_direct_usable_channel_over_routed_engine_contract() {
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
     if recovered_payee_pubkey != payee_pubkey {
         sender.test_upsert_runtime_peer(
@@ -4423,6 +4468,8 @@ fn multi_hop_route_prefers_direct_usable_channel_over_routed_engine_contract() {
                 asset_id: None,
                 asset_local_amount: None,
                 virtual_open_mode: None,
+                outbound_msat: 0,
+                next_outbound_htlc_limit_msat: 0,
             });
     }
     sender.test_upsert_runtime_peer(relay_pubkey.clone(), "127.0.0.1:9736".to_string(), true);
@@ -4441,6 +4488,8 @@ fn multi_hop_route_prefers_direct_usable_channel_over_routed_engine_contract() {
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
 
     let send_js = sender
@@ -4555,6 +4604,8 @@ fn multi_hop_route_requires_pending_receiver_invoice_contract() {
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
     assert!(
         sender.ldk_runtime.get_peer(&payee_pubkey).is_none(),
@@ -4667,6 +4718,8 @@ fn vanilla_payment_on_rgb_channel_success_path_contract() {
             asset_id: Some("rgb:VanillaOverRgbParity-1".to_string()),
             asset_local_amount: Some(100),
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         });
     if recovered_payee_pubkey != payee_pubkey {
         sender.test_upsert_runtime_peer(
@@ -4689,6 +4742,8 @@ fn vanilla_payment_on_rgb_channel_success_path_contract() {
                 asset_id: Some("rgb:VanillaOverRgbParity-1".to_string()),
                 asset_local_amount: Some(100),
                 virtual_open_mode: None,
+                outbound_msat: 0,
+                next_outbound_htlc_limit_msat: 0,
             });
     }
     let channels_js = sender.list_channels_value().expect("list sender channels");
@@ -6898,6 +6953,8 @@ fn list_channels_merges_runtime_metadata_from_local_cache_contract() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     };
     node.channels.borrow_mut().insert(
         channel.channel_id.clone(),
@@ -6918,6 +6975,8 @@ fn list_channels_merges_runtime_metadata_from_local_cache_contract() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     let channels_js = node.list_channels_value().expect("list channels");

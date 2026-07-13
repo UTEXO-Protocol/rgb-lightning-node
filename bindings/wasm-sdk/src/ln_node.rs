@@ -5268,12 +5268,131 @@ impl RlnWasmNode {
     }
 }
 
+#[wasm_bindgen]
+impl RlnWasmNode {
+    /// Enable remote VSS replication of this node's state — LDK snapshots (channel
+    /// monitors, channel manager, network graph, scorer) plus the RGB KV store
+    /// (per-channel `RgbInfo`, payment/transfer info, consignments) — the WASM
+    /// counterpart of the native node's VSS KV replication. Best-effort: local
+    /// browser persistence stays the durability ack gate; VSS mirrors in the
+    /// background.
+    ///
+    /// Reuses the same VSS `server_url` + `signing_key` as the wallet backup, but
+    /// targets a **distinct** store id (`{store_id}-ldk`) so the LDK stream can never
+    /// collide with the wallet-backup stream. Call this **before** starting the node's
+    /// runtime: it also performs a one-time fresh-load restore (guarded — it will not
+    /// clobber a populated local store) so a fresh device recovers its channels from
+    /// VSS before the LDK object graph is built. Returns the number of keys restored.
+    #[wasm_bindgen(js_name = configureLdkVssReplication)]
+    pub async fn configure_ldk_vss_replication(
+        &self,
+        server_url: String,
+        store_id: String,
+        signing_key_hex: String,
+    ) -> Result<u32, JsValue> {
+        let signing_key =
+            crate::vss_kv_store::parse_vss_config(&server_url, &store_id, &signing_key_hex)?;
+
+        // Distinct keyspace for the LDK stream (belt-and-suspenders on top of the
+        // HKDF domain-separation the store already applies).
+        let ldk_store_id = format!("{}-ldk", store_id.trim());
+        let runtime_key = self.runtime_manager_key();
+
+        // Fencing id: stable per (browser, node) and persisted in localStorage, so a
+        // reloaded/crashed tab re-acquires its own fence instead of locking itself
+        // out of its own VSS store.
+        let instance_id = crate::vss_replicator::persistent_instance_id(&runtime_key)?;
+
+        // Same-origin guard: refuse if another tab in this browser is already the
+        // writer for this node (both tabs share one origin + localStorage + fence id).
+        let lock_name = crate::vss_replicator::web_lock_name(&runtime_key);
+        if !crate::vss_replicator::acquire_web_lock(&lock_name).await? {
+            return Err(JsValue::from_str(
+                "another tab in this browser is already replicating this node to VSS",
+            ));
+        }
+
+        let store = crate::vss_kv_store::WasmVssKvStore::new(
+            server_url.trim().to_string(),
+            ldk_store_id,
+            signing_key,
+        );
+
+        // Cross-device guard: refuse if another instance owns this VSS store.
+        if let Err(e) = store.acquire_fence(&instance_id).await {
+            crate::vss_replicator::release_web_lock(&lock_name);
+            return Err(JsValue::from_str(&e));
+        }
+
+        let replicator = crate::vss_replicator::VssReplicator::new(store, instance_id);
+        crate::vss_replicator::register_vss_replicator(&runtime_key, replicator);
+
+        // Make sure any IndexedDB-only state is hydrated into localStorage first, so
+        // the restore guard sees an already-populated store and doesn't overwrite it.
+        let restore_result: Result<usize, JsValue> = async {
+            crate::runtime_store::preload_runtime_state_from_persistent_store().await?;
+            crate::vss_replicator::maybe_restore_ldk_state_from_vss(&runtime_key).await
+        }
+        .await;
+        match restore_result {
+            Ok(restored) => Ok(restored as u32),
+            Err(e) => {
+                // Roll back completely: leaving the replicator registered (live
+                // replication over a never-restored store) or the guards held (every
+                // retry failing with "another tab...") after reporting failure would
+                // wedge the caller. The persisted instance id survives, so a retry
+                // re-acquires the same fence.
+                crate::vss_replicator::teardown_vss_replication(&runtime_key);
+                Err(e)
+            }
+        }
+    }
+
+    /// Disable VSS replication for this node (unregisters the replicator; queued
+    /// writes are dropped). Releases both the single-writer guards — the VSS fence
+    /// (best-effort, async) and the same-origin Web Lock — so another instance can
+    /// take over cleanly. Local persistence is unaffected.
+    #[wasm_bindgen(js_name = disableLdkVssReplication)]
+    pub fn disable_ldk_vss_replication(&self) {
+        crate::vss_replicator::teardown_vss_replication(&self.runtime_manager_key());
+    }
+
+    /// Health view for LDK VSS replication as JSON:
+    /// `{ configured, pendingWrites, lastError }`. `pendingWrites > 0` means some
+    /// state has not yet reached VSS (transient outage); alert if it stays non-zero.
+    #[wasm_bindgen(js_name = ldkVssBackupInfoJson)]
+    pub fn ldk_vss_backup_info_json(&self) -> Result<String, JsValue> {
+        let runtime_key = self.runtime_manager_key();
+        let (configured, pending, last_error, disabled) =
+            match crate::vss_replicator::vss_replicator(&runtime_key) {
+                Some(r) => (true, r.pending_count(), r.last_error(), r.is_disabled()),
+                None => (false, 0usize, None, false),
+            };
+        let info = serde_json::json!({
+            "configured": configured,
+            "pendingWrites": pending,
+            "lastError": last_error,
+            "disabled": disabled,
+        });
+        serde_json::to_string(&info).map_err(|e| JsValue::from_str(&format!("{e}")))
+    }
+}
+
 impl Drop for RlnWasmNode {
     fn drop(&mut self) {
-        crate::ldk_runtime::release_runtime_manager_if_last(
-            &self.runtime_manager_key(),
-            &self.ldk_runtime,
-        );
+        let runtime_key = self.runtime_manager_key();
+        let was_last =
+            crate::ldk_runtime::release_runtime_manager_if_last(&runtime_key, &self.ldk_runtime);
+        // Release the VSS single-writer guards so a same-tab restart or a takeover
+        // isn't wedged (fence release is best-effort/async; the Web Lock is freed
+        // synchronously — the browser would also free it on context destruction).
+        // Only when this was the LAST handle for the runtime: multiple RlnWasmNode
+        // handles can share a runtime_key (recreate-in-place, stale JS handles being
+        // GC-finalized), and tearing down on any drop would silently kill a live
+        // node's replication.
+        if was_last {
+            crate::vss_replicator::teardown_vss_replication(&runtime_key);
+        }
     }
 }
 

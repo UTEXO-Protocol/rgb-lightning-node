@@ -872,6 +872,9 @@ fn spawn_local_persist_completion(
             )));
             return;
         }
+
+        // Best-effort mirror to VSS once the deferred local persist is durable.
+        crate::vss_replicator::replicate_monitor(&runtime_key, &name, bytes);
         // Maintain the monitor index in the durable tier too, so restart can find it.
         let idx_key = monitor_index_key(&runtime_key);
         let store = browser_persistent_state_store();
@@ -952,7 +955,7 @@ fn persist_bytes_snapshot(
     pending_key: String,
     committed_key: String,
     schema_version: u32,
-    bytes: Vec<u8>,
+    bytes: &[u8],
 ) -> Result<(), JsValue> {
     let envelope = LdkBytesSnapshotEnvelope {
         schema_version,
@@ -1001,7 +1004,7 @@ fn persist_channel_manager_snapshot(
         .map_err(|e| JsValue::from_str(&format!("channel manager encode: {e}")))?;
     let envelope = ChannelManagerSnapshotEnvelope {
         schema_version: CHANNEL_MANAGER_SNAPSHOT_SCHEMA_VERSION,
-        bytes_hex: hex::encode(bytes),
+        bytes_hex: hex::encode(&bytes),
     };
     let raw = serde_json::to_string(&envelope)
         .map_err(|e| JsValue::from_str(&format!("channel manager snapshot encode: {e}")))?;
@@ -1011,6 +1014,9 @@ fn persist_channel_manager_snapshot(
     store.set(&pending_key, &raw)?;
     store.set(&committed_key, &raw)?;
     store.delete(&pending_key)?;
+
+    // Best-effort mirror to VSS (no-op unless a replicator is registered for this node).
+    crate::vss_replicator::replicate_manager(runtime_key, bytes);
     Ok(())
 }
 
@@ -1026,8 +1032,10 @@ fn persist_network_graph_snapshot(
         network_graph_snapshot_pending_key(runtime_key),
         network_graph_snapshot_key(runtime_key),
         NETWORK_GRAPH_SNAPSHOT_SCHEMA_VERSION,
-        bytes,
-    )
+        &bytes,
+    )?;
+    crate::vss_replicator::replicate_network_graph(runtime_key, bytes);
+    Ok(())
 }
 
 fn persist_scorer_snapshot(runtime_key: &str, scorer: &WasmScorer) -> Result<(), JsValue> {
@@ -1039,8 +1047,10 @@ fn persist_scorer_snapshot(runtime_key: &str, scorer: &WasmScorer) -> Result<(),
         scorer_snapshot_pending_key(runtime_key),
         scorer_snapshot_key(runtime_key),
         SCORER_SNAPSHOT_SCHEMA_VERSION,
-        bytes,
-    )
+        &bytes,
+    )?;
+    crate::vss_replicator::replicate_scorer(runtime_key, bytes);
+    Ok(())
 }
 
 fn persist_ldk_runtime_snapshots(runtime_key: &str, g: &LdkObjectGraph) -> Result<(), JsValue> {
@@ -1073,10 +1083,13 @@ fn persist_monitor_snapshot(
     monitor
         .write(&mut bytes)
         .map_err(|e| JsValue::from_str(&format!("monitor encode: {e}")))?;
-    let encoded = hex::encode(bytes);
+    let encoded = hex::encode(&bytes);
 
     let item_key = monitor_snapshot_key(runtime_key, monitor_name);
     store.set(&item_key, &encoded)?;
+
+    // Best-effort mirror to VSS (no-op unless a replicator is registered for this node).
+    crate::vss_replicator::replicate_monitor(runtime_key, &monitor_name.to_string(), bytes);
 
     // Maintain an index because our store doesn't support listing keys.
     let idx_key = monitor_index_key(runtime_key);
@@ -1098,6 +1111,9 @@ fn delete_monitor_snapshot(runtime_key: &str, monitor_name: MonitorName) -> Resu
     let store = browser_persistent_state_store();
     let item_key = monitor_snapshot_key(runtime_key, monitor_name);
     store.delete(&item_key)?;
+
+    // Best-effort mirror of the removal to VSS (no-op unless a replicator is registered).
+    crate::vss_replicator::replicate_monitor_removal(runtime_key, &monitor_name.to_string());
 
     let idx_key = monitor_index_key(runtime_key);
     let mut index: Vec<String> = store
@@ -1166,6 +1182,136 @@ fn load_channel_manager_snapshot(runtime_key: &str) -> Result<Option<Vec<u8>>, J
     Ok(Some(bytes))
 }
 
+/// Restore LDK/RGB state from VSS into the local browser store.
+///
+/// The counterpart of the native `SyncedKvStore::restore_from_vss`. On a fresh
+/// device the browser has no snapshots; this pulls the VSS manifest + every tracked
+/// key, then rewraps each raw payload into the exact local format its reader
+/// expects: LDK snapshots go through the same envelope writer the live persist path
+/// uses ([`persist_bytes_snapshot`], via [`browser_persistent_state_store`], so they
+/// also land in the durable IndexedDB tier), and mirrored RGB KV entries are written
+/// back through the [`crate::browser_kv_store::LdkBrowserKvStore`] the node reads.
+///
+/// Guarded like native: with `force = false` it refuses to clobber a populated local
+/// store (detected via an existing channel-manager snapshot) and returns `Ok(0)`.
+/// Because that guard keys off the channel-manager snapshot, the manager is written
+/// LAST — any earlier failure (e.g. a storage quota error on a monitor) leaves the
+/// guard untripped so the restore can simply be retried. Returns the number of keys
+/// restored. Called (via `maybe_restore_ldk_state_from_vss`) from
+/// `RlnWasmNode::configure_ldk_vss_replication`, before the object graph builds.
+pub(crate) async fn restore_ldk_state_from_vss(
+    store: &crate::vss_kv_store::WasmVssKvStore,
+    runtime_key: &str,
+    force: bool,
+) -> Result<usize, JsValue> {
+    if !force && load_channel_manager_snapshot(runtime_key)?.is_some() {
+        web_sys::console::log_1(&JsValue::from_str(
+            "VSS restore skipped: local store already has a channel-manager snapshot",
+        ));
+        return Ok(0);
+    }
+
+    let items = store
+        .download_all()
+        .await
+        .map_err(|e| JsValue::from_str(&format!("VSS restore download failed: {e}")))?;
+
+    let kv = browser_persistent_state_store();
+    let rgb_kv = crate::browser_kv_store::ldk_browser_kv_store(runtime_key);
+    let mut restored = 0usize;
+    let mut monitor_names: Vec<String> = Vec::new();
+    let mut manager_bytes: Option<Vec<u8>> = None;
+
+    for (vkey, bytes) in items {
+        let Some((primary, secondary, name)) = crate::vss_kv_store::parse_vss_key(&vkey) else {
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "VSS restore: skipping unparseable key {vkey}"
+            )));
+            continue;
+        };
+        if !primary.is_empty() {
+            // A mirrored KV-store entry (RGB per-channel/payment state; see
+            // `VssMirroredKvStore`): write it back through the store the node reads.
+            lightning::util::persist::KVStoreSync::write(
+                rgb_kv.as_ref(),
+                &primary,
+                &secondary,
+                &name,
+                bytes,
+            )
+            .map_err(|e| JsValue::from_str(&format!("VSS restore kv write failed: {e}")))?;
+            restored += 1;
+            continue;
+        }
+        match secondary.as_str() {
+            crate::vss_replicator::CAT_MONITOR => {
+                kv.set(
+                    &monitor_snapshot_key_str(runtime_key, &name),
+                    &hex::encode(&bytes),
+                )?;
+                if !monitor_names.contains(&name) {
+                    monitor_names.push(name);
+                }
+                restored += 1;
+            }
+            crate::vss_replicator::CAT_MANAGER => {
+                // Deferred: written last, see below.
+                manager_bytes = Some(bytes);
+            }
+            crate::vss_replicator::CAT_NETWORK_GRAPH => {
+                persist_bytes_snapshot(
+                    network_graph_snapshot_pending_key(runtime_key),
+                    network_graph_snapshot_key(runtime_key),
+                    NETWORK_GRAPH_SNAPSHOT_SCHEMA_VERSION,
+                    &bytes,
+                )?;
+                restored += 1;
+            }
+            crate::vss_replicator::CAT_SCORER => {
+                persist_bytes_snapshot(
+                    scorer_snapshot_pending_key(runtime_key),
+                    scorer_snapshot_key(runtime_key),
+                    SCORER_SNAPSHOT_SCHEMA_VERSION,
+                    &bytes,
+                )?;
+                restored += 1;
+            }
+            other => {
+                web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "VSS restore: unknown category '{other}' for key {vkey}"
+                )));
+            }
+        }
+    }
+
+    // Rebuild the monitor index so `load_persisted_monitors` can enumerate them
+    // (the browser store has no key listing).
+    if !monitor_names.is_empty() {
+        let raw = serde_json::to_string(&monitor_names)
+            .map_err(|e| JsValue::from_str(&format!("VSS restore monitor index encode: {e}")))?;
+        kv.set(&monitor_index_key(runtime_key), &raw)?;
+    }
+
+    // Write the channel manager last: its presence is the non-`force` restore guard,
+    // so committing it only after everything else guarantees a partial restore stays
+    // retryable and a manager is never loaded without its monitors.
+    if let Some(bytes) = manager_bytes {
+        persist_bytes_snapshot(
+            channel_manager_snapshot_pending_key(runtime_key),
+            channel_manager_snapshot_key(runtime_key),
+            CHANNEL_MANAGER_SNAPSHOT_SCHEMA_VERSION,
+            &bytes,
+        )?;
+        restored += 1;
+    }
+
+    web_sys::console::log_1(&JsValue::from_str(&format!(
+        "VSS restore complete: {restored} keys ({} monitors)",
+        monitor_names.len()
+    )));
+    Ok(restored)
+}
+
 fn load_network_graph_snapshot(
     runtime_key: &str,
     network: bitcoin::Network,
@@ -1178,10 +1324,7 @@ fn load_network_graph_snapshot(
         "network graph",
     )?
     else {
-        return Ok((
-            Arc::new(NetworkGraph::new(network, logger)),
-            false,
-        ));
+        return Ok((Arc::new(NetworkGraph::new(network, logger)), false));
     };
     let mut cursor = std::io::Cursor::new(bytes);
     let graph = <WasmNetworkGraph>::read(&mut cursor, logger)
@@ -1254,8 +1397,14 @@ impl WasmLdkLiveBackend {
             chain_monitor: std::cell::RefCell::new(None),
         });
         let chain_source = Arc::new(WasmFilter::new());
+        // Wrapped so every RGB KV write (RgbInfo, payment/transfer info, consignments,
+        // fascia) is mirrored to VSS when replication is configured — a fresh-device
+        // restore without this state would silently turn colored channels plain-BTC.
         let rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync> =
-            crate::browser_kv_store::ldk_browser_kv_store(&self.runtime_key);
+            Arc::new(crate::vss_replicator::VssMirroredKvStore::new(
+                crate::browser_kv_store::ldk_browser_kv_store(&self.runtime_key),
+                &self.runtime_key,
+            ));
         let rgb_backend: Arc<lightning::rgb_utils::RgbBackend> = {
             let wallet_rc = RGB_WALLET_REGISTRY
                 .with(|reg| reg.borrow().get(&self.runtime_key).cloned())
@@ -3776,7 +3925,9 @@ impl WasmLdkLiveBackend {
             Err(_) => return,
         };
         let Some(online) = online else { return };
-        let Ok(mut wallet) = wallet_rc.try_borrow_mut() else { return };
+        let Ok(mut wallet) = wallet_rc.try_borrow_mut() else {
+            return;
+        };
         let _ = wallet.sync(online).await;
     }
 

@@ -1027,8 +1027,8 @@ impl RlnWasmSdk {
     }
 
     #[wasm_bindgen(js_name = walletClearRgbProxyTransport)]
-    pub fn wallet_clear_rgb_proxy_transport(&self, wallet: &RlnWasmWallet) {
-        wallet.clear_rgb_proxy_transport();
+    pub fn wallet_clear_rgb_proxy_transport(&self, wallet: &RlnWasmWallet) -> Result<(), JsValue> {
+        wallet.clear_rgb_proxy_transport()
     }
 
     #[wasm_bindgen(js_name = walletRgbProxyTransportValue)]
@@ -2133,8 +2133,8 @@ impl RlnWasmSdkWalletHandle {
     }
 
     #[wasm_bindgen(js_name = clearRgbProxyTransport)]
-    pub fn clear_rgb_proxy_transport(&self) {
-        self.inner.clear_rgb_proxy_transport();
+    pub fn clear_rgb_proxy_transport(&self) -> Result<(), JsValue> {
+        self.inner.clear_rgb_proxy_transport()
     }
 
     #[wasm_bindgen(js_name = rgbProxyTransportValue)]
@@ -2470,23 +2470,26 @@ impl RlnWasmWallet {
         })
     }
 
-    fn rgb_proxy_transport_key(&self) -> String {
-        // Non-panicking: if the wallet is mid-operation (borrow held across an await), treat
-        // the transport config as unavailable rather than aborting the wasm instance.
-        self.inner
-            .try_borrow()
-            .map(|wallet| wallet.idb_key())
-            .unwrap_or_default()
+    /// The storage key the proxy-transport config is registered under. Errors (with
+    /// the retryable "wallet is busy" message) instead of guessing when the wallet
+    /// borrow is held: a fallback key would silently read/write the config in the
+    /// wrong slot, losing the caller's configuration with no error surfaced.
+    fn rgb_proxy_transport_key(&self) -> Result<String, JsValue> {
+        Ok(self.wallet_ref()?.idb_key())
     }
 
-    fn current_rgb_proxy_transport(&self) -> Option<RlnWasmRgbProxyTransportConfigData> {
-        let key = self.rgb_proxy_transport_key();
+    fn current_rgb_proxy_transport(
+        &self,
+    ) -> Result<Option<RlnWasmRgbProxyTransportConfigData>, JsValue> {
+        let key = self.rgb_proxy_transport_key()?;
         if let Some(config) = wallet_rgb_proxy_transport_get(&key) {
-            return Some(config);
+            return Ok(Some(config));
         }
-        let default = sdk_default_rgb_proxy_transport()?;
+        let Some(default) = sdk_default_rgb_proxy_transport() else {
+            return Ok(None);
+        };
         let _ = wallet_rgb_proxy_transport_insert(&key, &default);
-        Some(default)
+        Ok(Some(default))
     }
 
     fn resolve_transport_endpoints(
@@ -2494,7 +2497,7 @@ impl RlnWasmWallet {
         transport_endpoints_js: JsValue,
     ) -> Result<Vec<String>, JsValue> {
         if transport_endpoints_js.is_null() || transport_endpoints_js.is_undefined() {
-            let Some(config) = self.current_rgb_proxy_transport() else {
+            let Some(config) = self.current_rgb_proxy_transport()? else {
                 return Err(JsValue::from_str(
                     sdk_contracts::ERR_TRANSPORT_ENDPOINTS_MISSING,
                 ));
@@ -2514,19 +2517,20 @@ impl RlnWasmWallet {
         node_id: Option<String>,
     ) -> Result<(), JsValue> {
         let config = Self::validate_rgb_proxy_transport_config(endpoint, auth_token, node_id)?;
-        let key = self.rgb_proxy_transport_key();
+        let key = self.rgb_proxy_transport_key()?;
         wallet_rgb_proxy_transport_insert(&key, &config)
     }
 
     #[wasm_bindgen(js_name = clearRgbProxyTransport)]
-    pub fn clear_rgb_proxy_transport(&self) {
-        let key = self.rgb_proxy_transport_key();
+    pub fn clear_rgb_proxy_transport(&self) -> Result<(), JsValue> {
+        let key = self.rgb_proxy_transport_key()?;
         wallet_rgb_proxy_transport_remove(&key);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = rgbProxyTransportValue)]
     pub fn rgb_proxy_transport_value(&self) -> Result<JsValue, JsValue> {
-        match self.current_rgb_proxy_transport() {
+        match self.current_rgb_proxy_transport()? {
             Some(config) => js_obj(&config),
             None => Ok(JsValue::NULL),
         }
@@ -2544,8 +2548,7 @@ impl RlnWasmWallet {
 
     #[wasm_bindgen(js_name = getAddress)]
     pub fn get_address(&self) -> Result<String, JsValue> {
-        self.inner
-            .borrow_mut()
+        self.wallet_mut()?
             .get_address()
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -2555,8 +2558,7 @@ impl RlnWasmWallet {
         if unsigned_psbt.trim().is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_UNSIGNED_PSBT_EMPTY));
         }
-        self.inner
-            .borrow()
+        self.wallet_ref()?
             .sign_psbt(unsigned_psbt, None)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -2569,8 +2571,7 @@ impl RlnWasmWallet {
     #[wasm_bindgen(js_name = getBtcBalanceValue)]
     pub fn get_btc_balance_value(&self) -> Result<JsValue, JsValue> {
         let balance = self
-            .inner
-            .borrow_mut()
+            .wallet_mut()?
             .get_btc_balance(None, true)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         js_obj(&balance)
@@ -2586,8 +2587,7 @@ impl RlnWasmWallet {
     #[wasm_bindgen(js_name = listTransactionsValue)]
     pub fn list_transactions_value(&self) -> Result<JsValue, JsValue> {
         let txs = self
-            .inner
-            .borrow_mut()
+            .wallet_mut()?
             .list_transactions(None, true)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         js_obj(&txs)
@@ -2606,8 +2606,7 @@ impl RlnWasmWallet {
             serde_wasm_bindgen::from_value(filter_asset_schemas_js)
                 .map_err(|e| JsValue::from_str(&format!("Invalid schemas: {e}")))?;
         let assets = self
-            .inner
-            .borrow()
+            .wallet_ref()?
             .list_assets(schemas)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         js_obj(&assets)
@@ -2626,8 +2625,7 @@ impl RlnWasmWallet {
             return Err(JsValue::from_str(sdk_contracts::ERR_ASSET_ID_EMPTY));
         }
         let metadata = self
-            .inner
-            .borrow()
+            .wallet_ref()?
             .get_asset_metadata(asset_id)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         js_obj(&metadata)
@@ -2724,8 +2722,7 @@ impl RlnWasmWallet {
             return Err(JsValue::from_str(sdk_contracts::ERR_ASSET_ID_EMPTY));
         }
         let balance = self
-            .inner
-            .borrow()
+            .wallet_ref()?
             .get_asset_balance(asset_id)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         js_obj(&balance)
@@ -2748,8 +2745,7 @@ impl RlnWasmWallet {
             }
         }
         let transfers = self
-            .inner
-            .borrow()
+            .wallet_ref()?
             .list_transfers(asset_id)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         js_obj(&transfers)
@@ -2765,8 +2761,7 @@ impl RlnWasmWallet {
     #[wasm_bindgen(js_name = listUnspentsValue)]
     pub fn list_unspents_value(&self, settled_only: bool) -> Result<JsValue, JsValue> {
         let unspents = self
-            .inner
-            .borrow_mut()
+            .wallet_mut()?
             .list_unspents(None, settled_only, true)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         js_obj(&unspents)
@@ -2799,8 +2794,7 @@ impl RlnWasmWallet {
             .map_err(|e| JsValue::from_str(&format!("Invalid assignment: {e}")))?;
         let transport_endpoints = self.resolve_transport_endpoints(transport_endpoints_js)?;
         let data = self
-            .inner
-            .borrow()
+            .wallet_ref()?
             .blind_receive(
                 asset_id,
                 assignment,
@@ -2852,8 +2846,7 @@ impl RlnWasmWallet {
             .map_err(|e| JsValue::from_str(&format!("Invalid assignment: {e}")))?;
         let transport_endpoints = self.resolve_transport_endpoints(transport_endpoints_js)?;
         let data = self
-            .inner
-            .borrow_mut()
+            .wallet_mut()?
             .witness_receive(
                 asset_id,
                 assignment,
@@ -3188,8 +3181,7 @@ impl RlnWasmWallet {
 
         // sign with the BDK signer.
         let signed_psbt = self
-            .inner
-            .borrow()
+            .wallet_ref()?
             .sign_psbt(normalized_unsigned_psbt, None)
             .map_err(|e| JsValue::from_str(&format!("sign_psbt failed: {e}")))?;
 
@@ -3420,8 +3412,7 @@ impl RlnWasmWallet {
         if password.is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_PASSWORD_EMPTY));
         }
-        self.inner
-            .borrow()
+        self.wallet_ref()?
             .backup(&password)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -3431,16 +3422,14 @@ impl RlnWasmWallet {
         if password.is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_PASSWORD_EMPTY));
         }
-        self.inner
-            .borrow_mut()
+        self.wallet_mut()?
             .restore_backup(&backup_bytes, &password)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = backupInfo)]
     pub fn backup_info(&self) -> Result<bool, JsValue> {
-        self.inner
-            .borrow()
+        self.wallet_ref()?
             .backup_info()
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -3458,35 +3447,21 @@ impl RlnWasmWallet {
         store_id: String,
         signing_key_hex: String,
     ) -> Result<(), JsValue> {
-        if server_url.trim().is_empty() {
-            return Err(JsValue::from_str(sdk_contracts::ERR_SERVER_URL_EMPTY));
-        }
-        if store_id.trim().is_empty() {
-            return Err(JsValue::from_str(sdk_contracts::ERR_STORE_ID_EMPTY));
-        }
-        if signing_key_hex.len() != 64 {
-            return Err(JsValue::from_str(&format!(
-                "signing_key_hex must be exactly 64 hex chars (32 bytes), got {}",
-                signing_key_hex.len()
-            )));
-        }
-        let key_bytes = hex::decode(signing_key_hex)
-            .map_err(|e| JsValue::from_str(&format!("Invalid signing key hex: {e}")))?;
         let signing_key =
-            rgb_lib_wasm::bdk_wallet::bitcoin::secp256k1::SecretKey::from_slice(&key_bytes)
-                .map_err(|e| JsValue::from_str(&format!("Invalid signing key: {e}")))?;
+            crate::vss_kv_store::parse_vss_config(&server_url, &store_id, &signing_key_hex)?;
         let config =
             rgb_lib_wasm::wallet::vss::VssBackupConfig::new(server_url, store_id, signing_key);
         self.wallet_mut()?.configure_vss_backup(&config);
         Ok(())
     }
 
+    /// Errors with a retryable "wallet is busy" message if the wallet is
+    /// mid-operation — the disable must not be silently skipped, or backups would
+    /// keep flowing to a server the caller asked to disconnect from.
     #[wasm_bindgen(js_name = disableVssBackup)]
-    pub fn disable_vss_backup(&self) {
-        // Non-panicking: skip rather than abort if the wallet is mid-operation.
-        if let Ok(mut wallet) = self.inner.try_borrow_mut() {
-            wallet.disable_vss_backup();
-        }
+    pub fn disable_vss_backup(&self) -> Result<(), JsValue> {
+        self.wallet_mut()?.disable_vss_backup();
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = vssBackupValue)]
@@ -3508,8 +3483,10 @@ impl RlnWasmWallet {
 
     #[wasm_bindgen(js_name = vssRestoreBackup)]
     pub async fn vss_restore_backup(&self) -> Result<(), JsValue> {
-        self.inner
-            .borrow_mut()
+        // The exclusive borrow is (unavoidably) held across the network await — the
+        // rgb-lib-wasm API is `&mut self` for the whole restore — but taking it via
+        // `wallet_mut` keeps entry non-panicking when another wallet op is in flight.
+        self.wallet_mut()?
             .vss_restore_backup()
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
