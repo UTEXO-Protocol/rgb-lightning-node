@@ -5357,6 +5357,48 @@ impl RlnWasmNode {
         crate::vss_replicator::teardown_vss_replication(&self.runtime_manager_key());
     }
 
+    /// Clear the VSS single-writer fence for this node's LDK store — the WASM
+    /// counterpart of the native SDK's `POST /vssclearfence`. Use when
+    /// `configureLdkVssReplication` fails with "owned by another instance" and that
+    /// owner can never release the fence itself: its browser profile was wiped (the
+    /// persisted fence id is gone) or the device is dead. After clearing, call
+    /// `configureLdkVssReplication` again — the new instance claims the fence and,
+    /// on a fresh device, runs the restore.
+    ///
+    /// Only clear the fence when the previous owner is truly gone: two live writers
+    /// on one VSS store corrupt each other's state (a still-running old owner will
+    /// stop itself at its next periodic fence check).
+    ///
+    /// Refused while replication is active on this node — call
+    /// `disableLdkVssReplication` first (mirrors native, where `/vssclearfence`
+    /// requires a locked node).
+    #[wasm_bindgen(js_name = clearLdkVssFence)]
+    pub async fn clear_ldk_vss_fence(
+        &self,
+        server_url: String,
+        store_id: String,
+        signing_key_hex: String,
+    ) -> Result<(), JsValue> {
+        let signing_key =
+            crate::vss_kv_store::parse_vss_config(&server_url, &store_id, &signing_key_hex)?;
+        let runtime_key = self.runtime_manager_key();
+        if crate::vss_replicator::vss_replicator(&runtime_key).is_some() {
+            return Err(JsValue::from_str(
+                "VSS replication is active on this node; call disableLdkVssReplication \
+                 before clearing the fence",
+            ));
+        }
+        let store = crate::vss_kv_store::WasmVssKvStore::new(
+            server_url.trim().to_string(),
+            format!("{}-ldk", store_id.trim()),
+            signing_key,
+        );
+        store
+            .delete_fence()
+            .await
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// Health view for LDK VSS replication as JSON:
     /// `{ configured, pendingWrites, lastError }`. `pendingWrites > 0` means some
     /// state has not yet reached VSS (transient outage); alert if it stays non-zero.

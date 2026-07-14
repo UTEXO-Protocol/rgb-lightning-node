@@ -118,7 +118,8 @@ struct AsyncOrderEnvelope {
 }
 
 type AsyncOrderResponse = Result<serde_json::Value, JsonRpcErrorWire>;
-pub(crate) type AsyncOrderResponseReceiver = futures::channel::oneshot::Receiver<AsyncOrderResponse>;
+pub(crate) type AsyncOrderResponseReceiver =
+    futures::channel::oneshot::Receiver<AsyncOrderResponse>;
 type AsyncOrderResponseSender = futures::channel::oneshot::Sender<AsyncOrderResponse>;
 
 #[derive(Default)]
@@ -233,7 +234,9 @@ impl RgbLnForkCustomMessageHandler {
         let envelope: AsyncOrderEnvelope = match serde_json::from_str(payload) {
             Ok(env) => env,
             Err(err) => {
-                fork_log(&format!("rgb-ln-fork-wire: bad async_order envelope: {err}"));
+                fork_log(&format!(
+                    "rgb-ln-fork-wire: bad async_order envelope: {err}"
+                ));
                 return;
             }
         };
@@ -245,11 +248,11 @@ impl RgbLnForkCustomMessageHandler {
             };
             if method == "async_order.request_invoice" {
                 let params = envelope.params.unwrap_or(serde_json::Value::Null);
-                self.state
-                    .lock()
-                    .unwrap()
-                    .inbound_requests
-                    .push((sender_node_id, request_id, params));
+                self.state.lock().unwrap().inbound_requests.push((
+                    sender_node_id,
+                    request_id,
+                    params,
+                ));
             } else {
                 fork_log(&format!(
                     "rgb-ln-fork-wire: ignoring unsupported async_order method {method}"

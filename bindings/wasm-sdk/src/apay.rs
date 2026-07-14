@@ -433,7 +433,8 @@ impl AsyncPaymentsPreimageRoot {
         if hash_index < ASYNC_ORDER_FIRST_HASH_INDEX {
             return Err(JsonRpcErrorWire::invalid_hash_batch());
         }
-        let index = u32::try_from(hash_index).map_err(|_| JsonRpcErrorWire::invalid_hash_batch())?;
+        let index =
+            u32::try_from(hash_index).map_err(|_| JsonRpcErrorWire::invalid_hash_batch())?;
         if index > ASYNC_PAYMENTS_BIP32_MAX_CHILD_INDEX {
             return Err(JsonRpcErrorWire::invalid_hash_batch());
         }

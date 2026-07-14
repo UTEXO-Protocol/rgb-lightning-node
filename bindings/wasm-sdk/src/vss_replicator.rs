@@ -11,7 +11,13 @@
 //!
 //! Design (single-threaded wasm, so `RefCell`/`Cell`, no locks):
 //!   * `replicate()` records the *latest desired state* per key into a pending map
-//!     (last-write-wins) and kicks an async drain via `spawn_local`.
+//!     (last-write-wins) and kicks an async drain via `spawn_local`. Values
+//!     byte-identical to what is already queued/uploaded for the key are dropped
+//!     (content dirty check) — the snapshot persist path re-replicates every drive
+//!     tick, and without this VSS would receive identical PUTs every second. The
+//!     reconstructible network-graph/scorer singletons are additionally rate-limited
+//!     to one upload per [`RECONSTRUCTIBLE_MIN_UPLOAD_INTERVAL_MS`], since live
+//!     gossip changes their bytes nearly every tick.
 //!   * The drain pops entries and `.await`s the VSS put/remove. A `draining` flag
 //!     makes concurrent `replicate()` calls coalesce into the running drain instead
 //!     of spawning a second one. No `RefCell` borrow is ever held across an `.await`.
@@ -62,6 +68,14 @@ const PENDING_QUEUE_CAP: usize = 1000;
 /// Successful writes between mid-session fence re-checks (matches native).
 const FENCE_CHECK_INTERVAL: u64 = 100;
 
+/// Minimum spacing between uploads of a *reconstructible* singleton (network graph,
+/// scorer). Under live gossip the graph's serialization changes almost every tick,
+/// so the content dirty-check alone would still upload multi-MB payloads once a
+/// second. Losing up to this much graph/scorer freshness on restore is harmless —
+/// both rebuild from gossip / payment history — unlike monitors, the channel
+/// manager, and RGB state, which replicate immediately.
+const RECONSTRUCTIBLE_MIN_UPLOAD_INTERVAL_MS: f64 = 5.0 * 60.0 * 1000.0;
+
 /// Best-effort replicator owning one [`WasmVssKvStore`]. Always held as `Rc` so it
 /// can be shared into `spawn_local` drain tasks and the thread-local registry.
 pub(crate) struct VssReplicator {
@@ -71,6 +85,16 @@ pub(crate) struct VssReplicator {
     instance_id: String,
     /// VSS key -> latest desired state. `Some(bytes)` = put, `None` = remove.
     pending: RefCell<HashMap<String, Option<Vec<u8>>>>,
+    /// VSS key -> hash of the most recent bytes accepted into the pipeline (queued
+    /// or already uploaded). Dirty check: the snapshot persist path re-replicates
+    /// the manager/graph/scorer on every drive tick whether or not they changed, and
+    /// without this the replicator would PUT byte-identical values to VSS every
+    /// second forever. A removal clears the entry so a later re-put always goes out.
+    latest_hash: RefCell<HashMap<String, u64>>,
+    /// VSS key -> timestamp (ms) the key's bytes were last accepted for upload.
+    /// Backs the [`RECONSTRUCTIBLE_MIN_UPLOAD_INTERVAL_MS`] throttle for the
+    /// network-graph/scorer singletons.
+    last_accepted_ms: RefCell<HashMap<String, f64>>,
     /// Keys we believe are present in the server-side manifest.
     known: RefCell<HashSet<String>>,
     /// Membership changes (`vss_key -> should_be_present`) not yet reflected in the
@@ -96,6 +120,8 @@ impl VssReplicator {
             store,
             instance_id,
             pending: RefCell::new(HashMap::new()),
+            latest_hash: RefCell::new(HashMap::new()),
+            last_accepted_ms: RefCell::new(HashMap::new()),
             known: RefCell::new(HashSet::new()),
             pending_manifest: RefCell::new(HashMap::new()),
             manifest_loaded: Cell::new(false),
@@ -172,11 +198,55 @@ impl VssReplicator {
             return;
         }
         let vkey = vss_key(primary_namespace, secondary_namespace, key);
+        // Dirty check: skip values byte-identical to what is already queued or
+        // uploaded for this key. Comparing against the latest *accepted* bytes (not
+        // just the last upload) keeps this safe while a drain is in flight.
+        if let Some(buf) = &value {
+            let hash = hash_bytes(buf);
+            if self.latest_hash.borrow().get(&vkey) == Some(&hash) {
+                // Identical bytes are already queued or uploaded — but still re-kick
+                // the drain if anything is parked: these periodic re-replicates are
+                // the retry heartbeat that ends a VSS outage.
+                if !self.pending.borrow().is_empty() {
+                    self.kick_drain();
+                }
+                return;
+            }
+            // Reconstructible singletons (graph/scorer) are additionally
+            // rate-limited: under live gossip their bytes change nearly every tick,
+            // so the dirty check alone would still upload multi-MB payloads once a
+            // second. Skipped values are NOT hashed/timestamped, so the next
+            // replicate after the window carries the freshest bytes.
+            if primary_namespace.is_empty()
+                && (secondary_namespace == CAT_NETWORK_GRAPH || secondary_namespace == CAT_SCORER)
+            {
+                let now = now_ms();
+                let too_soon = self
+                    .last_accepted_ms
+                    .borrow()
+                    .get(&vkey)
+                    .is_some_and(|last| now - last < RECONSTRUCTIBLE_MIN_UPLOAD_INTERVAL_MS);
+                if too_soon {
+                    if !self.pending.borrow().is_empty() {
+                        self.kick_drain();
+                    }
+                    return;
+                }
+                self.last_accepted_ms.borrow_mut().insert(vkey.clone(), now);
+            }
+            self.latest_hash.borrow_mut().insert(vkey.clone(), hash);
+        } else {
+            self.latest_hash.borrow_mut().remove(&vkey);
+        }
         {
             let mut pending = self.pending.borrow_mut();
             if pending.len() >= PENDING_QUEUE_CAP && !pending.contains_key(&vkey) {
                 if let Some(evict) = pending.keys().next().cloned() {
                     pending.remove(&evict);
+                    // The evicted bytes never reached VSS; forget their hash and
+                    // throttle stamp so a later replicate isn't wrongly held back.
+                    self.latest_hash.borrow_mut().remove(&evict);
+                    self.last_accepted_ms.borrow_mut().remove(&evict);
                     warn(&format!(
                         "VSS pending-replication queue at cap ({PENDING_QUEUE_CAP}); evicted {evict}"
                     ));
@@ -263,6 +333,8 @@ impl VssReplicator {
                             ));
                             self.disabled.set(true);
                             self.pending.borrow_mut().clear();
+                            self.latest_hash.borrow_mut().clear();
+                            self.last_accepted_ms.borrow_mut().clear();
                             *self.last_error.borrow_mut() = Some(e);
                             break;
                         }
@@ -337,6 +409,30 @@ impl VssReplicator {
             }
         }
     }
+}
+
+/// Wall-clock milliseconds for the reconstructible-singleton upload throttle.
+fn now_ms() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0)
+    }
+}
+
+/// Content hash for the replicate dirty check (not adversarial — both writer and
+/// reader of the hash are this same in-memory replicator).
+fn hash_bytes(buf: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    buf.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn warn(msg: &str) {
@@ -651,5 +747,77 @@ mod tests {
         assert_eq!(r.pending_count(), 0);
         assert!(r.last_error().is_none());
         assert!(!r.is_disabled());
+    }
+
+    /// Byte-identical re-replication of an already-uploaded value is dropped (the
+    /// per-tick snapshot heartbeat must not turn into per-second identical PUTs),
+    /// while changed bytes still queue.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn replicate_dedupes_unchanged_bytes() {
+        let r = test_replicator();
+        // Simulate a completed upload of v1: hash recorded, queue drained.
+        r.replicate(CAT_MANAGER, "channel-manager", Some(vec![1, 2, 3]));
+        r.pending.borrow_mut().clear();
+        assert_eq!(r.pending_count(), 0);
+
+        // Same bytes again: dirty check drops it.
+        r.replicate(CAT_MANAGER, "channel-manager", Some(vec![1, 2, 3]));
+        assert_eq!(r.pending_count(), 0, "identical bytes must not re-queue");
+
+        // Changed bytes: queued.
+        r.replicate(CAT_MANAGER, "channel-manager", Some(vec![9, 9, 9]));
+        assert_eq!(r.pending_count(), 1, "changed bytes must queue");
+    }
+
+    /// Graph/scorer uploads are rate-limited even when the bytes change (gossip
+    /// churns them every tick), while monitors always replicate immediately.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn reconstructible_singletons_are_rate_limited() {
+        let r = test_replicator();
+        r.replicate(CAT_NETWORK_GRAPH, SINGLETON_NETWORK_GRAPH, Some(vec![1]));
+        assert_eq!(r.pending_count(), 1, "first graph upload goes out");
+        r.pending.borrow_mut().clear(); // simulate drained upload
+
+        r.replicate(CAT_NETWORK_GRAPH, SINGLETON_NETWORK_GRAPH, Some(vec![2]));
+        assert_eq!(
+            r.pending_count(),
+            0,
+            "changed graph bytes inside the window must be throttled"
+        );
+
+        // Age the throttle stamp past the window: the next change goes out.
+        let vkey = vss_key("", CAT_NETWORK_GRAPH, SINGLETON_NETWORK_GRAPH);
+        r.last_accepted_ms.borrow_mut().insert(
+            vkey,
+            now_ms() - RECONSTRUCTIBLE_MIN_UPLOAD_INTERVAL_MS - 1.0,
+        );
+        r.replicate(CAT_NETWORK_GRAPH, SINGLETON_NETWORK_GRAPH, Some(vec![2]));
+        assert_eq!(r.pending_count(), 1, "post-window change must upload");
+
+        // Monitors are never throttled: consecutive changes both queue.
+        r.pending.borrow_mut().clear();
+        r.replicate(CAT_MONITOR, "chan-1", Some(vec![1]));
+        r.pending.borrow_mut().clear();
+        r.replicate(CAT_MONITOR, "chan-1", Some(vec![2]));
+        assert_eq!(r.pending_count(), 1, "monitor changes always replicate");
+    }
+
+    /// A removal clears the dirty-check hash, so re-putting the previously uploaded
+    /// bytes afterwards is NOT deduped away.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn removal_resets_dirty_check_for_reput() {
+        let r = test_replicator();
+        r.replicate(CAT_MONITOR, "chan-1", Some(vec![4, 5, 6]));
+        r.pending.borrow_mut().clear(); // simulate drained upload
+
+        r.replicate(CAT_MONITOR, "chan-1", None); // archive the monitor
+        r.pending.borrow_mut().clear(); // simulate drained removal
+
+        r.replicate(CAT_MONITOR, "chan-1", Some(vec![4, 5, 6]));
+        assert_eq!(
+            r.pending_count(),
+            1,
+            "re-put after removal must go out even with identical bytes"
+        );
     }
 }

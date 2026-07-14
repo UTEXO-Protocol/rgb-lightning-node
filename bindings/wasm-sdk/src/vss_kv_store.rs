@@ -272,7 +272,8 @@ impl WasmVssKvStore {
                     return Err(format!(
                         "VSS store is owned by another rgb-lightning-node instance ({remote}); \
                          refusing to replicate to avoid concurrent-writer corruption. If that \
-                         owner is gone, clear the `{FENCE_KEY}` key from VSS to take over."
+                         owner is gone (wiped browser profile, dead device), call \
+                         clearLdkVssFence and retry to take over."
                     ));
                 }
             }
@@ -333,6 +334,22 @@ impl WasmVssKvStore {
     /// another instance is never clobbered. Idempotent. Mirrors native
     /// `release_fence_if_owned`.
     pub(crate) async fn release_fence_if_owned(&self, instance_id: &str) -> Result<(), String> {
+        self.remove_fence(Some(instance_id)).await
+    }
+
+    /// Remove the fence key *regardless of owner* — the WASM counterpart of the
+    /// native SDK's `delete_fence` (`POST /vssclearfence`). Needed when the previous
+    /// owner can never release it itself: a wiped browser profile or a dead device
+    /// loses its persisted instance id, so every new instance fails `acquire_fence`
+    /// with "owned by another instance" until the stale fence is cleared. Idempotent:
+    /// a missing key is not an error.
+    pub(crate) async fn delete_fence(&self) -> Result<(), String> {
+        self.remove_fence(None).await
+    }
+
+    /// Shared fence-removal: with `only_if_owner = Some(id)` the fence is left in
+    /// place unless `id` owns it; with `None` it is removed unconditionally.
+    async fn remove_fence(&self, only_if_owner: Option<&str>) -> Result<(), String> {
         let existing = match self
             .client
             .get_object(&GetObjectRequest {
@@ -348,8 +365,10 @@ impl WasmVssKvStore {
             Err(VssError::NoSuchKey(_)) => return Ok(()),
             Err(e) => return Err(format!("VSS fence read failed: {e:?}")),
         };
-        if String::from_utf8_lossy(&existing.value) != instance_id {
-            return Ok(());
+        if let Some(owner) = only_if_owner {
+            if String::from_utf8_lossy(&existing.value) != owner {
+                return Ok(());
+            }
         }
         match self
             .client
