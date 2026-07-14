@@ -673,6 +673,9 @@ pub enum AppError {
     #[error("Invalid VSS configuration: {0}")]
     InvalidVssConfig(String),
 
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
+
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
 

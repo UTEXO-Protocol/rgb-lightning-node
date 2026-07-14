@@ -3,7 +3,7 @@
 
 use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
-    AsyncOrderOutboundInvoiceResultWire, ASYNC_ORDER_RESPONSE_TIMEOUT_SECS,
+    AsyncOrderOutboundInvoiceResultWire,
 };
 use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
@@ -1212,7 +1212,7 @@ pub(crate) async fn async_order_new(
         .map_err(|err| APIError::InvalidRequest(err.message))?;
     unlocked_state.peer_manager.process_events();
     let order_state_value = match timeout(
-        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        Duration::from_secs(unlocked_state.config.lsp.order_response_timeout_secs),
         response_rx,
     )
     .await
@@ -1303,7 +1303,7 @@ pub(crate) async fn async_order_outbound_invoice(
     unlocked_state.peer_manager.process_events();
 
     let response_value = match timeout(
-        Duration::from_secs(ASYNC_ORDER_RESPONSE_TIMEOUT_SECS),
+        Duration::from_secs(unlocked_state.config.lsp.order_response_timeout_secs),
         response_rx,
     )
     .await
@@ -1818,7 +1818,10 @@ pub(crate) async fn init(
         return Err(APIError::ExternalSignerRequired);
     }
 
-    check_password_strength(password.clone())?;
+    check_password_strength(
+        password.clone(),
+        state.static_state.config.auth.password_min_length,
+    )?;
     check_already_initialized(&state.db())?;
 
     let mnemonic = match mnemonic {
@@ -1930,11 +1933,13 @@ pub(crate) async fn vss_clear_fence(
             }
         };
 
+        let vss_retry = state.static_state.config.vss.clone();
         tokio::task::spawn_blocking(move || {
-            let store = crate::vss_kv_store::VssKvStore::new(
+            let store = crate::vss_kv_store::VssKvStore::new_with_retry(
                 vss_url,
                 identity.pubkey_hex,
                 identity.signing_key,
+                &vss_retry,
             )?;
             store.delete_fence()
         })
@@ -3367,6 +3372,7 @@ pub(crate) async fn maker_execute(
         .to_asset
         .map(|to_asset| (to_asset, swap_info.qty_to));
     let first_leg = get_route(
+        &unlocked_state.config,
         &unlocked_state.channel_manager,
         &unlocked_state.router,
         unlocked_state.kv_store.as_ref(),
@@ -3385,6 +3391,7 @@ pub(crate) async fn maker_execute(
         .from_asset
         .map(|from_asset| (from_asset, swap_info.qty_from));
     let second_leg = get_route(
+        &unlocked_state.config,
         &unlocked_state.channel_manager,
         &unlocked_state.router,
         unlocked_state.kv_store.as_ref(),
@@ -4453,6 +4460,7 @@ mod tests {
         crate::runtime::block_on(Migrator::up(&database, None)).expect("run migrations");
         Arc::new(AppState {
             static_state: Arc::new(StaticState {
+                config: Default::default(),
                 ldk_peer_listening_port: 9735,
                 network: BitcoinNetwork::Regtest,
                 storage_dir_path: storage_dir.clone(),

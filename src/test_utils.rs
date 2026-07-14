@@ -24,6 +24,7 @@ pub fn mock_locked_app_state() -> TestAppState {
 
     TestAppState(Arc::new(AppState {
         static_state: Arc::new(StaticState {
+            config: Default::default(),
             ldk_peer_listening_port: 9735,
             network: rgb_lib::BitcoinNetwork::Regtest,
             storage_dir_path: path.clone(),

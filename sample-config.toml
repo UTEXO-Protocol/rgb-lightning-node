@@ -1,0 +1,142 @@
+# Sample configuration file for rgb-lightning-node.
+#
+# The node loads <storage_directory_path>/config.toml if it exists, or the
+# file given via --config. Values here override the built-in defaults and are
+# overridden by explicit CLI options. All keys are optional; unknown keys are
+# rejected. The values below document the defaults.
+
+[node]
+# Bitcoin network (Mainnet, Testnet, Testnet4, Signet, Regtest)
+#network = "Testnet"
+# Listening port of the daemon
+#daemon_listening_port = 3001
+# Listening port for LN peers
+#ldk_peer_listening_port = 9735
+# Default node alias announced via gossip (max 32 bytes, /unlock overrides)
+#announce_alias = ""
+# Default addresses announced via gossip (/unlock overrides)
+#announce_addresses = []
+# Reuse a pinned wallet address instead of generating a fresh one per call
+#reuse_addresses = false
+# Interval between channel peer reconnection attempts (seconds)
+#peer_reconnect_interval_secs = 1
+# Delay before the first node announcement broadcast (seconds)
+#announce_initial_delay_secs = 60
+# Interval between node announcement refreshes (seconds)
+#announce_refresh_interval_secs = 3600
+
+[auth]
+# Disable biscuit token authentication
+#disable_authentication = false
+# Root public key for biscuit token authentication (hex-encoded)
+#root_public_key = ""
+# Minimum accepted wallet password length
+#password_min_length = 8
+
+[chain]
+# Default indexer URL used when /unlock does not provide one
+# (defaults to a per-network public electrum server)
+#indexer_url = ""
+# Default RGB proxy endpoint used when /unlock does not provide one
+# (defaults to a per-network public proxy)
+#proxy_endpoint = ""
+# Socket timeout for the indexer client (seconds)
+#indexer_timeout_secs = 10
+# Interval between fee estimate refreshes (seconds)
+#fee_refresh_interval_secs = 60
+
+[rgb]
+# Default fee rate in sat/vB for coloring, witness and channel funding txs
+#fee_rate_sat_vb = 7
+# Default size in sats for colorable UTXOs created by /createutxos
+#utxo_size_sat = 32000
+# Default number of UTXOs created by /createutxos
+#utxo_num = 4
+# Confirmations required for channel funding transactions
+#min_channel_confirmations = 6
+
+[channels]
+# Minimum HTLC amount on RGB channels (msat)
+#htlc_min_msat = 3000000
+# Minimum HTLC amount on virtual channels (msat)
+#virtual_htlc_min_msat = 1000
+# Minimum inbound payment amount (msat)
+#dust_limit_msat = 546000
+# Minimum capacity for a vanilla channel (sat)
+#open_min_sat = 5506
+# Maximum channel capacity (sat, protocol limit 16777215)
+#open_max_sat = 16777215
+# Minimum RGB asset amount in a channel
+#open_min_rgb_amount = 1
+# Maximum to_self_delay accepted from the counterparty (max 2016)
+#their_to_self_delay = 2016
+# to_self_delay we require from the counterparty (144-2016)
+#our_to_self_delay = 144
+# CLTV expiry delta advertised for forwarded HTLCs (min 48)
+#cltv_expiry_delta = 72
+# Default forwarding base fee for new channels (msat)
+#forwarding_fee_base_msat = 1000
+# Default forwarding proportional fee for new channels (parts per million)
+#forwarding_fee_proportional_millionths = 0
+# Max dust HTLC exposure as a multiplier on the max fee estimate (mutually exclusive with the fixed variant)
+#max_dust_htlc_exposure_multiplier = 10000
+# Max dust HTLC exposure as a fixed msat limit (mutually exclusive with the multiplier variant)
+#max_dust_htlc_exposure_fixed_msat = 5000000
+# Max inbound HTLC value in flight, percent of channel capacity (1-100)
+#max_inbound_htlc_value_in_flight_percent = 10
+# Max concurrent HTLCs we accept per channel (1-483)
+#our_max_accepted_htlcs = 50
+# Max confirmations a peer may require before a channel is usable
+#max_minimum_depth = 144
+# Enable virtual channels (v0)
+#enable_virtual_channels_v0 = false
+# Allowed virtual channel peer pubkeys (hex-encoded)
+#virtual_peer_pubkeys = []
+
+[payments]
+# Final CLTV expiry delta used for payments
+#final_cltv_expiry_delta = 14
+# Payment retry timeout in seconds
+#retry_timeout_secs = 10
+# Maximum acceptable total swap fee (msat)
+#max_swap_fee_msat = 3000000
+
+[gossip]
+# Interval between rapid gossip sync updates (seconds)
+#rgs_sync_interval_secs = 3600
+# Maximum accepted RGS snapshot size (MB)
+#rgs_snapshot_max_size_mb = 15
+# RGS server connect timeout (seconds)
+#rgs_connect_timeout_secs = 5
+# RGS snapshot download timeout (seconds)
+#rgs_sync_timeout_secs = 60
+
+[lsp]
+# LSP base URL
+#base_url = ""
+# LSP bearer token
+#bearer_token = ""
+# Timeout waiting for an async order response from the LSP (seconds)
+#order_response_timeout_secs = 30
+# HTTP request timeout towards the LSP (seconds, keep above the LSP's own timeout)
+#request_timeout_secs = 25
+
+[vss]
+# VSS server URL for cloud backup (empty = VSS disabled)
+#url = ""
+# Allow http:// VSS URLs for non-loopback hosts
+#allow_http = false
+# Start with empty local state if VSS restore fails on a fresh device
+#allow_empty_restore = false
+# Initial backoff between VSS request retries (milliseconds)
+#retry_backoff_ms = 100
+# Maximum VSS request attempts
+#retry_max_attempts = 3
+# Maximum total delay across VSS request retries (seconds)
+#retry_max_total_delay_secs = 5
+
+[api]
+# Max allowed media size for upload (MB)
+#max_media_upload_size_mb = 5
+# Default page size for list endpoints
+#default_page_size = 100

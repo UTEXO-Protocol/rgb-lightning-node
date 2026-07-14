@@ -9,10 +9,27 @@ use tokio::sync::Notify;
 use crate::disk::FilesystemLogger;
 use crate::ldk::{GossipVerifier, NetworkGraph, P2PGossipSync, RapidGossipSync};
 
-pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const RGS_SNAPSHOT_MAX_SIZE: usize = 15 * 1024 * 1024;
 pub(crate) const RGS_CONNECT_TIMEOUT_SECS: u64 = 5;
 pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 60;
+
+/// RGS network tuning, sourced from the config file.
+#[derive(Clone, Debug)]
+pub(crate) struct RgsTuning {
+    pub(crate) connect_timeout_secs: u64,
+    pub(crate) sync_timeout_secs: u64,
+    pub(crate) snapshot_max_size: usize,
+}
+
+impl Default for RgsTuning {
+    fn default() -> Self {
+        Self {
+            connect_timeout_secs: RGS_CONNECT_TIMEOUT_SECS,
+            sync_timeout_secs: RGS_SYNC_TIMEOUT_SECS,
+            snapshot_max_size: RGS_SNAPSHOT_MAX_SIZE,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -32,6 +49,7 @@ pub(crate) enum GossipSource {
         gossip_sync: Arc<RapidGossipSync>,
         server_url: String,
         latest_sync_timestamp: AtomicU32,
+        tuning: RgsTuning,
     },
 }
 
@@ -50,12 +68,14 @@ impl GossipSource {
         latest_sync_timestamp: u32,
         network_graph: Arc<NetworkGraph>,
         logger: Arc<FilesystemLogger>,
+        tuning: RgsTuning,
     ) -> Self {
         let gossip_sync = Arc::new(RapidGossipSync::new(network_graph, logger));
         Self::RapidGossipSync {
             gossip_sync,
             server_url,
             latest_sync_timestamp: AtomicU32::new(latest_sync_timestamp),
+            tuning,
         }
     }
 
@@ -72,15 +92,17 @@ impl GossipSource {
     }
 
     pub(crate) async fn update_rgs_snapshot(&self) -> Result<u32, crate::error::APIError> {
-        let (gossip_sync, server_url, latest_sync_timestamp) = match self {
+        let (gossip_sync, server_url, latest_sync_timestamp, tuning) = match self {
             Self::P2PNetwork { .. } => return Ok(0),
             Self::RapidGossipSync {
                 gossip_sync,
                 server_url,
                 latest_sync_timestamp,
+                tuning,
                 ..
-            } => (gossip_sync, server_url, latest_sync_timestamp),
+            } => (gossip_sync, server_url, latest_sync_timestamp, tuning),
         };
+        let snapshot_max_size = tuning.snapshot_max_size;
 
         let ts = latest_sync_timestamp.load(Ordering::Acquire);
         let url = snapshot_url(server_url, ts)?;
@@ -88,8 +110,8 @@ impl GossipSource {
         // Fail fast on unreachable servers but allow a 15 MiB body to land
         // on slow links — the two timeouts have different jobs.
         let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(RGS_CONNECT_TIMEOUT_SECS))
-            .timeout(Duration::from_secs(RGS_SYNC_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_secs(tuning.connect_timeout_secs))
+            .timeout(Duration::from_secs(tuning.sync_timeout_secs))
             .build()
             .map_err(|e| crate::error::APIError::GossipUpdateFailed(e.to_string()))?;
 
@@ -113,7 +135,7 @@ impl GossipSource {
         // then enforce the same cap per-chunk for responses without a
         // Content-Length (or with a truthful one that exceeds the cap).
         if let Some(advertised) = response.content_length() {
-            if advertised > RGS_SNAPSHOT_MAX_SIZE as u64 {
+            if advertised > snapshot_max_size as u64 {
                 return Err(crate::error::APIError::GossipUpdateFailed(format!(
                     "snapshot too large: {advertised} bytes"
                 )));
@@ -122,7 +144,7 @@ impl GossipSource {
 
         let cap_hint = response
             .content_length()
-            .map(|n| (n as usize).min(RGS_SNAPSHOT_MAX_SIZE))
+            .map(|n| (n as usize).min(snapshot_max_size))
             .unwrap_or(0);
         let mut buf: Vec<u8> = Vec::with_capacity(cap_hint);
         let mut response = response;
@@ -133,7 +155,7 @@ impl GossipSource {
                 crate::error::APIError::GossipUpdateFailed(e.to_string())
             }
         })? {
-            if buf.len() + chunk.len() > RGS_SNAPSHOT_MAX_SIZE {
+            if buf.len() + chunk.len() > snapshot_max_size {
                 return Err(crate::error::APIError::GossipUpdateFailed(format!(
                     "snapshot too large: {} bytes",
                     buf.len() + chunk.len()
@@ -302,7 +324,13 @@ mod source_tests {
 
         let logger = test_logger();
         let graph = test_graph(Arc::clone(&logger));
-        let source = GossipSource::new_rgs(format!("http://{addr}/snapshot"), 0, graph, logger);
+        let source = GossipSource::new_rgs(
+            format!("http://{addr}/snapshot"),
+            0,
+            graph,
+            logger,
+            RgsTuning::default(),
+        );
         match source.update_rgs_snapshot().await {
             Err(crate::error::APIError::GossipUpdateFailed(_)) => {}
             other => panic!("expected GossipUpdateFailed, got {other:?}"),
@@ -339,7 +367,13 @@ mod source_tests {
 
         let logger = test_logger();
         let graph = test_graph(Arc::clone(&logger));
-        let source = GossipSource::new_rgs(format!("http://{addr}/snapshot"), 0, graph, logger);
+        let source = GossipSource::new_rgs(
+            format!("http://{addr}/snapshot"),
+            0,
+            graph,
+            logger,
+            RgsTuning::default(),
+        );
 
         let started = Instant::now();
         let result = source.update_rgs_snapshot().await;
@@ -402,7 +436,13 @@ mod source_tests {
 
         let logger = test_logger();
         let graph = test_graph(Arc::clone(&logger));
-        let source = GossipSource::new_rgs(format!("http://{addr}/snapshot"), 0, graph, logger);
+        let source = GossipSource::new_rgs(
+            format!("http://{addr}/snapshot"),
+            0,
+            graph,
+            logger,
+            RgsTuning::default(),
+        );
 
         let result = source.update_rgs_snapshot().await;
         let _ = server.await;
@@ -435,6 +475,7 @@ mod source_tests {
             0,
             graph,
             logger,
+            RgsTuning::default(),
         ));
         let shutdown = Arc::new(Notify::new());
         shutdown.notify_one();
@@ -482,7 +523,13 @@ mod source_tests {
 
         let logger = test_logger();
         let graph = test_graph(Arc::clone(&logger));
-        let source = GossipSource::new_rgs(format!("http://{addr}/snapshot"), 0, graph, logger);
+        let source = GossipSource::new_rgs(
+            format!("http://{addr}/snapshot"),
+            0,
+            graph,
+            logger,
+            RgsTuning::default(),
+        );
 
         let result = source.update_rgs_snapshot().await;
         let _ = server.await;

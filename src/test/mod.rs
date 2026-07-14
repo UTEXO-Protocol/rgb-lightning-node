@@ -115,6 +115,7 @@ impl Default for UserArgs {
             vss_allow_empty_restore: false,
             reuse_addresses: false,
             remote_signer_listen_addr: None,
+            config: Default::default(),
         }
     }
 }

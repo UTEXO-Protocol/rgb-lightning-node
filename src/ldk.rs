@@ -117,10 +117,7 @@ use tokio::task::JoinHandle;
 use crate::async_kv_store::RemoteFirstKvStore;
 use crate::bitcoind::BitcoindClient;
 use crate::chain_backend::ChainBackend;
-use crate::core_types::{
-    HTLCStatus, NodeKeySource, SwapStatus, UnlockRequest, DUST_LIMIT_MSAT, FEE_RATE, HTLC_MIN_MSAT,
-    MIN_CHANNEL_CONFIRMATIONS, VIRTUAL_HTLC_MIN_MSAT,
-};
+use crate::core_types::{HTLCStatus, NodeKeySource, SwapStatus, UnlockRequest};
 use crate::database::RlnDatabase;
 use crate::disk::{self, FilesystemLogger};
 use crate::gossip::{GossipSource, GossipSourceConfig};
@@ -1187,6 +1184,7 @@ impl AsyncOrderAccessControl for LiveChannelAccess {
 }
 
 struct AsyncOrderRecipientInvoiceProvider {
+    config: Arc<crate::config::Config>,
     channel_manager: Arc<ChannelManager>,
     inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
     async_payments_preimage_root: Arc<AsyncPaymentsPreimageRoot>,
@@ -1219,9 +1217,9 @@ impl AsyncOrderInvoiceProvider for AsyncOrderRecipientInvoiceProvider {
         let htlc_min_msat = if self.channel_manager.list_channels().iter().any(|channel| {
             channel.counterparty.node_id == sender_node_id && channel.trusted_no_broadcast
         }) {
-            VIRTUAL_HTLC_MIN_MSAT
+            self.config.channels.virtual_htlc_min_msat
         } else {
-            HTLC_MIN_MSAT
+            self.config.channels.htlc_min_msat
         };
         if amount_msat < htlc_min_msat {
             return Err(JsonRpcErrorWire::invalid_params(format!(
@@ -1774,10 +1772,19 @@ async fn handle_ldk_events(
                             assignment,
                             transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
                     }]};
+                    let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
                     let unlocked_state_copy = unlocked_state.clone();
                     let res = tokio::task::spawn_blocking(move || -> Result<String, String> {
                         let res = unlocked_state_copy
-                            .rgb_send_begin(recipient_map, true, FEE_RATE, 0, None, false, Some(0))
+                            .rgb_send_begin(
+                                recipient_map,
+                                true,
+                                fee_rate_sat_vb,
+                                0,
+                                None,
+                                false,
+                                Some(0),
+                            )
                             .map_err(|e| e.to_string())?;
                         let fascia_str = fs::read_to_string(&res.details.fascia_path)
                             .map_err(|e| e.to_string())?;
@@ -1981,14 +1988,16 @@ async fn handle_ldk_events(
                         transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
                 }]};
 
+                let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
+                let min_channel_confirmations = unlocked_state.config.rgb.min_channel_confirmations;
                 let unlocked_state_copy = unlocked_state.clone();
                 let res = tokio::task::spawn_blocking(
                     move || -> Result<(String, Option<i32>), RgbLibError> {
                         let res = unlocked_state_copy.rgb_send_begin(
                             recipient_map,
                             true,
-                            FEE_RATE,
-                            MIN_CHANNEL_CONFIRMATIONS,
+                            fee_rate_sat_vb,
+                            min_channel_confirmations,
                             None,
                             false,
                             // Final locktime: this colored tx funds an LN channel.
@@ -2043,7 +2052,7 @@ async fn handle_ldk_events(
                 let raw_psbt = match unlocked_state.rgb_send_btc_begin(
                     addr.to_address(),
                     channel_value_satoshis,
-                    FEE_RATE,
+                    unlocked_state.config.rgb.fee_rate_sat_vb,
                 ) {
                     Ok(psbt) => psbt,
                     Err(e) => {
@@ -3274,7 +3283,9 @@ impl OutputSpender for RgbOutputSpender {
                     .unwrap()
                     .unwrap();
                 txouts.push(TxOut {
-                    value: Amount::from_sat(DUST_LIMIT_MSAT / 1000),
+                    value: Amount::from_sat(
+                        self.static_state.config.channels.dust_limit_msat / 1000,
+                    ),
                     script_pubkey,
                 });
                 receive_data.recipient_id
@@ -3305,7 +3316,7 @@ impl OutputSpender for RgbOutputSpender {
             );
         }
 
-        let feerate_sat_per_1000_weight = FEE_RATE as u32 * 250; // 1 sat/vB = 250 sat/kw
+        let feerate_sat_per_1000_weight = self.static_state.config.rgb.fee_rate_sat_vb as u32 * 250; // 1 sat/vB = 250 sat/kw
         let (psbt, _expected_max_weight) =
             SpendableOutputDescriptor::create_spendable_outputs_psbt(
                 secp_ctx,
@@ -3764,10 +3775,25 @@ fn supported_asset_schemas(bitcoin_network: BitcoinNetwork) -> Vec<AssetSchema> 
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     key_source: NodeKeySource,
-    unlock_request: UnlockRequest,
+    mut unlock_request: UnlockRequest,
 ) -> Result<(LdkBackgroundServices, Arc<UnlockedAppState>), APIError> {
     let gossip_source_config = unlock_request.gossip_source.clone().unwrap_or_default();
     let static_state = &app_state.static_state;
+
+    // Unlock request params take precedence, the config file provides defaults.
+    let file_config = &static_state.config;
+    unlock_request.indexer_url = unlock_request
+        .indexer_url
+        .or_else(|| file_config.chain.indexer_url.clone());
+    unlock_request.proxy_endpoint = unlock_request
+        .proxy_endpoint
+        .or_else(|| file_config.chain.proxy_endpoint.clone());
+    unlock_request.announce_alias = unlock_request
+        .announce_alias
+        .or_else(|| file_config.node.announce_alias.clone());
+    if unlock_request.announce_addresses.is_empty() {
+        unlock_request.announce_addresses = file_config.node.announce_addresses.clone();
+    }
     let (
         internal_mnemonic,
         external_signer_mode,
@@ -3859,10 +3885,11 @@ pub(crate) async fn start_ldk(
     {
         tracing::info!(store_id = %identity.pubkey_hex, "Initializing VSS KV store");
         let vss_kv_store = Arc::new(
-            crate::vss_kv_store::VssKvStore::new(
+            crate::vss_kv_store::VssKvStore::new_with_retry(
                 vss_url.clone(),
                 identity.pubkey_hex.clone(),
                 identity.signing_key,
+                &static_state.config.vss,
             )
             .map_err(|e| APIError::FailedVssInit(e.to_string()))?,
         );
@@ -3970,6 +3997,7 @@ pub(crate) async fn start_ldk(
                 password,
                 tokio::runtime::Handle::current(),
                 Arc::clone(&logger),
+                static_state.config.chain.fee_refresh_interval_secs,
             )
             .await
             {
@@ -4006,6 +4034,8 @@ pub(crate) async fn start_ldk(
                     network,
                     tokio::runtime::Handle::current(),
                     Arc::clone(&logger),
+                    static_state.config.chain.indexer_timeout_secs,
+                    static_state.config.chain.fee_refresh_interval_secs,
                 )
                 .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
             );
@@ -4034,6 +4064,7 @@ pub(crate) async fn start_ldk(
                     network,
                     tokio::runtime::Handle::current(),
                     Arc::clone(&logger),
+                    static_state.config.chain.fee_refresh_interval_secs,
                 )
                 .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
             );
@@ -4245,13 +4276,24 @@ pub(crate) async fn start_ldk(
     ));
 
     // Initialize the ChannelManager
+    let channels_config = &static_state.config.channels;
     let mut user_config = UserConfig::default();
     user_config
         .channel_handshake_limits
         .force_announced_channel_preference = false;
+    user_config.channel_handshake_limits.their_to_self_delay = channels_config.their_to_self_delay;
+    user_config.channel_handshake_limits.max_minimum_depth = channels_config.max_minimum_depth;
     user_config
         .channel_handshake_config
         .negotiate_anchors_zero_fee_htlc_tx = true;
+    user_config.channel_handshake_config.our_to_self_delay = channels_config.our_to_self_delay;
+    user_config
+        .channel_handshake_config
+        .max_inbound_htlc_value_in_flight_percent_of_channel =
+        channels_config.max_inbound_htlc_value_in_flight_percent;
+    user_config.channel_handshake_config.our_max_accepted_htlcs =
+        channels_config.our_max_accepted_htlcs;
+    user_config.channel_config = channels_config.channel_config();
     user_config.accept_forwards_to_priv_channels = static_state.enable_virtual_channels_v0;
     user_config.manually_accept_inbound_channels = true;
     let mut restarting_node = true;
@@ -4625,6 +4667,14 @@ pub(crate) async fn start_ldk(
                 latest_sync_timestamp,
                 Arc::clone(&network_graph),
                 Arc::clone(&logger),
+                crate::gossip::RgsTuning {
+                    connect_timeout_secs: static_state.config.gossip.rgs_connect_timeout_secs,
+                    sync_timeout_secs: static_state.config.gossip.rgs_sync_timeout_secs,
+                    snapshot_max_size: (static_state.config.gossip.rgs_snapshot_max_size_mb
+                        as usize)
+                        * 1024
+                        * 1024,
+                },
             )
         }
     });
@@ -4683,6 +4733,7 @@ pub(crate) async fn start_ldk(
             lsp_base_url.clone(),
             static_state.lsp_bearer_token.clone(),
             Handle::current(),
+            static_state.config.lsp.request_timeout_secs,
         )),
         None => Arc::new(AsyncOrderMessageHandler::new(live_channel_access)),
     };
@@ -5020,6 +5071,7 @@ pub(crate) async fn start_ldk(
     }
 
     async_order_handler.set_invoice_provider(Arc::new(AsyncOrderRecipientInvoiceProvider {
+        config: static_state.config.clone(),
         channel_manager: Arc::clone(&channel_manager),
         inbound_payments: Arc::clone(&inbound_payments),
         async_payments_preimage_root: Arc::clone(&async_payments_preimage_root),
@@ -5030,6 +5082,7 @@ pub(crate) async fn start_ldk(
     }));
 
     let unlocked_state = Arc::new(UnlockedAppState {
+        config: static_state.config.clone(),
         channel_manager: Arc::clone(&channel_manager),
         gossip_source: Arc::clone(&gossip_source),
         inbound_payments,
@@ -5068,7 +5121,7 @@ pub(crate) async fn start_ldk(
         tokio::spawn(crate::gossip::run_rgs_sync_loop(
             Arc::clone(&unlocked_state.gossip_source),
             Arc::clone(&gossip_shutdown),
-            crate::gossip::RGS_SYNC_INTERVAL,
+            Duration::from_secs(static_state.config.gossip.rgs_sync_interval_secs),
         ));
     }
 
@@ -5131,8 +5184,9 @@ pub(crate) async fn start_ldk(
     let connect_pm = Arc::clone(&peer_manager);
     let connect_db = static_state.db();
     let stop_connect = Arc::clone(&stop_processing);
+    let reconnect_interval_secs = static_state.config.node.peer_reconnect_interval_secs;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut interval = tokio::time::interval(Duration::from_secs(reconnect_interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
@@ -5261,12 +5315,15 @@ pub(crate) async fn start_ldk(
     };
     let peer_man = Arc::clone(&peer_manager);
     let chan_man = Arc::clone(&channel_manager);
+    let announce_initial_delay_secs = static_state.config.node.announce_initial_delay_secs;
+    let announce_refresh_interval_secs = static_state.config.node.announce_refresh_interval_secs;
     tokio::spawn(async move {
-        // First wait a minute until we have some peers and maybe have opened a channel.
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        // Then, update our announcement once an hour to keep it fresh but avoid unnecessary churn
+        // First wait until we have some peers and maybe have opened a channel.
+        tokio::time::sleep(Duration::from_secs(announce_initial_delay_secs)).await;
+        // Then, update our announcement periodically to keep it fresh but avoid unnecessary churn
         // in the global gossip network.
-        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(announce_refresh_interval_secs));
         loop {
             interval.tick().await;
             // Don't bother trying to announce if we don't have any public channls, though our

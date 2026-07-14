@@ -76,6 +76,16 @@ body must include exactly one of:
 `bitcoind + esplora` returns `400 AmbiguousChainBackend`. No credentials at
 all returns `400 MissingChainBackend`.
 
+### Configuration file
+
+The node can be configured via a TOML file, loaded from
+`<storage_directory_path>/config.toml` if it exists, or from the path given
+with `--config <path>`. All settings are optional and documented, along with
+their defaults, in [sample-config.toml](sample-config.toml). Values are
+resolved in order: built-in defaults, then the config file, then explicit CLI
+options; `/unlock` body params override the corresponding config values at
+runtime. Invalid values and unknown keys abort startup with an error.
+
 ### Regtest
 
 To easily start the required services on a regtest network, run:

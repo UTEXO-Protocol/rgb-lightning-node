@@ -118,16 +118,32 @@ impl VssKvStore {
     /// * `store_id` - Keyspace identifier (derived from node pubkey)
     /// * `signing_key` - Secret key used both for sigs-auth and for deriving
     ///   the per-value encryption key via HKDF-SHA256.
+    #[cfg(test)]
     pub fn new(
         server_url: String,
         store_id: String,
         signing_key: SecretKey,
     ) -> Result<Self, io::Error> {
+        Self::new_with_retry(
+            server_url,
+            store_id,
+            signing_key,
+            &crate::config::VssSection::default(),
+        )
+    }
+
+    pub fn new_with_retry(
+        server_url: String,
+        store_id: String,
+        signing_key: SecretKey,
+        retry: &crate::config::VssSection,
+    ) -> Result<Self, io::Error> {
         let auth_provider = SigsAuthProvider::new(signing_key, HashMap::new());
 
-        let retry_policy = ExponentialBackoffRetryPolicy::new(Duration::from_millis(100))
-            .with_max_attempts(3)
-            .with_max_total_delay(Duration::from_secs(5));
+        let retry_policy =
+            ExponentialBackoffRetryPolicy::new(Duration::from_millis(retry.retry_backoff_ms))
+                .with_max_attempts(retry.retry_max_attempts)
+                .with_max_total_delay(Duration::from_secs(retry.retry_max_total_delay_secs));
 
         let client = VssClient::new_with_headers(server_url, retry_policy, Arc::new(auth_provider));
 

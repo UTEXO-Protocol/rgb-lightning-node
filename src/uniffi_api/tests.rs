@@ -97,6 +97,7 @@ mod uniffi_smoke_tests {
                 .expect("mock database connection");
         Arc::new(AppState {
             static_state: Arc::new(StaticState {
+                config: Default::default(),
                 ldk_peer_listening_port: 9735,
                 network: BitcoinNetwork::Regtest,
                 storage_dir_path: tmp.path().to_path_buf(),

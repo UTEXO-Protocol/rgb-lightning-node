@@ -37,7 +37,6 @@ use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
-use crate::core_types::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT, VIRTUAL_HTLC_MIN_MSAT};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::signer::{
@@ -66,7 +65,6 @@ pub(crate) const ELECTRUM_URL_TESTNET4: &str = "ssl://electrum.iriswallet.com:50
 pub(crate) const ELECTRUM_URL_MAINNET: &str = "ssl://electrum.iriswallet.com:50003";
 pub(crate) const PROXY_ENDPOINT_LOCAL: &str = "rpc://127.0.0.1:3000/json-rpc";
 pub(crate) const PROXY_ENDPOINT_PUBLIC: &str = "rpcs://proxy.iriswallet.com/0.2/json-rpc";
-const PASSWORD_MIN_LENGTH: u8 = 8;
 
 pub(crate) struct AppState {
     pub(crate) static_state: Arc<StaticState>,
@@ -126,6 +124,7 @@ impl AppState {
 // `cfg_attr(dead_code)` annotations made the fields look optional; they
 // aren't, only their consumers are gated).
 pub(crate) struct StaticState {
+    pub(crate) config: Arc<crate::config::Config>,
     pub(crate) enable_virtual_channels_v0: bool,
     pub(crate) ldk_peer_listening_port: u16,
     pub(crate) network: BitcoinNetwork,
@@ -164,6 +163,7 @@ impl StaticState {
 }
 
 pub(crate) struct UnlockedAppState {
+    pub(crate) config: Arc<crate::config::Config>,
     pub(crate) channel_manager: Arc<ChannelManager>,
     pub(crate) gossip_source: Arc<crate::gossip::GossipSource>,
     pub(crate) inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
@@ -284,7 +284,7 @@ impl UnlockedAppState {
             })
             .filter_map(|chan_info| chan_info.inbound_htlc_minimum_msat)
             .min()
-            .unwrap_or(HTLC_MIN_MSAT)
+            .unwrap_or(self.config.channels.htlc_min_msat)
     }
 
     pub(crate) fn htlc_min_msat_for_peer(&self, peer: PublicKey) -> u64 {
@@ -293,9 +293,9 @@ impl UnlockedAppState {
                 channel.trusted_no_broadcast && channel.counterparty.node_id == peer
             });
         if has_virtual {
-            VIRTUAL_HTLC_MIN_MSAT
+            self.config.channels.virtual_htlc_min_msat
         } else {
-            HTLC_MIN_MSAT
+            self.config.channels.htlc_min_msat
         }
     }
 
@@ -435,10 +435,10 @@ pub(crate) fn validate_external_signer_init(
     Ok(())
 }
 
-pub(crate) fn check_password_strength(password: String) -> Result<(), APIError> {
-    if password.len() < PASSWORD_MIN_LENGTH as usize {
+pub(crate) fn check_password_strength(password: String, min_length: u8) -> Result<(), APIError> {
+    if password.len() < min_length as usize {
         return Err(APIError::InvalidPassword(format!(
-            "must have at least {PASSWORD_MIN_LENGTH} chars"
+            "must have at least {min_length} chars"
         )));
     }
     Ok(())
@@ -716,6 +716,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
     }
 
     let static_state = Arc::new(StaticState {
+        config: Arc::new(args.config.clone()),
         enable_virtual_channels_v0: args.enable_virtual_channels_v0,
         ldk_peer_listening_port: args.ldk_peer_listening_port,
         network: args.network,
@@ -781,6 +782,7 @@ pub(crate) fn get_max_local_rgb_amount<'r>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_route(
+    config: &crate::config::Config,
     channel_manager: &crate::ldk::ChannelManager,
     router: &crate::ldk::Router,
     kv_store: &dyn KVStoreSync,
@@ -817,7 +819,7 @@ pub(crate) fn get_route(
             node_id: dest,
             route_hints: hints,
             features: None,
-            final_cltv_expiry_delta: DEFAULT_FINAL_CLTV_EXPIRY_DELTA,
+            final_cltv_expiry_delta: config.payments.final_cltv_expiry_delta,
         },
         expiry_time: None,
         max_total_cltv_expiry_delta: DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA,
@@ -831,7 +833,7 @@ pub(crate) fn get_route(
         &start,
         &RouteParameters {
             payment_params,
-            final_value_msat: final_value_msat.unwrap_or(HTLC_MIN_MSAT),
+            final_value_msat: final_value_msat.unwrap_or(config.channels.htlc_min_msat),
             max_total_routing_fee_msat: None,
             rgb_payment,
         },
