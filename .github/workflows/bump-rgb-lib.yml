@@ -1,0 +1,67 @@
+name: Bump rgb-lib version
+
+on:
+  repository_dispatch:
+    types: [rgb-lib-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rgb-lib tag (e.g. v0.3.0-beta.28)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            RAW="${{ github.event.client_payload.version }}"
+          else
+            RAW="${{ inputs.version }}"
+          fi
+          VERSION="${RAW#v}"
+          VERSION="v${VERSION}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "branch=bump/rgb-lib-$VERSION" >> $GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Update rgb-lib tag in Cargo.toml
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "s|tag = \"v[^\"]*\"|tag = \"${VERSION}\"|g" Cargo.toml
+
+      - name: Commit and push bump branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${{ steps.version.outputs.branch }}"
+          git add Cargo.toml
+          git diff --cached --quiet && echo "No changes, exiting" && exit 0
+          git commit -m "chore: bump rgb-lib to ${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.branch }}"
+
+      - name: Create pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "chore: bump rgb-lib to ${{ steps.version.outputs.version }}" \
+            --body "Automated bump of rgb-lib to [${{ steps.version.outputs.version }}](https://github.com/UTEXO-Protocol/rgb-lib/releases/tag/${{ steps.version.outputs.version }})." \
+            --base dev \
+            --head "${{ steps.version.outputs.branch }}"
+
+      - name: Dispatch CI on bump branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run test.yaml --ref "${{ steps.version.outputs.branch }}"

@@ -2,11 +2,12 @@
 const path = require("path");
 const { defineConfig } = require("@playwright/test");
 
-const repoRoot = path.join(__dirname, "..");
+// This suite lives at `bindings/wasm-sdk/e2e-specs`, so the repo root is three levels up.
+const repoRoot = path.join(__dirname, "..", "..", "..");
 
 /**
- * Serves the repository root so `wasm_to_regular_rln_channel_flow.html` can load
- * `../../pkg/rln_wasm_sdk.js`.
+ * Serves the repository root so the harness page can load the built wasm package under
+ * `/bindings/wasm-sdk/pkg/` and the example HTML under `/bindings/wasm-sdk/examples/`.
  */
 module.exports = defineConfig({
   testDir: ".",

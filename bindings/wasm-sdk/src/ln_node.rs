@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -102,6 +103,11 @@ pub struct RlnWasmNodeChannelData {
     pub asset_id: Option<String>,
     pub asset_local_amount: Option<u64>,
     pub virtual_open_mode: Option<String>,
+    /// This node's spendable outbound BTC capacity, in msat.
+    pub outbound_msat: u64,
+    /// The largest single outbound HTLC this node can currently send, in msat. Callers draining a
+    /// channel (e.g. before a virtual-channel close) should pay in chunks bounded by this value.
+    pub next_outbound_htlc_limit_msat: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -387,6 +393,10 @@ pub struct RlnWasmNode {
     node_instance_nonce: u64,
     next_runtime_event_seq: Rc<RefCell<u64>>,
     network: RefCell<String>,
+    /// Whether the network was explicitly selected at construction (native-style `--network`).
+    /// When `true`, `attach_wallet_shared` validates the wallet's network against it and errors on
+    /// mismatch. When `false` (bare `new`/facade path), the node adopts the attached wallet's network.
+    network_configured: Cell<bool>,
     wallet: RefCell<Option<std::rc::Rc<RefCell<rgb_lib_wasm::Wallet>>>>,
     relay_session_auth: RefCell<Option<RlnWasmNodeRelaySessionAuthData>>,
     enable_virtual_channels_v0: RefCell<bool>,
@@ -459,22 +469,33 @@ impl RlnWasmNode {
         }
     }
 
+    /// Bare constructor. The network is left unset and adopted from the first attached wallet
+    /// (regtest defaults apply until then). For an explicit, native-style network selection use
+    /// [`new_with_node_runtime_id`](Self::new_with_node_runtime_id).
     #[wasm_bindgen(constructor)]
     pub fn new(proxy_url: String) -> Result<RlnWasmNode, JsValue> {
-        Self::new_with_runtime_id_opt(proxy_url, None)
+        Self::new_with_runtime_id_opt(proxy_url, None, None)
     }
 
+    /// Construct a node with an explicit Bitcoin network, mirroring the native node's `--network`.
+    /// The `network` string is one of `"mainnet" | "testnet" | "testnet4" | "signet" | "regtest"`
+    /// (case-insensitive). The node owns this network as its single source of truth: it drives the
+    /// LDK `ChannelManager`/`NetworkGraph` (and therefore the `Init` handshake chain), and
+    /// `attachWallet` will reject a wallet created on a different network.
     #[wasm_bindgen(js_name = newWithNodeRuntimeId)]
     pub fn new_with_node_runtime_id(
         proxy_url: String,
         node_runtime_id: String,
+        network: String,
     ) -> Result<RlnWasmNode, JsValue> {
-        Self::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id))
+        let network = crate::WasmRlnNetwork::parse(&network)?;
+        Self::new_with_runtime_id_opt(proxy_url, Some(node_runtime_id), Some(network))
     }
 
     pub(crate) fn new_with_runtime_id_opt(
         proxy_url: String,
         node_runtime_id: Option<String>,
+        network: Option<crate::WasmRlnNetwork>,
     ) -> Result<RlnWasmNode, JsValue> {
         if proxy_url.trim().is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_PROXY_URL_EMPTY));
@@ -513,11 +534,22 @@ impl RlnWasmNode {
         )?;
         let runtime_core =
             NativeLnRuntimeCore::new(persistence_keys.ldk_manager_registry_key.clone());
+        // When a network is explicitly selected it becomes the node's single source of truth (like
+        // the native node's `--network`); otherwise fall back to the historical `regtest` default and
+        // let the first attached wallet supply the network.
+        let configured_rgb_network = network.map(|n| n.as_rgb());
+        let default_network_label = configured_rgb_network
+            .map(rgb_network_label)
+            .unwrap_or("regtest");
         let chain_sync = WasmChainSyncDriver::new(
             persistence_keys.ldk_manager_registry_key.clone(),
-            "regtest".to_string(),
+            default_network_label.to_string(),
         )?;
-        let restored_network = chain_sync.status().network;
+        let restored_network = if configured_rgb_network.is_some() {
+            default_network_label.to_string()
+        } else {
+            chain_sync.status().network
+        };
         let enable_virtual_channels_v0 =
             load_virtual_channels_v0_flag(&persistence_keys.virtual_channels_v0_storage_key)
                 .unwrap_or_else(crate::sdk_default_enable_virtual_channels_v0);
@@ -540,6 +572,7 @@ impl RlnWasmNode {
             node_instance_nonce: Self::next_node_instance_nonce(),
             next_runtime_event_seq: Rc::new(RefCell::new(next_runtime_event_seq)),
             network: RefCell::new(restored_network),
+            network_configured: Cell::new(configured_rgb_network.is_some()),
             wallet: RefCell::new(None),
             relay_session_auth: RefCell::new(None),
             enable_virtual_channels_v0: RefCell::new(enable_virtual_channels_v0),
@@ -548,6 +581,15 @@ impl RlnWasmNode {
             auto_drive_running: Rc::new(RefCell::new(false)),
             auto_drive_interval_ms: Rc::new(RefCell::new(AUTO_DRIVE_DEFAULT_INTERVAL_MS)),
         };
+        // For an explicitly-selected network, register it with the LDK backend now — before the
+        // object graph (ChannelManager/NetworkGraph) is first built — so the handshake advertises the
+        // configured chain even if a wallet is never attached.
+        if let Some(rgb_network) = configured_rgb_network {
+            crate::ldk_live_backend::set_network_for_runtime(
+                &node.persistence_keys.ldk_manager_registry_key,
+                crate::ldk_live_backend::rgb_network_to_bitcoin_network(rgb_network),
+            );
+        }
         // Keep live LDK backend identity aligned with node_signing_identity pubkey.
         let (node_secret_key, _) = node.node_signing_identity()?;
         node.ldk_runtime
@@ -579,16 +621,54 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = attachWallet)]
     pub fn attach_wallet(&self, wallet: &crate::RlnWasmWallet) -> Result<(), JsValue> {
-        self.attach_wallet_shared(Rc::clone(&wallet.inner));
-        Ok(())
+        self.attach_wallet_shared(Rc::clone(&wallet.inner))
     }
 
-    pub(crate) fn attach_wallet_shared(&self, wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>) {
+    pub(crate) fn attach_wallet_shared(
+        &self,
+        wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>,
+    ) -> Result<(), JsValue> {
+        // Reconcile the wallet's network with the node's.
+        //
+        // - Network selected explicitly at construction (`network_configured`): the node owns the
+        //   network (like the native `--network`), so the wallet MUST match. A mismatch is a
+        //   configuration error and is rejected up front — mirroring the native node's
+        //   `NetworkMismatch`, and preventing the LDK side from advertising a chain the wallet can't
+        //   actually operate on.
+        // - Otherwise: adopt the wallet's network as the node's, and propagate it to the LDK backend
+        //   (so the `ChannelManager`/`NetworkGraph`, and thus the `networks` field of the `Init`
+        //   handshake, advertise the right chain) and to the node's own network string (invoice
+        //   currency, chain-sync status).
+        let bitcoin_network = wallet.borrow().get_wallet_data().bitcoin_network;
+        let wallet_label = rgb_network_label(bitcoin_network);
+        if self.network_configured.get() {
+            let node_label = self.network.borrow().clone();
+            if wallet_label != node_label {
+                return Err(JsValue::from_str(&format!(
+                    "wallet network ({wallet_label}) does not match the node's configured network ({node_label})"
+                )));
+            }
+        } else {
+            *self.network.borrow_mut() = wallet_label.to_string();
+            let _ = self.chain_sync.set_network(wallet_label);
+        }
+        crate::ldk_live_backend::set_network_for_runtime(
+            &self.persistence_keys.ldk_manager_registry_key,
+            crate::ldk_live_backend::rgb_network_to_bitcoin_network(bitcoin_network),
+        );
         crate::ldk_live_backend::register_rgb_wallet_for_runtime(
             &self.persistence_keys.ldk_manager_registry_key,
             Rc::clone(&wallet),
         );
+        // Seed the live-backend virtual-channels flag registry with this node's current value
+        // (default/persisted) before the LDK object graph is first built, so the
+        // `Event::OpenChannelRequest` handler sees the right gate even if the setter is never called.
+        crate::ldk_live_backend::set_virtual_channels_v0_for_runtime(
+            &self.persistence_keys.ldk_manager_registry_key,
+            *self.enable_virtual_channels_v0.borrow(),
+        );
         *self.wallet.borrow_mut() = Some(wallet);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = setRelaySessionAuth)]
@@ -651,6 +731,13 @@ impl RlnWasmNode {
         *self.enable_virtual_channels_v0.borrow_mut() = enabled;
         persist_virtual_channels_v0_flag(
             &self.persistence_keys.virtual_channels_v0_storage_key,
+            enabled,
+        );
+        // Mirror the flag into the live-backend registry so the `Event::OpenChannelRequest` handler
+        // (which decides whether to accept inbound scid-privacy channels as 0-conf virtual channels)
+        // can read it by runtime key.
+        crate::ldk_live_backend::set_virtual_channels_v0_for_runtime(
+            &self.persistence_keys.ldk_manager_registry_key,
             enabled,
         );
     }
@@ -2893,7 +2980,12 @@ impl RlnWasmNode {
                 .map(|entry| entry.data.clone())
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN))?
         };
-        if payment.status == "pending" && parsed.is_expired() {
+        // `Bolt11Invoice::is_expired()` reads the system clock via `SystemTime::now()`, which is
+        // unimplemented on wasm32 and traps ("time not implemented on this platform"), poisoning the
+        // whole node. Use the explicit-time variant with the crate's cfg-gated `unix_now_secs()`
+        // helper instead — same semantics, no `SystemTime`.
+        if payment.status == "pending" && parsed.would_expire(Duration::from_secs(unix_now_secs()))
+        {
             let _ =
                 self.apply_payment_status_via_event_stream(&payment_hash, "expired", "node_api")?;
         }
@@ -3181,12 +3273,13 @@ impl RlnWasmNode {
                 .or_else(|| asset_id.clone())
                 .and_then(|id| {
                     self.with_attached_wallet(|wallet| {
-                        Ok(wallet.get_asset_metadata(id).ok().map(|m| {
-                            match m.asset_schema {
+                        Ok(wallet
+                            .get_asset_metadata(id)
+                            .ok()
+                            .map(|m| match m.asset_schema {
                                 rgb_lib_wasm::AssetSchema::Ifa => "ifa".to_string(),
                                 _ => "nia".to_string(),
-                            }
-                        }))
+                            }))
                     })
                     .ok()
                     .flatten()
@@ -3264,6 +3357,10 @@ impl RlnWasmNode {
             asset_id,
             asset_local_amount,
             virtual_open_mode: normalized_virtual_open_mode,
+            // A freshly-opened channel has no spendable outbound yet; `list_channels_value` overlays
+            // live balances from the channel manager once the channel is usable.
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         };
 
         if self.use_runtime_state_for_ln_views() {
@@ -3407,6 +3504,57 @@ impl RlnWasmNode {
             .await
     }
 
+    /// Async payments with LSP: register a fresh batch of payment hashes with the invoice-host /
+    /// LSP peer (`async_order.new`). Returns the host's order acknowledgement. Mirrors the native
+    /// SDK's `apay_new` / `/apay/new`.
+    #[wasm_bindgen(js_name = apayNewValue)]
+    pub async fn apay_new_value(&self, host_node_id: String) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let response = self
+            .ldk_runtime
+            .apay_new_boxed(host_node_id, None, None)
+            .await?;
+        crate::js_obj(&response)
+    }
+
+    #[wasm_bindgen(js_name = apayNewJson)]
+    pub async fn apay_new_json(&self, host_node_id: String) -> Result<String, JsValue> {
+        let value = self.apay_new_value(host_node_id).await?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
+    /// Like [`Self::apay_new_value`] but also attests a `username@domain` Lightning Address so the
+    /// LSP can serve inbound payments to that address. Mirrors `apay_new_with_address`.
+    #[wasm_bindgen(js_name = apayNewWithAddressValue)]
+    pub async fn apay_new_with_address_value(
+        &self,
+        host_node_id: String,
+        username: String,
+        domain: String,
+    ) -> Result<JsValue, JsValue> {
+        self.ensure_runtime_ready()?;
+        let response = self
+            .ldk_runtime
+            .apay_new_boxed(host_node_id, Some(username), Some(domain))
+            .await?;
+        crate::js_obj(&response)
+    }
+
+    #[wasm_bindgen(js_name = apayNewWithAddressJson)]
+    pub async fn apay_new_with_address_json(
+        &self,
+        host_node_id: String,
+        username: String,
+        domain: String,
+    ) -> Result<String, JsValue> {
+        let value = self
+            .apay_new_with_address_value(host_node_id, username, domain)
+            .await?;
+        let parsed: serde_json::Value = crate::js_from(value)?;
+        crate::js_to_json(&parsed)
+    }
+
     #[wasm_bindgen(js_name = closeChannel)]
     pub fn close_channel(&self, channel_id: String) -> Result<(), JsValue> {
         self.close_channel_with_options(channel_id, None, false)
@@ -3517,17 +3665,37 @@ impl RlnWasmNode {
                     "cannot find the channel with the provided peer pubkey",
                 ));
             }
-            let Some(session) = virtual_session.as_ref() else {
-                return Err(JsValue::from_str(
-                    "virtual cleanup is host-only and requires a host-side session",
-                ));
-            };
-            if session.status == LdkRuntimeVirtualChannelSessionStatusData::AbandonPending {
-                return Err(JsValue::from_str(
-                    sdk_contracts::ERR_VIRTUAL_CLEANUP_IN_PROGRESS,
-                ));
+            match virtual_session.as_ref() {
+                Some(session) => {
+                    if session.status == LdkRuntimeVirtualChannelSessionStatusData::AbandonPending {
+                        return Err(JsValue::from_str(
+                            sdk_contracts::ERR_VIRTUAL_CLEANUP_IN_PROGRESS,
+                        ));
+                    }
+                    self.ensure_virtual_cleanup_has_no_client_value(&channel, session)?;
+                }
+                None => {
+                    // Client (accepter) path: we accepted this channel and hold no host-side session.
+                    // The LSP/host abandons silently (`ErrorAction::IgnoreError`) without notifying us,
+                    // so once we have drained our value we must tear down our own side. Guard on the
+                    // live channel balances, then abandon locally — `abandon_virtual_channel` fires
+                    // `Event::ChannelClosed`, which the authoritative reconcile propagates to our views.
+                    if force {
+                        return Err(JsValue::from_str(
+                            "force=true is not supported for trusted virtual channels",
+                        ));
+                    }
+                    // `peer_pubkey` was validated and unwrapped to a trimmed `String` above.
+                    self.ensure_virtual_cleanup_client_no_local_value(&channel)?;
+                    self.ldk_runtime
+                        .virtual_channel_abandon_local(&channel_id, &peer_pubkey)?;
+                    self.ldk_runtime.remove_channel(&channel_id);
+                    self.unregister_trusted_virtual_scope_channel(&channel_id);
+                    self.ldk_runtime.record_channel_closed();
+                    self.persist_runtime_event_log_state();
+                    return Ok(());
+                }
             }
-            self.ensure_virtual_cleanup_has_no_client_value(&channel, session)?;
         }
         if force {
             if is_virtual_channel {
@@ -3615,6 +3783,28 @@ impl RlnWasmNode {
         self.unregister_trusted_virtual_scope_channel(&channel_id);
         self.ldk_runtime.record_channel_closed();
         self.persist_runtime_event_log_state();
+        Ok(())
+    }
+
+    /// Guard for client-side virtual-channel cleanup (we accepted the channel; no host session).
+    /// Refuse to abandon while we still hold value: RGB must be fully drained (units are valuable),
+    /// and BTC must be down to sub-HTLC-minimum dust (unspendable over LN, forfeited by the abandon).
+    fn ensure_virtual_cleanup_client_no_local_value(
+        &self,
+        channel: &RlnWasmNodeChannelData,
+    ) -> Result<(), JsValue> {
+        let rgb = channel.asset_local_amount.unwrap_or(0);
+        if rgb > 0 {
+            return Err(JsValue::from_str(&format!(
+                "virtual cleanup blocked: {rgb} RGB units remain on the channel — drain them to the LSP first"
+            )));
+        }
+        if channel.outbound_msat >= SDK_HTLC_MIN_MSAT {
+            return Err(JsValue::from_str(&format!(
+                "virtual cleanup blocked: {} msat of spendable BTC remains — drain it to the LSP first",
+                channel.outbound_msat
+            )));
+        }
         Ok(())
     }
 
@@ -4039,7 +4229,7 @@ impl RlnWasmNode {
                 runtime_backend.trim()
             )));
         }
-        Self::new_with_runtime_id_opt(proxy_url, node_runtime_id)
+        Self::new_with_runtime_id_opt(proxy_url, node_runtime_id, None)
     }
 }
 
@@ -4473,6 +4663,8 @@ impl RlnWasmNode {
             asset_id: data.asset_id.clone(),
             asset_local_amount: data.asset_local_amount,
             virtual_open_mode: data.virtual_open_mode.clone(),
+            outbound_msat: data.outbound_msat,
+            next_outbound_htlc_limit_msat: data.next_outbound_htlc_limit_msat,
         }
     }
 
@@ -4515,6 +4707,8 @@ impl RlnWasmNode {
             asset_id: state.asset_id,
             asset_local_amount: state.asset_local_amount,
             virtual_open_mode: state.virtual_open_mode,
+            outbound_msat: state.outbound_msat,
+            next_outbound_htlc_limit_msat: state.next_outbound_htlc_limit_msat,
         }
     }
 
@@ -5079,6 +5273,20 @@ impl Drop for RlnWasmNode {
 
 fn unix_now_secs() -> u64 {
     (js_sys::Date::now() as u64) / 1000
+}
+
+/// The node-level network string (as consumed by `invoice_currency` and the chain-sync driver)
+/// for a given rgb-lib WASM network. `SignetCustom` collapses to `"signet"`, matching the LDK
+/// network mapping in `ldk_live_backend::rgb_network_to_bitcoin_network`.
+fn rgb_network_label(network: rgb_lib_wasm::BitcoinNetwork) -> &'static str {
+    match network {
+        rgb_lib_wasm::BitcoinNetwork::Mainnet => "mainnet",
+        rgb_lib_wasm::BitcoinNetwork::Testnet => "testnet",
+        rgb_lib_wasm::BitcoinNetwork::Testnet4 => "testnet4",
+        rgb_lib_wasm::BitcoinNetwork::Signet => "signet",
+        rgb_lib_wasm::BitcoinNetwork::Regtest => "regtest",
+        rgb_lib_wasm::BitcoinNetwork::SignetCustom => "signet",
+    }
 }
 
 fn normalize_payment_status(status: &str) -> Result<String, JsValue> {

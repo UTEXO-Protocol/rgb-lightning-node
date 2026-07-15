@@ -189,6 +189,20 @@ impl WasmChainSyncDriver {
         self.persist()
     }
 
+    /// Override the network this driver reports (and persists). Called when the node's wallet is
+    /// attached so the persisted chain-sync snapshot — and the `status().network` copied into the
+    /// node on `chain_sync_start` — reflect the configured network instead of the Regtest default.
+    pub fn set_network(&self, network: &str) -> Result<(), JsValue> {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.network == network {
+                return Ok(());
+            }
+            state.network = network.to_string();
+        }
+        self.persist()
+    }
+
     pub fn enqueue_rebroadcast_tx(&self, txid: String, tx_hex: String) -> Result<(), JsValue> {
         let txid = txid.trim().to_lowercase();
         if txid.len() != 64 || !txid.chars().all(|c| c.is_ascii_hexdigit()) {

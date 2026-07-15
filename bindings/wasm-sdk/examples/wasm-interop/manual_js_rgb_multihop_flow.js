@@ -261,7 +261,7 @@ async function runFlow(cfg, runtimeId) {
   await sdk.unlock(JSON.stringify({ password: sdkPassword }));
   log("SDK initialized + unlocked");
 
-  const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, runtimeId);
+  const node = RlnWasmNode.newWithNodeRuntimeId(cfg.nodeProxyUrl, runtimeId, "Regtest");
   const myPubkey = JSON.parse(node.nodePubkeyJson());
   log("WASM node created", myPubkey);
 

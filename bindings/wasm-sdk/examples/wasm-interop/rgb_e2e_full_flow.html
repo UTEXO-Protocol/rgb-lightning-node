@@ -15,9 +15,11 @@
   <body>
     <h1>WASM ↔ Native — Real RGB-over-Lightning E2E</h1>
     <p class="hint">
-      Open vanilla + RGB channels &rarr; real BTC keysend HTLC &rarr; real RGB keysend HTLC
-      &rarr; close &rarr; reopen &amp; verify persisted state. Requires compose.wasm.yaml infra
-      and <code>rgb-native-phase5-node</code> on 19735/19737. Driven headlessly by
+      LSP opens vanilla + RGB <strong>trusted virtual channels</strong> to us (we accept 0-conf)
+      &rarr; real BTC keysend/BOLT11/HODL HTLCs &rarr; real RGB BOLT11 + keysend HTLCs &rarr; LSP
+      abandons both &rarr; reopen &amp; verify persisted state. Requires compose.wasm.yaml infra and a
+      native <code>rgb-lightning-node</code> LSP (peer 9802, REST 3101) started with
+      <code>--enable-virtual-channels-v0</code>. Driven headlessly by
       <code>run_e2e_full_flow.mjs</code> (auto-runs when <code>?phase=</code> is present).
     </p>
     <button id="run">Run E2E Full Flow</button>

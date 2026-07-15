@@ -194,6 +194,14 @@ pub struct LdkRuntimeChannelStateData {
     pub asset_id: Option<String>,
     pub asset_local_amount: Option<u64>,
     pub virtual_open_mode: Option<String>,
+    /// This node's spendable outbound BTC capacity, in msat. Refreshed on every live reconcile;
+    /// last-known value on reload (ephemeral, so not authoritative across restarts).
+    #[serde(default)]
+    pub outbound_msat: u64,
+    /// The largest single outbound HTLC this node can send, in msat. Used to drain a channel
+    /// before a virtual-channel close. Refreshed on every live reconcile.
+    #[serde(default)]
+    pub next_outbound_htlc_limit_msat: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -226,6 +234,25 @@ pub struct LdkRuntimeOpenChannelResultData {
     pub status: String,
     pub ready: bool,
     pub is_usable: bool,
+    /// RGB contract id of the channel's asset, read from the RGB kv store for *every* live channel
+    /// (both outbound-opened and inbound-accepted). `None` for vanilla (BTC-only) channels.
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    /// This node's local RGB amount held in the channel.
+    #[serde(default)]
+    pub asset_local_amount: Option<u64>,
+    /// This node's spendable outbound BTC capacity, in msat (LDK `outbound_capacity_msat`).
+    #[serde(default)]
+    pub outbound_msat: u64,
+    /// The largest single outbound HTLC this node can send right now, in msat
+    /// (LDK `next_outbound_htlc_limit_msat`). Used to drain a channel before a virtual-channel close.
+    #[serde(default)]
+    pub next_outbound_htlc_limit_msat: u64,
+    /// `Some("trusted_no_broadcast")` when the live channel is a never-broadcast virtual channel
+    /// (from LDK `ChannelDetails::trusted_no_broadcast`), for both opened and accepted channels.
+    /// `None` for regular channels. Lets a client recognize an accepted virtual channel as virtual.
+    #[serde(default)]
+    pub virtual_open_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -354,6 +381,12 @@ pub trait LdkRuntimeManager {
         channel_id: &str,
         peer_pubkey: &str,
         force: bool,
+    ) -> Result<(), JsValue>;
+    /// Abandon our own side of a never-broadcast virtual channel (client-side teardown).
+    fn virtual_channel_abandon_local(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
     ) -> Result<(), JsValue>;
     fn upsert_channel(&self, channel: LdkRuntimeChannelStateData);
     fn remove_channel(&self, channel_id: &str) -> bool;
@@ -486,6 +519,22 @@ pub trait LdkRuntimeManager {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
         Box::pin(async { Ok(()) })
+    }
+
+    /// Register a fresh async-payment hash batch with an invoice-host / LSP peer
+    /// (`async_order.new`), optionally attesting a `username@domain` Lightning Address.
+    fn apay_new_boxed(
+        &self,
+        _host_node_id: String,
+        _username: Option<String>,
+        _domain: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>>
+    {
+        Box::pin(async {
+            Err(JsValue::from_str(
+                "apay_new is not supported by this runtime manager",
+            ))
+        })
     }
 }
 
@@ -1107,6 +1156,15 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
         backend.close_live_channel(channel_id, peer_pubkey, force)
     }
 
+    fn virtual_channel_abandon_local(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+    ) -> Result<(), JsValue> {
+        let backend = self.ensure_live_backend()?;
+        backend.virtual_channel_abandon_local(channel_id, peer_pubkey)
+    }
+
     fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
         let backend = self.ensure_live_backend()?;
         backend.chain_relevant_txids()
@@ -1154,6 +1212,21 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
                 backend.process_pending_rgb_transactions_boxed().await?;
             }
             Ok(())
+        })
+    }
+
+    fn apay_new_boxed(
+        &self,
+        host_node_id: String,
+        username: Option<String>,
+        domain: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>>
+    {
+        let maybe_backend = self.live_backend.borrow().as_ref().map(Rc::clone);
+        Box::pin(async move {
+            let backend = maybe_backend
+                .ok_or_else(|| JsValue::from_str("apay_new requires a started live LDK runtime"))?;
+            backend.apay_new_boxed(host_node_id, username, domain).await
         })
     }
 
@@ -1395,9 +1468,25 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
                 } else {
                     existing.as_ref().map(|e| e.capacity_sat).unwrap_or(0)
                 },
-                asset_id: existing.as_ref().and_then(|e| e.asset_id.clone()),
-                asset_local_amount: existing.as_ref().and_then(|e| e.asset_local_amount),
-                virtual_open_mode: existing.as_ref().and_then(|e| e.virtual_open_mode.clone()),
+                // Prefer the live channel's RGB info (now surfaced by `list_live_channels` for both
+                // inbound-accepted and outbound-opened channels); fall back to the cached entry for
+                // channels whose RGB info is not yet persisted (e.g. an outbound open still funding).
+                asset_id: ch
+                    .asset_id
+                    .clone()
+                    .or_else(|| existing.as_ref().and_then(|e| e.asset_id.clone())),
+                asset_local_amount: ch
+                    .asset_local_amount
+                    .or_else(|| existing.as_ref().and_then(|e| e.asset_local_amount)),
+                // Prefer the live channel's virtual flag (now surfaced for accepted channels too),
+                // falling back to the cached value for channels not yet in the live set.
+                virtual_open_mode: ch
+                    .virtual_open_mode
+                    .clone()
+                    .or_else(|| existing.as_ref().and_then(|e| e.virtual_open_mode.clone())),
+                // Live balances straight from the channel manager (source of truth each reconcile).
+                outbound_msat: ch.outbound_msat,
+                next_outbound_htlc_limit_msat: ch.next_outbound_htlc_limit_msat,
             };
             self.upsert_channel(state);
             updated += 1;

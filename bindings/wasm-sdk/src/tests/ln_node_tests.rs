@@ -1671,9 +1671,9 @@ fn wasm_two_node_handles_same_proxy_distinct_runtime_ids_contract() {
     crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.runtime-id-isolation.example".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()))
+    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
         .expect("node A should build");
-    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()))
+    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()), None)
         .expect("node B should build");
 
     node_a.ensure_runtime_ready().expect("node A runtime");
@@ -1703,9 +1703,9 @@ fn wasm_signing_identity_differs_by_runtime_id_contract() {
     crate::ldk_runtime::test_utils::reset_runtime_storage_for_tests();
     let proxy = "ws://proxy.signing-identity-runtime-id.example".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()))
+    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
         .expect("node A should build");
-    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()))
+    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()), None)
         .expect("node B should build");
 
     let invoice_a_doc: serde_json::Value = serde_json::from_str(
@@ -1754,9 +1754,9 @@ fn wasm_channel_payment_state_does_not_cross_runtime_ids_contract() {
     let peer_pubkey =
         "0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0".to_string();
 
-    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()))
+    let node_a = RlnWasmNode::new_with_runtime_id_opt(proxy.clone(), Some("node-a".to_string()), None)
         .expect("node A should build");
-    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()))
+    let node_b = RlnWasmNode::new_with_runtime_id_opt(proxy, Some("node-b".to_string()), None)
         .expect("node B should build");
 
     node_a.ensure_runtime_ready().expect("node A runtime");
@@ -3069,11 +3069,13 @@ fn close_channel_allows_virtual_cleanup_after_authoritative_peer_keysend_roundtr
     let node_a = RlnWasmNode::new_with_runtime_id_opt(
         "ws://proxy.virtual-close-authoritative-roundtrip.example".to_string(),
         Some("virtual-close-node-a".to_string()),
+        None,
     )
     .expect("node a should build");
     let node_b = RlnWasmNode::new_with_runtime_id_opt(
         "ws://proxy.virtual-close-authoritative-roundtrip.example".to_string(),
         Some("virtual-close-node-b".to_string()),
+        None,
     )
     .expect("node b should build");
 

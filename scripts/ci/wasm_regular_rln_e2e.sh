@@ -224,7 +224,7 @@ wait_http "http://127.0.0.1:3001/healthz" "wasm-proxy-gateway"
 
 if [[ "$E2E_AUTO_PROVISION_REGULAR_RLN" != "1" ]]; then
   if ! curl -sf --max-time 2 http://127.0.0.1:3101/nodeinfo >/dev/null 2>&1; then
-    echo "Regular RLN is not reachable on 3101. Export E2E_AUTO_PROVISION_REGULAR_RLN=1 for a fresh node, or start one manually (see e2e-specs/README.md)." >&2
+    echo "Regular RLN is not reachable on 3101. Export E2E_AUTO_PROVISION_REGULAR_RLN=1 for a fresh node, or start one manually (see bindings/wasm-sdk/e2e-specs/README.md)." >&2
     exit 1
   fi
 fi
@@ -300,7 +300,7 @@ fi
 
 stage "stage 5 / playwright"
 
-cd e2e-specs
+cd "$ROOT/bindings/wasm-sdk/e2e-specs"
 if [[ "$E2E_NPM_CI" == "1" ]]; then
   npm ci
 fi

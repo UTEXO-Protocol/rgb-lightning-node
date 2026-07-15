@@ -26,8 +26,8 @@ use lightning::chain::{BestBlock, ChannelMonitorUpdateStatus};
 use lightning::events::Event;
 use lightning::events::{EventsProvider, ReplayEvent};
 use lightning::ln::channelmanager::{
-    Bolt11InvoiceParameters, ChainParameters, ChannelManagerReadArgs, PaymentId,
-    RecipientOnionFields, Retry, SimpleArcChannelManager,
+    Bolt11InvoiceParameters, ChainParameters, ChannelFundingType, ChannelManagerReadArgs,
+    PaymentId, RecipientOnionFields, Retry, SimpleArcChannelManager,
 };
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerHandleError, PeerManager, SocketDescriptor,
@@ -55,6 +55,7 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use secp256k1::PublicKey as SecpPublicKey;
 use wasm_bindgen::prelude::JsValue;
 
+use crate::apay;
 use crate::ldk_runtime::{
     LdkRuntimeFundingRequestData, LdkRuntimeFundingTxSubmissionData, LdkRuntimeLivePaymentData,
     LdkRuntimeOpenChannelRequestData, LdkRuntimeOpenChannelResultData,
@@ -83,6 +84,99 @@ pub fn register_rgb_wallet_for_runtime(
     RGB_WALLET_REGISTRY.with(|reg| {
         reg.borrow_mut().insert(runtime_key.to_string(), wallet);
     });
+}
+
+thread_local! {
+    /// Maps LDK runtime_key → whether trusted virtual channels v0 are enabled for that node.
+    /// Set from `RlnWasmNode::set_enable_virtual_channels_v0` (and at node construction); read by the
+    /// live backend's `Event::OpenChannelRequest` handler to decide whether to accept an inbound
+    /// scid-privacy channel as a 0-conf virtual channel. Mirrors the native node's
+    /// `static_state.enable_virtual_channels_v0` gate (`src/ldk.rs`).
+    static VIRTUAL_CHANNELS_V0_REGISTRY: RefCell<HashMap<String, bool>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Record whether trusted virtual channels v0 are enabled for a given LDK runtime key.
+pub fn set_virtual_channels_v0_for_runtime(runtime_key: &str, enabled: bool) {
+    VIRTUAL_CHANNELS_V0_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(runtime_key.to_string(), enabled);
+    });
+}
+
+/// Whether trusted virtual channels v0 are enabled for a given LDK runtime key.
+/// Defaults to `false` (opt-in, matching the native node) when no value has been registered.
+fn virtual_channels_v0_enabled(runtime_key: &str) -> bool {
+    VIRTUAL_CHANNELS_V0_REGISTRY
+        .with(|reg| reg.borrow().get(runtime_key).copied())
+        .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// Selecting the node's Bitcoin network
+// ---------------------------------------------------------------------------
+//
+// The node takes an explicit network, mirroring the native node's `--network`. That network is fed
+// into this registry (keyed by runtime_key) and consumed when the backend lazily builds its
+// `ChannelManager`/`NetworkGraph`, so the `Init` handshake advertises the matching genesis/chain hash
+// in its `networks` field (Signet `f61eee3b…`, Regtest `06226e46…`, etc.). Two entry points populate
+// it (both in `src/ln_node.rs`):
+//
+//   1. Explicit selection — `RlnWasmNode.newWithNodeRuntimeId(proxy, rid, network)` parses the
+//      network (`"mainnet" | "testnet" | "testnet4" | "signet" | "regtest"`) and calls
+//      `set_network_for_runtime` at construction, before the object graph exists. `attachWallet` then
+//      validates the wallet's network against it and rejects a mismatch.
+//   2. Adopt-from-wallet — the bare `RlnWasmNode::new` / SDK-facade path leaves the node unconfigured;
+//      `attach_wallet_shared` reads the attached wallet's network
+//      (`get_wallet_data().bitcoin_network`), maps it via `rgb_network_to_bitcoin_network`, and calls
+//      `set_network_for_runtime` (still before the object graph is built).
+//
+// Consequences:
+//   - The network is captured at object-graph build time and cannot change afterward (a
+//     `ChannelManager`'s chain hash is fixed for its lifetime). In the adopt-from-wallet path, attach
+//     the wallet before connecting to any peer.
+//   - A mismatch between your wallet network and the peer's (e.g. wallet on Regtest, LSP on Signet)
+//     surfaces as "Peer does not support any of our supported chains" + a handshake disconnect.
+//   - `SignetCustom` (custom/mutinynet-style signets) maps to standard `Signet` for LDK purposes.
+//
+// The `Regtest` default below only applies before either path has run (e.g. early bring-up / tests),
+// matching the historical hardcoded behaviour.
+thread_local! {
+    /// Maps LDK runtime_key → the Bitcoin network the node operates on.
+    /// Set from `attach_wallet_shared` (derived from the attached RGB wallet); consumed when the live
+    /// backend builds the `ChannelManager`/`NetworkGraph` so the LDK handshake advertises the correct
+    /// chain (the `networks` field of the `Init` message) instead of the historical Regtest default.
+    static NETWORK_REGISTRY: RefCell<HashMap<String, bitcoin::Network>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Record the Bitcoin network for a given LDK runtime key.
+///
+/// Must be called before the LDK object graph is first built for that runtime (done automatically
+/// from `attach_wallet_shared`, whose wallet carries the configured network).
+pub fn set_network_for_runtime(runtime_key: &str, network: bitcoin::Network) {
+    NETWORK_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(runtime_key.to_string(), network);
+    });
+}
+
+/// The Bitcoin network registered for a given LDK runtime key.
+/// Defaults to `Regtest` (the historical hardcoded value) when nothing has been registered yet.
+fn network_for_runtime(runtime_key: &str) -> bitcoin::Network {
+    NETWORK_REGISTRY
+        .with(|reg| reg.borrow().get(runtime_key).copied())
+        .unwrap_or(bitcoin::Network::Regtest)
+}
+
+/// Map an rgb-lib WASM network to the `lightning::bitcoin` network used by LDK.
+pub fn rgb_network_to_bitcoin_network(network: rgb_lib_wasm::BitcoinNetwork) -> bitcoin::Network {
+    match network {
+        rgb_lib_wasm::BitcoinNetwork::Mainnet => bitcoin::Network::Bitcoin,
+        rgb_lib_wasm::BitcoinNetwork::Testnet => bitcoin::Network::Testnet,
+        rgb_lib_wasm::BitcoinNetwork::Testnet4 => bitcoin::Network::Testnet4,
+        rgb_lib_wasm::BitcoinNetwork::Signet => bitcoin::Network::Signet,
+        rgb_lib_wasm::BitcoinNetwork::Regtest => bitcoin::Network::Regtest,
+        rgb_lib_wasm::BitcoinNetwork::SignetCustom => bitcoin::Network::Signet,
+    }
 }
 
 /// Pending RGB open intent keyed by `user_channel_id`.
@@ -153,6 +247,18 @@ pub trait LdkLiveBackend {
         let _ = (channel_id, peer_pubkey, force);
         Err(JsValue::from_str(
             "close_live_channel is not supported by this backend",
+        ))
+    }
+    /// Abandon our own side of a never-broadcast virtual channel (client-side teardown). Used when
+    /// the counterparty (LSP/host) has abandoned the channel without notifying us.
+    fn virtual_channel_abandon_local(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+    ) -> Result<(), JsValue> {
+        let _ = (channel_id, peer_pubkey);
+        Err(JsValue::from_str(
+            "virtual_channel_abandon_local is not supported by this backend",
         ))
     }
     /// Send a real keysend (spontaneous) HTLC over a live channel, optionally carrying RGB.
@@ -266,6 +372,23 @@ pub trait LdkLiveBackend {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<(), JsValue>> + 'static>> {
         Box::pin(async { Ok(()) })
+    }
+
+    /// Register a fresh batch of async-payment hashes with the invoice-host / LSP peer
+    /// (`async_order.new`). When `username`/`domain` are supplied a Lightning-Address attestation
+    /// is included so the LSP can serve `username@domain`. Resolves once the host replies.
+    fn apay_new_boxed(
+        &self,
+        _host_node_id: String,
+        _username: Option<String>,
+        _domain: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>>
+    {
+        Box::pin(async {
+            Err(JsValue::from_str(
+                "apay_new is not supported by this backend",
+            ))
+        })
     }
 }
 
@@ -421,6 +544,11 @@ pub struct WasmLdkLiveBackend {
     /// fail it back before the deadline forces a channel close. Repopulated from replayed
     /// `PaymentClaimable` events on restart (intentionally not persisted).
     hodl_claim_deadlines: RefCell<HashMap<String, u32>>,
+    /// Preimages for async-payment **recipient** invoices minted in response to a host
+    /// `request_invoice`, keyed by hex payment hash. When the inbound HTLC for one of these
+    /// arrives we auto-claim with the stashed preimage (we derived it deterministically, so unlike
+    /// a normal external-hash/hodl invoice there is nothing to wait for).
+    async_recipient_preimages: RefCell<HashMap<String, PaymentPreimage>>,
     /// Channel ids the live `ChannelManager` reported closed via `Event::ChannelClosed`, pending
     /// propagation to the runtime channel view (drained by `take_closed_live_channels`).
     closed_channels: RefCell<Vec<String>>,
@@ -440,6 +568,9 @@ struct LdkObjectGraph {
     channel_manager: Arc<WasmChannelManager>,
     rgb_backend: Arc<lightning::rgb_utils::RgbBackend>,
     rgb_kv_store: Arc<dyn KVStoreSync + Send + Sync>,
+    /// Custom-message handler shared with the `PeerManager`; also drives the `async_order.*`
+    /// (async-payments-with-LSP) request/response wire.
+    fork_custom_wire: Arc<crate::rgb_ln_wire::RgbLnForkCustomMessageHandler>,
     peer_descriptors: RefCell<HashMap<String, LiveSocketDescriptor>>,
     channel_manager_restored: bool,
     monitors_restored: bool,
@@ -1030,6 +1161,7 @@ fn load_channel_manager_snapshot(runtime_key: &str) -> Result<Option<Vec<u8>>, J
 
 fn load_network_graph_snapshot(
     runtime_key: &str,
+    network: bitcoin::Network,
     logger: Arc<WasmLdkLogger>,
 ) -> Result<(Arc<WasmNetworkGraph>, bool), JsValue> {
     let Some(bytes) = load_bytes_snapshot(
@@ -1040,7 +1172,7 @@ fn load_network_graph_snapshot(
     )?
     else {
         return Ok((
-            Arc::new(NetworkGraph::new(bitcoin::Network::Regtest, logger)),
+            Arc::new(NetworkGraph::new(network, logger)),
             false,
         ));
     };
@@ -1092,6 +1224,7 @@ impl WasmLdkLiveBackend {
             live_payments: RefCell::new(HashMap::new()),
             hodl_payment_hashes: RefCell::new(HashSet::new()),
             hodl_claim_deadlines: RefCell::new(HashMap::new()),
+            async_recipient_preimages: RefCell::new(HashMap::new()),
             closed_channels: RefCell::new(Vec::new()),
             object_graph: RefCell::new(None),
         }
@@ -1101,6 +1234,7 @@ impl WasmLdkLiveBackend {
         if self.object_graph.borrow().is_some() {
             return Ok(());
         }
+        let network = network_for_runtime(&self.runtime_key);
         let seed = self.derive_seed32();
         let logger = Arc::new(WasmLdkLogger);
         let fee_estimator = Arc::new(FixedFeeEstimator);
@@ -1155,7 +1289,7 @@ impl WasmLdkLiveBackend {
         let restored_monitors = load_persisted_monitors(&self.runtime_key, &keys_manager)?;
         let has_persisted_monitors = !restored_monitors.is_empty();
         let (network_graph, _network_graph_restored) =
-            load_network_graph_snapshot(&self.runtime_key, Arc::clone(&logger))?;
+            load_network_graph_snapshot(&self.runtime_key, network, Arc::clone(&logger))?;
         let (scorer, _scorer_restored) = load_scorer_snapshot(
             &self.runtime_key,
             Arc::clone(&network_graph),
@@ -1172,16 +1306,34 @@ impl WasmLdkLiveBackend {
             Arc::clone(&network_graph),
             Arc::clone(&keys_manager),
         ));
-        let mut user_config = UserConfig::default();
-        // Act as a routing intermediary for multi-hop payments: forward HTLCs whose
-        // outgoing hop is one of our *private* (unannounced) channels. With the default `false`,
-        // LDK returns `PrivateChannelForward` and refuses to forward over private channels
-        // (`can_forward_htlc_to_outgoing_channel`), which would break native-A -> WASM -> native-B
-        // where the WASM->payee channel is private and reached via an invoice route hint.
-        user_config.accept_forwards_to_priv_channels = true;
+        // `accept_forwards_to_priv_channels = true`: act as a routing intermediary for multi-hop
+        // payments — forward HTLCs whose outgoing hop is one of our *private* (unannounced) channels.
+        // With the default `false`, LDK returns `PrivateChannelForward` and refuses to forward over
+        // private channels (`can_forward_htlc_to_outgoing_channel`), which would break
+        // native-A -> WASM -> native-B where the WASM->payee channel is private and reached via an
+        // invoice route hint.
+        // `manually_accept_inbound_channels = true`: accept inbound channels the LSP opens to us (see
+        // the `Event::OpenChannelRequest` handler). Without manual acceptance LDK auto-accepts with a
+        // hardcoded 354-sat dust floor, which rejects virtual RGB channels (dust=1:
+        // "dust_limit_satoshis (1) is less than the implementation limit (354)").
+        let mut user_config = UserConfig {
+            accept_forwards_to_priv_channels: true,
+            manually_accept_inbound_channels: true,
+            ..Default::default()
+        };
+        // Drop the announcement-preference constraint (the default `true` rejects public channels
+        // whose announcement preference differs from ours: "their announcement preference is
+        // different from ours") and negotiate anchors so the anchor channel types the LSP proposes
+        // (mandatory for colored RGB channels) are accepted — mirroring the native node (`src/ldk.rs`).
+        user_config
+            .channel_handshake_limits
+            .force_announced_channel_preference = false;
+        user_config
+            .channel_handshake_config
+            .negotiate_anchors_zero_fee_htlc_tx = true;
         let chain_params = ChainParameters {
-            network: bitcoin::Network::Regtest,
-            best_block: BestBlock::from_network(bitcoin::Network::Regtest),
+            network,
+            best_block: BestBlock::from_network(network),
         };
         let mut channel_manager_restored = false;
         let mut monitors_restored = false;
@@ -1272,6 +1424,7 @@ impl WasmLdkLiveBackend {
             channel_manager,
             rgb_backend,
             rgb_kv_store,
+            fork_custom_wire,
             peer_descriptors: RefCell::new(HashMap::new()),
             channel_manager_restored,
             monitors_restored,
@@ -1403,6 +1556,55 @@ impl WasmLdkLiveBackend {
                     .borrow_mut()
                     .push_back(PendingRgbFundingWork::ProcessPendingTransactions);
             }
+            // ---- Inbound channel open request (LSP opens a channel to this node) ----
+            // With `manually_accept_inbound_channels = true` LDK surfaces every inbound open here
+            // instead of auto-accepting under a hardcoded 354-sat dust floor. Mirror the native
+            // node (`src/ldk.rs` `Event::OpenChannelRequest`): a channel advertising SCID privacy
+            // is a virtual channel (dust=1, never broadcast) and must be accepted 0-conf as
+            // `ChannelFundingType::Virtual` so the monitor is marked manual-broadcast and the dust
+            // floor is bypassed; any other channel is a regular (public/private) channel accepted
+            // normally.
+            Event::OpenChannelRequest {
+                temporary_channel_id,
+                counterparty_node_id,
+                channel_type,
+                ..
+            } => {
+                let user_channel_id = self.next_user_channel_id();
+                // Gate the 0-conf virtual accept on this node's `enable_virtual_channels_v0` flag
+                // (mirrors the native node's `static_state.enable_virtual_channels_v0`). When the
+                // flag is disabled, a scid-privacy channel falls through to the regular accept path,
+                // which rejects it at the 354-sat dust floor — the intended opt-in behavior.
+                let is_virtual = virtual_channels_v0_enabled(&self.runtime_key)
+                    && channel_type.supports_scid_privacy();
+                let counterparty_hex = hex::encode(counterparty_node_id.serialize());
+                let res = if is_virtual {
+                    g.channel_manager
+                        .accept_inbound_channel_from_trusted_peer_0conf(
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                            user_channel_id,
+                            None,
+                            ChannelFundingType::Virtual,
+                        )
+                } else {
+                    g.channel_manager.accept_inbound_channel(
+                        &temporary_channel_id,
+                        &counterparty_node_id,
+                        user_channel_id,
+                        None,
+                    )
+                };
+                match res {
+                    Ok(()) => ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] accepted inbound {} channel {temporary_channel_id} from {counterparty_hex}",
+                        if is_virtual { "virtual" } else { "regular" }
+                    )),
+                    Err(e) => ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] failed to accept inbound channel {temporary_channel_id} from {counterparty_hex}: {e:?}"
+                    )),
+                }
+            }
             // ---- Channel closed (cooperative or force): record for runtime-view removal ----
             // The live ChannelManager is authoritative for close completion; we propagate this to
             // the SDK channel view via reconcile (event-driven), instead of removing optimistically
@@ -1440,6 +1642,23 @@ impl WasmLdkLiveBackend {
                 self.mark_live_payment(&hash_hex, "failed", None);
                 ldk_live_debug(&format!(
                     "[rln-wasm-sdk ldk-live] PaymentFailed hash={hash_hex}"
+                ));
+            }
+            // Surface HTLC-handling failures the live `ChannelManager` would otherwise swallow. For
+            // an inbound payment this is the ONLY signal that an HTLC was rejected in the receive or
+            // forward path *before* any `PaymentClaimable` (failed onion decode, unknown next hop, a
+            // failed receive-path check, etc.). `failure_type` distinguishes `Receive` (we were the
+            // final hop and rejected it) from `Forward`/`UnknownNextHop`/`InvalidForward` (misrouted
+            // as a forward), and `failure_reason` carries the concrete LDK cause.
+            Event::HTLCHandlingFailed {
+                prev_channel_id,
+                failure_type,
+                failure_reason,
+                ..
+            } => {
+                let best_h = g.channel_manager.current_best_block().height;
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk ldk-live] HTLCHandlingFailed prev_channel={prev_channel_id} wasm_best_height={best_h} type={failure_type:?} reason={failure_reason:?}"
                 ));
             }
             // ---- Real payment lifecycle (inbound, this node is the payee) ----
@@ -1481,6 +1700,22 @@ impl WasmLdkLiveBackend {
                         ));
                         return;
                     }
+                }
+                // Async-payment recipient invoices: we already know the preimage (derived
+                // deterministically when we answered the host's `request_invoice`), so claim
+                // immediately rather than holding like a normal external-hash/hodl invoice.
+                if let Some(preimage) = self
+                    .async_recipient_preimages
+                    .borrow_mut()
+                    .remove(&hash_hex)
+                {
+                    self.hodl_payment_hashes.borrow_mut().remove(&hash_hex);
+                    g.channel_manager.claim_funds(preimage);
+                    self.upsert_inbound_live_payment(&hash_hex, "pending", amount_msat);
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] PaymentClaimable async-recipient auto-claimed hash={hash_hex}"
+                    ));
+                    return;
                 }
                 let (preimage, external_hash_invoice) = match purpose {
                     lightning::events::PaymentPurpose::SpontaneousPayment(preimage) => {
@@ -1806,6 +2041,11 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                 break;
             }
         }
+        // Service any inbound async-payment `request_invoice` calls (recipient side): mint the
+        // invoice and queue the response, then flush it out to the host.
+        if self.handle_pending_async_order_requests(g) {
+            g.peer_manager.borrow().process_events();
+        }
         // Advance received/forwarded HTLCs (no PendingHTLCsForwardable event exists in this LDK;
         // it must be driven explicitly) so inbound payments reach PaymentClaimable.
         g.channel_manager.process_pending_htlc_forwards();
@@ -1966,6 +2206,41 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
                     .close_channel(&channel_id, &peer_pubkey)
                     .map_err(|e| JsValue::from_str(&format!("live channel close failed: {e:?}")))?;
             }
+            g.peer_manager.borrow().process_events();
+            persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
+            Ok(())
+        })
+    }
+
+    fn virtual_channel_abandon_local(
+        &self,
+        channel_id: &str,
+        peer_pubkey: &str,
+    ) -> Result<(), JsValue> {
+        self.ensure_phase1_runtime_ready()?;
+        let channel_id_bytes = hex::decode(channel_id)
+            .map_err(|e| JsValue::from_str(&format!("invalid channel id: {e}")))?;
+        let channel_id_bytes: [u8; 32] = channel_id_bytes
+            .try_into()
+            .map_err(|_| JsValue::from_str("invalid channel id length"))?;
+        let channel_id = lightning::ln::types::ChannelId::from_bytes(channel_id_bytes);
+        let peer_pubkey_bytes = hex::decode(peer_pubkey)
+            .map_err(|e| JsValue::from_str(&format!("invalid peer pubkey: {e}")))?;
+        let peer_pubkey = SecpPublicKey::from_slice(&peer_pubkey_bytes)
+            .map_err(|e| JsValue::from_str(&format!("invalid peer pubkey: {e}")))?;
+
+        self.with_graph(|g| {
+            // Drop our side of a never-broadcast virtual channel. The counterparty (LSP/host) uses
+            // `ErrorAction::IgnoreError` when it abandons, so it never notifies us — a client that has
+            // drained its value must therefore tear down its own side. `abandon_virtual_channel`
+            // removes the channel and fires `Event::ChannelClosed`, which the authoritative reconcile
+            // then propagates to our channel views. `dangerous_ack=true` acknowledges that any
+            // remaining (sub-HTLC-minimum dust) balance is forfeited.
+            g.channel_manager
+                .abandon_virtual_channel(&channel_id, &peer_pubkey, true)
+                .map_err(|e| {
+                    JsValue::from_str(&format!("virtual channel abandon failed: {e:?}"))
+                })?;
             g.peer_manager.borrow().process_events();
             persist_ldk_runtime_snapshots(&self.runtime_key, g)?;
             Ok(())
@@ -2645,8 +2920,12 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         // 3M-msat HTLC floor; 6-conf funding; LND-compatible 2016-block to_self_delay.
         let with_anchors = rgb_open.is_some();
         let mut override_config = UserConfig::default();
-        override_config.channel_handshake_config.announce_for_forwarding = request.public;
-        override_config.channel_handshake_config.our_htlc_minimum_msat = OPEN_CHANNEL_HTLC_MIN_MSAT;
+        override_config
+            .channel_handshake_config
+            .announce_for_forwarding = request.public;
+        override_config
+            .channel_handshake_config
+            .our_htlc_minimum_msat = OPEN_CHANNEL_HTLC_MIN_MSAT;
         override_config.channel_handshake_config.minimum_depth = MIN_CHANNEL_CONFIRMATIONS;
         override_config
             .channel_handshake_config
@@ -2771,6 +3050,15 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             status,
             ready,
             is_usable,
+            // The outbound-open RGB asset is tracked via the open intent/cache and surfaced by
+            // `list_live_channels` once its RGB info is persisted; not known at this return point.
+            asset_id: None,
+            asset_local_amount: None,
+            // A just-opened channel has no spendable outbound yet; refreshed on the next reconcile.
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
+            // The live channel's virtual flag is surfaced by the next reconcile.
+            virtual_open_mode: None,
         })
     }
 
@@ -2861,20 +3149,44 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             .channel_manager
             .list_channels()
             .into_iter()
-            .map(|details| LdkRuntimeOpenChannelResultData {
-                temporary_channel_id: format!("{}", details.channel_id),
-                channel_id: format!("{}", details.channel_id),
-                peer_pubkey: details.counterparty.node_id.to_string(),
-                capacity_sat: details.channel_value_satoshis,
-                status: if details.is_usable {
-                    "ready".to_string()
-                } else if details.is_channel_ready {
-                    "pending".to_string()
-                } else {
-                    "opening".to_string()
-                },
-                ready: details.is_channel_ready,
-                is_usable: details.is_usable,
+            .map(|details| {
+                let channel_id_str = format!("{}", details.channel_id);
+                // Read the channel's RGB info from the kv store, mirroring the native node's
+                // `list_channels` (`src/routes.rs`). This surfaces `asset_id` for *inbound*
+                // (LSP-opened) RGB channels too — previously the runtime only knew the asset for
+                // channels this node opened itself (from the outbound-open cache), so accepted RGB
+                // channels showed up as vanilla. The info is written once the channel's RGB funding
+                // consignment is validated.
+                let rgb_info = g
+                    .rgb_kv_store
+                    .read_rgb_channel_info(&channel_id_str, false)
+                    .ok();
+                LdkRuntimeOpenChannelResultData {
+                    temporary_channel_id: channel_id_str.clone(),
+                    channel_id: channel_id_str,
+                    peer_pubkey: details.counterparty.node_id.to_string(),
+                    capacity_sat: details.channel_value_satoshis,
+                    status: if details.is_usable {
+                        "ready".to_string()
+                    } else if details.is_channel_ready {
+                        "pending".to_string()
+                    } else {
+                        "opening".to_string()
+                    },
+                    ready: details.is_channel_ready,
+                    is_usable: details.is_usable,
+                    asset_id: rgb_info.as_ref().map(|i| i.contract_id.to_string()),
+                    asset_local_amount: rgb_info.as_ref().map(|i| i.local_rgb_amount),
+                    outbound_msat: details.outbound_capacity_msat,
+                    next_outbound_htlc_limit_msat: details.next_outbound_htlc_limit_msat,
+                    // A never-broadcast virtual channel — recognized for both opened and accepted
+                    // channels, so a client can tear down its accepted virtual channel.
+                    virtual_open_mode: if details.trusted_no_broadcast {
+                        Some("trusted_no_broadcast".to_string())
+                    } else {
+                        None
+                    },
+                }
             })
             .collect();
         Ok(channels)
@@ -2903,9 +3215,368 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
             Ok(())
         })
     }
+
+    fn apay_new_boxed(
+        &self,
+        host_node_id: String,
+        username: Option<String>,
+        domain: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::apay::AsyncOrderNewResponse, JsValue>> + 'static>>
+    {
+        let maybe_this = self.self_weak.borrow().upgrade();
+        Box::pin(async move {
+            let this = maybe_this
+                .ok_or_else(|| JsValue::from_str("apay_new: live backend was dropped"))?;
+            WasmLdkLiveBackend::apay_new_impl(this, host_node_id, username, domain).await
+        })
+    }
 }
 
 impl WasmLdkLiveBackend {
+    /// Build, sign and ship an `async_order.new` request to the invoice-host / LSP peer, then
+    /// await its JSON-RPC response. See [`LdkLiveBackend::apay_new_boxed`].
+    async fn apay_new_impl(
+        this: Rc<Self>,
+        host_node_id: String,
+        username: Option<String>,
+        domain: Option<String>,
+    ) -> Result<crate::apay::AsyncOrderNewResponse, JsValue> {
+        if username.is_some() != domain.is_some() {
+            return Err(JsValue::from_str(
+                "apay_new: username and domain must be supplied together",
+            ));
+        }
+
+        this.ensure_phase1_runtime_ready()?;
+        let host_pubkey = hex::decode(host_node_id.trim())
+            .ok()
+            .and_then(|bytes| SecpPublicKey::from_slice(&bytes).ok())
+            .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_PEER_PUBKEY_INVALID))?;
+
+        // Synchronous prep: derive + sign the batch, queue the request, flush it. We must not hold
+        // the `object_graph` borrow across the later `.await`, so collect everything we need here.
+        let (request_id, response_rx, first_hash_index, last_hash_index, hashes) = {
+            let graph = this.object_graph.borrow();
+            let g = graph.as_ref().ok_or_else(|| {
+                JsValue::from_str(sdk_contracts::ERR_LDK_OBJECT_GRAPH_NOT_INITIALIZED)
+            })?;
+
+            // Require a live (usable) channel with the invoice-host, mirroring the native node.
+            let host_has_live_channel = g
+                .channel_manager
+                .list_channels()
+                .into_iter()
+                .any(|c| c.counterparty.node_id == host_pubkey && c.is_usable);
+            if !host_has_live_channel {
+                return Err(JsValue::from_str(
+                    "apay_new requires a live channel with the invoice-host peer",
+                ));
+            }
+
+            let local_node_id = g
+                .keys_manager
+                .get_node_id(Recipient::Node)
+                .map_err(|_| JsValue::from_str("apay_new: failed to derive local node id"))?;
+            let local_node_hex = local_node_id.to_string();
+            let host_node_hex = apay::hex_str(&host_pubkey.serialize());
+
+            // Derive the next hash batch from this node's seed.
+            let start_index =
+                apay::read_async_payments_next_hash_index(g.rgb_kv_store.as_ref(), &host_pubkey)
+                    .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let seed = this.derive_seed32();
+            let preimage_root = apay::AsyncPaymentsPreimageRoot::build_from_seed(
+                &seed,
+                network_for_runtime(&this.runtime_key),
+                &local_node_id,
+            )
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let mut params = preimage_root
+                .prepare_async_order_new_params(start_index, apay::ASYNC_ORDER_MAX_HASH_BATCH_SIZE)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+
+            let first_hash_index = params
+                .hashes
+                .first()
+                .map(|h| h.hash_index)
+                .ok_or_else(|| JsValue::from_str("apay_new: empty hash batch"))?;
+            let last_hash_index = params.hashes.last().map(|h| h.hash_index).unwrap();
+
+            // Sign the batch commitment (and optional Lightning-Address attestation) with the
+            // node key, exactly as the native `/apay/new` route does.
+            let keys_manager = Arc::clone(&g.keys_manager);
+            let created_at = unix_now_secs();
+            let expires_at = created_at.saturating_add(apay::APAY_BATCH_EXPIRY_SECS);
+            let batch = apay::build_apay_batch_commitment(
+                &local_node_hex,
+                &host_node_hex,
+                first_hash_index,
+                &params.hashes,
+                created_at,
+                expires_at,
+                |msg| keys_manager.sign_message(msg),
+            )
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            params.batch = Some(batch);
+
+            if let (Some(username), Some(domain)) = (username.as_deref(), domain.as_deref()) {
+                let address_sig = apay::build_apay_address_attestation(
+                    &local_node_hex,
+                    domain,
+                    username,
+                    0,
+                    |msg| keys_manager.sign_message(msg),
+                )
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                params.address_sig = Some(address_sig);
+            }
+
+            let request_id = apay::new_request_id(&local_node_hex, &host_node_hex);
+            let params_value = serde_json::to_value(&params)
+                .map_err(|err| JsValue::from_str(&format!("apay_new: serialize params: {err}")))?;
+            let response_rx = g.fork_custom_wire.queue_async_order_new(
+                host_pubkey,
+                request_id.clone(),
+                params_value,
+            );
+            (
+                request_id,
+                response_rx,
+                first_hash_index,
+                last_hash_index,
+                params.hashes,
+            )
+        };
+
+        // Flush the queued message out to the peer (populates outbound frames for the JS pump).
+        this.process_events()?;
+
+        // Await the host response, bounded by a timeout. The JS websocket pump keeps calling
+        // `process_events` as reply frames arrive, which completes `response_rx`.
+        let response_value =
+            match Self::apay_await_response(response_rx, apay::ASYNC_ORDER_RESPONSE_TIMEOUT_MS)
+                .await
+            {
+                ApayAwaitOutcome::Response(Ok(value)) => value,
+                ApayAwaitOutcome::Response(Err(err)) => {
+                    return Err(JsValue::from_str(&err.to_string()));
+                }
+                ApayAwaitOutcome::PeerClosed => {
+                    return Err(JsValue::from_str(
+                        "apay_new: peer connection closed before the host replied",
+                    ));
+                }
+                ApayAwaitOutcome::TimedOut => {
+                    if let Some(g) = this.object_graph.borrow().as_ref() {
+                        g.fork_custom_wire.forget_response(host_pubkey, &request_id);
+                    }
+                    return Err(JsValue::from_str(
+                        "apay_new: timed out waiting for the host response",
+                    ));
+                }
+            };
+
+        let result: apay::AsyncOrderNewResultWire = serde_json::from_value(response_value)
+            .map_err(|err| JsValue::from_str(&format!("apay_new: invalid host response: {err}")))?;
+
+        // Persist the host-advertised next index so the next batch never reuses hashes.
+        if let Some(g) = this.object_graph.borrow().as_ref() {
+            apay::write_async_payments_next_hash_index(
+                g.rgb_kv_store.as_ref(),
+                &host_pubkey,
+                result.next_index_expected,
+            )
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+        }
+
+        Ok(apay::AsyncOrderNewResponse {
+            request_id,
+            host_node_id: apay::hex_str(&host_pubkey.serialize()),
+            protocol_version: result.protocol_version,
+            order_id: result.order_id,
+            status: result.status,
+            accepted_through_index: result.accepted_through_index,
+            next_index_expected: result.next_index_expected,
+            unused_hashes: result.unused_hashes,
+            refill_batch_size: result.refill_batch_size,
+            first_hash_index,
+            last_hash_index,
+            hashes,
+        })
+    }
+
+    /// Recipient side of async payments: service any inbound `async_order.request_invoice` calls
+    /// queued by the wire handler. Returns true if at least one was handled (so the caller flushes
+    /// the queued responses out to the host). Each request mints a BOLT11 invoice for a
+    /// deterministically-derived preimage and stashes that preimage so the inbound HTLC auto-claims.
+    fn handle_pending_async_order_requests(&self, g: &LdkObjectGraph) -> bool {
+        let requests = g.fork_custom_wire.take_inbound_requests();
+        if requests.is_empty() {
+            return false;
+        }
+        for (sender, request_id, params_value) in requests {
+            match self.process_one_request_invoice(g, sender, params_value) {
+                Ok(result) => {
+                    let result_value =
+                        serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
+                    g.fork_custom_wire
+                        .queue_async_order_result(sender, &request_id, result_value);
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] async_order.request_invoice served hash={}",
+                        result.payment_hash
+                    ));
+                }
+                Err(err) => {
+                    g.fork_custom_wire
+                        .queue_async_order_error(sender, &request_id, &err);
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk ldk-live] async_order.request_invoice error {}: {}",
+                        err.code, err.message
+                    ));
+                }
+            }
+        }
+        true
+    }
+
+    fn process_one_request_invoice(
+        &self,
+        g: &LdkObjectGraph,
+        _sender: SecpPublicKey,
+        params_value: serde_json::Value,
+    ) -> Result<apay::AsyncOrderOutboundInvoiceResultWire, apay::JsonRpcErrorWire> {
+        use apay::JsonRpcErrorWire;
+
+        let params: apay::AsyncOrderRequestInvoiceParamsWire = serde_json::from_value(params_value)
+            .map_err(|err| JsonRpcErrorWire::invalid_params(format!("invalid_params: {err}")))?;
+
+        let hash_index = params
+            .hash_index
+            .parse::<u64>()
+            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_hash_index"))?;
+        if matches!(params.asset_amount, Some(0)) {
+            return Err(JsonRpcErrorWire::invalid_params("invalid_asset_amount"));
+        }
+        if params.description_hash.trim().is_empty() {
+            return Err(JsonRpcErrorWire::invalid_params("invalid_description_hash"));
+        }
+        let (contract_id, asset_amount) = match (&params.asset_id, params.asset_amount) {
+            (Some(asset_id), Some(asset_amount)) => (
+                Some(
+                    asset_id
+                        .parse::<ContractId>()
+                        .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_asset_id"))?,
+                ),
+                Some(asset_amount),
+            ),
+            (None, None) => (None, None),
+            _ => return Err(JsonRpcErrorWire::invalid_params("incomplete_rgb_info")),
+        };
+
+        // Re-derive the preimage/hash for this index and confirm it matches what the host asked
+        // for — otherwise we would mint an invoice we cannot settle.
+        let local_node_id = g
+            .keys_manager
+            .get_node_id(Recipient::Node)
+            .map_err(|_| JsonRpcErrorWire::internal_error("failed to derive local node id"))?;
+        let seed = self.derive_seed32();
+        let preimage_root = apay::AsyncPaymentsPreimageRoot::build_from_seed(
+            &seed,
+            network_for_runtime(&self.runtime_key),
+            &local_node_id,
+        )?;
+        let (payment_preimage, payment_hash) = preimage_root.derive_hash_material(hash_index)?;
+        let requested = params.payment_hash.trim().to_lowercase();
+        if apay::hex_str(&payment_hash.0) != requested {
+            return Err(JsonRpcErrorWire::application_error(
+                1104,
+                "invoice_hash_mismatch",
+            ));
+        }
+        let hash_hex = apay::hex_str(&payment_hash.0);
+
+        // Refuse to re-mint while a prior invoice for this hash is still live.
+        if self
+            .async_recipient_preimages
+            .borrow()
+            .contains_key(&hash_hex)
+            || self
+                .live_payments
+                .borrow()
+                .get(&hash_hex)
+                .is_some_and(|p| matches!(p.status.as_str(), "pending" | "claimable" | "claiming"))
+        {
+            return Err(JsonRpcErrorWire::application_error(1105, "stale_flow"));
+        }
+
+        let description_hash = lightning_invoice::Sha256(
+            params
+                .description_hash
+                .trim()
+                .parse::<lightning::bitcoin::hashes::sha256::Hash>()
+                .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_description_hash"))?,
+        );
+
+        let invoice = g
+            .channel_manager
+            .create_bolt11_invoice(Bolt11InvoiceParameters {
+                amount_msats: Some(params.amount_msat),
+                description: Bolt11InvoiceDescription::Hash(description_hash),
+                invoice_expiry_delta_secs: Some(params.invoice_expiry_sec),
+                min_final_cltv_expiry_delta: Some(params.min_final_cltv_expiry_delta),
+                payment_hash: Some(payment_hash),
+                contract_id,
+                asset_amount,
+                ..Default::default()
+            })
+            .map_err(|err| {
+                JsonRpcErrorWire::internal_error(format!("request_invoice_create_failed: {err:?}"))
+            })?;
+
+        // Stash the preimage so the inbound HTLC auto-claims, and track the inbound payment.
+        self.async_recipient_preimages
+            .borrow_mut()
+            .insert(hash_hex.clone(), payment_preimage);
+        let now = unix_now_secs();
+        self.live_payments.borrow_mut().insert(
+            hash_hex.clone(),
+            LdkRuntimeLivePaymentData {
+                payment_hash: hash_hex.clone(),
+                status: "pending".to_string(),
+                amt_msat: Some(params.amount_msat),
+                asset_id: contract_id.map(|c| c.to_string()),
+                asset_amount,
+                inbound: true,
+                preimage: None,
+                expires_at: Some(now.saturating_add(params.invoice_expiry_sec as u64)),
+                created_at: now,
+                updated_at: now,
+            },
+        );
+
+        Ok(apay::AsyncOrderOutboundInvoiceResultWire {
+            payment_hash: hash_hex,
+            bolt11: invoice.to_string(),
+        })
+    }
+
+    /// Race the async-order response receiver against a timeout.
+    async fn apay_await_response(
+        rx: crate::rgb_ln_wire::AsyncOrderResponseReceiver,
+        timeout_ms: u32,
+    ) -> ApayAwaitOutcome {
+        use futures::future::{select, Either};
+
+        let timeout = apay_sleep_ms(timeout_ms);
+        futures::pin_mut!(rx);
+        futures::pin_mut!(timeout);
+        match select(rx, timeout).await {
+            Either::Left((Ok(response), _)) => ApayAwaitOutcome::Response(response),
+            // Sender dropped (e.g. peer disconnected) without sending a response.
+            Either::Left((Err(_canceled), _)) => ApayAwaitOutcome::PeerClosed,
+            Either::Right(((), _)) => ApayAwaitOutcome::TimedOut,
+        }
+    }
     async fn drive_rgb_funding_work_impl(this: Rc<Self>) -> Result<(), JsValue> {
         loop {
             let work_item = this.pending_rgb_funding_work.borrow_mut().pop_front();
@@ -2990,7 +3661,7 @@ impl WasmLdkLiveBackend {
                     output_script,
                     channel_value_satoshis,
                     consignment_endpoint: intent.consignment_endpoint,
-                    network: bitcoin::Network::Regtest,
+                    network: network_for_runtime(&this.runtime_key),
                     fee_rate: intent.fee_rate,
                     min_confirmations: intent.min_confirmations,
                 };
@@ -3098,6 +3769,33 @@ pub fn create_wasm_ldk_live_backend(
     let backend = Rc::new(WasmLdkLiveBackend::new(runtime_key, node_seed32));
     *backend.self_weak.borrow_mut() = Rc::downgrade(&backend);
     Ok(backend)
+}
+
+/// Outcome of awaiting an `async_order` response receiver against a timeout.
+enum ApayAwaitOutcome {
+    Response(Result<serde_json::Value, crate::apay::JsonRpcErrorWire>),
+    PeerClosed,
+    TimedOut,
+}
+
+/// Resolve after `ms` milliseconds. Browser path uses `setTimeout`; native test path sleeps.
+async fn apay_sleep_ms(ms: u32) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32);
+            } else {
+                let _ = resolve.call0(&JsValue::NULL);
+            }
+        });
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
 }
 
 fn unix_now_secs() -> u64 {
