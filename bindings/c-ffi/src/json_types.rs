@@ -33,7 +33,7 @@ use rgb_lightning_node::{
     AssetRecipients, RgbRecipient,
     SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
     TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
-    WitnessData,
+    VerifyMessageResponse, WitnessData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1590,6 +1590,19 @@ impl From<SignMessageResponse> for JsonSignMessageResponse {
     fn from(s: SignMessageResponse) -> Self {
         JsonSignMessageResponse {
             signed_message: s.signed_message,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonVerifyMessageResponse {
+    pub valid: bool,
+}
+
+impl From<VerifyMessageResponse> for JsonVerifyMessageResponse {
+    fn from(response: VerifyMessageResponse) -> Self {
+        JsonVerifyMessageResponse {
+            valid: response.valid,
         }
     }
 }

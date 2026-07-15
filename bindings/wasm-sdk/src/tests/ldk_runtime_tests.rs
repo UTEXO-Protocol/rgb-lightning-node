@@ -24,6 +24,8 @@ fn sample_snapshot() -> LdkRuntimeSnapshot {
             asset_id: None,
             asset_local_amount: None,
             virtual_open_mode: None,
+            outbound_msat: 0,
+            next_outbound_htlc_limit_msat: 0,
         }],
         payments: vec![LdkRuntimePaymentStateData {
             amt_msat: Some(3_000_000),
@@ -162,6 +164,8 @@ fn virtual_channel_intent_session_and_reconcile_contract() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
     assert!(manager.remove_channel("chan-v-1"));
     let session = manager
@@ -194,6 +198,8 @@ fn upsert_channel_preserves_metadata_when_incoming_live_snapshot_is_partial() {
         asset_id: Some("asset-rich".to_string()),
         asset_local_amount: Some(42),
         virtual_open_mode: Some("trusted_no_broadcast".to_string()),
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     manager.upsert_channel(LdkRuntimeChannelStateData {
@@ -208,6 +214,8 @@ fn upsert_channel_preserves_metadata_when_incoming_live_snapshot_is_partial() {
         asset_id: None,
         asset_local_amount: None,
         virtual_open_mode: None,
+        outbound_msat: 0,
+        next_outbound_htlc_limit_msat: 0,
     });
 
     let channel = manager

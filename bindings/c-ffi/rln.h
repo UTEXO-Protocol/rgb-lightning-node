@@ -242,3 +242,7 @@ struct CResultString rln_taker(const struct COpaqueStruct *node, const char *req
 struct CResultString rln_uniffi_healthcheck(void);
 
 struct CResultString rln_uniffi_is_initialized(void);
+
+struct CResultString rln_verify_message(const struct COpaqueStruct *node,
+                                        const char *message,
+                                        const char *signature);

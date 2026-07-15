@@ -295,7 +295,9 @@ fn sdk_wallet_handle_rgb_proxy_transport_set_get_clear_contract() {
     assert_eq!(parsed.auth_token, None);
     assert_eq!(parsed.node_id, None);
 
-    wallet.clear_rgb_proxy_transport();
+    wallet
+        .clear_rgb_proxy_transport()
+        .expect("clear rgb proxy transport");
     let cleared = wallet
         .rgb_proxy_transport_value()
         .expect("cleared proxy transport value");
@@ -367,7 +369,8 @@ fn sdk_wallet_facade_rgb_proxy_transport_contract() {
         Some("0334cc4bca04ce3d1537310f55e91ec4cec7e5a88fa0fba20a24cce1fe6de2a2b0")
     );
 
-    sdk.wallet_clear_rgb_proxy_transport(&wallet);
+    sdk.wallet_clear_rgb_proxy_transport(&wallet)
+        .expect("clear rgb proxy transport");
     let cleared = sdk
         .wallet_rgb_proxy_transport_value(&wallet)
         .expect("cleared value via facade");
@@ -393,7 +396,9 @@ fn wallet_rgb_proxy_transport_persists_across_wrappers_contract() {
         serde_wasm_bindgen::from_value(value_b).expect("parse wallet b transport");
     assert_eq!(parsed_b.endpoint, "http://127.0.0.1:3000/rgb/json-rpc");
 
-    wallet_b.clear_rgb_proxy_transport();
+    wallet_b
+        .clear_rgb_proxy_transport()
+        .expect("clear rgb proxy transport");
     let value_a = wallet_a
         .rgb_proxy_transport_value()
         .expect("read transport from wallet a after clear");

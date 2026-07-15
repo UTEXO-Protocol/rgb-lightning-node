@@ -41,17 +41,22 @@ jobs:
         id: resolve
         run: |
           RAW_VERSION="${{ inputs.version }}"
-          VERSION="${RAW_VERSION#v}"
+          VERSION="$(echo "${RAW_VERSION}" | sed -E 's/^[[:space:]]*([Ss][Dd][Kk][[:space:]]+)?v?//; s/[[:space:]]+$//')"
+          if [[ -z "${VERSION}" ]]; then
+            echo "Resolved version is empty. Provided input: '${RAW_VERSION}'"
+            exit 1
+          fi
           TAG="v${VERSION}"
           PUBLISH_TO_MAVEN="${{ inputs.publish_to_maven }}"
           PUBLISH_TO_NPM="${{ inputs.publish_to_npm }}"
+          echo "Resolved version input '${RAW_VERSION}' -> '${VERSION}'"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "publish_to_maven=${PUBLISH_TO_MAVEN}" >> "$GITHUB_OUTPUT"
           echo "publish_to_npm=${PUBLISH_TO_NPM}" >> "$GITHUB_OUTPUT"
 
   wasm-sdk:
-    name: Build WASM SDK and publish npm
+    name: Build WASM SDK package
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: resolve-version
@@ -71,18 +76,12 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack@0.14.0
+        run: cargo install wasm-pack --version 0.14.0 --locked
 
       - name: Build WASM package
         run: |
           cd bindings/wasm-sdk
           wasm-pack build --target web --release --out-dir pkg
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Set WASM package version and metadata
         working-directory: bindings/wasm-sdk/pkg
@@ -94,6 +93,11 @@ jobs:
             pkg.name = '@utexo/rln-wasm';
             pkg.version = process.env.VERSION;
             pkg.repository = { type: 'git', url: 'https://github.com/UTEXO-Protocol/rgb-lightning-node.git' };
+            if (Array.isArray(pkg.files)) {
+              if (!pkg.files.includes('snippets/') && !pkg.files.includes('snippets/**')) {
+                pkg.files.push('snippets/');
+              }
+            }
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
         env:
@@ -101,13 +105,6 @@ jobs:
 
       - name: Copy README into package
         run: cp bindings/wasm-sdk/README.md bindings/wasm-sdk/pkg/README.md
-
-      - name: Publish WASM package to npm
-        if: needs.resolve-version.outputs.publish_to_npm == 'true'
-        working-directory: bindings/wasm-sdk/pkg
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Package WASM release artifact
         run: |
@@ -336,10 +333,68 @@ jobs:
           if-no-files-found: error
           path: release/rgb-lightning-node-swift-${{ needs.resolve-version.outputs.version }}.zip
 
+  npm-wasm:
+    name: Publish WASM package to npm
+    runs-on: ubuntu-latest
+    needs: [resolve-version, kotlin-android, swift-ios, wasm-sdk]
+    steps:
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-sdk-release
+          path: release-assets
+
+      - name: Extract WASM package
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(release-assets/*.tar.gz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball in release-assets, got ${#tarballs[@]}"
+            ls -la release-assets
+            exit 1
+          fi
+          tar -xzf "${tarballs[0]}" -C release-assets
+
+      - name: Setup Node.js
+        if: needs.resolve-version.outputs.publish_to_npm == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Verify npm tarball includes snippets
+        if: needs.resolve-version.outputs.publish_to_npm == 'true'
+        working-directory: release-assets/pkg
+        run: |
+          npm pack --dry-run --json > npm-pack.json
+          node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('npm-pack.json', 'utf8'));
+            const files = (data[0] && data[0].files || []).map((f) => f.path);
+            if (!files.some((p) => p.startsWith('snippets/'))) {
+              console.error('npm pack is missing snippets/.');
+              console.error('Packed files:', files.join('\n'));
+              process.exit(1);
+            }
+            console.log('snippets/ is included in npm pack output');
+          "
+
+      - name: Publish WASM package to npm
+        if: needs.resolve-version.outputs.publish_to_npm == 'true'
+        working-directory: release-assets/pkg
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Skip npm publish
+        if: needs.resolve-version.outputs.publish_to_npm != 'true'
+        run: echo "publish_to_npm=false, skipping npm publish"
+
   github-release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
-    needs: [resolve-version, kotlin-android, swift-ios, wasm-sdk]
+    needs: [resolve-version, kotlin-android, swift-ios, wasm-sdk, npm-wasm]
     steps:
       - name: Download release artifacts
         uses: actions/download-artifact@v4

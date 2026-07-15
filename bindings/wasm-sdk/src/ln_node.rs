@@ -907,12 +907,18 @@ impl RlnWasmNode {
         }
         // Always force a clean transport/runtime session before reconnect to avoid stale
         // descriptor/socket state leaking across retries.
-        if let Some(existing) = self
+        //
+        // Bind the session clone on its own statement so the `peers` Ref guard drops BEFORE the
+        // `close().await`: under edition 2021 an inline `.borrow()` in the `if let` scrutinee
+        // lives to the end of the block, holding the borrow across the await — and the 1s drive
+        // tick's event draining does `peers.borrow_mut()`, which would panic the whole wasm
+        // instance ("already borrowed") if it fired during that suspension.
+        let existing_session = self
             .peers
             .borrow()
             .get(&peer_pubkey)
-            .map(|entry| Rc::clone(&entry.session))
-        {
+            .map(|entry| Rc::clone(&entry.session));
+        if let Some(existing) = existing_session {
             let _ = existing.close().await;
         }
         self.peers.borrow_mut().remove(&peer_pubkey);
@@ -5262,12 +5268,173 @@ impl RlnWasmNode {
     }
 }
 
+#[wasm_bindgen]
+impl RlnWasmNode {
+    /// Enable remote VSS replication of this node's state — LDK snapshots (channel
+    /// monitors, channel manager, network graph, scorer) plus the RGB KV store
+    /// (per-channel `RgbInfo`, payment/transfer info, consignments) — the WASM
+    /// counterpart of the native node's VSS KV replication. Best-effort: local
+    /// browser persistence stays the durability ack gate; VSS mirrors in the
+    /// background.
+    ///
+    /// Reuses the same VSS `server_url` + `signing_key` as the wallet backup, but
+    /// targets a **distinct** store id (`{store_id}-ldk`) so the LDK stream can never
+    /// collide with the wallet-backup stream. Call this **before** starting the node's
+    /// runtime: it also performs a one-time fresh-load restore (guarded — it will not
+    /// clobber a populated local store) so a fresh device recovers its channels from
+    /// VSS before the LDK object graph is built. Returns the number of keys restored.
+    #[wasm_bindgen(js_name = configureLdkVssReplication)]
+    pub async fn configure_ldk_vss_replication(
+        &self,
+        server_url: String,
+        store_id: String,
+        signing_key_hex: String,
+    ) -> Result<u32, JsValue> {
+        let signing_key =
+            crate::vss_kv_store::parse_vss_config(&server_url, &store_id, &signing_key_hex)?;
+
+        // Distinct keyspace for the LDK stream (belt-and-suspenders on top of the
+        // HKDF domain-separation the store already applies).
+        let ldk_store_id = format!("{}-ldk", store_id.trim());
+        let runtime_key = self.runtime_manager_key();
+
+        // Fencing id: stable per (browser, node) and persisted in localStorage, so a
+        // reloaded/crashed tab re-acquires its own fence instead of locking itself
+        // out of its own VSS store.
+        let instance_id = crate::vss_replicator::persistent_instance_id(&runtime_key)?;
+
+        // Same-origin guard: refuse if another tab in this browser is already the
+        // writer for this node (both tabs share one origin + localStorage + fence id).
+        let lock_name = crate::vss_replicator::web_lock_name(&runtime_key);
+        if !crate::vss_replicator::acquire_web_lock(&lock_name).await? {
+            return Err(JsValue::from_str(
+                "another tab in this browser is already replicating this node to VSS",
+            ));
+        }
+
+        let store = crate::vss_kv_store::WasmVssKvStore::new(
+            server_url.trim().to_string(),
+            ldk_store_id,
+            signing_key,
+        );
+
+        // Cross-device guard: refuse if another instance owns this VSS store.
+        if let Err(e) = store.acquire_fence(&instance_id).await {
+            crate::vss_replicator::release_web_lock(&lock_name);
+            return Err(JsValue::from_str(&e));
+        }
+
+        let replicator = crate::vss_replicator::VssReplicator::new(store, instance_id);
+        crate::vss_replicator::register_vss_replicator(&runtime_key, replicator);
+
+        // Make sure any IndexedDB-only state is hydrated into localStorage first, so
+        // the restore guard sees an already-populated store and doesn't overwrite it.
+        let restore_result: Result<usize, JsValue> = async {
+            crate::runtime_store::preload_runtime_state_from_persistent_store().await?;
+            crate::vss_replicator::maybe_restore_ldk_state_from_vss(&runtime_key).await
+        }
+        .await;
+        match restore_result {
+            Ok(restored) => Ok(restored as u32),
+            Err(e) => {
+                // Roll back completely: leaving the replicator registered (live
+                // replication over a never-restored store) or the guards held (every
+                // retry failing with "another tab...") after reporting failure would
+                // wedge the caller. The persisted instance id survives, so a retry
+                // re-acquires the same fence.
+                crate::vss_replicator::teardown_vss_replication(&runtime_key);
+                Err(e)
+            }
+        }
+    }
+
+    /// Disable VSS replication for this node (unregisters the replicator; queued
+    /// writes are dropped). Releases both the single-writer guards — the VSS fence
+    /// (best-effort, async) and the same-origin Web Lock — so another instance can
+    /// take over cleanly. Local persistence is unaffected.
+    #[wasm_bindgen(js_name = disableLdkVssReplication)]
+    pub fn disable_ldk_vss_replication(&self) {
+        crate::vss_replicator::teardown_vss_replication(&self.runtime_manager_key());
+    }
+
+    /// Clear the VSS single-writer fence for this node's LDK store — the WASM
+    /// counterpart of the native SDK's `POST /vssclearfence`. Use when
+    /// `configureLdkVssReplication` fails with "owned by another instance" and that
+    /// owner can never release the fence itself: its browser profile was wiped (the
+    /// persisted fence id is gone) or the device is dead. After clearing, call
+    /// `configureLdkVssReplication` again — the new instance claims the fence and,
+    /// on a fresh device, runs the restore.
+    ///
+    /// Only clear the fence when the previous owner is truly gone: two live writers
+    /// on one VSS store corrupt each other's state (a still-running old owner will
+    /// stop itself at its next periodic fence check).
+    ///
+    /// Refused while replication is active on this node — call
+    /// `disableLdkVssReplication` first (mirrors native, where `/vssclearfence`
+    /// requires a locked node).
+    #[wasm_bindgen(js_name = clearLdkVssFence)]
+    pub async fn clear_ldk_vss_fence(
+        &self,
+        server_url: String,
+        store_id: String,
+        signing_key_hex: String,
+    ) -> Result<(), JsValue> {
+        let signing_key =
+            crate::vss_kv_store::parse_vss_config(&server_url, &store_id, &signing_key_hex)?;
+        let runtime_key = self.runtime_manager_key();
+        if crate::vss_replicator::vss_replicator(&runtime_key).is_some() {
+            return Err(JsValue::from_str(
+                "VSS replication is active on this node; call disableLdkVssReplication \
+                 before clearing the fence",
+            ));
+        }
+        let store = crate::vss_kv_store::WasmVssKvStore::new(
+            server_url.trim().to_string(),
+            format!("{}-ldk", store_id.trim()),
+            signing_key,
+        );
+        store
+            .delete_fence()
+            .await
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Health view for LDK VSS replication as JSON:
+    /// `{ configured, pendingWrites, lastError }`. `pendingWrites > 0` means some
+    /// state has not yet reached VSS (transient outage); alert if it stays non-zero.
+    #[wasm_bindgen(js_name = ldkVssBackupInfoJson)]
+    pub fn ldk_vss_backup_info_json(&self) -> Result<String, JsValue> {
+        let runtime_key = self.runtime_manager_key();
+        let (configured, pending, last_error, disabled) =
+            match crate::vss_replicator::vss_replicator(&runtime_key) {
+                Some(r) => (true, r.pending_count(), r.last_error(), r.is_disabled()),
+                None => (false, 0usize, None, false),
+            };
+        let info = serde_json::json!({
+            "configured": configured,
+            "pendingWrites": pending,
+            "lastError": last_error,
+            "disabled": disabled,
+        });
+        serde_json::to_string(&info).map_err(|e| JsValue::from_str(&format!("{e}")))
+    }
+}
+
 impl Drop for RlnWasmNode {
     fn drop(&mut self) {
-        crate::ldk_runtime::release_runtime_manager_if_last(
-            &self.runtime_manager_key(),
-            &self.ldk_runtime,
-        );
+        let runtime_key = self.runtime_manager_key();
+        let was_last =
+            crate::ldk_runtime::release_runtime_manager_if_last(&runtime_key, &self.ldk_runtime);
+        // Release the VSS single-writer guards so a same-tab restart or a takeover
+        // isn't wedged (fence release is best-effort/async; the Web Lock is freed
+        // synchronously — the browser would also free it on context destruction).
+        // Only when this was the LAST handle for the runtime: multiple RlnWasmNode
+        // handles can share a runtime_key (recreate-in-place, stale JS handles being
+        // GC-finalized), and tearing down on any drop would silently kill a live
+        // node's replication.
+        if was_last {
+            crate::vss_replicator::teardown_vss_replication(&runtime_key);
+        }
     }
 }
 
@@ -5962,6 +6129,20 @@ async fn node_drive_tick_once(
 ) -> Result<(), JsValue> {
     let use_runtime_state_for_ln_views = ldk_runtime.status().backend == "wasm_native_ldk";
 
+    // Drain pending RGB work BEFORE processing peer messages. Colored-channel signing is gated on
+    // durably persisted commitment/HTLC fascia (`is_transaction_durable`), and inbound funding
+    // needs its consignment validated (`RgbFundingValidationRequired`) before the channel can
+    // progress. Without this drain a client that only pumps `chainSyncTick`/`autoDrive` (i.e.
+    // never calls `driveRgbFundingWork` explicitly) leaves the first real RGB HTLC's
+    // commitment_signed deferred forever: the payment sticks at Pending until the counterparty
+    // disconnects with "timeout awaiting response". Errors are transient (the failed item is
+    // re-queued internally), so they must not fail the whole drive tick.
+    if let Err(err) = ldk_runtime.drive_rgb_funding_work_boxed().await {
+        wasm_debug(&format!(
+            "[rln-wasm-sdk node-drive] pre-tick RGB work drain deferred: {err:?}"
+        ));
+    }
+
     chain_sync.tick().await?;
     apply_chain_sync_to_live_ldk(chain_sync, ldk_runtime).await?;
 
@@ -5994,6 +6175,30 @@ async fn node_drive_tick_once(
         next_runtime_event_seq,
         label,
     )?;
+
+    // Drain RGB work queued by the peer messages just processed (funding validations, freshly
+    // prepared commitment/HTLC fascia), then run one more peer pass: the durable-fascia sweep
+    // calls `signer_unblocked`, which releases any commitment_signed/RAA that was deferred on
+    // `is_transaction_durable`, and those messages only reach the wire through
+    // `peer_process_events`. Without the second pass the release would wait a full extra tick.
+    if let Err(err) = ldk_runtime.drive_rgb_funding_work_boxed().await {
+        wasm_debug(&format!(
+            "[rln-wasm-sdk node-drive] post-events RGB work drain deferred: {err:?}"
+        ));
+    } else {
+        ldk_runtime.peer_process_events()?;
+        let _ = drain_pending_peer_hook_events(
+            ldk_runtime,
+            use_runtime_state_for_ln_views,
+            peers,
+            channels,
+            payments,
+            pending_peer_hook_events,
+            runtime_events,
+            next_runtime_event_seq,
+            label,
+        )?;
+    }
 
     // Reconcile the cached channel snapshot from the live backend LAST, so the authoritative live
     // `ChannelManager` set is the final word for this pass and purges any pre-funding temporary-id

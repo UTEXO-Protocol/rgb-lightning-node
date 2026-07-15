@@ -949,7 +949,9 @@ fn clearing_wallet_transport_reverts_to_sdk_default_backfill_contract() {
             None,
         )
         .expect("set wallet override");
-    wallet.clear_rgb_proxy_transport();
+    wallet
+        .clear_rgb_proxy_transport()
+        .expect("clear rgb proxy transport");
 
     let value = wallet
         .rgb_proxy_transport_value()

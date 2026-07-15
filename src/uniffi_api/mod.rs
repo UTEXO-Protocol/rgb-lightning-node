@@ -1069,6 +1069,16 @@ impl SdkNode {
         })
     }
 
+    pub fn verify_message(
+        &self,
+        message: String,
+        signature: String,
+    ) -> Result<VerifyMessageResponse, RlnError> {
+        let state = self.handle.app_state();
+        let valid = block_on_sdk(sdk::verify_message(state, message, signature))?;
+        Ok(VerifyMessageResponse { valid })
+    }
+
     pub fn estimate_fee(&self, blocks: u16) -> Result<EstimateFeeResponse, RlnError> {
         let state = self.handle.app_state();
         let resp = block_on_sdk(sdk::estimate_fee(state, blocks))?;
@@ -1648,6 +1658,14 @@ pub fn sdk_btc_balance(skip_sync: bool) -> Result<BtcBalanceInfo, RlnError> {
 pub fn sdk_sign_message(message: String) -> Result<SignMessageResponse, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
     SdkNode { handle }.sign_message(message)
+}
+
+pub fn sdk_verify_message(
+    message: String,
+    signature: String,
+) -> Result<VerifyMessageResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.verify_message(message, signature)
 }
 
 pub fn sdk_estimate_fee(blocks: u16) -> Result<EstimateFeeResponse, RlnError> {

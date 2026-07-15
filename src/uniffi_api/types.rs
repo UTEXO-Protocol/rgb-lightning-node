@@ -106,6 +106,10 @@ pub struct SignMessageResponse {
     pub signed_message: String,
 }
 
+pub struct VerifyMessageResponse {
+    pub valid: bool,
+}
+
 pub struct EstimateFeeResponse {
     pub fee_rate: f64,
 }

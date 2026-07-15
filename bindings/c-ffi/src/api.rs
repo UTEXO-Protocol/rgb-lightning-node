@@ -531,6 +531,16 @@ pub(crate) fn sign_message(
     json(JsonSignMessageResponse::from(resp))
 }
 
+pub(crate) fn verify_message(
+    node: &COpaqueStruct,
+    message: *const c_char,
+    signature: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let resp = node.verify_message(ptr_to_string(message), ptr_to_string(signature))?;
+    json(JsonVerifyMessageResponse::from(resp))
+}
+
 pub(crate) fn estimate_fee(node: &COpaqueStruct, blocks: u16) -> Result<String, Error> {
     let node = require_handle(node)?;
     let resp = node.estimate_fee(blocks)?;

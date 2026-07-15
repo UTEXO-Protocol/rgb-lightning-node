@@ -58,6 +58,7 @@ use lightning::util::config::{
     ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig,
 };
 use lightning::util::errors::APIError as LDKAPIError;
+use lightning::util::message_signing;
 use lightning::util::IS_SWAP_SCID;
 use lightning::{
     onion_message::messenger::Destination, onion_message::messenger::MessageSendInstructions,
@@ -1372,6 +1373,54 @@ pub(crate) async fn sign_message(
     let trimmed = message.trim();
     let signed_message = unlocked_state.sign_node_message(trimmed.as_bytes())?;
     Ok(SignMessageData { signed_message })
+}
+
+pub(crate) async fn verify_message(
+    state: Arc<AppState>,
+    message: String,
+    signature: String,
+) -> Result<bool, APIError> {
+    let node_id = message_verification_node_id(&state).await?;
+
+    Ok(verify_message_signature(
+        message.trim().as_bytes(),
+        signature.trim(),
+        &node_id,
+    ))
+}
+
+async fn message_verification_node_id(state: &Arc<AppState>) -> Result<PublicKey, APIError> {
+    check_changing_state(state)?;
+
+    {
+        let unlocked_state = state.get_unlocked_app_state().await;
+        if let Some(unlocked_state) = unlocked_state.as_ref() {
+            return Ok(unlocked_state.runtime_node_id());
+        }
+    }
+
+    // Verification is a public-key operation. In external-signer mode the
+    // persisted key source is the authoritative account identity even while
+    // the node is locked. Prefer it over a newly attached signer so seed
+    // migration/fallback cannot temporarily verify against the wrong node id.
+    let persisted_node_id = read_key_source_file(&state.static_state.storage_dir_path)
+        .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?
+        .map(|key_source| key_source.node_id);
+    let attached_node_id = {
+        let attachment = state.get_attached_external_signer();
+        attachment
+            .as_ref()
+            .map(|attachment| attachment.bootstrap.identity.node_id.clone())
+    };
+    let node_id = persisted_node_id
+        .or(attached_node_id)
+        .ok_or(APIError::LockedNode)?;
+
+    PublicKey::from_str(&node_id).map_err(|_| APIError::InvalidPubkey)
+}
+
+fn verify_message_signature(message: &[u8], signature: &str, node_id: &PublicKey) -> bool {
+    message_signing::verify(message, signature, node_id)
 }
 
 pub(crate) async fn get_channel_id(
@@ -4314,7 +4363,9 @@ mod tests {
         WalletInputMetadata,
     };
     use crate::signer::vls_adapter::ExternalSignerBackend;
-    use crate::signer::{read_key_source_file, RlnSignerError, SignerIdentity};
+    use crate::signer::{
+        read_key_source_file, write_key_source_file, KeySourceFile, RlnSignerError, SignerIdentity,
+    };
     use crate::utils::{AppState, StaticState};
     use rgb_lib::BitcoinNetwork;
     use rln_migration::{Migrator, MigratorTrait};
@@ -4323,6 +4374,66 @@ mod tests {
     use std::sync::{Arc, Mutex, RwLock};
     use tokio::sync::Mutex as TokioMutex;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn verify_message_signature_accepts_known_lightning_vector_and_rejects_tampering() {
+        let message = b"is this compatible?";
+        let signature = "rbgfioj114mh48d8egqx8o9qxqw4fmhe8jbeeabdioxnjk8z3t1ma1hu1fiswpakgucwwzwo6ofycffbsqusqdimugbh41n1g698hr9t";
+        let node_id = PublicKey::from_str(
+            "02b80cabdf82638aac86948e4c06e82064f547768dcef977677b9ea931ea75bab5",
+        )
+        .expect("valid node id");
+
+        assert!(verify_message_signature(message, signature, &node_id));
+        assert!(!verify_message_signature(b"tampered", signature, &node_id));
+        assert!(!verify_message_signature(message, "invalid", &node_id));
+    }
+
+    #[tokio::test]
+    async fn verify_message_uses_persisted_external_identity_while_locked() {
+        let state = mock_locked_state();
+        let storage_dir = state.static_state.storage_dir_path.clone();
+        let mut bootstrap = sample_bootstrap();
+        bootstrap.identity.node_id =
+            "02b80cabdf82638aac86948e4c06e82064f547768dcef977677b9ea931ea75bab5".to_string();
+        write_key_source_file(
+            &state.static_state.storage_dir_path,
+            &KeySourceFile::from_bootstrap(&bootstrap),
+        )
+        .expect("persist key source");
+
+        let valid = verify_message(
+            state,
+            "is this compatible?".to_string(),
+            "rbgfioj114mh48d8egqx8o9qxqw4fmhe8jbeeabdioxnjk8z3t1ma1hu1fiswpakgucwwzwo6ofycffbsqusqdimugbh41n1g698hr9t".to_string(),
+        )
+        .await
+        .expect("locked public-key verification");
+
+        assert!(valid);
+        std::fs::remove_dir_all(storage_dir).expect("remove temp storage dir");
+    }
+
+    #[tokio::test]
+    async fn verify_message_uses_attached_external_identity_before_init() {
+        let state = mock_locked_state();
+        let storage_dir = state.static_state.storage_dir_path.clone();
+        let mut bootstrap = sample_bootstrap();
+        bootstrap.identity.node_id =
+            "02b80cabdf82638aac86948e4c06e82064f547768dcef977677b9ea931ea75bab5".to_string();
+        attach_test_external_signer(&state, bootstrap).expect("attach external signer");
+
+        let valid = verify_message(
+            state,
+            "is this compatible?".to_string(),
+            "rbgfioj114mh48d8egqx8o9qxqw4fmhe8jbeeabdioxnjk8z3t1ma1hu1fiswpakgucwwzwo6ofycffbsqusqdimugbh41n1g698hr9t".to_string(),
+        )
+        .await
+        .expect("attached public-key verification");
+
+        assert!(valid);
+        std::fs::remove_dir_all(storage_dir).expect("remove temp storage dir");
+    }
 
     fn mock_locked_state() -> Arc<AppState> {
         let unique = format!(

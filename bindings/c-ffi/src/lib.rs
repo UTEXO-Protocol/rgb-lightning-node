@@ -66,6 +66,9 @@ pub struct CResultString {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn free_sdk_node(obj: COpaqueStruct) {
+    if obj.ptr.is_null() {
+        return;
+    }
     unsafe {
         let _ = Box::from_raw(obj.ptr as *mut SdkNode);
     }
@@ -471,6 +474,18 @@ pub extern "C" fn rln_sign_message(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rln_verify_message(
+    node: &COpaqueStruct,
+    message: *const c_char,
+    signature: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_verify_message",
+        api::verify_message(node, message, signature)
+    )
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rln_estimate_fee(node: &COpaqueStruct, blocks: u16) -> CResultString {
     ffi_call!("rln_estimate_fee", api::estimate_fee(node, blocks))
 }
@@ -614,8 +629,22 @@ pub extern "C" fn rln_sdk_shutdown() -> CResultString {
 /// attach / init / unlock succeeds: RLN holds its own `Arc` clone.
 #[unsafe(no_mangle)]
 pub extern "C" fn free_native_external_signer(obj: COpaqueStruct) {
+    if obj.ptr.is_null() {
+        return;
+    }
     unsafe {
         let _ = Box::from_raw(obj.ptr as *mut Arc<NativeExternalSigner>);
+    }
+}
+
+#[cfg(test)]
+mod free_tests {
+    use super::*;
+
+    #[test]
+    fn free_functions_accept_null_handles() {
+        free_sdk_node(COpaqueStruct::null());
+        free_native_external_signer(COpaqueStruct::null());
     }
 }
 

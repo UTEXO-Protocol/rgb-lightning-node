@@ -37,6 +37,8 @@ interface SdkNode {
     [Throws=RlnError]
     SignMessageResponse sign_message(string message);
     [Throws=RlnError]
+    VerifyMessageResponse verify_message(string message, string signature);
+    [Throws=RlnError]
     string init(string password, string? mnemonic);
     [Throws=RlnError]
     void init_with_external_signer(SdkExternalSignerBootstrap bootstrap);
@@ -196,6 +198,10 @@ dictionary BtcBalanceInfo {
 
 dictionary SignMessageResponse {
     string signed_message;
+};
+
+dictionary VerifyMessageResponse {
+    boolean valid;
 };
 
 dictionary EstimateFeeResponse {

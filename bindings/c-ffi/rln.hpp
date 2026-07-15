@@ -217,4 +217,8 @@ CResultString rln_uniffi_healthcheck();
 
 CResultString rln_uniffi_is_initialized();
 
+CResultString rln_verify_message(const COpaqueStruct *node,
+                                 const char *message,
+                                 const char *signature);
+
 }  // extern "C"

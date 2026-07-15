@@ -1874,7 +1874,12 @@ pub fn ldk_runtime_manager(runtime_key: String) -> Result<Rc<dyn LdkRuntimeManag
     Ok(manager)
 }
 
-pub fn release_runtime_manager_if_last(runtime_key: &str, manager: &Rc<dyn LdkRuntimeManager>) {
+/// Returns `true` when this was the last live handle for `runtime_key` (the registry
+/// entry was removed), so per-runtime teardown (e.g. VSS replication guards) may run.
+pub fn release_runtime_manager_if_last(
+    runtime_key: &str,
+    manager: &Rc<dyn LdkRuntimeManager>,
+) -> bool {
     let runtime_key = canonicalize_runtime_key(runtime_key);
     RUNTIME_MANAGER_REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
@@ -1887,7 +1892,8 @@ pub fn release_runtime_manager_if_last(runtime_key: &str, manager: &Rc<dyn LdkRu
             registry.remove(&runtime_key);
         }
         registry.retain(|_, weak| weak.strong_count() > 0);
-    });
+        should_remove
+    })
 }
 
 fn canonicalize_runtime_key(runtime_key: &str) -> String {
