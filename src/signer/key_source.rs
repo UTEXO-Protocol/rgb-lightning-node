@@ -95,6 +95,10 @@ pub fn write_restricted_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// file, owned by the current user, with no group/other permission bits. [`write_restricted_file`]
 /// guarantees this for files we create; this guards the path where the file already existed — a
 /// seed written by a shell redirect is typically 0644 and must be refused, not silently used.
+///
+/// Only consumed by the `rln-signer-daemon` binary (via the crate-root re-export in `lib.rs`),
+/// hence the feature gate — without it the default build flags this as dead code.
+#[cfg(any(feature = "remote-signer", test))]
 pub fn check_restricted_file(path: &Path) -> std::io::Result<()> {
     let metadata = fs::metadata(path)?;
     if !metadata.is_file() {
@@ -135,6 +139,10 @@ pub fn check_restricted_file(path: &Path) -> std::io::Result<()> {
 /// already exists, verify it is a directory owned by the current user with no group/other
 /// permission bits. Fails closed on broader permissions instead of silently tightening them: an
 /// already-exposed directory may already have been read, and that is the operator's call to assess.
+///
+/// Only consumed by `in_process_vls::open_restricted_persister` (gated on `vls`), hence the
+/// feature gate — without it the default build flags this as dead code.
+#[cfg(any(feature = "vls", test))]
 pub fn create_or_check_restricted_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -177,6 +185,10 @@ pub fn create_or_check_restricted_dir(path: &Path) -> std::io::Result<()> {
 /// Tighten an existing file to owner-only (0600). For files created by third-party libraries (e.g.
 /// the VLS `redb` store) whose creation mode follows the process umask. Missing files are fine —
 /// the caller doesn't always know which of several candidate files the library created.
+///
+/// Only consumed by `in_process_vls::open_restricted_persister` (gated on `vls`), hence the
+/// feature gate — without it the default build flags this as dead code.
+#[cfg(any(feature = "vls", test))]
 pub fn restrict_existing_file(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     if path.exists() {
