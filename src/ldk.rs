@@ -1237,9 +1237,7 @@ impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
             asset_link_read_record(self.kv_store.as_ref(), &params.asset_id).map_err(|_| {
                 JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_LINK, "unknown_link")
             })?;
-        if record.linked_asset_id.as_deref() != Some(params.linked_asset_id.as_str())
-            || record.signature.is_none()
-        {
+        if record.linked_asset_id.as_deref() != Some(params.linked_asset_id.as_str()) {
             return Err(JsonRpcErrorWire::application_error(
                 ASSET_LINK_ERROR_UNKNOWN_LINK,
                 "unknown_link",

@@ -18,7 +18,7 @@ use lightning_invoice::Bolt11Invoice;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use reqwest::{Response, StatusCode};
-use rgb_lib::{BitcoinNetwork, ContractId};
+use rgb_lib::{wallet::IfaIssuanceType, BitcoinNetwork, ContractId};
 use sea_orm::{ConnectOptions, Database};
 use std::collections::HashMap;
 use std::fs::File;
@@ -583,6 +583,8 @@ async fn asset_link_create(
     let payload = AssetLinkCreateRequest {
         asset_id: asset_id.to_string(),
         linked_asset_id: linked_asset_id.to_string(),
+        fee_rate: FEE_RATE,
+        min_confirmations: 1,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/assetlink/create"))
@@ -1059,6 +1061,13 @@ async fn issue_asset_cfa(node_address: SocketAddr, file_path: Option<&str>) -> A
 }
 
 async fn issue_asset_ifa(node_address: SocketAddr) -> AssetIFA {
+    issue_asset_ifa_with_type(node_address, None).await
+}
+
+async fn issue_asset_ifa_with_type(
+    node_address: SocketAddr,
+    issuance_type: Option<IfaIssuanceType>,
+) -> AssetIFA {
     println!("issuing IFA asset on node {node_address}");
     let payload = IssueAssetIFARequest {
         amounts: vec![ISSUE_AMT],
@@ -1067,6 +1076,7 @@ async fn issue_asset_ifa(node_address: SocketAddr) -> AssetIFA {
         name: s!("Tether"),
         precision: 0,
         reject_list_url: None,
+        issuance_type,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/issueassetifa"))

@@ -18,10 +18,10 @@ use rgb_lib::{
     bitcoin::psbt::Psbt as BitcoinPsbt,
     wallet::{
         rust_only::{check_proxy_url, ColoringInfo},
-        AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, Metadata, Online,
-        OperationResult, ReceiveData, Recipient, RefreshFilter, RefreshResult, RgbWalletOpsOffline,
-        RgbWalletOpsOnline, SendBeginResult, SinglesigKeys, SyncOptions,
-        Transaction as RgbLibTransaction, Transfer, TransportEndpoint, Unspent,
+        AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, IfaIssuanceType,
+        Metadata, Online, OperationResult, Outpoint, ReceiveData, Recipient, RefreshFilter,
+        RefreshResult, RgbWalletOpsOffline, RgbWalletOpsOnline, SendBeginResult, SinglesigKeys,
+        SyncOptions, Transaction as RgbLibTransaction, Transfer, TransportEndpoint, Unspent,
         Wallet as RgbLibWallet,
     },
     AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, Fascia, RgbTransfer,
@@ -276,6 +276,7 @@ impl UnlockedAppState {
         amounts: Vec<u64>,
         inflation_amounts: Vec<u64>,
         reject_list_url: Option<String>,
+        issuance_type: Option<IfaIssuanceType>,
     ) -> Result<AssetIFA, RgbLibError> {
         self.rgb_wallet_wrapper.issue_asset_ifa(
             ticker,
@@ -284,6 +285,25 @@ impl UnlockedAppState {
             amounts,
             inflation_amounts,
             reject_list_url,
+            issuance_type,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rgb_link_ifa(
+        &self,
+        parent_contract_id: String,
+        child_contract_id: String,
+        link_right_outpoint: Outpoint,
+        fee_rate: u64,
+        min_confirmations: u8,
+    ) -> Result<OperationResult, RgbLibError> {
+        self.rgb_wallet_wrapper.link_ifa(
+            parent_contract_id,
+            child_contract_id,
+            link_right_outpoint,
+            fee_rate,
+            min_confirmations,
         )
     }
 
@@ -746,6 +766,7 @@ impl RgbLibWalletWrapper {
         amounts: Vec<u64>,
         inflation_amounts: Vec<u64>,
         reject_list_url: Option<String>,
+        issuance_type: Option<IfaIssuanceType>,
     ) -> Result<AssetIFA, RgbLibError> {
         self.get_rgb_wallet().issue_asset_ifa(
             ticker,
@@ -754,6 +775,26 @@ impl RgbLibWalletWrapper {
             amounts,
             inflation_amounts,
             reject_list_url,
+            issuance_type,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn link_ifa(
+        &self,
+        parent_contract_id: String,
+        child_contract_id: String,
+        link_right_outpoint: Outpoint,
+        fee_rate: u64,
+        min_confirmations: u8,
+    ) -> Result<OperationResult, RgbLibError> {
+        self.get_rgb_wallet().link_ifa(
+            self.online,
+            parent_contract_id,
+            child_contract_id,
+            link_right_outpoint,
+            fee_rate,
+            min_confirmations,
         )
     }
 

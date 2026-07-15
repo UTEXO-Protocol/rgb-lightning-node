@@ -57,3 +57,7 @@ lightning-persister = { path = "../../rust-lightning/lightning-persister" }
 lightning-rapid-gossip-sync = { path = "../../rust-lightning/lightning-rapid-gossip-sync" }
 vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
 vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
+
+[patch."https://github.com/UTEXO-Protocol/rgb-lib.git"]
+rgb-lib = { git = "https://github.com/txalkan/rgb-lib.git", branch = "feat/asset-link" }
+rgb-lib-migration = { git = "https://github.com/txalkan/rgb-lib.git", branch = "feat/asset-link", package = "rgb-lib-migration" }

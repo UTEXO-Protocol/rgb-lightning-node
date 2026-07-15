@@ -260,6 +260,29 @@ fn map_media(data: crate::sdk::Media) -> Media {
     }
 }
 
+fn map_ifa_issuance_type(
+    issuance_type: IfaIssuanceType,
+) -> Result<rgb_lib::wallet::IfaIssuanceType, RlnError> {
+    Ok(match issuance_type {
+        IfaIssuanceType::Legacy => rgb_lib::wallet::IfaIssuanceType::Legacy,
+        IfaIssuanceType::LinkRightOnly => rgb_lib::wallet::IfaIssuanceType::LinkRightOnly,
+        IfaIssuanceType::LinkedFromParent {
+            contract_id,
+            request_link_right,
+        } => rgb_lib::wallet::IfaIssuanceType::LinkedFromParent {
+            contract_id: contract_id.to_string(),
+            request_link_right,
+        },
+    })
+}
+
+fn map_rgb_outpoint(outpoint: rgb_lib::wallet::Outpoint) -> RgbOutpoint {
+    RgbOutpoint {
+        txid: outpoint.txid,
+        vout: outpoint.vout,
+    }
+}
+
 fn map_token(data: crate::sdk::Token) -> Token {
     Token {
         index: data.index,
@@ -510,6 +533,10 @@ impl SdkNode {
 
     pub fn issueassetifa(&self, request: SdkIssueAssetIfaRequest) -> Result<AssetIfa, RlnError> {
         let state = self.handle.app_state();
+        let issuance_type = request
+            .issuance_type
+            .map(map_ifa_issuance_type)
+            .transpose()?;
         let asset = block_on_sdk(sdk::issue_asset_ifa(
             state,
             sdk::IssueAssetIFARequestData {
@@ -519,6 +546,7 @@ impl SdkNode {
                 name: request.name,
                 precision: request.precision,
                 reject_list_url: request.reject_list_url,
+                issuance_type,
             },
         ))?;
 
@@ -536,6 +564,7 @@ impl SdkNode {
             balance: map_asset_balance(asset.balance),
             media: asset.media.map(map_media),
             reject_list_url: asset.reject_list_url,
+            link_right_outpoint: asset.link_right_outpoint.map(map_rgb_outpoint),
         })
     }
 
@@ -1249,6 +1278,7 @@ impl SdkNode {
                             balance: map_asset_balance(a.balance),
                             media: a.media.map(map_media),
                             reject_list_url: a.reject_list_url,
+                            link_right_outpoint: a.link_right_outpoint.map(map_rgb_outpoint),
                         })
                     })
                     .collect::<Result<Vec<_>, RlnError>>()

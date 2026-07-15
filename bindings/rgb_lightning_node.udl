@@ -440,6 +440,12 @@ dictionary AssetIfa {
     AssetBalanceInfo balance;
     Media? media;
     string? reject_list_url;
+    RgbOutpoint? link_right_outpoint;
+};
+
+dictionary RgbOutpoint {
+    string txid;
+    u32 vout;
 };
 
 dictionary ListAssetsResponse {
@@ -676,6 +682,14 @@ dictionary SdkIssueAssetIfaRequest {
     string name;
     u8 precision;
     string? reject_list_url;
+    IfaIssuanceType? issuance_type = null;
+};
+
+[Enum]
+interface IfaIssuanceType {
+    Legacy();
+    LinkRightOnly();
+    LinkedFromParent(ContractId contract_id, boolean request_link_right);
 };
 
 dictionary SdkIssueAssetUdaRequest {

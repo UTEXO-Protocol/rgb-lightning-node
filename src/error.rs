@@ -163,6 +163,9 @@ pub enum APIError {
     #[error("Invalid channel ID")]
     InvalidChannelID,
 
+    #[error("Invalid contract link: {0}")]
+    InvalidContractLink(String),
+
     #[error("Invalid description hash: {0}")]
     InvalidDescriptionHash(String),
 
@@ -436,6 +439,7 @@ impl From<RgbLibError> for APIError {
             RgbLibError::InvalidAmountZero => APIError::InvalidAmount(s!("0")),
             RgbLibError::InvalidAssignment => APIError::InvalidAssignment,
             RgbLibError::InvalidAttachments { details } => APIError::InvalidAttachments(details),
+            RgbLibError::InvalidContractLink { details } => APIError::InvalidContractLink(details),
             RgbLibError::InvalidDetails { details } => APIError::InvalidDetails(details),
             RgbLibError::InvalidElectrum { details } => APIError::InvalidIndexer(details),
             RgbLibError::InvalidEstimationBlocks => APIError::InvalidEstimationBlocks,
@@ -527,6 +531,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidBackupPath
             | APIError::InvalidBiscuitToken
             | APIError::InvalidChannelID
+            | APIError::InvalidContractLink(_)
             | APIError::InvalidDescriptionHash(_)
             | APIError::InvalidDetails(_)
             | APIError::InvalidEstimationBlocks

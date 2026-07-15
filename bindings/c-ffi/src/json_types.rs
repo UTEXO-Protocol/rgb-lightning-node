@@ -15,22 +15,22 @@ use hex::DisplayHex;
 use hex::FromHex;
 use rgb_lightning_node::{
     AddressInfo, AssetBalanceInfo, AssetCfa, AssetIfa, AssetMediaResponse, AssetMetadataInfo,
-    AssetNia, AssetUda, AssignmentKind, BlockTime, BtcBalance, BtcBalanceInfo,
+    AssetNia, AssetRecipients, AssetUda, AssignmentKind, BlockTime, BtcBalance, BtcBalanceInfo,
     CancelHodlInvoiceRequest, Channel, ChannelId, ChannelStatus, CheckIndexerUrlResponse,
     ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, ContractId, DecodeLnInvoiceResponse,
-    DecodeRgbInvoiceResponse, EmbeddedMedia, EstimateFeeResponse, HtlcStatus, InflateRequest,
-    InflateResponse, InvoiceStatus, ListAssetsResponse, LnInvoiceRequest, LnInvoiceResponse, Media,
-    MediaAttachment, NetworkInfo, NodeInfo, Payment, PaymentHash, PaymentType, Peer, ProofOfReserves,
-    PublicKey, RecipientId, RgbAllocation, SdkCloseChannelRequest, SdkCreateUtxosRequest,
-    SdkDisconnectPeerRequest, SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest,
+    DecodeRgbInvoiceResponse, EmbeddedMedia, EstimateFeeResponse, HtlcStatus, IfaIssuanceType,
+    InflateRequest, InflateResponse, InvoiceStatus, ListAssetsResponse, LnInvoiceRequest,
+    LnInvoiceResponse, Media, MediaAttachment, NetworkInfo, NodeInfo, Payment, PaymentHash,
+    PaymentType, Peer, ProofOfReserves, PublicKey, RecipientId, RgbAllocation, RgbOutpoint,
+    RgbRecipient, SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkDisconnectPeerRequest,
+    SdkExternalSignerBootstrap, SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest,
     SdkIssueAssetCfaRequest, SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest,
     SdkIssueAssetUdaRequest, SdkKeysendRequest, SdkKeysendResponse, SdkMakerExecuteRequest,
     SdkMakerInitRequest, SdkMakerInitResponse, SdkOpenChannelRequest, SdkOpenChannelResponse,
     SdkPostAssetMediaRequest, SdkPostAssetMediaResponse, SdkRefreshTransfersRequest,
     SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
-    SdkExternalSignerBootstrap, SdkSendOnionMessageRequest, SdkSendPaymentRequest,
-    SdkSendPaymentResponse, SdkTakerRequest, SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
-    AssetRecipients, RgbRecipient,
+    SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
+    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
     SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
     TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
     VerifyMessageResponse, WitnessData,
@@ -142,7 +142,11 @@ impl TryFrom<JsonSdkInitRequest> for SdkInitRequest {
     fn try_from(j: JsonSdkInitRequest) -> Result<Self, Self::Error> {
         let virtual_peer_pubkeys = j
             .virtual_peer_pubkeys
-            .map(|v| v.iter().map(|s| parse_pubkey(s)).collect::<Result<Vec<_>, _>>())
+            .map(|v| {
+                v.iter()
+                    .map(|s| parse_pubkey(s))
+                    .collect::<Result<Vec<_>, _>>()
+            })
             .transpose()?;
         Ok(SdkInitRequest {
             storage_dir_path: j.storage_dir_path,
@@ -1105,18 +1109,50 @@ pub(crate) struct JsonIssueAssetIfaRequest {
     pub precision: u8,
     #[serde(default)]
     pub reject_list_url: Option<String>,
+    #[serde(default)]
+    pub issuance_type: Option<JsonIfaIssuanceType>,
 }
 
-impl From<JsonIssueAssetIfaRequest> for SdkIssueAssetIfaRequest {
-    fn from(j: JsonIssueAssetIfaRequest) -> Self {
-        SdkIssueAssetIfaRequest {
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum JsonIfaIssuanceType {
+    Legacy,
+    LinkRightOnly,
+    LinkedFromParent {
+        contract_id: String,
+        #[serde(default)]
+        request_link_right: bool,
+    },
+}
+
+impl TryFrom<JsonIssueAssetIfaRequest> for SdkIssueAssetIfaRequest {
+    type Error = Error;
+
+    fn try_from(j: JsonIssueAssetIfaRequest) -> Result<Self, Self::Error> {
+        Ok(SdkIssueAssetIfaRequest {
             amounts: j.amounts,
             inflation_amounts: j.inflation_amounts,
             ticker: j.ticker,
             name: j.name,
             precision: j.precision,
             reject_list_url: j.reject_list_url,
-        }
+            issuance_type: j
+                .issuance_type
+                .map(|issuance_type| -> Result<IfaIssuanceType, Error> {
+                    match issuance_type {
+                        JsonIfaIssuanceType::Legacy => Ok(IfaIssuanceType::Legacy),
+                        JsonIfaIssuanceType::LinkRightOnly => Ok(IfaIssuanceType::LinkRightOnly),
+                        JsonIfaIssuanceType::LinkedFromParent {
+                            contract_id,
+                            request_link_right,
+                        } => Ok(IfaIssuanceType::LinkedFromParent {
+                            contract_id: parse_contract_id(&contract_id)?,
+                            request_link_right,
+                        }),
+                    }
+                })
+                .transpose()?,
+        })
     }
 }
 
@@ -1358,6 +1394,22 @@ pub(crate) struct JsonAssetIfa {
     pub balance: JsonAssetBalanceInfo,
     pub media: Option<JsonMedia>,
     pub reject_list_url: Option<String>,
+    pub link_right_outpoint: Option<JsonRgbOutpoint>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRgbOutpoint {
+    pub txid: String,
+    pub vout: u32,
+}
+
+impl From<RgbOutpoint> for JsonRgbOutpoint {
+    fn from(outpoint: RgbOutpoint) -> Self {
+        Self {
+            txid: outpoint.txid,
+            vout: outpoint.vout,
+        }
+    }
 }
 
 impl From<AssetIfa> for JsonAssetIfa {
@@ -1376,6 +1428,7 @@ impl From<AssetIfa> for JsonAssetIfa {
             balance: a.balance.into(),
             media: a.media.map(Into::into),
             reject_list_url: a.reject_list_url,
+            link_right_outpoint: a.link_right_outpoint.map(Into::into),
         }
     }
 }

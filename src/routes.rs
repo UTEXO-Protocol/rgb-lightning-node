@@ -50,7 +50,8 @@ use rgb_lib::{
         },
         AssetCFA as RgbLibAssetCFA, AssetIFA as RgbLibAssetIFA, AssetNIA as RgbLibAssetNIA,
         AssetUDA as RgbLibAssetUDA, Balance as RgbLibBalance, EmbeddedMedia as RgbLibEmbeddedMedia,
-        Invoice as RgbLibInvoice, Media as RgbLibMedia, ProofOfReserves as RgbLibProofOfReserves,
+        IfaIssuanceType as RgbLibIfaIssuanceType, Invoice as RgbLibInvoice, Media as RgbLibMedia,
+        Outpoint as RgbLibOutpoint, ProofOfReserves as RgbLibProofOfReserves,
         Recipient as RgbLibRecipient, RecipientInfo, RecipientType as RgbLibRecipientType,
         RefreshFilter as RgbLibRefreshFilter, RefreshTransferStatus as RgbLibRefreshTransferStatus,
         SyncKeychain as RgbLibSyncKeychain, SyncOptions as RgbLibSyncOptions,
@@ -127,7 +128,6 @@ const OPENCHANNEL_MAX_SAT: u64 = 16777215;
 const OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
 const VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
 const ASSET_LINK_NAMESPACE: &str = "asset_link";
-const ASSET_LINK_SIGNATURE_DOMAIN: &str = "RLN_ASSET_LINK_V1";
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AddressResponse {
@@ -204,6 +204,7 @@ pub(crate) struct AssetIFA {
     pub(crate) balance: AssetBalanceResponse,
     pub(crate) media: Option<Media>,
     pub(crate) reject_list_url: Option<String>,
+    pub(crate) link_right_outpoint: Option<RgbLibOutpoint>,
 }
 
 impl From<RgbLibAssetIFA> for AssetIFA {
@@ -222,6 +223,7 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             balance: value.balance.into(),
             media: value.media.map(|m| m.into()),
             reject_list_url: value.reject_list_url,
+            link_right_outpoint: value.link_right_outpoint,
         }
     }
 }
@@ -230,15 +232,17 @@ impl From<RgbLibAssetIFA> for AssetIFA {
 pub(crate) struct AssetLink {
     pub(crate) asset_id: String,
     pub(crate) linked_asset_id: Option<String>,
-    pub(crate) issuer_pubkey: String,
-    pub(crate) signature: Option<String>,
     pub(crate) created_at: Option<u64>,
+    pub(crate) link_right_outpoint: Option<RgbLibOutpoint>,
+    pub(crate) txid: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AssetLinkCreateRequest {
     pub(crate) asset_id: String,
     pub(crate) linked_asset_id: String,
+    pub(crate) fee_rate: u64,
+    pub(crate) min_confirmations: u8,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -275,6 +279,22 @@ fn asset_link_write_record(
                 "asset link write failed: {e}"
             )))
         })
+}
+
+fn asset_link_write_reverse_record(
+    kv_store: &dyn KVStoreSync,
+    parent_asset_id: &str,
+    child_asset_id: &str,
+    txid: Option<String>,
+) -> Result<(), APIError> {
+    let reverse_asset_link = AssetLink {
+        asset_id: child_asset_id.to_string(),
+        linked_asset_id: Some(parent_asset_id.to_string()),
+        created_at: None,
+        link_right_outpoint: None,
+        txid,
+    };
+    asset_link_write_record(kv_store, &reverse_asset_link)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -393,6 +413,7 @@ pub(crate) enum Assignment {
     NonFungible,
     InflationRight(u64),
     Any,
+    LinkRight,
 }
 
 impl From<RgbLibAssignment> for Assignment {
@@ -402,6 +423,7 @@ impl From<RgbLibAssignment> for Assignment {
             RgbLibAssignment::NonFungible => Self::NonFungible,
             RgbLibAssignment::InflationRight(amt) => Self::InflationRight(amt),
             RgbLibAssignment::Any => Self::Any,
+            RgbLibAssignment::LinkRight => Self::LinkRight,
         }
     }
 }
@@ -413,6 +435,7 @@ impl From<Assignment> for RgbLibAssignment {
             Assignment::NonFungible => Self::NonFungible,
             Assignment::InflationRight(amt) => Self::InflationRight(amt),
             Assignment::Any => Self::Any,
+            Assignment::LinkRight => Self::LinkRight,
         }
     }
 }
@@ -792,6 +815,8 @@ pub(crate) struct IssueAssetIFARequest {
     pub(crate) name: String,
     pub(crate) precision: u8,
     pub(crate) reject_list_url: Option<String>,
+    #[serde(default)]
+    pub(crate) issuance_type: Option<RgbLibIfaIssuanceType>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1502,6 +1527,7 @@ pub(crate) enum TransferKind {
     Send,
     Inflation,
     Burn,
+    Link,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -1897,71 +1923,84 @@ pub(crate) async fn asset_link_create(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<AssetLinkCreateRequest>, APIError>,
 ) -> Result<Json<AssetLinkCreateResponse>, APIError> {
-    let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
-    let issuer_pubkey = unlocked_state.runtime_node_pubkey();
+    no_cancel(async move {
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
+        if unlocked_state.external_signer_mode {
+            return Err(APIError::UnsupportedInExternalSignerMode(
+                "asset linking is not supported in external signer mode".to_string(),
+            ));
+        }
 
-    let asset_id = payload.asset_id.trim().to_string();
-    let linked_asset_id = payload.linked_asset_id.trim().to_string();
+        let asset_id = payload.asset_id.trim().to_string();
+        let linked_asset_id = payload.linked_asset_id.trim().to_string();
 
-    let contract_id =
-        ContractId::from_str(&asset_id).map_err(|_| APIError::InvalidAssetID(asset_id.clone()))?;
-    let linked_contract_id = ContractId::from_str(&linked_asset_id)
-        .map_err(|_| APIError::InvalidAssetID(linked_asset_id.clone()))?;
+        let contract_id = ContractId::from_str(&asset_id)
+            .map_err(|_| APIError::InvalidAssetID(asset_id.clone()))?;
+        let linked_contract_id = ContractId::from_str(&linked_asset_id)
+            .map_err(|_| APIError::InvalidAssetID(linked_asset_id.clone()))?;
 
-    if contract_id == linked_contract_id {
-        return Err(APIError::InvalidRequest(
-            "asset_id and linked_asset_id must be different".to_string(),
-        ));
-    }
+        if contract_id == linked_contract_id {
+            return Err(APIError::InvalidRequest(
+                "asset_id and linked_asset_id must be different".to_string(),
+            ));
+        }
 
-    unlocked_state.rgb_get_asset_metadata(contract_id)?;
-    unlocked_state.rgb_get_asset_metadata(linked_contract_id)?;
+        let asset_record = asset_link_read_record(unlocked_state.kv_store.as_ref(), &asset_id)?;
 
-    let asset_record = asset_link_read_record(unlocked_state.kv_store.as_ref(), &asset_id)?;
-    let linked_asset_record =
-        asset_link_read_record(unlocked_state.kv_store.as_ref(), &linked_asset_id)?;
-
-    if asset_record.issuer_pubkey != issuer_pubkey
-        || linked_asset_record.issuer_pubkey != issuer_pubkey
-    {
-        return Err(APIError::InvalidRequest(
-            "asset link requires both assets to be issued by this node".to_string(),
-        ));
-    }
-
-    match asset_record.linked_asset_id.as_deref() {
-        None => {}
-        Some(existing_linked_asset_id) if existing_linked_asset_id == linked_asset_id => {
-            if asset_record.signature.is_some() && asset_record.created_at.is_some() {
-                return Ok(Json(AssetLinkCreateResponse {
-                    asset_link: asset_record,
-                }));
+        match asset_record.linked_asset_id.as_deref() {
+            None => {}
+            Some(existing_linked_asset_id) if existing_linked_asset_id == linked_asset_id => {
+                if asset_record.link_right_outpoint.is_none() && asset_record.created_at.is_some() {
+                    return Ok(Json(AssetLinkCreateResponse {
+                        asset_link: asset_record,
+                    }));
+                }
+                return Err(APIError::InvalidRequest(format!(
+                    "asset link record for asset_id {asset_id} is partially populated"
+                )));
             }
-            return Err(APIError::InvalidRequest(format!(
-                "asset link record for asset_id {asset_id} is partially populated"
-            )));
+            Some(_) => {
+                return Err(APIError::InvalidRequest(format!(
+                    "asset link already exists for asset_id {asset_id}"
+                )));
+            }
         }
-        Some(_) => {
-            return Err(APIError::InvalidRequest(format!(
-                "asset link already exists for asset_id {asset_id}"
-            )));
-        }
-    }
 
-    let network = format!("{:?}", state.static_state.network);
-    let message = format!("{ASSET_LINK_SIGNATURE_DOMAIN}:{network}:{asset_id}:{linked_asset_id}");
-    let signature = unlocked_state.sign_node_message(message.as_bytes())?;
-    let asset_link = AssetLink {
-        asset_id: asset_id.clone(),
-        linked_asset_id: Some(linked_asset_id),
-        issuer_pubkey,
-        signature: Some(signature),
-        created_at: Some(get_current_timestamp()),
-    };
-    asset_link_write_record(unlocked_state.kv_store.as_ref(), &asset_link)?;
+        let link_right_outpoint = asset_record.link_right_outpoint.clone().ok_or_else(|| {
+            APIError::InvalidRequest(format!(
+                "asset link record for asset_id {asset_id} is missing link_right_outpoint"
+            ))
+        })?;
 
-    Ok(Json(AssetLinkCreateResponse { asset_link }))
+        let link_ifa = unlocked_state.rgb_link_ifa(
+            asset_id.clone(),
+            linked_asset_id.clone(),
+            link_right_outpoint,
+            payload.fee_rate,
+            payload.min_confirmations,
+        )?;
+        let asset_link = AssetLink {
+            asset_id: asset_id.clone(),
+            linked_asset_id: Some(linked_asset_id),
+            created_at: Some(get_current_timestamp()),
+            link_right_outpoint: None,
+            txid: Some(link_ifa.txid),
+        };
+        asset_link_write_record(unlocked_state.kv_store.as_ref(), &asset_link)?;
+        asset_link_write_reverse_record(
+            unlocked_state.kv_store.as_ref(),
+            &asset_link.asset_id,
+            asset_link
+                .linked_asset_id
+                .as_deref()
+                .expect("linked asset id"),
+            asset_link.txid.clone(),
+        )?;
+
+        Ok(Json(AssetLinkCreateResponse { asset_link }))
+    })
+    .await
 }
 
 pub(crate) async fn asset_link_send_payment(
@@ -3232,7 +3271,17 @@ pub(crate) async fn issue_asset_ifa(
             payload.amounts,
             payload.inflation_amounts,
             payload.reject_list_url,
+            payload.issuance_type,
         )?;
+
+        let no_asset_link = AssetLink {
+            asset_id: asset.asset_id.clone(),
+            linked_asset_id: None,
+            created_at: None,
+            link_right_outpoint: asset.link_right_outpoint.clone(),
+            txid: None,
+        };
+        asset_link_write_record(unlocked_state.kv_store.as_ref(), &no_asset_link)?;
 
         Ok(Json(IssueAssetIFAResponse {
             asset: asset.into(),
@@ -3260,14 +3309,6 @@ pub(crate) async fn issue_asset_nia(
             payload.precision,
             payload.amounts,
         )?;
-        let no_asset_link = AssetLink {
-            asset_id: asset.asset_id.clone(),
-            linked_asset_id: None,
-            issuer_pubkey: unlocked_state.runtime_node_pubkey(),
-            signature: None,
-            created_at: None,
-        };
-        asset_link_write_record(unlocked_state.kv_store.as_ref(), &no_asset_link)?;
 
         Ok(Json(IssueAssetNIAResponse {
             asset: asset.into(),
@@ -3858,6 +3899,7 @@ pub(crate) async fn list_transfers(
                 rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
                 rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
                 rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
+                rgb_lib::wallet::TransferKind::Link => TransferKind::Link,
             },
             txid: transfer.txid,
             recipient_id: transfer.recipient_id,

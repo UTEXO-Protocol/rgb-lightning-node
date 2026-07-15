@@ -23,32 +23,81 @@ async fn asset_link_create_is_persisted_and_idempotent() {
 
     let test_dir_node = format!("{TEST_DIR_BASE}node");
     let (node_addr, _) = start_node(&test_dir_node, NODE1_PEER_PORT, false).await;
-    fund_and_create_utxos(node_addr, None).await;
+    fund_and_create_utxos(node_addr, Some(12)).await;
 
-    let linked_asset_id = issue_asset_nia(node_addr).await.asset_id;
-    let asset_id = issue_asset_nia(node_addr).await.asset_id;
-    let issuer_pubkey = node_info(node_addr).await.pubkey;
+    let legacy_asset = issue_asset_ifa(node_addr).await;
+    assert_eq!(legacy_asset.link_right_outpoint, None);
+    let legacy_asset_id = legacy_asset.asset_id;
 
-    let asset_record = read_asset_link_record(&test_dir_node, &asset_id);
-    assert_eq!(asset_record.asset_id, asset_id);
-    assert_eq!(asset_record.linked_asset_id, None);
-    assert_eq!(asset_record.issuer_pubkey, issuer_pubkey);
-    assert_eq!(asset_record.signature, None);
-    assert_eq!(asset_record.created_at, None);
+    let asset = issue_asset_ifa_with_type(node_addr, Some(IfaIssuanceType::LinkRightOnly)).await;
+    let asset_id = asset.asset_id;
+    let _link_right_outpoint = asset.link_right_outpoint.expect("link-right outpoint");
+    let linked_asset = issue_asset_ifa_with_type(
+        node_addr,
+        Some(IfaIssuanceType::LinkedFromParent {
+            contract_id: asset_id.clone(),
+            request_link_right: false,
+        }),
+    )
+    .await;
+    assert_eq!(linked_asset.link_right_outpoint, None);
+    let linked_asset_id = linked_asset.asset_id;
 
-    let linked_asset_record = read_asset_link_record(&test_dir_node, &linked_asset_id);
-    assert_eq!(linked_asset_record.asset_id, linked_asset_id);
-    assert_eq!(linked_asset_record.linked_asset_id, None);
-    assert_eq!(linked_asset_record.issuer_pubkey, issuer_pubkey);
-    assert_eq!(linked_asset_record.signature, None);
-    assert_eq!(linked_asset_record.created_at, None);
+    let invalid_link_payload = AssetLinkCreateRequest {
+        asset_id: asset_id.clone(),
+        linked_asset_id: legacy_asset_id.clone(),
+        fee_rate: FEE_RATE,
+        min_confirmations: 1,
+    };
+    let invalid_link_res = reqwest::Client::new()
+        .post(format!("http://{node_addr}/assetlink/create"))
+        .json(&invalid_link_payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        invalid_link_res,
+        StatusCode::BAD_REQUEST,
+        "Invalid contract link",
+        "InvalidContractLink",
+    )
+    .await;
+
+    let missing_link_right_child = issue_asset_ifa_with_type(
+        node_addr,
+        Some(IfaIssuanceType::LinkedFromParent {
+            contract_id: legacy_asset_id.clone(),
+            request_link_right: false,
+        }),
+    )
+    .await;
+    let missing_link_right_payload = AssetLinkCreateRequest {
+        asset_id: legacy_asset_id.clone(),
+        linked_asset_id: missing_link_right_child.asset_id.clone(),
+        fee_rate: FEE_RATE,
+        min_confirmations: 1,
+    };
+    let missing_link_right_res = reqwest::Client::new()
+        .post(format!("http://{node_addr}/assetlink/create"))
+        .json(&missing_link_right_payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_nok(
+        missing_link_right_res,
+        StatusCode::BAD_REQUEST,
+        "missing link_right_outpoint",
+        "InvalidRequest",
+    )
+    .await;
 
     let asset_link = asset_link_create(node_addr, &asset_id, &linked_asset_id).await;
     assert_eq!(asset_link.asset_id, asset_id);
-    assert_eq!(asset_link.linked_asset_id, Some(linked_asset_id.clone()));
-    assert_eq!(asset_link.issuer_pubkey, issuer_pubkey);
-    assert!(asset_link.signature.is_some());
-    assert!(!asset_link.signature.as_deref().unwrap().is_empty());
+    assert_eq!(asset_link.linked_asset_id, Some(linked_asset_id));
+    assert!(asset_link
+        .txid
+        .as_deref()
+        .is_some_and(|txid| !txid.is_empty()));
     assert!(asset_link.created_at.is_some());
 
     let persisted_asset_link = read_asset_link_record(&test_dir_node, &asset_id);
@@ -57,15 +106,28 @@ async fn asset_link_create_is_persisted_and_idempotent() {
     let duplicate = asset_link_create(
         node_addr,
         &asset_link.asset_id,
-        asset_link.linked_asset_id.as_deref().unwrap(),
+        asset_link
+            .linked_asset_id
+            .as_deref()
+            .expect("linked asset id"),
     )
     .await;
     assert_eq!(duplicate, asset_link);
 
-    let conflicting_linked_asset_id = issue_asset_nia(node_addr).await.asset_id;
+    let conflicting_linked_asset_id = issue_asset_ifa_with_type(
+        node_addr,
+        Some(IfaIssuanceType::LinkedFromParent {
+            contract_id: asset_id.clone(),
+            request_link_right: false,
+        }),
+    )
+    .await
+    .asset_id;
     let conflict_payload = AssetLinkCreateRequest {
         asset_id: asset_link.asset_id.clone(),
         linked_asset_id: conflicting_linked_asset_id,
+        fee_rate: FEE_RATE,
+        min_confirmations: 1,
     };
     let conflict_res = reqwest::Client::new()
         .post(format!("http://{node_addr}/assetlink/create"))
@@ -87,7 +149,10 @@ async fn asset_link_create_is_persisted_and_idempotent() {
     let after_restart = asset_link_create(
         node_addr,
         &asset_link.asset_id,
-        asset_link.linked_asset_id.as_deref().unwrap(),
+        asset_link
+            .linked_asset_id
+            .as_deref()
+            .expect("linked asset id"),
     )
     .await;
     assert_eq!(after_restart, asset_link);
@@ -126,9 +191,22 @@ async fn asset_link_send_payment_swaps_virtual_to_reserve_asset() {
     fund_and_create_utxos(host_addr, None).await;
     fund_and_create_utxos(receiver_addr, None).await;
 
-    let asset_v = issue_asset_nia(host_addr).await.asset_id;
-    let asset_r = issue_asset_nia(host_addr).await.asset_id;
-    asset_link_create(host_addr, &asset_v, &asset_r).await;
+    let asset_r_data =
+        issue_asset_ifa_with_type(host_addr, Some(IfaIssuanceType::LinkRightOnly)).await;
+    let asset_r = asset_r_data.asset_id;
+    let _link_right_outpoint = asset_r_data
+        .link_right_outpoint
+        .expect("link-right outpoint");
+    let asset_v = issue_asset_ifa_with_type(
+        host_addr,
+        Some(IfaIssuanceType::LinkedFromParent {
+            contract_id: asset_r.clone(),
+            request_link_right: false,
+        }),
+    )
+    .await
+    .asset_id;
+    asset_link_create(host_addr, &asset_r, &asset_v).await;
 
     let payer_info = node_info(payer_addr).await;
     open_virtual_channel(
@@ -205,7 +283,7 @@ async fn asset_link_send_payment_swaps_virtual_to_reserve_asset() {
     assert_eq!(linked_swap.qty_from, LINK_AMT);
     assert_eq!(linked_swap.qty_to, LINK_AMT);
 
-    let asset_unlinked = issue_asset_nia(host_addr).await.asset_id;
+    let asset_unlinked = issue_asset_ifa(host_addr).await.asset_id;
     let r_invoice_unlinked = ln_invoice(
         receiver_addr,
         Some(3_000_000),

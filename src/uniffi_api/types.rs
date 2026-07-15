@@ -346,6 +346,12 @@ pub struct AssetIfa {
     pub balance: AssetBalanceInfo,
     pub media: Option<Media>,
     pub reject_list_url: Option<String>,
+    pub link_right_outpoint: Option<RgbOutpoint>,
+}
+
+pub struct RgbOutpoint {
+    pub txid: String,
+    pub vout: u32,
 }
 
 pub struct ListAssetsResponse {
@@ -577,6 +583,16 @@ pub struct SdkIssueAssetIfaRequest {
     pub name: String,
     pub precision: u8,
     pub reject_list_url: Option<String>,
+    pub issuance_type: Option<IfaIssuanceType>,
+}
+
+pub enum IfaIssuanceType {
+    Legacy,
+    LinkRightOnly,
+    LinkedFromParent {
+        contract_id: ContractId,
+        request_link_right: bool,
+    },
 }
 
 pub struct SdkIssueAssetUdaRequest {
