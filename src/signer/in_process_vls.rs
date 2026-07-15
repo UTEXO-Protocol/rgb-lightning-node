@@ -236,6 +236,29 @@ pub(crate) fn build_backend(
     Ok((backend, transport))
 }
 
+/// Open the disk-backed VLS store under `data_dir` with signer-state hygiene: the directory is
+/// created 0700 (or, when pre-existing, verified owner-only — failing closed on broader
+/// permissions), and the `redb` database files are tightened to 0600 afterwards, since `redb`
+/// creates them at the process umask. The store carries channel signer state and the dbid
+/// high-water mark that prevents key reuse after a restart — treat it like the seed. The single
+/// construction site shared by the remote-signer daemon and the uniffi persistent signer.
+pub(crate) fn open_restricted_persister(
+    data_dir: &std::path::Path,
+) -> anyhow::Result<Arc<dyn Persist>> {
+    use vls_persist::kvv::redb::RedbKVVStore;
+    use vls_persist::kvv::{JsonFormat, KVVPersister};
+
+    super::key_source::create_or_check_restricted_dir(data_dir)
+        .with_context(|| format!("VLS signer state dir {}", data_dir.display()))?;
+    let store = RedbKVVStore::new(data_dir);
+    // "redb" is the store's database file; "redb.db2" appears after a redb 1.x → 2.x migration.
+    for name in ["redb", "redb.db2"] {
+        super::key_source::restrict_existing_file(&data_dir.join(name))
+            .with_context(|| format!("restrict VLS db file {}", data_dir.join(name).display()))?;
+    }
+    Ok(Arc::new(KVVPersister(store, JsonFormat)))
+}
+
 /// [`build_backend`] over a [`DummyPersister`]: no on-disk state — see
 /// [`InProcessVlsTransport::new_ephemeral`] for when that is (and is not) appropriate.
 pub(crate) fn build_backend_ephemeral(

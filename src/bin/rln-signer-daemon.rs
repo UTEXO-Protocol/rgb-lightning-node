@@ -5,8 +5,10 @@
 //! (ECDH / inbound-payment / peer-storage / offers), and `sign_rgb_psbt` — over a length-prefixed TCP
 //! framing. The RLN node connects to `--listen-addr` (its `--remote-signer-addr`).
 //!
-//! NOTE: the framing is currently plaintext; run it over localhost / a trusted link until TLS/mTLS is
-//! added. The seed never leaves this process.
+//! The seed never leaves this process. Because any client that can reach the port can request
+//! signatures, a non-loopback `--listen-addr` requires mTLS (`--client-ca`) — server-auth TLS alone
+//! does not authenticate the caller — unless `--allow-unauthenticated-remote-signer` explicitly
+//! accepts that risk (e.g. the link is secured by a WireGuard tunnel).
 
 use std::fs;
 use std::net::SocketAddr;
@@ -41,7 +43,8 @@ struct Args {
     #[arg(long, default_value = "regtest")]
     network: String,
 
-    /// Address to listen on for the RLN node (its `--remote-signer-addr`).
+    /// Address to listen on for the RLN node (its `--remote-signer-addr`). Non-loopback addresses
+    /// require mTLS (`--client-ca`) or `--allow-unauthenticated-remote-signer`.
     #[arg(long, default_value = "127.0.0.1:9737")]
     listen_addr: SocketAddr,
 
@@ -66,10 +69,21 @@ struct Args {
     /// PEM CA to verify node client certificates. Enables mTLS (requires `--tls-cert`).
     #[arg(long, requires = "tls_cert")]
     client_ca: Option<PathBuf>,
+
+    /// Allow a non-loopback `--listen-addr` without mTLS. Dangerous for a seed-holding signer:
+    /// anyone who can reach the port can request signatures (server-auth TLS does not authenticate
+    /// the caller). Only for links already secured by other means, e.g. a WireGuard tunnel.
+    #[arg(long, default_value_t = false)]
+    allow_unauthenticated_remote_signer: bool,
 }
 
 fn load_or_generate_seed(path: &Path) -> anyhow::Result<[u8; 32]> {
     if path.exists() {
+        // Freshly generated seeds are created 0600 below, but this file may predate the daemon
+        // (e.g. written with a shell redirect at the umask default 0644). Refuse anything that is
+        // not a regular owner-only file rather than silently trusting a possibly-exposed seed.
+        rgb_lightning_node::check_restricted_file(path)
+            .with_context(|| format!("seed file {} failed safety checks", path.display()))?;
         let contents = fs::read_to_string(path)
             .with_context(|| format!("read seed file {}", path.display()))?;
         let bytes = Vec::<u8>::from_hex(contents.trim()).context("seed file must be hex")?;
@@ -101,14 +115,14 @@ async fn main() -> anyhow::Result<()> {
     }
     let seed = load_or_generate_seed(&args.seed_file)?;
 
+    // The data dir itself is created/verified owner-only (0700) inside `DaemonSigner::new` — it
+    // holds VLS channel signer state and the dbid high-water mark, i.e. seed-grade material.
     let data_dir = args.data_dir.clone().unwrap_or_else(|| {
         args.seed_file
             .parent()
             .map(|dir| dir.join("signer-db"))
             .unwrap_or_else(|| PathBuf::from("signer-db"))
     });
-    fs::create_dir_all(&data_dir)
-        .with_context(|| format!("create data dir {}", data_dir.display()))?;
 
     if args.print_bootstrap {
         let signer =
@@ -127,6 +141,8 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
 
+    // Listener-exposure policy (non-loopback requires mTLS or the explicit footgun flag) is
+    // enforced inside `run_signer_daemon`, so it also covers direct library users.
     run_signer_daemon(DaemonConfig {
         seed,
         network,
@@ -134,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         permissive_policy: args.permissive,
         data_dir,
         tls,
+        allow_unauthenticated_remote: args.allow_unauthenticated_remote_signer,
     })
     .await
 }
@@ -169,6 +186,22 @@ mod tests {
         // Round-trip: re-reading the same path must reproduce the identical seed, not regenerate one.
         let reloaded = load_or_generate_seed(&seed_path).expect("reload seed");
         assert_eq!(seed, reloaded);
+    }
+
+    /// A seed file the operator created by hand (e.g. `echo $SEED > seed`, typically 0644) must be
+    /// refused instead of silently used — group/other readability means the seed may already be
+    /// exposed. Once tightened to owner-only it must load normally.
+    #[test]
+    fn preexisting_seed_file_with_broad_permissions_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seed_path = dir.path().join("seed");
+        fs::write(&seed_path, "aa".repeat(32)).expect("write seed");
+        fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        load_or_generate_seed(&seed_path).expect_err("group/other-readable seed must be refused");
+
+        fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        load_or_generate_seed(&seed_path).expect("owner-only seed loads");
     }
 
     /// Polls `path`'s permissions on a background thread for up to ~500ms, recording whether any

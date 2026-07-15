@@ -91,6 +91,103 @@ pub fn write_restricted_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// Verify that an existing secret file (e.g. the signer daemon's seed) is safe to trust: a regular
+/// file, owned by the current user, with no group/other permission bits. [`write_restricted_file`]
+/// guarantees this for files we create; this guards the path where the file already existed — a
+/// seed written by a shell redirect is typically 0644 and must be refused, not silently used.
+pub fn check_restricted_file(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let euid = unsafe { libc::geteuid() };
+        if metadata.uid() != euid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is owned by uid {} but this process runs as uid {euid}",
+                    path.display(),
+                    metadata.uid(),
+                ),
+            ));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is readable by group/others (mode {:o}); fix with: chmod 600 the file",
+                    path.display(),
+                    metadata.mode() & 0o777,
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Create `path` as an owner-only (0700) directory — including any missing parents — or, if it
+/// already exists, verify it is a directory owned by the current user with no group/other
+/// permission bits. Fails closed on broader permissions instead of silently tightening them: an
+/// already-exposed directory may already have been read, and that is the operator's call to assess.
+pub fn create_or_check_restricted_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        // `recursive(true)` is a no-op (not an error) when the directory already exists, so the
+        // metadata check below always runs — there is no exists()/create window to race.
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+        let metadata = fs::metadata(path)?;
+        let euid = unsafe { libc::geteuid() };
+        if metadata.uid() != euid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is owned by uid {} but this process runs as uid {euid}",
+                    path.display(),
+                    metadata.uid(),
+                ),
+            ));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is accessible by group/others (mode {:o}); fix with: chmod 700 the directory",
+                    path.display(),
+                    metadata.mode() & 0o777,
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)
+}
+
+/// Tighten an existing file to owner-only (0600). For files created by third-party libraries (e.g.
+/// the VLS `redb` store) whose creation mode follows the process umask. Missing files are fine —
+/// the caller doesn't always know which of several candidate files the library created.
+pub fn restrict_existing_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 pub(crate) fn validate_key_source_matches_bootstrap(
     key_source: &KeySourceFile,
     bootstrap: &BootstrapData,
@@ -165,6 +262,71 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let value = read_key_source_file(tmp.path()).expect("read missing key source");
         assert!(value.is_none());
+    }
+
+    /// A secret file created by a shell redirect (default umask → typically 0644) must be refused,
+    /// not silently used: group/others being able to read it means the seed may already be
+    /// compromised and the operator has to decide, not the daemon.
+    #[cfg(unix)]
+    #[test]
+    fn check_restricted_file_rejects_group_other_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("seed");
+        fs::write(&path, b"deadbeef").expect("write");
+
+        for mode in [0o644, 0o640, 0o604, 0o660] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+            check_restricted_file(&path).expect_err("group/other-accessible file must be refused");
+        }
+        for mode in [0o600, 0o400] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+            check_restricted_file(&path).expect("owner-only file must be accepted");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_restricted_file_rejects_non_regular_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        check_restricted_file(tmp.path()).expect_err("a directory is not a regular seed file");
+        check_restricted_file(&tmp.path().join("missing")).expect_err("missing file errors");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_or_check_restricted_dir_creates_0700_and_rejects_broader() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("nested/signer-db");
+        create_or_check_restricted_dir(&dir).expect("create");
+        let mode = fs::metadata(&dir).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "created directory must be owner-only");
+        // Idempotent on a compliant existing directory.
+        create_or_check_restricted_dir(&dir).expect("recheck");
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod");
+        create_or_check_restricted_dir(&dir)
+            .expect_err("group/other-accessible signer state dir must be refused");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_existing_file_tightens_to_0600_and_ignores_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("redb");
+        fs::write(&path, b"db").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        restrict_existing_file(&path).expect("restrict");
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        restrict_existing_file(&tmp.path().join("missing")).expect("missing file is fine");
     }
 
     #[test]

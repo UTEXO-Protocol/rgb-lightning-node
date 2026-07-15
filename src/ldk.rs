@@ -1604,6 +1604,82 @@ async fn handle_open_chan_fail(channel_id: &ChannelId, unlocked_state: Arc<Unloc
         .remove(PENDING_FUNDING_NAMESPACE, "", &channel_id_hex, false);
 }
 
+/// Undo what a standard channel's `FundingGenerationReady` preparation staged, so a failure
+/// between preparation and a fully-signed funding tx (e.g. a remote external signer briefly
+/// unreachable, or returning a malformed reply) can replay the event without leaking locked funds:
+/// for a colored channel fail the pending RGB batch transfer (releasing the reserved allocation),
+/// for a vanilla channel abort the pending vanilla tx (releasing the locked UTXOs). This runs
+/// *before* the `PENDING_FUNDING_NAMESPACE` mapping exists, so `handle_open_chan_fail` could not do
+/// the vanilla cleanup later — the staged tx would be unabortable. Best-effort: errors are logged
+/// and the caller still replays the event.
+async fn abort_staged_standard_funding(
+    unlocked_state: Arc<UnlockedAppState>,
+    temporary_channel_id: &ChannelId,
+    unsigned_psbt: &str,
+    is_colored: bool,
+) {
+    if is_colored {
+        if let Some(mut rgb_info) = get_rgb_channel_info_optional(
+            temporary_channel_id,
+            true,
+            unlocked_state.kv_store.as_ref(),
+        ) {
+            if let Some(batch_transfer_idx) = rgb_info.batch_transfer_idx {
+                let unlocked_state_copy = unlocked_state.clone();
+                let failed = tokio::task::spawn_blocking(move || {
+                    unlocked_state_copy.rgb_fail_transfers(Some(batch_transfer_idx), false, true)
+                })
+                .await
+                .unwrap();
+                match failed {
+                    Ok(_) => {
+                        // Clear the recorded idx: the transfer is already failed, and the replayed
+                        // event will stage a fresh transfer and record its own idx.
+                        rgb_info.batch_transfer_idx = None;
+                        unlocked_state.kv_store.write_rgb_channel_info(
+                            &temporary_channel_id.0.as_hex().to_string(),
+                            &rgb_info,
+                            true,
+                        );
+                    }
+                    Err(e) => tracing::error!(
+                        "Error failing staged RGB transfer batch_transfer_idx={batch_transfer_idx} \
+                         for channel {temporary_channel_id}: {e:?}"
+                    ),
+                }
+            }
+        }
+    } else {
+        // The txid of the pending vanilla tx: witness data is excluded from the txid, so the
+        // unsigned PSBT's tx computes the same txid rgb-lib recorded for the pending tx.
+        match Psbt::from_str(unsigned_psbt) {
+            Ok(psbt) => {
+                let txid = psbt.unsigned_tx.compute_txid().to_string();
+                let unlocked_state_copy = unlocked_state.clone();
+                let txid_copy = txid.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    unlocked_state_copy.rgb_abort_pending_vanilla_tx(txid_copy)
+                })
+                .await
+                .unwrap();
+                match result {
+                    Ok(()) => tracing::info!(
+                        "Aborted staged vanilla funding tx {txid} for channel {temporary_channel_id}"
+                    ),
+                    Err(e) => tracing::error!(
+                        "Error aborting staged vanilla funding tx {txid} for channel \
+                         {temporary_channel_id}: {e:?}"
+                    ),
+                }
+            }
+            Err(e) => tracing::error!(
+                "cannot parse staged funding PSBT while cleaning up channel \
+                 {temporary_channel_id}: {e}"
+            ),
+        }
+    }
+}
+
 async fn handle_ldk_events(
     event: Event,
     unlocked_state: Arc<UnlockedAppState>,
@@ -1994,10 +2070,38 @@ async fn handle_ldk_events(
                 (unsigned_psbt, None)
             };
 
-            let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).unwrap();
-            let psbt = Psbt::from_str(&signed_psbt).unwrap();
-
-            let funding_tx = psbt.clone().extract_tx().unwrap();
+            // With a remote external signer this call crosses the network: a transient transport
+            // failure or a malformed reply must not panic the event task. Take the same
+            // cooperative path as virtual funding — undo what the preparation staged (the pending
+            // vanilla tx / the RGB batch transfer, which would otherwise be unabortable since the
+            // PENDING_FUNDING mapping is only written after signing), then replay the event to
+            // retry the preparation from scratch.
+            let signing_outcome = unlocked_state
+                .rgb_sign_psbt(unsigned_psbt.clone())
+                .map_err(|e| format!("signing failed: {e}"))
+                .and_then(|signed| {
+                    Psbt::from_str(&signed).map_err(|e| format!("signed PSBT does not parse: {e}"))
+                })
+                .and_then(|psbt| {
+                    psbt.clone()
+                        .extract_tx()
+                        .map(|tx| (psbt, tx))
+                        .map_err(|e| format!("signed PSBT does not extract: {e}"))
+                });
+            let (psbt, funding_tx) = match signing_outcome {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("cannot sign channel funding transaction: {e}");
+                    abort_staged_standard_funding(
+                        unlocked_state.clone(),
+                        &temporary_channel_id,
+                        &unsigned_psbt,
+                        asset_id.is_some(),
+                    )
+                    .await;
+                    return Err(ReplayEvent());
+                }
+            };
             let funding_txid = funding_tx.compute_txid();
             let funding_txid_str = funding_txid.to_string();
             tracing::info!("Funding TXID: {funding_txid_str}");

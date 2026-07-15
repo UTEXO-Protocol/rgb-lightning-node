@@ -569,7 +569,10 @@ mod tests {
     fn daemon_restart_with_persistence_never_reissues_a_dbid() {
         use signer_external::contract::{ChannelRequest, ChannelResponse};
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // A subdirectory the signer creates itself: `tempdir()` inherits the process umask, and the
+        // signer refuses (by design) a pre-existing group/other-accessible state dir.
+        let data_dir = tmp.path().join("signer-db");
         let seed = [11u8; 32];
 
         let generate_and_derive = |signer: &super::daemon::DaemonSigner| -> String {
@@ -610,7 +613,7 @@ mod tests {
         // without ever forgetting/closing the channel.
         let first_channel_keys_id_hex = {
             let signer =
-                super::daemon::DaemonSigner::new(seed, bitcoin::Network::Regtest, true, dir.path())
+                super::daemon::DaemonSigner::new(seed, bitcoin::Network::Regtest, true, &data_dir)
                     .expect("first daemon signer");
             generate_and_derive(&signer)
         };
@@ -618,7 +621,7 @@ mod tests {
         // "Restart": a fresh `DaemonSigner` over the same data_dir must restore the existing channel
         // and allocate a fresh dbid for the new one, never reissuing the first channel's dbid.
         let signer =
-            super::daemon::DaemonSigner::new(seed, bitcoin::Network::Regtest, true, dir.path())
+            super::daemon::DaemonSigner::new(seed, bitcoin::Network::Regtest, true, &data_dir)
                 .expect("restarted daemon signer");
         let second_channel_keys_id_hex = generate_and_derive(&signer);
 

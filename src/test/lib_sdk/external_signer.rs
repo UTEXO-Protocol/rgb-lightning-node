@@ -414,6 +414,132 @@ fn external_signer_sign_rgb_psbt_failure_surfaces_on_send_btc_mock() {
     }
 }
 
+/// Regression: a vanilla channel's `FundingGenerationReady` whose `SignRgbPsbt` fails (a remote
+/// signer briefly unreachable, or a malformed reply) used to panic the event task at
+/// `rgb_sign_psbt(..).unwrap()`, killing the funding permanently. The handler must instead take
+/// the cooperative path: abort the staged pending vanilla tx — at that point the
+/// `PENDING_FUNDING_NAMESPACE` mapping does not exist yet, so nothing else could ever abort it —
+/// and replay the event. Once the signer recovers, the replayed event re-stages the funding from
+/// the *released* UTXOs and broadcasts: that recovery is also the proof of cleanup, since a leaked
+/// pending vanilla tx would keep the coins locked and the replay could never fund the channel.
+#[test]
+#[serial]
+fn external_signer_vanilla_funding_sign_failure_is_retryable() {
+    ensure_regtest_available();
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    const PORT_OFF: u16 = 330;
+    let da = NODE_A_DAEMON_PORT + PORT_OFF;
+    let pa = NODE_A_PEER_PORT + PORT_OFF;
+    let db = NODE_B_DAEMON_PORT + PORT_OFF;
+    let pb = NODE_B_PEER_PORT + PORT_OFF;
+
+    let test_dir = test_dir("sdk_external_vanilla_funding_sign_fail");
+    if test_dir.exists() {
+        fs::remove_dir_all(&test_dir).expect("remove previous lib_sdk test dir");
+    }
+    fs::create_dir_all(&test_dir).expect("create lib_sdk test dir");
+    let node_a_dir = test_dir.join("node_a");
+    let node_b_dir = test_dir.join("node_b");
+    let signer_a_dir = test_dir.join("signer_a");
+
+    let signer = make_native_signer(&signer_a_dir, None);
+    let bootstrap = signer.bootstrap().expect("bootstrap");
+    let host = Arc::new(TunableNativeSignerHost::new(signer));
+
+    let node_a = make_node(&node_a_dir, da, pa);
+    let node_b = make_node(&node_b_dir, db, pb);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        node_a
+            .init_with_external_signer(clone_bootstrap(&bootstrap))
+            .expect("node A external init");
+        attach_external_signer_host(&node_a, host.clone(), &bootstrap);
+        unlock_with_attached_external_signer(&node_a, "RLN_ext_vanilla_fund_fail");
+
+        node_b
+            .init("nodeBpass".to_string(), None)
+            .expect("node B init");
+        node_b
+            .unlock(unlock_request("nodeBpass"))
+            .expect("node B unlock");
+
+        ensure_funded(
+            &node_a,
+            2 * OPEN_CHANNEL_CAPACITY_SAT,
+            "node A vanilla funding",
+        );
+
+        let peer_uri = format!(
+            "{}@127.0.0.1:{pb}",
+            node_b.node_info().expect("node B node_info").pubkey
+        );
+        node_a.connectpeer(peer_uri.clone()).expect("connectpeer");
+
+        // Fail SignRgbPsbt from before the open so the very first `FundingGenerationReady` hits
+        // it. The vanilla open itself returns right after `create_channel`; the signing happens in
+        // the background event task.
+        host.set_fail_sign_rgb_psbt(true);
+        node_a
+            .openchannel(SdkOpenChannelRequest {
+                peer_pubkey_and_opt_addr: peer_uri,
+                capacity_sat: OPEN_CHANNEL_CAPACITY_SAT,
+                push_msat: OPEN_CHANNEL_PUSH_MSAT,
+                public: false,
+                with_anchors: true,
+                fee_base_msat: None,
+                fee_proportional_millionths: None,
+                temporary_channel_id: None,
+                asset_id: None,
+                asset_amount: None,
+                push_asset_amount: None,
+                virtual_open_mode: None,
+            })
+            .expect("openchannel (vanilla)");
+
+        // Give the event task time to hit the failing signer at least once. The node must stay
+        // responsive (no panicked event task) and must not have broadcast any funding tx.
+        thread::sleep(Duration::from_secs(5));
+        let channels = node_a
+            .list_channels()
+            .expect("list_channels while the signer is failing");
+        assert!(
+            channels.iter().all(|c| c.funding_txid.is_none()),
+            "no funding tx may be broadcast while SignRgbPsbt fails"
+        );
+
+        // Signer recovers: the replayed event must be able to stage a fresh funding tx from the
+        // released UTXOs and broadcast it.
+        host.set_fail_sign_rgb_psbt(false);
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            node_a.sync().expect("node A sync");
+            let funded = node_a
+                .list_channels()
+                .expect("list_channels while waiting for funding tx")
+                .iter()
+                .any(|c| c.funding_txid.is_some());
+            if funded {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "channel funding was never broadcast after the signer recovered — the \
+                 FundingGenerationReady retry path is broken"
+            );
+            thread::sleep(Duration::from_secs(1));
+        }
+
+        node_a.shutdown();
+        node_b.shutdown();
+        thread::sleep(Duration::from_millis(300));
+    }));
+
+    if result.is_err() {
+        panic!("external signer vanilla funding sign-failure retry lib_sdk test failed");
+    }
+}
+
 /// RGB payment with node A (internal signer) and node B (native in-process VLS signer).
 ///
 /// Regtest: `./regtest.sh start`, then:

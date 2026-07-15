@@ -42,6 +42,21 @@ impl NativeExternalSigner {
         seed
     }
 
+    /// Resolve the host's `permissive_policy` request. Strict is the default (`None` → `false`):
+    /// a host must opt in to `PolicyFilter::new_permissive()` knowingly, and never on mainnet —
+    /// same rule the remote signer daemon enforces for its `--permissive` flag.
+    fn resolve_permissive_policy(
+        network: Network,
+        permissive_policy: Option<bool>,
+    ) -> Result<bool, RlnError> {
+        let permissive = permissive_policy.unwrap_or(false);
+        if permissive && network == Network::Bitcoin {
+            tracing::error!("permissive VLS policy is not allowed on mainnet");
+            return Err(RlnError::InvalidRequest);
+        }
+        Ok(permissive)
+    }
+
     fn map_bootstrap(data: BootstrapData) -> SdkExternalSignerBootstrap {
         SdkExternalSignerBootstrap {
             node_id: data.identity.node_id,
@@ -63,18 +78,15 @@ impl NativeExternalSigner {
         permissive_policy: Option<bool>,
     ) -> Result<Arc<Self>, RlnError> {
         let network = Self::parse_network(&network)?;
+        let permissive = Self::resolve_permissive_policy(network, permissive_policy)?;
         // Host must supply a stable 32-byte seed (e.g. loaded from Android Keystore / iOS Keychain)
         // and pass it in-memory; this signer helper does not persist secrets.
         let seed = Self::parse_seed_hex(&seed_hex)?;
-        let (backend, transport) = in_process_vls::build_backend_ephemeral(
-            network,
-            seed,
-            permissive_policy.unwrap_or(true),
-        )
-        .map_err(|e| {
-            tracing::error!(error = ?e, "native signer transport init failed");
-            RlnError::Internal
-        })?;
+        let (backend, transport) =
+            in_process_vls::build_backend_ephemeral(network, seed, permissive).map_err(|e| {
+                tracing::error!(error = ?e, "native signer transport init failed");
+                RlnError::Internal
+            })?;
         Ok(Arc::new(Self { backend, transport }))
     }
 
@@ -96,27 +108,22 @@ impl NativeExternalSigner {
         permissive_policy: Option<bool>,
         storage_dir_path: String,
     ) -> Result<Arc<Self>, RlnError> {
-        use lightning_signer::persist::Persist;
-        use vls_persist::kvv::redb::RedbKVVStore;
-        use vls_persist::kvv::{JsonFormat, KVVPersister};
-
         let network = Self::parse_network(&network)?;
+        let permissive = Self::resolve_permissive_policy(network, permissive_policy)?;
         let seed = Self::parse_seed_hex(&seed_hex)?;
-        std::fs::create_dir_all(&storage_dir_path).map_err(|_| RlnError::Internal)?;
-        let persister: Arc<dyn Persist> = Arc::new(KVVPersister(
-            RedbKVVStore::new(&storage_dir_path),
-            JsonFormat,
-        ));
-        let (backend, transport) = in_process_vls::build_backend(
-            network,
-            seed,
-            permissive_policy.unwrap_or(true),
-            persister,
-        )
-        .map_err(|e| {
-            tracing::error!(error = ?e, "native signer persistent transport init failed");
-            RlnError::Internal
-        })?;
+        // Creates/verifies the store directory owner-only (0700) and tightens the redb files to
+        // 0600 — the store carries channel signer state and the dbid high-water mark.
+        let persister =
+            in_process_vls::open_restricted_persister(std::path::Path::new(&storage_dir_path))
+                .map_err(|e| {
+                    tracing::error!(error = ?e, "native signer VLS store init failed");
+                    RlnError::Internal
+                })?;
+        let (backend, transport) =
+            in_process_vls::build_backend(network, seed, permissive, persister).map_err(|e| {
+                tracing::error!(error = ?e, "native signer persistent transport init failed");
+                RlnError::Internal
+            })?;
         Ok(Arc::new(Self { backend, transport }))
     }
 
@@ -143,5 +150,53 @@ impl ExternalSignerHost for NativeExternalSigner {
                 RlnError::Internal
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The production/persistent native signer must never run VLS with
+    /// `PolicyFilter::new_permissive()` on mainnet — the same rule the remote signer daemon
+    /// enforces for its `--permissive` flag.
+    #[test]
+    fn native_persistent_signer_rejects_mainnet_permissive() {
+        let dir = tempfile::tempdir().unwrap();
+        let res = NativeExternalSigner::new_with_storage(
+            "11".repeat(32),
+            "bitcoin".to_string(),
+            Some(true),
+            dir.path().display().to_string(),
+        );
+        assert!(
+            res.is_err(),
+            "mainnet permissive VLS policy must not be allowed"
+        );
+    }
+
+    #[test]
+    fn native_ephemeral_signer_rejects_mainnet_permissive() {
+        let res = NativeExternalSigner::new("11".repeat(32), "bitcoin".to_string(), Some(true));
+        assert!(
+            res.is_err(),
+            "mainnet permissive VLS policy must not be allowed"
+        );
+    }
+
+    /// A host that passes `None` gets the strict policy — permissive requires an explicit opt-in.
+    #[test]
+    fn permissive_policy_defaults_to_strict() {
+        for network in [Network::Bitcoin, Network::Regtest] {
+            assert!(
+                !NativeExternalSigner::resolve_permissive_policy(network, None)
+                    .expect("strict default is always allowed"),
+                "None must resolve to the strict policy on {network}"
+            );
+        }
+        assert!(
+            NativeExternalSigner::resolve_permissive_policy(Network::Regtest, Some(true))
+                .expect("explicit permissive is allowed off-mainnet")
+        );
     }
 }

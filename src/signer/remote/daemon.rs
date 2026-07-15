@@ -15,8 +15,6 @@ use bitcoin::Network;
 use lightning_signer::persist::Persist;
 use signer_external::contract::{ExternalSignerBackend, SignerRequest, SignerResponse};
 use tokio::net::TcpListener;
-use vls_persist::kvv::redb::RedbKVVStore;
-use vls_persist::kvv::{JsonFormat, KVVPersister};
 
 use super::framing;
 use crate::signer::in_process_vls::{self, InProcessVlsTransport};
@@ -83,8 +81,7 @@ impl DaemonSigner {
         permissive_policy: bool,
         data_dir: &Path,
     ) -> anyhow::Result<Self> {
-        let persister: Arc<dyn Persist> =
-            Arc::new(KVVPersister(RedbKVVStore::new(data_dir), JsonFormat));
+        let persister = in_process_vls::open_restricted_persister(data_dir)?;
         Self::new_with_persister(seed, network, permissive_policy, persister)
     }
 
@@ -153,10 +150,49 @@ pub struct DaemonConfig {
     pub data_dir: PathBuf,
     /// `None` = plaintext TCP (localhost / trusted link only).
     pub tls: Option<DaemonTlsConfig>,
+    /// Allow a non-loopback `listen_addr` without mTLS. Dangerous for a seed-holding signer:
+    /// anyone who can reach the port can request signatures (server-auth TLS does not authenticate
+    /// the caller). Only for links already secured by other means, e.g. a WireGuard tunnel.
+    pub allow_unauthenticated_remote: bool,
+}
+
+/// A non-loopback listener accepts signing requests from anything that can reach the port, so it
+/// must be paired with mTLS (`client_ca_path`) — server-auth TLS alone still admits any client — or
+/// explicitly waived with [`DaemonConfig::allow_unauthenticated_remote`].
+fn check_listener_exposure(
+    listen_addr: &std::net::SocketAddr,
+    mtls_configured: bool,
+    allow_unauthenticated_remote: bool,
+) -> anyhow::Result<()> {
+    if listen_addr.ip().is_loopback() || mtls_configured {
+        return Ok(());
+    }
+    if allow_unauthenticated_remote {
+        tracing::warn!(
+            addr = %listen_addr,
+            "listening on a non-loopback address WITHOUT client authentication: any client that \
+             can reach this port can request signatures backed by the daemon's seed"
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to listen on non-loopback {listen_addr} without mTLS: any client that can reach \
+         the port could request signatures backed by the daemon's seed. Configure TLS with a \
+         client CA (--tls-cert/--tls-key/--client-ca), or pass \
+         --allow-unauthenticated-remote-signer if the link is secured by other means"
+    )
 }
 
 /// Build the signer from the seed and serve the RLN protocol on `listen_addr` until the listener errors.
 pub async fn run(config: DaemonConfig) -> anyhow::Result<()> {
+    check_listener_exposure(
+        &config.listen_addr,
+        config
+            .tls
+            .as_ref()
+            .is_some_and(|t| t.client_ca_path.is_some()),
+        config.allow_unauthenticated_remote,
+    )?;
     let signer = Arc::new(
         DaemonSigner::new(
             config.seed,
@@ -280,6 +316,36 @@ async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpi
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn addr(s: &str) -> std::net::SocketAddr {
+        s.parse().expect("valid socket addr")
+    }
+
+    #[test]
+    fn loopback_listeners_need_no_authentication() {
+        check_listener_exposure(&addr("127.0.0.1:9737"), false, false).expect("v4 loopback");
+        check_listener_exposure(&addr("[::1]:9737"), false, false).expect("v6 loopback");
+    }
+
+    /// Server-auth-only TLS (`mtls_configured == false`) must not unlock a remote listener either:
+    /// it authenticates the daemon to the client, not the client to the seed-holding daemon.
+    #[test]
+    fn non_loopback_without_mtls_is_rejected() {
+        for a in ["0.0.0.0:9737", "10.0.0.5:9737", "[::]:9737"] {
+            check_listener_exposure(&addr(a), false, false)
+                .expect_err("non-loopback without mTLS must be refused");
+        }
+    }
+
+    #[test]
+    fn non_loopback_with_mtls_is_allowed() {
+        check_listener_exposure(&addr("10.0.0.5:9737"), true, false).expect("mTLS remote");
+    }
+
+    #[test]
+    fn explicit_footgun_flag_allows_unauthenticated_remote() {
+        check_listener_exposure(&addr("0.0.0.0:9737"), false, true).expect("explicit override");
+    }
 
     /// `accept()` failing transiently must never end the daemon's serve loop — it's the seed-holding
     /// node's only signer, and nothing else can restart it. This exercises the retry logic in

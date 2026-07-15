@@ -114,6 +114,10 @@ uniffi = { version = "0.28.3", features = ["build"], optional = true }
 vss-client = { package = "vss-client-ng", git = "https://github.com/lightningdevkit/vss-client", rev = "ad63805047561dcf3117cd992ad6d8bc3881adef", default-features = false, features = ["sigs-auth"], optional = true }
 zip = { version = "2.2.0", default-features = false, features = ["time", "zstd"] }
 
+[target.'cfg(unix)'.dependencies]
+# Only for `geteuid()` in the signer-state file/dir ownership checks (`signer::key_source`).
+libc = "0.2"
+
 [dev-dependencies]
 dircmp = "0.2.0"
 rcgen = "0.13"
