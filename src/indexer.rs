@@ -145,9 +145,11 @@ fn poll_esplora_fee_estimates(
                         .store(background_estimate, Ordering::Release);
                 }
                 Ok(Err(e)) => {
-                    log_warn!(logger, "Error getting fee estimate from esplora: {}", e)
+                    log_warn!(logger, "Error getting fee estimate from esplora: {}", e);
                 }
-                Err(e) => log_warn!(logger, "Error polling esplora fee estimates: {}", e),
+                Err(e) => {
+                    log_warn!(logger, "Error polling esplora fee estimates: {}", e);
+                }
             }
 
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -217,8 +219,12 @@ impl BroadcasterInterface for EsploraIndexerClient {
             .await;
             match res {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => log_warn!(logger, "esplora broadcast failed: {}", e),
-                Err(e) => log_warn!(logger, "esplora broadcast task spawn failed: {}", e),
+                Ok(Err(e)) => {
+                    log_warn!(logger, "esplora broadcast failed: {}", e);
+                }
+                Err(e) => {
+                    log_warn!(logger, "esplora broadcast task spawn failed: {}", e);
+                }
             }
         });
     }
@@ -339,8 +345,12 @@ impl BroadcasterInterface for ElectrumIndexerClient {
             .await;
             match res {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => log_warn!(logger, "electrum broadcast failed: {}", e),
-                Err(e) => log_warn!(logger, "electrum broadcast task spawn failed: {}", e),
+                Ok(Err(e)) => {
+                    log_warn!(logger, "electrum broadcast failed: {}", e);
+                }
+                Err(e) => {
+                    log_warn!(logger, "electrum broadcast task spawn failed: {}", e);
+                }
             }
         });
     }
@@ -426,8 +436,12 @@ fn poll_electrum_fee_estimates(
                         .unwrap()
                         .store(bg_e, Ordering::Release);
                 }
-                Ok(Err(e)) => log_warn!(logger, "Error getting fee estimate from electrum: {}", e),
-                Err(e) => log_warn!(logger, "Error polling electrum fee estimates: {}", e),
+                Ok(Err(e)) => {
+                    log_warn!(logger, "Error getting fee estimate from electrum: {}", e);
+                }
+                Err(e) => {
+                    log_warn!(logger, "Error polling electrum fee estimates: {}", e);
+                }
             }
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
