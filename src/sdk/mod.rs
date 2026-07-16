@@ -9,7 +9,6 @@ use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
     AsyncOrderOutboundInvoiceResponse,
 };
-use crate::core_types::{FEE_RATE, MIN_CHANNEL_CONFIRMATIONS, VIRTUAL_HTLC_MIN_MSAT};
 use crate::error::APIError;
 use crate::ldk::{
     clear_rgb_payment_pending, peer_has_live_channel, start_ldk, write_rgb_payment_info_file,
@@ -96,16 +95,6 @@ use rgb_lib::BitcoinNetwork as RgbBitcoinNetwork;
 use rgb_lib::{AssetSchema as RgbLibAssetSchema, Assignment as RgbLibAssignment};
 use serde_json::Value;
 
-const SDK_HTLC_MIN_MSAT: u64 = 3_000_000;
-const SDK_OPENRGBCHANNEL_MIN_SAT: u64 = SDK_HTLC_MIN_MSAT / 1000 * 10 + 10;
-const SDK_OPENCHANNEL_MIN_SAT: u64 = 5506;
-const SDK_OPENCHANNEL_MAX_SAT: u64 = 16_777_215;
-const SDK_OPENCHANNEL_MIN_RGB_AMT: u64 = 1;
-const SDK_UTXO_NUM: u8 = 4;
-const SDK_UTXO_SIZE_SAT: u32 = 32_000;
-const SDK_DUST_LIMIT_MSAT: u64 = 546_000;
-const SDK_MAX_SWAP_FEE_MSAT: u64 = SDK_HTLC_MIN_MSAT;
-const SDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
 const SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
 
 struct OpenChannelVirtualIntentGuard {
@@ -1119,11 +1108,11 @@ pub(crate) async fn node_info(state: Arc<AppState>) -> Result<NodeInfoData, APIE
         account_xpub_vanilla: wallet_data.account_xpub_vanilla,
         account_xpub_colored: wallet_data.account_xpub_colored,
         max_media_upload_size_mb: state.static_state.max_media_upload_size_mb,
-        rgb_htlc_min_msat: SDK_HTLC_MIN_MSAT,
-        rgb_channel_capacity_min_sat: SDK_OPENRGBCHANNEL_MIN_SAT,
-        channel_capacity_min_sat: SDK_OPENCHANNEL_MIN_SAT,
-        channel_capacity_max_sat: SDK_OPENCHANNEL_MAX_SAT,
-        channel_asset_min_amount: SDK_OPENCHANNEL_MIN_RGB_AMT,
+        rgb_htlc_min_msat: unlocked_state.config.channels.htlc_min_msat,
+        rgb_channel_capacity_min_sat: unlocked_state.config.channels.open_rgb_min_sat(),
+        channel_capacity_min_sat: unlocked_state.config.channels.open_min_sat,
+        channel_capacity_max_sat: unlocked_state.config.channels.open_max_sat,
+        channel_asset_min_amount: unlocked_state.config.channels.open_min_rgb_amount,
         channel_asset_max_amount: u64::MAX,
         network_nodes,
         network_channels,
@@ -2372,8 +2361,10 @@ pub(crate) async fn create_utxos(
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let num = request.num.unwrap_or(SDK_UTXO_NUM);
-    let size = request.size.unwrap_or(SDK_UTXO_SIZE_SAT);
+    let num = request.num.unwrap_or(unlocked_state.config.rgb.utxo_num);
+    let size = request
+        .size
+        .unwrap_or(unlocked_state.config.rgb.utxo_size_sat);
     if unlocked_state.external_signer_mode {
         let unsigned_psbt = unlocked_state
             .rgb_create_utxos_begin(
@@ -2782,10 +2773,12 @@ pub(crate) async fn open_channel(
         }
     }
 
+    let channels_config = &unlocked_state.config.channels;
     let colored_info = match (request.asset_id, request.asset_amount) {
-        (Some(_), Some(amt)) if amt < SDK_OPENCHANNEL_MIN_RGB_AMT => {
+        (Some(_), Some(amt)) if amt < channels_config.open_min_rgb_amount => {
             return Err(APIError::InvalidAmount(format!(
-                "Channel RGB amount must be equal to or higher than {SDK_OPENCHANNEL_MIN_RGB_AMT}"
+                "Channel RGB amount must be equal to or higher than {}",
+                channels_config.open_min_rgb_amount
             )));
         }
         (Some(asset), Some(amt)) => {
@@ -2797,18 +2790,21 @@ pub(crate) async fn open_channel(
         _ => return Err(APIError::IncompleteRGBInfo),
     };
 
-    if colored_info.is_some() && request.capacity_sat < SDK_OPENRGBCHANNEL_MIN_SAT {
+    if colored_info.is_some() && request.capacity_sat < channels_config.open_rgb_min_sat() {
         return Err(APIError::InvalidAmount(format!(
-            "RGB channel amount must be equal to or higher than {SDK_OPENRGBCHANNEL_MIN_SAT} sats"
+            "RGB channel amount must be equal to or higher than {} sats",
+            channels_config.open_rgb_min_sat()
         )));
-    } else if request.capacity_sat < SDK_OPENCHANNEL_MIN_SAT {
+    } else if request.capacity_sat < channels_config.open_min_sat {
         return Err(APIError::InvalidAmount(format!(
-            "Channel amount must be equal to or higher than {SDK_OPENCHANNEL_MIN_SAT} sats"
+            "Channel amount must be equal to or higher than {} sats",
+            channels_config.open_min_sat
         )));
     }
-    if request.capacity_sat > SDK_OPENCHANNEL_MAX_SAT {
+    if request.capacity_sat > channels_config.open_max_sat {
         return Err(APIError::InvalidAmount(format!(
-            "Channel amount must be equal to or less than {SDK_OPENCHANNEL_MAX_SAT} sats"
+            "Channel amount must be equal to or less than {} sats",
+            channels_config.open_max_sat
         )));
     }
 
@@ -2881,7 +2877,7 @@ pub(crate) async fn open_channel(
         )));
     }
 
-    let mut channel_config = ChannelConfig::default();
+    let mut channel_config = channels_config.channel_config();
     if let Some(fee_base_msat) = request.fee_base_msat {
         channel_config.forwarding_fee_base_msat = fee_base_msat;
     }
@@ -2891,7 +2887,8 @@ pub(crate) async fn open_channel(
     let config = UserConfig {
         channel_handshake_limits: ChannelHandshakeLimits {
             trust_own_funding_0conf: true,
-            their_to_self_delay: 2016,
+            their_to_self_delay: channels_config.their_to_self_delay,
+            max_minimum_depth: channels_config.max_minimum_depth,
             ..Default::default()
         },
         channel_handshake_config: ChannelHandshakeConfig {
@@ -2901,15 +2898,19 @@ pub(crate) async fn open_channel(
                 request.public
             },
             our_htlc_minimum_msat: if is_virtual_open {
-                VIRTUAL_HTLC_MIN_MSAT
+                channels_config.virtual_htlc_min_msat
             } else {
-                SDK_HTLC_MIN_MSAT
+                channels_config.htlc_min_msat
             },
             minimum_depth: if is_virtual_open {
                 0
             } else {
-                MIN_CHANNEL_CONFIRMATIONS as u32
+                unlocked_state.config.rgb.min_channel_confirmations as u32
             },
+            our_to_self_delay: channels_config.our_to_self_delay,
+            max_inbound_htlc_value_in_flight_percent_of_channel: channels_config
+                .max_inbound_htlc_value_in_flight_percent,
+            our_max_accepted_htlcs: channels_config.our_max_accepted_htlcs,
             negotiate_scid_privacy: is_virtual_open,
             negotiate_anchors_zero_fee_htlc_tx: request.with_anchors,
             their_channel_reserve_satoshis_override: if is_virtual_open { Some(0) } else { None },
@@ -2957,13 +2958,15 @@ pub(crate) async fn open_channel(
                 transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()],
         }]};
 
+        let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
+        let min_channel_confirmations = unlocked_state.config.rgb.min_channel_confirmations;
         let unlocked_state_copy = unlocked_state.clone();
         tokio::task::spawn_blocking(move || {
             unlocked_state_copy.rgb_send_begin(
                 recipient_map,
                 true,
-                FEE_RATE,
-                MIN_CHANNEL_CONFIRMATIONS,
+                fee_rate_sat_vb,
+                min_channel_confirmations,
                 None,
                 true,
                 Some(0),
@@ -3371,6 +3374,7 @@ pub(crate) async fn maker_execute(
     let rgb_payment = swap_info
         .to_asset
         .map(|to_asset| (to_asset, swap_info.qty_to));
+    let htlc_min_msat = unlocked_state.config.channels.htlc_min_msat;
     let first_leg = get_route(
         &unlocked_state.config,
         &unlocked_state.channel_manager,
@@ -3379,9 +3383,9 @@ pub(crate) async fn maker_execute(
         unlocked_state.runtime_node_id(),
         taker_pk,
         if swap_info.is_to_btc() {
-            Some(swap_info.qty_to + SDK_HTLC_MIN_MSAT)
+            Some(swap_info.qty_to + htlc_min_msat)
         } else {
-            Some(SDK_HTLC_MIN_MSAT)
+            Some(htlc_min_msat)
         },
         rgb_payment,
         vec![],
@@ -3398,9 +3402,9 @@ pub(crate) async fn maker_execute(
         taker_pk,
         unlocked_state.runtime_node_id(),
         if swap_info.is_to_btc() || swap_info.is_asset_asset() {
-            Some(SDK_HTLC_MIN_MSAT)
+            Some(htlc_min_msat)
         } else {
-            Some(swap_info.qty_from + SDK_HTLC_MIN_MSAT)
+            Some(swap_info.qty_from + htlc_min_msat)
         },
         rgb_payment,
         receive_hints,
@@ -3444,7 +3448,7 @@ pub(crate) async fn maker_execute(
         .map(|hop| hop.fee_msat)
         .sum::<u64>();
 
-    if total_fee >= SDK_MAX_SWAP_FEE_MSAT {
+    if total_fee >= unlocked_state.config.payments.max_swap_fee_msat {
         return Err(APIError::FailedPayment(format!(
             "Fee too high: {total_fee}"
         )));
@@ -3458,7 +3462,7 @@ pub(crate) async fn maker_execute(
         route_params: Some(RouteParameters {
             payment_params: PaymentParameters::for_keysend(
                 unlocked_state.runtime_node_id(),
-                SDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA,
+                unlocked_state.config.payments.final_cltv_expiry_delta,
                 false,
             ),
             final_value_msat: 0,
@@ -3557,7 +3561,11 @@ pub(crate) async fn maker_init(
 
     let (payment_hash, payment_secret) = unlocked_state
         .channel_manager
-        .create_inbound_payment(Some(SDK_DUST_LIMIT_MSAT), request.timeout_sec, None)
+        .create_inbound_payment(
+            Some(unlocked_state.config.channels.dust_limit_msat),
+            request.timeout_sec,
+            None,
+        )
         .unwrap();
     unlocked_state.add_maker_swap(payment_hash, swap_data);
 
