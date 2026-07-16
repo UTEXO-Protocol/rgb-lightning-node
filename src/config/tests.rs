@@ -15,9 +15,9 @@ fn err_msg(res: Result<Config, AppError>) -> String {
 fn defaults_match_hardcoded_values() {
     let c = Config::default();
     assert_eq!(c.rgb.fee_rate_sat_vb, 7);
-    assert_eq!(c.rgb.utxo_size_sat, 32000);
+    assert_eq!(c.rgb.utxo_size_sat, 20000);
     assert_eq!(c.rgb.utxo_num, 4);
-    assert_eq!(c.rgb.min_channel_confirmations, 6);
+    assert_eq!(c.rgb.min_channel_confirmations, 3);
     assert_eq!(c.channels.htlc_min_msat, 3_000_000);
     assert_eq!(c.channels.virtual_htlc_min_msat, 1_000);
     assert_eq!(c.channels.dust_limit_msat, 546_000);
@@ -47,7 +47,7 @@ fn empty_toml_keeps_defaults() {
 fn partial_override_leaves_other_defaults() {
     let c = cfg("[rgb]\nfee_rate_sat_vb = 12\n").unwrap();
     assert_eq!(c.rgb.fee_rate_sat_vb, 12);
-    assert_eq!(c.rgb.utxo_size_sat, 32000);
+    assert_eq!(c.rgb.utxo_size_sat, 20000);
     assert_eq!(c.channels, Config::default().channels);
 }
 

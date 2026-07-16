@@ -49,14 +49,14 @@
 # Default fee rate in sat/vB for coloring, witness and channel funding txs
 #fee_rate_sat_vb = 7
 # Default size in sats for colorable UTXOs created by /createutxos
-#utxo_size_sat = 32000
+#utxo_size_sat = 20000
 # Default number of UTXOs created by /createutxos
 #utxo_num = 4
 # Confirmations required for channel funding transactions
-#min_channel_confirmations = 6
+#min_channel_confirmations = 3
 
 [channels]
-# Minimum HTLC amount on RGB channels (msat)
+# Minimum HTLC amount on RGB channels (msat, must clear HTLC dust so asset payments can settle)
 #htlc_min_msat = 3000000
 # Minimum HTLC amount on virtual channels (msat)
 #virtual_htlc_min_msat = 1000

@@ -4,12 +4,15 @@ use rgb_lib::bdk_wallet::keys::bip39::Mnemonic;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const FEE_RATE: u64 = 7;
-pub(crate) const UTXO_SIZE_SAT: u32 = 32000;
-pub(crate) const MIN_CHANNEL_CONFIRMATIONS: u8 = 6;
+// matches lnd's MinChanFundingSize
+pub(crate) const UTXO_SIZE_SAT: u32 = 20000;
+pub(crate) const MIN_CHANNEL_CONFIRMATIONS: u8 = 3;
 pub(crate) const DUST_LIMIT_MSAT: u64 = 546000;
+// must clear the commitment dust limit plus HTLC-tx fees: RGB assets ride the
+// HTLC output, so a dust-trimmed HTLC cannot settle an asset payment
 pub(crate) const HTLC_MIN_MSAT: u64 = 3_000_000;
 pub(crate) const VIRTUAL_HTLC_MIN_MSAT: u64 = 1_000;
-pub(crate) const MAX_SWAP_FEE_MSAT: u64 = HTLC_MIN_MSAT;
+pub(crate) const MAX_SWAP_FEE_MSAT: u64 = 3_000_000;
 pub(crate) const DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 14;
 
 pub mod async_order {
