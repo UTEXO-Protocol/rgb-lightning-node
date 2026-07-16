@@ -103,7 +103,7 @@ fn success() {
             node.createutxos(SdkCreateUtxosRequest {
                 up_to: false,
                 num: Some(CREATE_UTXOS_NUM),
-                size: None,
+                size: Some(32_000),
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 skip_sync: false,
             })
