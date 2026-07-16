@@ -37,7 +37,7 @@ async fn invoice() {
 
     // an invoice with RGB data and amt_msat below INVOICE_MIN_MSAT should fail
     let payload = LNInvoiceRequest {
-        amt_msat: Some(2999999),
+        amt_msat: Some(HTLC_MIN_MSAT - 1),
         expiry_sec: 900,
         asset_id: Some(asset_id.clone()),
         asset_amount: Some(1),

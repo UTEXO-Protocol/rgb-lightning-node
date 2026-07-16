@@ -371,27 +371,23 @@ fn multi_hop() {
         assert_eq!(chan_3_23.asset_local_amount, Some(50));
         assert_eq!(chan_3_23.asset_remote_amount, Some(250));
 
-        let htlc_min_sat = node_a
-            .node_info()
-            .expect("node A node_info htlc min")
-            .rgb_htlc_min_msat
-            / 1000;
+        let payment_sat = PAYMENT_MSAT / 1000;
         let fees = 1;
         assert_eq!(
             chan_1_12.local_balance_sat,
-            chan_1_12_before.local_balance_sat - htlc_min_sat - fees
+            chan_1_12_before.local_balance_sat - payment_sat - fees
         );
         assert_eq!(
             chan_2_12.local_balance_sat,
-            chan_2_12_before.local_balance_sat + htlc_min_sat + fees
+            chan_2_12_before.local_balance_sat + payment_sat + fees
         );
         assert_eq!(
             chan_2_23.local_balance_sat,
-            chan_2_23_before.local_balance_sat - htlc_min_sat
+            chan_2_23_before.local_balance_sat - payment_sat
         );
         assert_eq!(
             chan_3_23.local_balance_sat,
-            chan_3_23_before.local_balance_sat + htlc_min_sat
+            chan_3_23_before.local_balance_sat + payment_sat
         );
 
         wait_for_usable_channel_counts(

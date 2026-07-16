@@ -351,7 +351,8 @@ pub(crate) fn fund_and_create_utxos(node: &SdkNode, node_name: &str) {
     node.createutxos(SdkCreateUtxosRequest {
         up_to: false,
         num: Some(CREATE_UTXOS_NUM),
-        size: None,
+        // explicit size keeps fixture balances independent of the default
+        size: Some(32_000),
         fee_rate: CREATE_UTXOS_FEE_RATE,
         skip_sync: false,
     })
