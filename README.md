@@ -76,6 +76,16 @@ body must include exactly one of:
 `bitcoind + esplora` returns `400 AmbiguousChainBackend`. No credentials at
 all returns `400 MissingChainBackend`.
 
+### Configuration file
+
+The node can be configured via a TOML file, loaded from
+`<storage_directory_path>/config.toml` if it exists, or from the path given
+with `--config <path>`. All settings are optional and documented, along with
+their defaults, in [sample-config.toml](sample-config.toml). Values are
+resolved in order: built-in defaults, then the config file, then explicit CLI
+options; `/unlock` body params override the corresponding config values at
+runtime. Invalid values and unknown keys abort startup with an error.
+
 ### Regtest
 
 To easily start the required services on a regtest network, run:
@@ -423,9 +433,7 @@ the node behaves exactly as before.
 
 Two independent data streams are backed up:
 
-- **Node KV state** — channel manager, channel monitors, payment info, swap
-  data and RGB channel info. Every update is written to both the local SQLite
-  database and the remote VSS server.
+- **Node KV state** — channel manager, channel monitors, payment info, swap data and RGB channel info. Every update is written to both the local SQLite database and the remote VSS server; channel-monitor updates are persisted remote-first, completing only once the VSS server has durably stored them.
 - **RGB wallet data** — the wallet files managed by rgb-lib, backed up
   automatically after every state-changing wallet operation.
 
@@ -479,22 +487,9 @@ the node finishes coming up:
 - the **RGB wallet directory** (assets, transfers, allocations) is restored
   when the local wallet directory for this mnemonic's fingerprint is absent.
 
-Together these recover BTC balance, channels, and RGB assets without any
-extra calls — `unlock` is the only entry point. Each VSS store is owned by a
-single running node instance, so a second node pointed at the same store
-refuses to start to avoid corrupting state. After a previous owner shuts
-down its fence is intentionally left behind; on a legitimate device wipe and
-restore the operator must call `POST /vssclearfence` (or
-`SdkNode::vss_clear_fence`) once between `init` and `unlock` to take over
-the store. In internal-mnemonic mode this is authenticated by the wallet
-password; in external-signer mode (no mnemonic on the node) the password is
-ignored and the VSS identity is reconstructed from the persisted
-`key_source.json`, matching the identity the node acquires the fence under.
+Together these recover BTC balance, channels, and RGB assets without any extra calls — `unlock` is the only entry point, provided the node was initialized (`/init`) with the same mnemonic as the original device and started with the same `--vss-url` and `--network`. A different mnemonic maps to a different VSS store, so the node finds no backup and starts fresh without an error. Each VSS store is owned by a single running node instance, so a second node pointed at the same store refuses to start to avoid corrupting state. A graceful teardown (lock, shutdown, signal) releases the fence; after a crash or hard kill it is left behind and the operator must call `POST /vssclearfence` (or `SdkNode::vss_clear_fence`) once between `init` and `unlock` to take over the store. In internal-mnemonic mode this is authenticated by the wallet password; in external-signer mode (no mnemonic on the node) the password is ignored and the VSS identity is reconstructed from the persisted `key_source.json`, matching the identity the node acquires the fence under.
 
-VSS replication is best-effort: a write that fails to reach the server is
-queued and retried on later successful writes. The number of pending writes is
-reported by `GET /vssbackupinfo` so monitoring can alert on persistent
-staleness.
+Replication guarantees differ per stream. Channel-monitor writes are remote-first: each write completes only after the VSS server durably stores it, and transient server failures are retried with capped exponential backoff until the server recovers. All other KV writes land in the local database first and are replicated to VSS best-effort: a write that fails to reach the server is queued and retried on later successful writes. The number of pending best-effort writes is reported by `GET /vssbackupinfo` so monitoring can alert on persistent staleness.
 
 ### API endpoints (when VSS is enabled)
 - `POST /vssbackup` — trigger a manual RGB wallet backup

@@ -29,7 +29,6 @@ use crate::utils::{hex_str, validate_and_parse_description_hash, validate_and_pa
 
 pub(crate) const ASYNC_ORDER_MESSAGE_TYPE_ID: u16 = 37915;
 pub(crate) const ASYNC_ORDER_MAX_HASH_BATCH_SIZE: usize = 200;
-pub(crate) const ASYNC_ORDER_RESPONSE_TIMEOUT_SECS: u64 = 30;
 const ASYNC_ERROR_DUPLICATE_INDEX_CONFLICT: i64 = 1004;
 const ASYNC_ERROR_DUPLICATE_HASH_CONFLICT: i64 = 1005;
 const ASYNC_ERROR_INVALID_HASH_BATCH: i64 = 1003;
@@ -46,7 +45,6 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_VERSION: &str = "2.0";
 const PROTOCOL_VERSION: u64 = 1;
-const ASYNC_ORDER_LSP_REQUEST_TIMEOUT_SECS: u64 = 25; // Must be above utexo-lsp's default 15s HTTP timeout with a buffer.
 const ASYNC_ORDER_FIRST_HASH_INDEX: u64 = 1;
 const ASYNC_PAYMENTS_ACCOUNT_INDEX: u32 = 0;
 const ASYNC_PAYMENTS_BIP32_MAX_CHILD_INDEX: u32 = 0x7fff_ffff;
@@ -872,6 +870,7 @@ impl AsyncOrderMessageHandler {
         lsp_base_url: String,
         lsp_bearer_token: Option<String>,
         runtime_handle: Handle,
+        request_timeout_secs: u64,
     ) -> Self {
         Self {
             access_control,
@@ -879,7 +878,7 @@ impl AsyncOrderMessageHandler {
             lsp_client: Some(AsyncOrderLspClient::new(
                 lsp_base_url,
                 lsp_bearer_token,
-                Duration::from_secs(ASYNC_ORDER_LSP_REQUEST_TIMEOUT_SECS),
+                Duration::from_secs(request_timeout_secs),
             )),
             runtime_handle: Some(runtime_handle),
             state: Arc::new(Mutex::new(AsyncOrderState::default())),

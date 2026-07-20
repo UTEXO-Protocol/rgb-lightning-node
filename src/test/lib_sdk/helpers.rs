@@ -27,8 +27,9 @@ pub(crate) const OPEN_CHANNEL_CAPACITY_SAT: u64 = 100_000;
 pub(crate) const OPEN_CHANNEL_CONFIRM_BLOCKS: u32 = 6;
 pub(crate) const OPEN_CHANNEL_ASSET_AMOUNT: u64 = 600;
 pub(crate) const OPEN_CHANNEL_PUSH_MSAT: u64 = 3_500_000;
+// keep in sync with core_types::HTLC_MIN_MSAT
 pub(crate) const HTLC_MIN_MSAT: u64 = 3_000_000;
-pub(crate) const PAYMENT_MSAT: u64 = HTLC_MIN_MSAT;
+pub(crate) const PAYMENT_MSAT: u64 = 3_000_000;
 pub(crate) const LIQUIDITY_KEYSEND_MSAT: u64 = 10_000_000;
 pub(crate) const CREATE_UTXOS_NUM: u8 = 10;
 pub(crate) const CREATE_UTXOS_FEE_RATE: u64 = 7;
@@ -350,7 +351,8 @@ pub(crate) fn fund_and_create_utxos(node: &SdkNode, node_name: &str) {
     node.createutxos(SdkCreateUtxosRequest {
         up_to: false,
         num: Some(CREATE_UTXOS_NUM),
-        size: None,
+        // explicit size keeps fixture balances independent of the default
+        size: Some(32_000),
         fee_rate: CREATE_UTXOS_FEE_RATE,
         skip_sync: false,
     })

@@ -162,7 +162,8 @@ class PaymentTest {
             SdkCreateUtxosRequest(
                 upTo = false,
                 num = utxosNum,
-                size = null,
+                // explicit size keeps fixture balances independent of the default
+                size = 32_000u,
                 feeRate = utxosFeeRate,
                 skipSync = false,
             )

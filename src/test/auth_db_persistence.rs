@@ -18,6 +18,7 @@ use crate::utils::{AppState, StaticState};
 fn build_state(storage_dir_path: PathBuf, database: DatabaseConnection) -> AppState {
     AppState {
         static_state: Arc::new(StaticState {
+            config: Default::default(),
             ldk_peer_listening_port: 9735,
             network: rgb_lib::BitcoinNetwork::Regtest,
             storage_dir_path: storage_dir_path.clone(),

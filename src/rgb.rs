@@ -1066,16 +1066,21 @@ impl ChangeDestinationSource for RgbLibWalletWrapper {
     }
 }
 
+// Runs in the event handler: failures must return Err(()) (retried later), never panic.
 impl WalletSource for RgbLibWalletWrapper {
     fn list_confirmed_utxos<'a>(&'a self) -> AsyncResult<'a, Vec<Utxo>, ()> {
         Box::pin(async move {
-            let network =
-                Network::from_str(&self.bitcoin_network().to_string().to_lowercase()).unwrap();
-            let mut wallet = self.get_rgb_wallet();
-            Ok(wallet.list_unspents_vanilla(self.online, 1, false).unwrap().iter().filter_map(|u| {
+            let network = Network::from(self.bitcoin_network());
+            let unspents = self
+                .get_rgb_wallet()
+                .list_unspents_vanilla(self.online, 1, false)
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to list unspents for fee bumping");
+                })?;
+            Ok(unspents.iter().filter_map(|u| {
                 let script = u.txout.script_pubkey.clone().into_boxed_script();
-                let address = Address::from_script(&script, network).unwrap();
-                let outpoint = OutPoint::from_str(&u.outpoint.to_string()).unwrap();
+                let address = Address::from_script(&script, network).ok()?;
+                let outpoint = OutPoint::from_str(&u.outpoint.to_string()).ok()?;
                 let value = u.txout.value;
                 match address.witness_program() {
                     Some(prog) if prog.is_p2wpkh() => {
@@ -1107,12 +1112,13 @@ impl WalletSource for RgbLibWalletWrapper {
 
     fn get_change_script<'a>(&'a self) -> AsyncResult<'a, ScriptBuf, ()> {
         Box::pin(async move {
-            Ok(
-                Address::from_str(&self.get_rgb_wallet().get_address().unwrap())
-                    .unwrap()
-                    .assume_checked()
-                    .script_pubkey(),
-            )
+            let address = self.get_rgb_wallet().get_address().map_err(|e| {
+                tracing::error!(error = %e, "failed to get change address for fee bumping");
+            })?;
+            let parsed = Address::from_str(&address).map_err(|e| {
+                tracing::error!(error = %e, "invalid change address for fee bumping");
+            })?;
+            Ok(parsed.assume_checked().script_pubkey())
         })
     }
 
@@ -1125,8 +1131,15 @@ impl WalletSource for RgbLibWalletWrapper {
             let signed = self
                 .get_rgb_wallet()
                 .sign_psbt(tx.to_string(), Some(sign_options))
-                .unwrap();
-            Ok(Psbt::from_str(&signed).unwrap().extract_tx().unwrap())
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to sign fee-bump PSBT");
+                })?;
+            let psbt = Psbt::from_str(&signed).map_err(|e| {
+                tracing::error!(error = %e, "failed to parse signed fee-bump PSBT");
+            })?;
+            psbt.extract_tx().map_err(|e| {
+                tracing::error!(error = %e, "failed to extract fee-bump transaction");
+            })
         })
     }
 }
@@ -1191,5 +1204,58 @@ mod rgb_psbt_signer_failure_tests {
             "{msg}"
         );
         assert!(msg.contains("signer offline"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod wallet_source_tests {
+    use super::*;
+    use rgb_lib::keys::{generate_keys, WitnessVersion};
+    use rgb_lib::wallet::{DatabaseType, WalletData};
+
+    #[test]
+    fn bitcoin_network_conversion_covers_all_variants() {
+        for (rgb_net, expected) in [
+            (BitcoinNetwork::Mainnet, Network::Bitcoin),
+            (BitcoinNetwork::Testnet, Network::Testnet),
+            (BitcoinNetwork::Testnet4, Network::Testnet4),
+            (BitcoinNetwork::Signet, Network::Signet),
+            (BitcoinNetwork::Regtest, Network::Regtest),
+            (BitcoinNetwork::SignetCustom, Network::Signet),
+        ] {
+            assert_eq!(Network::from(rgb_net), expected, "converting {rgb_net:?}");
+        }
+    }
+
+    fn signetcustom_wallet_source() -> RgbLibWalletWrapper {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let keys = generate_keys(BitcoinNetwork::SignetCustom, WitnessVersion::Taproot);
+        let wallet = RgbLibWallet::new(
+            WalletData {
+                data_dir: tmp.keep().display().to_string(),
+                bitcoin_network: BitcoinNetwork::SignetCustom,
+                database_type: DatabaseType::Sqlite,
+                max_allocations_per_utxo: 1,
+                supported_schemas: vec![AssetSchema::Nia],
+                reuse_addresses: false,
+            },
+            SinglesigKeys {
+                account_xpub_vanilla: keys.account_xpub_vanilla,
+                account_xpub_colored: keys.account_xpub_colored,
+                vanilla_keychain: None,
+                master_fingerprint: keys.master_fingerprint,
+                mnemonic: Some(keys.mnemonic),
+                witness_version: WitnessVersion::Taproot,
+            },
+        )
+        .expect("signetcustom wallet");
+        RgbLibWalletWrapper::new(Arc::new(Mutex::new(wallet)), Online { id: 0 })
+    }
+
+    #[tokio::test]
+    async fn wallet_source_does_not_panic_on_signetcustom() {
+        let wrapper = signetcustom_wallet_source();
+        let _ = wrapper.list_confirmed_utxos().await;
+        let _ = wrapper.get_change_script().await;
     }
 }

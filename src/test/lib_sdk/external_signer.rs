@@ -607,7 +607,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_quick() {
             .createutxos(SdkCreateUtxosRequest {
                 up_to: false,
                 num: Some(25),
-                size: None,
+                size: Some(32_000),
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 skip_sync: false,
             })
@@ -752,7 +752,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
             .createutxos(SdkCreateUtxosRequest {
                 up_to: false,
                 num: Some(25),
-                size: None,
+                size: Some(32_000),
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 skip_sync: false,
             })
@@ -914,7 +914,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
             .createutxos(SdkCreateUtxosRequest {
                 up_to: false,
                 num: Some(25),
-                size: None,
+                size: Some(32_000),
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 skip_sync: false,
             })

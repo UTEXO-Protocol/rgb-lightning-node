@@ -115,6 +115,7 @@ impl Default for UserArgs {
             vss_allow_empty_restore: false,
             reuse_addresses: false,
             remote_signer_listen_addr: None,
+            config: Default::default(),
         }
     }
 }
@@ -875,7 +876,8 @@ async fn fund_with_and_create_utxos(node_address: SocketAddr, num: Option<u8>, s
     fund_wallet(addr, sats);
     mine(false);
 
-    create_utxos(node_address, false, Some(num.unwrap_or(10)), None).await;
+    // explicit size keeps fixture balances independent of the default
+    create_utxos(node_address, false, Some(num.unwrap_or(10)), Some(32_000)).await;
     mine(false);
 }
 
@@ -1131,7 +1133,7 @@ async fn keysend_raw(
         "sending spontaneously {asset_amount:?} of asset {asset_id:?} from node {node_address} \
          to {dest_pubkey}"
     );
-    let amt_msat = amt_msat.unwrap_or(3000000);
+    let amt_msat = amt_msat.unwrap_or(HTLC_MIN_MSAT);
     let payload = KeysendRequest {
         dest_pubkey: dest_pubkey.to_string(),
         amt_msat,
@@ -1536,7 +1538,7 @@ async fn ln_invoice_with_description_hash(
         "generating invoice with description_hash {description_hash:?} for node {node_address}"
     );
     let payload = LNInvoiceRequest {
-        amt_msat: Some(amt_msat.unwrap_or(3000000)),
+        amt_msat: Some(amt_msat.unwrap_or(HTLC_MIN_MSAT)),
         expiry_sec,
         asset_id: None,
         asset_amount: None,
@@ -1592,7 +1594,7 @@ async fn ln_invoice_with_type(
         "generating {invoice_type:?} invoice for {asset_amount:?} of asset {asset_id:?} for node {node_address}"
     );
     let payload = LNInvoiceRequest {
-        amt_msat: Some(amt_msat.unwrap_or(3000000)),
+        amt_msat: Some(amt_msat.unwrap_or(HTLC_MIN_MSAT)),
         expiry_sec,
         asset_id: asset_id.map(|a| a.to_string()),
         asset_amount,

@@ -60,6 +60,7 @@ impl NodeHandle {
             vss_allow_empty_restore: config.vss_allow_empty_restore,
             reuse_addresses: config.reuse_addresses,
             remote_signer_listen_addr: config.remote_signer_listen_addr,
+            config: Default::default(),
         };
         let state = start_daemon(&args).await?;
         Ok(Self { state })

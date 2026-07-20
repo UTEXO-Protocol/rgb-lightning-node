@@ -11,6 +11,7 @@ mod auth;
 mod backup;
 mod bitcoind;
 mod chain_backend;
+mod config;
 mod core_types;
 mod database;
 mod disk;

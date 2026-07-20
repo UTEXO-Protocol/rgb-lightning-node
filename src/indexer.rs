@@ -71,11 +71,13 @@ impl EsploraIndexerClient {
         network: Network,
         handle: tokio::runtime::Handle,
         logger: Arc<FilesystemLogger>,
+        timeout_secs: u64,
+        fee_refresh_interval_secs: u64,
     ) -> io::Result<Self> {
         // Bounded socket timeout so a hung endpoint doesn't block runtime shutdown.
         let client = Arc::new(
             EsploraBuilder::new(&server_url)
-                .timeout(10)
+                .timeout(timeout_secs)
                 .build_blocking(),
         );
         client
@@ -85,7 +87,13 @@ impl EsploraIndexerClient {
             .get_height()
             .map_err(|e| io::Error::other(format!("failed to query esplora tip height: {e}")))?;
         let fees = Arc::new(default_fee_buckets());
-        poll_esplora_fee_estimates(fees.clone(), client.clone(), logger.clone(), handle.clone());
+        poll_esplora_fee_estimates(
+            fees.clone(),
+            client.clone(),
+            logger.clone(),
+            handle.clone(),
+            fee_refresh_interval_secs,
+        );
         Ok(Self {
             client,
             fees,
@@ -101,6 +109,7 @@ fn poll_esplora_fee_estimates(
     client: Arc<EsploraBlockingClient>,
     logger: Arc<FilesystemLogger>,
     handle: tokio::runtime::Handle,
+    refresh_interval_secs: u64,
 ) {
     handle.spawn(async move {
         loop {
@@ -145,12 +154,14 @@ fn poll_esplora_fee_estimates(
                         .store(background_estimate, Ordering::Release);
                 }
                 Ok(Err(e)) => {
-                    log_warn!(logger, "Error getting fee estimate from esplora: {}", e)
+                    log_warn!(logger, "Error getting fee estimate from esplora: {}", e);
                 }
-                Err(e) => log_warn!(logger, "Error polling esplora fee estimates: {}", e),
+                Err(e) => {
+                    log_warn!(logger, "Error polling esplora fee estimates: {}", e);
+                }
             }
 
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_secs(refresh_interval_secs)).await;
         }
     });
 }
@@ -217,8 +228,12 @@ impl BroadcasterInterface for EsploraIndexerClient {
             .await;
             match res {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => log_warn!(logger, "esplora broadcast failed: {}", e),
-                Err(e) => log_warn!(logger, "esplora broadcast task spawn failed: {}", e),
+                Ok(Err(e)) => {
+                    log_warn!(logger, "esplora broadcast failed: {}", e);
+                }
+                Err(e) => {
+                    log_warn!(logger, "esplora broadcast task spawn failed: {}", e);
+                }
             }
         });
     }
@@ -271,6 +286,7 @@ impl ElectrumIndexerClient {
         network: Network,
         handle: tokio::runtime::Handle,
         logger: Arc<FilesystemLogger>,
+        fee_refresh_interval_secs: u64,
     ) -> io::Result<Self> {
         let client =
             Arc::new(ElectrumClient::new(&server_url).map_err(|e| {
@@ -280,7 +296,13 @@ impl ElectrumIndexerClient {
             io::Error::other(format!("failed to query electrum server features: {e}"))
         })?;
         let fees = Arc::new(default_fee_buckets());
-        poll_electrum_fee_estimates(fees.clone(), client.clone(), logger.clone(), handle.clone());
+        poll_electrum_fee_estimates(
+            fees.clone(),
+            client.clone(),
+            logger.clone(),
+            handle.clone(),
+            fee_refresh_interval_secs,
+        );
         Ok(Self {
             client,
             fees,
@@ -339,8 +361,12 @@ impl BroadcasterInterface for ElectrumIndexerClient {
             .await;
             match res {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => log_warn!(logger, "electrum broadcast failed: {}", e),
-                Err(e) => log_warn!(logger, "electrum broadcast task spawn failed: {}", e),
+                Ok(Err(e)) => {
+                    log_warn!(logger, "electrum broadcast failed: {}", e);
+                }
+                Err(e) => {
+                    log_warn!(logger, "electrum broadcast task spawn failed: {}", e);
+                }
             }
         });
     }
@@ -380,6 +406,7 @@ fn poll_electrum_fee_estimates(
     client: Arc<ElectrumClient>,
     logger: Arc<FilesystemLogger>,
     handle: tokio::runtime::Handle,
+    refresh_interval_secs: u64,
 ) {
     handle.spawn(async move {
         loop {
@@ -426,10 +453,14 @@ fn poll_electrum_fee_estimates(
                         .unwrap()
                         .store(bg_e, Ordering::Release);
                 }
-                Ok(Err(e)) => log_warn!(logger, "Error getting fee estimate from electrum: {}", e),
-                Err(e) => log_warn!(logger, "Error polling electrum fee estimates: {}", e),
+                Ok(Err(e)) => {
+                    log_warn!(logger, "Error getting fee estimate from electrum: {}", e);
+                }
+                Err(e) => {
+                    log_warn!(logger, "Error polling electrum fee estimates: {}", e);
+                }
             }
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_secs(refresh_interval_secs)).await;
         }
     });
 }
