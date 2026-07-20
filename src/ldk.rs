@@ -5148,7 +5148,7 @@ pub(crate) async fn start_ldk(
 
     // Background Processing
     let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
-    let background_processor = tokio::spawn(process_events_async(
+    let bp_future = process_events_async(
         persister,
         event_handler,
         chain_monitor.clone(),
@@ -5177,7 +5177,50 @@ pub(crate) async fn start_ldk(
                     .unwrap(),
             )
         },
-    ));
+    );
+
+    // Watchdog: the node must never keep serving traffic without a background
+    // processor — no event handling, no channel-manager persistence, silent
+    // state divergence (field incident 2026-07: a panic in the BumpTransaction
+    // handler killed this task and the node looked healthy for two days). Any
+    // termination not requested through `stop_processing` exits the process so
+    // the supervisor restarts it from consistent state.
+    let bp_stop_flag = Arc::clone(&stop_processing);
+    let background_processor = tokio::spawn(async move {
+        let result =
+            futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(bp_future)).await;
+        let stopping = bp_stop_flag.load(Ordering::Acquire);
+        match result {
+            Ok(res) => {
+                if !stopping {
+                    match &res {
+                        Ok(()) => tracing::error!(
+                            "background processor exited unexpectedly; shutting down"
+                        ),
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            "background processor failed unexpectedly; shutting down"
+                        ),
+                    }
+                    std::process::exit(70);
+                }
+                res
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                tracing::error!(
+                    panic = %msg,
+                    "background processor panicked; shutting down instead of running without \
+                     event processing"
+                );
+                std::process::exit(70);
+            }
+        }
+    });
 
     // Regularly reconnect to channel peers.
     let connect_cm = Arc::clone(&channel_manager);
