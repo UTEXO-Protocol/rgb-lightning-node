@@ -72,6 +72,7 @@ pub(crate) struct TomlChannels {
     pub(crate) open_max_sat: Option<u64>,
     pub(crate) open_min_rgb_amount: Option<u64>,
     pub(crate) their_to_self_delay: Option<u16>,
+    pub(crate) accept_forwards_to_priv_channels: Option<bool>,
     pub(crate) cltv_expiry_delta: Option<u16>,
     pub(crate) our_to_self_delay: Option<u16>,
     pub(crate) forwarding_fee_base_msat: Option<u32>,

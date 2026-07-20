@@ -4399,7 +4399,9 @@ pub(crate) async fn start_ldk(
     user_config.channel_handshake_config.our_max_accepted_htlcs =
         channels_config.our_max_accepted_htlcs;
     user_config.channel_config = channels_config.channel_config();
-    user_config.accept_forwards_to_priv_channels = static_state.enable_virtual_channels_v0;
+    // virtual channels are unannounced, so they require private forwarding
+    user_config.accept_forwards_to_priv_channels =
+        channels_config.accept_forwards_to_priv_channels || static_state.enable_virtual_channels_v0;
     user_config.manually_accept_inbound_channels = true;
     let mut restarting_node = true;
     let (channel_manager_blockhash, channel_manager) = {

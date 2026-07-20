@@ -88,6 +88,8 @@
 #our_max_accepted_htlcs = 50
 # Max confirmations a peer may require before a channel is usable
 #max_minimum_depth = 144
+# Forward HTLCs to private (unannounced) channels; implied by enable_virtual_channels_v0
+#accept_forwards_to_priv_channels = false
 # Enable virtual channels (v0)
 #enable_virtual_channels_v0 = false
 # Allowed virtual channel peer pubkeys (hex-encoded)

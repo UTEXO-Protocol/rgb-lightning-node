@@ -208,6 +208,7 @@ pub(crate) struct ChannelsSection {
     pub(crate) open_max_sat: u64,
     pub(crate) open_min_rgb_amount: u64,
     pub(crate) their_to_self_delay: u16,
+    pub(crate) accept_forwards_to_priv_channels: bool,
     pub(crate) cltv_expiry_delta: u16,
     pub(crate) our_to_self_delay: u16,
     pub(crate) forwarding_fee_base_msat: u32,
@@ -233,6 +234,7 @@ impl Default for ChannelsSection {
             open_max_sat: DEFAULT_OPENCHANNEL_MAX_SAT,
             open_min_rgb_amount: DEFAULT_OPENCHANNEL_MIN_RGB_AMT,
             their_to_self_delay: DEFAULT_THEIR_TO_SELF_DELAY,
+            accept_forwards_to_priv_channels: false,
             cltv_expiry_delta: ldk_channel.cltv_expiry_delta,
             our_to_self_delay: ldk_handshake.our_to_self_delay,
             forwarding_fee_base_msat: ldk_channel.forwarding_fee_base_msat,
@@ -428,6 +430,10 @@ impl Config {
             apply(
                 &mut self.channels.their_to_self_delay,
                 channels.their_to_self_delay,
+            );
+            apply(
+                &mut self.channels.accept_forwards_to_priv_channels,
+                channels.accept_forwards_to_priv_channels,
             );
             apply(
                 &mut self.channels.cltv_expiry_delta,

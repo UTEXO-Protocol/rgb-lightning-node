@@ -535,3 +535,10 @@ fn zero_max_minimum_depth_rejected() {
     let m = err_msg(cfg("[channels]\nmax_minimum_depth = 0\n"));
     assert!(m.contains("max_minimum_depth"));
 }
+
+#[test]
+fn accept_forwards_to_priv_channels_defaults_off_and_applies() {
+    assert!(!Config::default().channels.accept_forwards_to_priv_channels);
+    let c = cfg("[channels]\naccept_forwards_to_priv_channels = true\n").unwrap();
+    assert!(c.channels.accept_forwards_to_priv_channels);
+}
