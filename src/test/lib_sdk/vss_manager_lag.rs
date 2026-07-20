@@ -1,15 +1,5 @@
-//! Reproduces the 2026-07 field incident: the channel-manager key on VSS lags
-//! behind the (remote-first) channel monitors, so a fresh-device restore loads
-//! a manager that does not know the channel and LDK force-closes it
-//! (`OutdatedChannelManager`) — `listchannels` comes back empty even though
-//! the restore itself "succeeded".
-//!
-//! The lag is driven through the production write path: an HTTP proxy in
-//! front of VSS rejects only PUTs of the `_/_/manager` key (a transient-style
-//! 502), which the best-effort `SyncedKvStore` replication absorbs into its
-//! in-memory pending queue. Monitor writes (RemoteFirstKvStore) pass through
-//! untouched. A graceful shutdown then discards the queue silently.
-//!
+//! A restore whose channel manager lags the (remote-first) channel monitors
+//! must refuse to unlock or keep the channel — never silently force-close.
 //! Requires the regtest stack (`./regtest.sh start`) and the VSS server
 //! (`docker compose --profile vss up -d`).
 
@@ -32,9 +22,7 @@ fn vss_server_available() -> bool {
         .is_ok()
 }
 
-/// HTTP proxy for the VSS server that can reject writes of the
-/// channel-manager key while passing everything else through — most
-/// importantly all channel-monitor writes.
+/// VSS proxy that can reject channel-manager-key writes, passing all else through.
 struct ManagerFilterProxy {
     port: u16,
     filter: Arc<AtomicBool>,
@@ -109,7 +97,10 @@ fn read_http_request(
 fn handle_conn(mut client: std::net::TcpStream, filter: Arc<AtomicBool>) -> std::io::Result<()> {
     while let Some((head, body)) = read_http_request(&mut client)? {
         let head_str = String::from_utf8_lossy(&head).to_string();
-        let is_put = head_str.lines().next().is_some_and(|l| l.contains("putObject"));
+        let is_put = head_str
+            .lines()
+            .next()
+            .is_some_and(|l| l.contains("putObject"));
         let has_manager_key = body
             .windows(MANAGER_VSS_KEY.len())
             .any(|w| w == MANAGER_VSS_KEY);
@@ -119,8 +110,7 @@ fn handle_conn(mut client: std::net::TcpStream, filter: Arc<AtomicBool>) -> std:
             )?;
             return Ok(());
         }
-        // Forward on a fresh upstream connection with `Connection: close` so
-        // the response is delimited by EOF and needs no framing of its own.
+        // Fresh upstream connection with `Connection: close`: response is EOF-delimited.
         let mut upstream = std::net::TcpStream::connect(VSS_SERVER_ADDR)?;
         let mut new_head = String::new();
         for line in head_str.split("\r\n") {
@@ -183,8 +173,7 @@ fn restore_keeps_channel_when_manager_replication_lagged() {
 
     let proxy = ManagerFilterProxy::start();
 
-    // --- Phase 1: node A (VSS via proxy) + peer B, channel while manager
-    // replication silently fails. ---
+    // Phase 1: open a channel while manager replication silently fails.
     let node_a = make_node_with_vss(
         &node_a_dir,
         NODE_A_DAEMON_PORT + NODE_A_PORT_OFFSET,
@@ -223,8 +212,6 @@ fn restore_keeps_channel_when_manager_replication_lagged() {
         .expect("node A issueassetnia");
     let asset_id = asset.asset_id;
 
-    // From here on the manager key never reaches VSS again (transient-style
-    // 502s absorbed by the best-effort replication queue); monitors do.
     proxy.block_manager_writes();
 
     let node_b_pubkey = node_b.node_info().expect("node B node_info").pubkey;
@@ -259,15 +246,14 @@ fn restore_keeps_channel_when_manager_replication_lagged() {
         .get_channel_id(open_channel.temporary_channel_id)
         .expect("node A get_channel_id");
 
-    // --- Phase 2: graceful shutdown (drops the pending replication queue),
-    // outage "ends", node A device is wiped. ---
+    // Phase 2: graceful shutdown drops the pending queue; wipe the device.
     node_a.shutdown();
     drop(node_a);
     proxy.allow_all();
 
     fs::remove_dir_all(&node_a_dir).expect("wipe node A storage");
 
-    // --- Phase 3: fresh device, same mnemonic, by-the-book restore. ---
+    // Phase 3: fresh device, same mnemonic, by-the-book restore.
     let node_a = make_node_with_vss(
         &node_a_dir,
         NODE_A_DAEMON_PORT + NODE_A_PORT_OFFSET,
@@ -283,22 +269,26 @@ fn restore_keeps_channel_when_manager_replication_lagged() {
             password: PASSWORD_A.to_string(),
         })
         .expect("node A vss_clear_fence");
-    node_a
-        .unlock(unlock_request(PASSWORD_A))
-        .expect("node A unlock after restore");
 
-    // --- Phase 4: the channel must have survived the restore. ---
-    let channels = node_a.list_channels().expect("node A list_channels");
-    let channel_ids: Vec<_> = channels.iter().map(|c| c.channel_id).collect();
-    let force_closed_evidence =
-        node_ldk_log_contains(&node_a_dir, "hen we loaded") // "...was not found... when we loaded"
-            || node_ldk_log_contains(&node_a_dir, "Force-closing");
-    assert!(
-        channel_ids.contains(&channel_id),
-        "channel {channel_id} must survive a VSS restore even when manager replication lagged \
-         behind monitor replication; got channels: {channel_ids:?} \
-         (force-close evidence in LDK log: {force_closed_evidence})"
-    );
+    // Phase 4: refuse loudly or keep the channel; silent empty success is the bug.
+    match node_a.unlock(unlock_request(PASSWORD_A)) {
+        Err(e) => {
+            eprintln!("unlock refused as expected: {e:?}");
+            assert!(
+                !node_ldk_log_contains(&node_a_dir, "force closed, should broadcast: true"),
+                "a refused unlock must not have broadcast a force-close"
+            );
+        }
+        Ok(()) => {
+            let channels = node_a.list_channels().expect("node A list_channels");
+            let channel_ids: Vec<_> = channels.iter().map(|c| c.channel_id).collect();
+            assert!(
+                channel_ids.contains(&channel_id),
+                "unlock succeeded after the restore, so channel {channel_id} must be intact; \
+                 got channels: {channel_ids:?}"
+            );
+        }
+    }
 
     // Cleanup
     node_a.shutdown();

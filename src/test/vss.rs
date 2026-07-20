@@ -977,10 +977,6 @@ mod tests {
         client.delete_backup().await.expect("cleanup");
     }
 
-    /// A queued (failed) replication must never overwrite a newer value that
-    /// already replicated for the same key. Field incident 2026-07: the
-    /// channel manager on VSS ended up older than the channel monitors, so a
-    /// restore force-closed the channel (`OutdatedChannelManager`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn synced_kv_store_drain_never_regresses_newer_write() {
         if !vss_server_available() {
@@ -1000,7 +996,9 @@ mod tests {
         synced.write("", "", "manager", b"v1".to_vec()).expect("v1");
 
         proxy.go_offline();
-        synced.write("", "", "manager", b"v2".to_vec()).expect("v2 local");
+        synced
+            .write("", "", "manager", b"v2".to_vec())
+            .expect("v2 local");
         assert_eq!(synced.pending_remote_writes(), 1, "v2 must be queued");
 
         proxy.go_online();

@@ -144,6 +144,18 @@ impl SyncedKvStore {
         Ok(restored)
     }
 
+    /// Local-only removal; lets the restore guard discard a restored key.
+    #[cfg(feature = "vss")]
+    pub(crate) fn remove_local_only(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+    ) -> Result<(), io::Error> {
+        self.local
+            .remove(primary_namespace, secondary_namespace, key, false)
+    }
+
     /// Returns the number of pending VSS-replication entries that failed and
     /// are awaiting retry. Surfaced via `/vssbackupinfo` so operators can
     /// alert on persistent backup-staleness.
@@ -241,8 +253,11 @@ impl KVStoreSync for SyncedKvStore {
         // Replicate to VSS (best-effort, queue for retry on failure).
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
+            let vss_key = crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
             match remote.write(primary_namespace, secondary_namespace, key, buf.clone()) {
                 Ok(()) => {
+                    // Drop any stale queued value so the drain can't regress the remote.
+                    self.pending.lock().unwrap().remove(&vss_key);
                     self.drain_pending();
                 }
                 Err(e) => {
@@ -253,8 +268,6 @@ impl KVStoreSync for SyncedKvStore {
                         error = %e,
                         "VSS replication write failed; queued for retry"
                     );
-                    let vss_key =
-                        crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
                     self.enqueue_pending(vss_key, Some(buf));
                 }
             }
@@ -277,8 +290,11 @@ impl KVStoreSync for SyncedKvStore {
         // Replicate removal to VSS (best-effort, queue for retry on failure).
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
+            let vss_key = crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
             match remote.remove(primary_namespace, secondary_namespace, key, lazy) {
                 Ok(()) => {
+                    // Same as in `write`.
+                    self.pending.lock().unwrap().remove(&vss_key);
                     self.drain_pending();
                 }
                 Err(e) => {
@@ -289,8 +305,6 @@ impl KVStoreSync for SyncedKvStore {
                         error = %e,
                         "VSS replication remove failed; queued for retry"
                     );
-                    let vss_key =
-                        crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
                     self.enqueue_pending(vss_key, None);
                 }
             }
