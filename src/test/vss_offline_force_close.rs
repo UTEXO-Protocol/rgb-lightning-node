@@ -7,7 +7,7 @@ const VSS_SERVER_ADDR: &str = "127.0.0.1:8081";
 /// simulating a VSS outage for a single node without touching the shared
 /// service. Offline: established connections are cut and new ones are closed
 /// on accept.
-struct VssProxy {
+pub(super) struct VssProxy {
     port: u16,
     online: tokio::sync::watch::Sender<bool>,
 }
@@ -15,7 +15,7 @@ struct VssProxy {
 impl VssProxy {
     // The proxy gets a dedicated thread + runtime: the shared test runtime can
     // stall for seconds on synchronous KVStore calls and would starve it.
-    fn start() -> Self {
+    pub(super) fn start() -> Self {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         std_listener.set_nonblocking(true).unwrap();
         let port = std_listener.local_addr().unwrap().port();
@@ -50,15 +50,15 @@ impl VssProxy {
         Self { port, online }
     }
 
-    fn url(&self) -> String {
+    pub(super) fn url(&self) -> String {
         format!("http://127.0.0.1:{}/vss", self.port)
     }
 
-    fn go_offline(&self) {
+    pub(super) fn go_offline(&self) {
         self.online.send(false).unwrap();
     }
 
-    fn go_online(&self) {
+    pub(super) fn go_online(&self) {
         self.online.send(true).unwrap();
     }
 }

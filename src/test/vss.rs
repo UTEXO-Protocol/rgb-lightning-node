@@ -976,4 +976,40 @@ mod tests {
 
         client.delete_backup().await.expect("cleanup");
     }
+
+    /// A queued (failed) replication must never overwrite a newer value that
+    /// already replicated for the same key. Field incident 2026-07: the
+    /// channel manager on VSS ended up older than the channel monitors, so a
+    /// restore force-closed the channel (`OutdatedChannelManager`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synced_kv_store_drain_never_regresses_newer_write() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let proxy = super::super::vss_offline_force_close::VssProxy::start();
+        let (signing_key, store_id) = generate_test_keys();
+        let remote =
+            Arc::new(VssKvStore::new(proxy.url(), store_id, signing_key).expect("vss store"));
+        let synced = SyncedKvStore::with_vss(
+            Arc::new(SeaOrmKvStore::from_connection(create_test_sqlite())),
+            Arc::clone(&remote),
+        );
+
+        synced.write("", "", "manager", b"v1".to_vec()).expect("v1");
+
+        proxy.go_offline();
+        synced.write("", "", "manager", b"v2".to_vec()).expect("v2 local");
+        assert_eq!(synced.pending_remote_writes(), 1, "v2 must be queued");
+
+        proxy.go_online();
+        synced.write("", "", "manager", b"v3".to_vec()).expect("v3");
+
+        assert_eq!(
+            KVStoreSync::read(&*remote, "", "", "manager").expect("remote read"),
+            b"v3".to_vec(),
+            "remote must hold the newest value; a stale queued write must not regress it"
+        );
+    }
 }
