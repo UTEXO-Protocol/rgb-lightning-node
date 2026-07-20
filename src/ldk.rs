@@ -3251,13 +3251,19 @@ impl OutputSpender for RgbOutputSpender {
                 .rgb_wallet_wrapper
                 .get_tx_height(txid_str.clone())
                 .map_err(|_| ())?;
+            let Some(closing_height) = closing_height else {
+                tracing::warn!(
+                    txid = txid_str,
+                    "closing tx not confirmed yet; deferring sweep"
+                );
+                return Err(());
+            };
             let update_res = self
                 .rgb_wallet_wrapper
-                .update_witnesses(
-                    closing_height.unwrap(),
-                    vec![RgbTxid::from_str(&txid_str).unwrap()],
-                )
-                .unwrap();
+                .update_witnesses(closing_height, vec![RgbTxid::from_str(&txid_str).unwrap()])
+                .map_err(|e| {
+                    tracing::error!(error = %e, txid = txid_str, "update_witnesses failed; deferring sweep");
+                })?;
             if !update_res.failed.is_empty() {
                 return Err(());
             }
@@ -3278,10 +3284,16 @@ impl OutputSpender for RgbOutputSpender {
                         vec![self.proxy_endpoint.clone()],
                         0,
                     )
-                    .unwrap();
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "witness_receive failed; deferring sweep");
+                    })?;
                 let script_pubkey = script_buf_from_recipient_id(receive_data.recipient_id.clone())
-                    .unwrap()
-                    .unwrap();
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "invalid sweep recipient id; deferring sweep");
+                    })?
+                    .ok_or_else(|| {
+                        tracing::error!("sweep recipient id has no script; deferring sweep");
+                    })?;
                 txouts.push(TxOut {
                     value: Amount::from_sat(
                         self.static_state.config.channels.dust_limit_msat / 1000,
@@ -3326,7 +3338,9 @@ impl OutputSpender for RgbOutputSpender {
                 feerate_sat_per_1000_weight,
                 locktime,
             )
-            .unwrap();
+            .map_err(|_| {
+                tracing::error!("failed to build sweep PSBT; deferring sweep");
+            })?;
 
         let mut asset_info_map = map![];
         for (contract_id, (vout, amt_rgb, _)) in asset_info.clone() {
@@ -3349,14 +3363,18 @@ impl OutputSpender for RgbOutputSpender {
         let consignments = self
             .rgb_wallet_wrapper
             .color_psbt_and_consume(&mut psbt, coloring_info)
-            .unwrap();
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to color sweep PSBT; deferring sweep");
+            })?;
 
         let mut psbt = Psbt::from_str(&psbt.to_string()).expect("valid transaction");
 
         psbt = self
             .signer
             .sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)
-            .unwrap();
+            .map_err(|e| {
+                tracing::error!(error = ?e, "failed to sign sweep PSBT; deferring sweep");
+            })?;
 
         let spending_tx = match psbt.extract_tx() {
             Ok(tx) => tx,
@@ -3770,6 +3788,93 @@ fn supported_asset_schemas(bitcoin_network: BitcoinNetwork) -> Vec<AssetSchema> 
         schemas.push(AssetSchema::Ifa);
     }
     schemas
+}
+
+// A dead background processor must exit the node, not leave it serving without
+// event processing; only `stop_processing` termination is expected.
+async fn supervise_background_processor(
+    bp_future: impl std::future::Future<Output = Result<(), io::Error>> + Send,
+    stop_flag: Arc<AtomicBool>,
+) -> Result<(), io::Error> {
+    let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(bp_future)).await;
+    let stopping = stop_flag.load(Ordering::Acquire);
+    match result {
+        Ok(res) => {
+            if !stopping {
+                match &res {
+                    Ok(()) => {
+                        tracing::error!("background processor exited unexpectedly; shutting down")
+                    }
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "background processor failed unexpectedly; shutting down"
+                    ),
+                }
+                std::process::exit(70);
+            }
+            res
+        }
+        Err(panic_payload) => {
+            let msg = panic_payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            tracing::error!(
+                panic = %msg,
+                "background processor panicked; shutting down instead of running without \
+                 event processing"
+            );
+            std::process::exit(70);
+        }
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+
+    // Child mode re-runs this test in a subprocess so the exit code is observable.
+    #[test]
+    fn exits_with_code_70_on_bp_panic() {
+        if std::env::var("BP_WATCHDOG_CHILD").is_ok() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let _ = rt.block_on(supervise_background_processor(
+                async { panic!("test panic") },
+                stop,
+            ));
+            std::process::exit(0);
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ldk::watchdog_tests::exits_with_code_70_on_bp_panic",
+            ])
+            .env("BP_WATCHDOG_CHILD", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(70));
+    }
+
+    #[test]
+    fn returns_without_exiting_when_stop_requested() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(true));
+        let res = rt.block_on(supervise_background_processor(
+            async { Err(io::Error::new(io::ErrorKind::Other, "aborted at teardown")) },
+            stop,
+        ));
+        assert!(res.is_err());
+    }
 }
 
 pub(crate) async fn start_ldk(
@@ -5179,48 +5284,10 @@ pub(crate) async fn start_ldk(
         },
     );
 
-    // Watchdog: the node must never keep serving traffic without a background
-    // processor — no event handling, no channel-manager persistence, silent
-    // state divergence (field incident 2026-07: a panic in the BumpTransaction
-    // handler killed this task and the node looked healthy for two days). Any
-    // termination not requested through `stop_processing` exits the process so
-    // the supervisor restarts it from consistent state.
-    let bp_stop_flag = Arc::clone(&stop_processing);
-    let background_processor = tokio::spawn(async move {
-        let result =
-            futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(bp_future)).await;
-        let stopping = bp_stop_flag.load(Ordering::Acquire);
-        match result {
-            Ok(res) => {
-                if !stopping {
-                    match &res {
-                        Ok(()) => tracing::error!(
-                            "background processor exited unexpectedly; shutting down"
-                        ),
-                        Err(e) => tracing::error!(
-                            error = %e,
-                            "background processor failed unexpectedly; shutting down"
-                        ),
-                    }
-                    std::process::exit(70);
-                }
-                res
-            }
-            Err(panic_payload) => {
-                let msg = panic_payload
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                tracing::error!(
-                    panic = %msg,
-                    "background processor panicked; shutting down instead of running without \
-                     event processing"
-                );
-                std::process::exit(70);
-            }
-        }
-    });
+    let background_processor = tokio::spawn(supervise_background_processor(
+        bp_future,
+        Arc::clone(&stop_processing),
+    ));
 
     // Regularly reconnect to channel peers.
     let connect_cm = Arc::clone(&channel_manager);

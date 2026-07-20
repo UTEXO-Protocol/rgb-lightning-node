@@ -1066,9 +1066,7 @@ impl ChangeDestinationSource for RgbLibWalletWrapper {
     }
 }
 
-// These methods run inside the BumpTransaction event handler: any panic here
-// kills the background processor task, so failures must surface as `Err(())`
-// (the bump is retried on a later event) instead of unwraps.
+// Runs in the event handler: failures must return Err(()) (retried later), never panic.
 impl WalletSource for RgbLibWalletWrapper {
     fn list_confirmed_utxos<'a>(&'a self) -> AsyncResult<'a, Vec<Utxo>, ()> {
         Box::pin(async move {
@@ -1215,9 +1213,6 @@ mod wallet_source_tests {
     use rgb_lib::keys::{generate_keys, WitnessVersion};
     use rgb_lib::wallet::{DatabaseType, WalletData};
 
-    /// Every rgb-lib network variant must map to a bitcoin network. Mainnet
-    /// and SignetCustom have no string form `bitcoin::Network` can parse, so
-    /// this conversion must never round-trip through strings.
     #[test]
     fn bitcoin_network_conversion_covers_all_variants() {
         for (rgb_net, expected) in [
@@ -1254,13 +1249,9 @@ mod wallet_source_tests {
             },
         )
         .expect("signetcustom wallet");
-        // Bogus online handle: wallet calls may fail, but must not panic.
         RgbLibWalletWrapper::new(Arc::new(Mutex::new(wallet)), Online { id: 0 })
     }
 
-    /// `WalletSource` methods run inside the BumpTransaction event handler; a
-    /// panic there kills the background processor. Field incident 2026-07: the
-    /// network-string unwrap panicked on signetcustom on every anchor bump.
     #[tokio::test]
     async fn wallet_source_does_not_panic_on_signetcustom() {
         let wrapper = signetcustom_wallet_source();
