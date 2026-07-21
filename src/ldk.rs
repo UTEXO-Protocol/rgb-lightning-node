@@ -56,14 +56,15 @@ use lightning::util::hash_tables::{new_hash_map, HashMap as LdkHashMap};
 #[cfg(feature = "vss")]
 use lightning::util::native_async::FutureSpawner;
 #[cfg(not(feature = "vss"))]
+use lightning::util::persist::KVStoreSyncWrapper;
+#[cfg(not(feature = "vss"))]
 use lightning::util::persist::MonitorUpdatingPersister;
 #[cfg(feature = "vss")]
 use lightning::util::persist::MonitorUpdatingPersisterAsync;
 use lightning::util::persist::{
-    KVStoreSync, KVStoreSyncWrapper, CHANNEL_MANAGER_PERSISTENCE_KEY,
-    CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-    OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
-    OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
+    KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+    CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_KEY,
+    OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning::util::sweep as ldk_sweep;
@@ -1131,12 +1132,19 @@ pub(crate) struct RgbOutputSpender {
     proxy_endpoint: String,
 }
 
+// The sweeper store type is shared with the background processor's persister
+// (same generic in `process_events_async`).
+#[cfg(feature = "vss")]
+pub(crate) type BpKvStore = Arc<crate::async_kv_store::BpKvStoreRouter>;
+#[cfg(not(feature = "vss"))]
+pub(crate) type BpKvStore = KVStoreSyncWrapper<Arc<SyncedKvStore>>;
+
 pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
     Arc<ChainBackend>,
     Arc<RgbLibWalletWrapper>,
     Arc<ChainBackend>,
     Arc<dyn Filter + Send + Sync>,
-    KVStoreSyncWrapper<Arc<SyncedKvStore>>,
+    BpKvStore,
     Arc<FilesystemLogger>,
     Arc<RgbOutputSpender>,
 >;
@@ -3876,9 +3884,11 @@ pub(crate) async fn start_ldk(
         None
     };
 
-    // Monitors persist remote-first through `monitor_kv_store` (async, VSS-durable
-    // before ack); ChannelManager and aux state keep the local-first `kv_store`
-    // sync facade. Both share the same local DB and (when configured) VSS store.
+    // Monitors and the channel manager persist remote-first (VSS-durable before
+    // ack); aux state keeps the local-first `kv_store` sync facade. All share
+    // the same local DB and (when configured) VSS store.
+    #[cfg(feature = "vss")]
+    let bp_local_kv_store = Arc::clone(&local_kv_store);
     #[cfg(feature = "vss")]
     let mut fence_guard: Option<crate::vss_kv_store::FenceReleaseGuard> = None;
     #[cfg(feature = "vss")]
@@ -3965,6 +3975,15 @@ pub(crate) async fn start_ldk(
 
     #[cfg(not(feature = "vss"))]
     let kv_store = Arc::new(SyncedKvStore::local_only(local_kv_store));
+
+    #[cfg(feature = "vss")]
+    let bp_kv_store: BpKvStore = Arc::new(crate::async_kv_store::BpKvStoreRouter::new(
+        Arc::clone(&monitor_kv_store),
+        bp_local_kv_store,
+        Arc::clone(&kv_store),
+    ));
+    #[cfg(not(feature = "vss"))]
+    let bp_kv_store: BpKvStore = KVStoreSyncWrapper(Arc::clone(&kv_store));
 
     // Sync config from database to KVStore
     sync_config_to_kvstore(&static_state.db(), kv_store.as_ref())?;
@@ -4606,7 +4625,7 @@ pub(crate) async fn start_ldk(
                 chain_source.clone(),
                 rgb_output_spender,
                 rgb_wallet_wrapper.clone(),
-                KVStoreSyncWrapper(kv_store.clone()),
+                Clone::clone(&bp_kv_store),
                 logger.clone(),
             );
             (channel_manager.current_best_block(), sweeper)
@@ -4618,7 +4637,7 @@ pub(crate) async fn start_ldk(
                 chain_source.clone(),
                 rgb_output_spender.clone(),
                 rgb_wallet_wrapper.clone(),
-                KVStoreSyncWrapper(kv_store.clone()),
+                Clone::clone(&bp_kv_store),
                 logger.clone(),
             );
             let mut reader = io::Cursor::new(&mut bytes);
@@ -5044,8 +5063,8 @@ pub(crate) async fn start_ldk(
         Arc::clone(&logger),
     ));
 
-    // Persist ChannelManager and NetworkGraph
-    let persister = KVStoreSyncWrapper(Arc::clone(&kv_store));
+    // Persist ChannelManager (remote-first with VSS), NetworkGraph and scorer.
+    let persister = Clone::clone(&bp_kv_store);
 
     // Read swaps info from KVStore
     let maker_swaps = Arc::new(Mutex::new({
@@ -5487,9 +5506,55 @@ impl AppState {
     }
 }
 
+#[cfg(feature = "vss")]
+const BP_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(feature = "vss")]
+fn log_bp_shutdown_result(res: Result<Result<(), io::Error>, tokio::task::JoinError>) {
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "background processor exited with error during shutdown")
+        }
+        Err(e) => tracing::error!(error = %e, "background processor task join failed"),
+    }
+}
+
 pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
     tracing::info!("Stopping LDK");
 
+    #[cfg(feature = "vss")]
+    let stores = app_state
+        .get_unlocked_app_state()
+        .await
+        .as_ref()
+        .map(|unlocked| {
+            (
+                Arc::clone(&unlocked.kv_store),
+                Arc::clone(&unlocked.monitor_kv_store),
+            )
+        });
+
+    #[cfg(feature = "vss")]
+    if let Some(mut join_handle) = app_state.stop_ldk() {
+        // Bounded flush: give the final remote-first persists time to reach
+        // VSS, then abort outage-pending retries so shutdown cannot hang.
+        match tokio::time::timeout(BP_SHUTDOWN_FLUSH_TIMEOUT, &mut join_handle).await {
+            Ok(res) => log_bp_shutdown_result(res),
+            Err(_) => {
+                tracing::error!(
+                    "final VSS flush did not complete in {:?}; aborting pending \
+                     retries — last channel-manager state may not have replicated",
+                    BP_SHUTDOWN_FLUSH_TIMEOUT
+                );
+                if let Some((_, ref monitor_kv_store)) = stores {
+                    monitor_kv_store.stop();
+                }
+                log_bp_shutdown_result(join_handle.await);
+            }
+        }
+    }
+    #[cfg(not(feature = "vss"))]
     if let Some(join_handle) = app_state.stop_ldk() {
         join_handle.await.unwrap().unwrap();
     }
@@ -5499,16 +5564,6 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
     // /vssclearfence. Hard kills still leave the fence behind by design.
     #[cfg(feature = "vss")]
     {
-        let stores = app_state
-            .get_unlocked_app_state()
-            .await
-            .as_ref()
-            .map(|unlocked| {
-                (
-                    Arc::clone(&unlocked.kv_store),
-                    Arc::clone(&unlocked.monitor_kv_store),
-                )
-            });
         if let Some((kv_store, monitor_kv_store)) = stores {
             // Abort outage-pending monitor writes before giving up the fence:
             // a retry landing after another instance owns the store would

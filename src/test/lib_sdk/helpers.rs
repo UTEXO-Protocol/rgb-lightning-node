@@ -247,6 +247,34 @@ pub(crate) fn make_node_with_vss(
     )
 }
 
+/// Like [`make_node_with_vss`] but with `--vss-allow-empty-restore`: the
+/// operator's escape hatch for restores refused as inconsistent.
+#[allow(dead_code)] // used by VSS-only tests
+pub(crate) fn make_node_with_vss_allow_empty(
+    storage_dir_path: &Path,
+    daemon_listening_port: u16,
+    ldk_peer_listening_port: u16,
+    vss_url: &str,
+) -> SdkNode {
+    fs::create_dir_all(storage_dir_path).expect("create storage dir");
+    SdkNode::create(SdkInitRequest {
+        storage_dir_path: storage_dir_path.display().to_string(),
+        daemon_listening_port,
+        ldk_peer_listening_port,
+        network: "regtest".to_string(),
+        max_media_upload_size_mb: 20,
+        enable_virtual_channels_v0: Some(false),
+        virtual_peer_pubkeys: None,
+        lsp_base_url: None,
+        lsp_bearer_token: None,
+        vss_url: Some(vss_url.to_string()),
+        vss_allow_http: true,
+        vss_allow_empty_restore: true,
+        reuse_addresses: false,
+    })
+    .expect("create SDK node")
+}
+
 /// Like [`make_node`], but with trusted virtual channels (v0) enabled. `virtual_peer_pubkeys`
 /// is the acceptor-side allowlist: inbound `trusted_no_broadcast` opens are only accepted from
 /// these peers. Openers just need the feature enabled (pass `None`).

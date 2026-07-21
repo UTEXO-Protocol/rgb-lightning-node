@@ -993,21 +993,117 @@ mod tests {
             Arc::clone(&remote),
         );
 
-        synced.write("", "", "manager", b"v1".to_vec()).expect("v1");
+        synced
+            .write("", "", "aux_state", b"v1".to_vec())
+            .expect("v1");
 
         proxy.go_offline();
         synced
-            .write("", "", "manager", b"v2".to_vec())
+            .write("", "", "aux_state", b"v2".to_vec())
             .expect("v2 local");
         assert_eq!(synced.pending_remote_writes(), 1, "v2 must be queued");
 
         proxy.go_online();
-        synced.write("", "", "manager", b"v3".to_vec()).expect("v3");
+        synced
+            .write("", "", "aux_state", b"v3".to_vec())
+            .expect("v3");
 
         assert_eq!(
-            KVStoreSync::read(&*remote, "", "", "manager").expect("remote read"),
+            KVStoreSync::read(&*remote, "", "", "aux_state").expect("remote read"),
             b"v3".to_vec(),
             "remote must hold the newest value; a stale queued write must not regress it"
+        );
+    }
+
+    /// Manager writes must be VSS-durable before completing; graph/scorer must
+    /// never reach VSS; aux keys keep best-effort replication.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bp_router_routes_manager_remote_first() {
+        use lightning::util::persist::{
+            KVStore, NETWORK_GRAPH_PERSISTENCE_KEY, SCORER_PERSISTENCE_KEY,
+        };
+
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let proxy = super::super::vss_offline_force_close::VssProxy::start();
+        let (signing_key, store_id) = generate_test_keys();
+        let remote =
+            Arc::new(VssKvStore::new(proxy.url(), store_id, signing_key).expect("vss store"));
+        let local = Arc::new(SeaOrmKvStore::from_connection(create_test_sqlite()));
+        let remote_first = Arc::new(crate::async_kv_store::RemoteFirstKvStore::new(
+            Arc::clone(&local),
+            Some(Arc::clone(&remote)),
+        ));
+        let synced = Arc::new(SyncedKvStore::with_vss(
+            Arc::clone(&local),
+            Arc::clone(&remote),
+        ));
+        let router = Arc::new(crate::async_kv_store::BpKvStoreRouter::new(
+            Arc::clone(&remote_first),
+            Arc::clone(&local),
+            synced,
+        ));
+
+        router
+            .write("", "", "manager", b"m1".to_vec())
+            .await
+            .expect("manager write");
+        assert_eq!(
+            remote.read_async("", "", "manager").await.expect("on VSS"),
+            b"m1".to_vec(),
+            "manager must be durable on VSS when the write completes"
+        );
+
+        router
+            .write("", "", NETWORK_GRAPH_PERSISTENCE_KEY, b"g1".to_vec())
+            .await
+            .expect("graph write");
+        router
+            .write("", "", SCORER_PERSISTENCE_KEY, b"s1".to_vec())
+            .await
+            .expect("scorer write");
+        assert!(
+            remote
+                .read_async("", "", NETWORK_GRAPH_PERSISTENCE_KEY)
+                .await
+                .is_err(),
+            "network graph must not replicate to VSS"
+        );
+        assert!(
+            remote
+                .read_async("", "", SCORER_PERSISTENCE_KEY)
+                .await
+                .is_err(),
+            "scorer must not replicate to VSS"
+        );
+        assert!(
+            KVStoreSync::read(&*local, "", "", NETWORK_GRAPH_PERSISTENCE_KEY).is_ok(),
+            "network graph must be stored locally"
+        );
+
+        // Manager write during an outage blocks (retry loop) instead of
+        // acking; it completes once VSS is back and lands durably.
+        proxy.go_offline();
+        let router_task = Arc::clone(&router);
+        let pending =
+            tokio::spawn(async move { router_task.write("", "", "manager", b"m2".to_vec()).await });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            !pending.is_finished(),
+            "manager write must not complete while VSS is unreachable"
+        );
+        proxy.go_online();
+        tokio::time::timeout(Duration::from_secs(30), pending)
+            .await
+            .expect("write must finish after recovery")
+            .expect("join")
+            .expect("write ok");
+        assert_eq!(
+            remote.read_async("", "", "manager").await.expect("on VSS"),
+            b"m2".to_vec(),
         );
     }
 }

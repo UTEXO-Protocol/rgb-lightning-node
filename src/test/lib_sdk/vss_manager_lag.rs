@@ -26,6 +26,7 @@ fn vss_server_available() -> bool {
 struct ManagerFilterProxy {
     port: u16,
     filter: Arc<AtomicBool>,
+    blocked: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ManagerFilterProxy {
@@ -33,17 +34,28 @@ impl ManagerFilterProxy {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let filter = Arc::new(AtomicBool::new(false));
+        let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let flag = Arc::clone(&filter);
+        let hits = Arc::clone(&blocked);
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { break };
                 let flag = Arc::clone(&flag);
+                let hits = Arc::clone(&hits);
                 std::thread::spawn(move || {
-                    let _ = handle_conn(stream, flag);
+                    let _ = handle_conn(stream, flag, hits);
                 });
             }
         });
-        Self { port, filter }
+        Self {
+            port,
+            filter,
+            blocked,
+        }
+    }
+
+    fn blocked_count(&self) -> usize {
+        self.blocked.load(Ordering::SeqCst)
     }
 
     fn url(&self) -> String {
@@ -94,7 +106,11 @@ fn read_http_request(
     Ok(Some((head, body)))
 }
 
-fn handle_conn(mut client: std::net::TcpStream, filter: Arc<AtomicBool>) -> std::io::Result<()> {
+fn handle_conn(
+    mut client: std::net::TcpStream,
+    filter: Arc<AtomicBool>,
+    blocked: Arc<std::sync::atomic::AtomicUsize>,
+) -> std::io::Result<()> {
     while let Some((head, body)) = read_http_request(&mut client)? {
         let head_str = String::from_utf8_lossy(&head).to_string();
         let is_put = head_str
@@ -105,6 +121,7 @@ fn handle_conn(mut client: std::net::TcpStream, filter: Arc<AtomicBool>) -> std:
             .windows(MANAGER_VSS_KEY.len())
             .any(|w| w == MANAGER_VSS_KEY);
         if filter.load(Ordering::SeqCst) && is_put && has_manager_key {
+            blocked.fetch_add(1, Ordering::SeqCst);
             client.write_all(
                 b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
             )?;
@@ -154,16 +171,20 @@ fn node_ldk_log_contains(dir: &std::path::Path, needle: &str) -> bool {
     false
 }
 
-#[test]
-#[serial]
-fn restore_keeps_channel_when_manager_replication_lagged() {
-    ensure_regtest_available();
-    if !vss_server_available() {
-        eprintln!("SKIP: VSS server not available at {VSS_SERVER_ADDR}");
-        return;
-    }
+struct LagSetup {
+    proxy: ManagerFilterProxy,
+    node_a: SdkNode,
+    node_b: SdkNode,
+    node_a_dir: std::path::PathBuf,
+    mnemonic_a: String,
+    node_b_pubkey: bitcoin::secp256k1::PublicKey,
+    peer_uri: String,
+    channel_id: lightning::ln::types::ChannelId,
+}
 
-    let test_dir = test_dir("vss_manager_lag");
+/// Init both nodes and open an RGB channel with full VSS replication.
+fn setup_with_open_channel(test_name: &str) -> LagSetup {
+    let test_dir = test_dir(test_name);
     if test_dir.exists() {
         fs::remove_dir_all(&test_dir).expect("clean previous test dir");
     }
@@ -173,7 +194,6 @@ fn restore_keeps_channel_when_manager_replication_lagged() {
 
     let proxy = ManagerFilterProxy::start();
 
-    // Phase 1: open a channel while manager replication silently fails.
     let node_a = make_node_with_vss(
         &node_a_dir,
         NODE_A_DAEMON_PORT + NODE_A_PORT_OFFSET,
@@ -212,8 +232,6 @@ fn restore_keeps_channel_when_manager_replication_lagged() {
         .expect("node A issueassetnia");
     let asset_id = asset.asset_id;
 
-    proxy.block_manager_writes();
-
     let node_b_pubkey = node_b.node_info().expect("node B node_info").pubkey;
     let peer_uri = format!(
         "{node_b_pubkey}@127.0.0.1:{}",
@@ -246,51 +264,206 @@ fn restore_keeps_channel_when_manager_replication_lagged() {
         .get_channel_id(open_channel.temporary_channel_id)
         .expect("node A get_channel_id");
 
-    // Phase 2: graceful shutdown drops the pending queue; wipe the device.
-    node_a.shutdown();
-    drop(node_a);
-    proxy.allow_all();
+    LagSetup {
+        proxy,
+        node_a,
+        node_b,
+        node_a_dir,
+        mnemonic_a,
+        node_b_pubkey,
+        peer_uri,
+        channel_id,
+    }
+}
 
-    fs::remove_dir_all(&node_a_dir).expect("wipe node A storage");
+fn keysend_raw(node: &SdkNode, dest: bitcoin::secp256k1::PublicKey) -> PaymentHash {
+    node.keysend(SdkKeysendRequest {
+        dest_pubkey: dest,
+        amt_msat: 3_000_000,
+        asset_id: None,
+        asset_amount: None,
+    })
+    .expect("keysend")
+    .payment_hash
+}
 
-    // Phase 3: fresh device, same mnemonic, by-the-book restore.
+fn payment_is_succeeded(node: &SdkNode, hash: &PaymentHash) -> bool {
+    node.list_payments()
+        .expect("list_payments")
+        .into_iter()
+        .any(|p| p.payment_hash == *hash && matches!(p.status, HtlcStatus::Succeeded))
+}
+
+fn restore_node_a(setup: &LagSetup) -> (SdkNode, Result<(), rgb_lightning_node::RlnError>) {
+    fs::remove_dir_all(&setup.node_a_dir).expect("wipe node A storage");
     let node_a = make_node_with_vss(
-        &node_a_dir,
+        &setup.node_a_dir,
         NODE_A_DAEMON_PORT + NODE_A_PORT_OFFSET,
         NODE_A_PEER_PORT + NODE_A_PORT_OFFSET,
-        &proxy.url(),
+        &setup.proxy.url(),
     );
     let mnemonic_returned = node_a
-        .init(PASSWORD_A.to_string(), Some(mnemonic_a.clone()))
+        .init(PASSWORD_A.to_string(), Some(setup.mnemonic_a.clone()))
         .expect("node A re-init");
-    assert_eq!(mnemonic_returned, mnemonic_a);
+    assert_eq!(mnemonic_returned, setup.mnemonic_a);
     node_a
         .vss_clear_fence(SdkVssClearFenceRequest {
             password: PASSWORD_A.to_string(),
         })
         .expect("node A vss_clear_fence");
+    let unlock_res = node_a.unlock(unlock_request(PASSWORD_A));
+    (node_a, unlock_res)
+}
 
-    // Phase 4: refuse loudly or keep the channel; silent empty success is the bug.
-    match node_a.unlock(unlock_request(PASSWORD_A)) {
-        Err(e) => {
-            eprintln!("unlock refused as expected: {e:?}");
-            assert!(
-                !node_ldk_log_contains(&node_a_dir, "force closed, should broadcast: true"),
-                "a refused unlock must not have broadcast a force-close"
-            );
-        }
-        Ok(()) => {
-            let channels = node_a.list_channels().expect("node A list_channels");
-            let channel_ids: Vec<_> = channels.iter().map(|c| c.channel_id).collect();
-            assert!(
-                channel_ids.contains(&channel_id),
-                "unlock succeeded after the restore, so channel {channel_id} must be intact; \
-                 got channels: {channel_ids:?}"
-            );
-        }
+/// A VSS outage pauses event processing (manager persists are remote-first)
+/// instead of letting the backup lag: after recovery and a graceful shutdown,
+/// a wipe-and-restore keeps the channel.
+#[test]
+#[serial]
+fn manager_replication_outage_cannot_poison_restore() {
+    ensure_regtest_available();
+    if !vss_server_available() {
+        eprintln!("SKIP: VSS server not available at {VSS_SERVER_ADDR}");
+        return;
     }
 
-    // Cleanup
+    let setup = setup_with_open_channel("vss_manager_lag_recovers");
+
+    setup.proxy.block_manager_writes();
+
+    // First payment's events may process before its manager persist blocks;
+    // the second payment's events sit behind the blocked persist.
+    let hash1 = keysend_raw(&setup.node_a, setup.node_b_pubkey);
+    std::thread::sleep(Duration::from_secs(5));
+    let hash2 = keysend_raw(&setup.node_a, setup.node_b_pubkey);
+    std::thread::sleep(Duration::from_secs(15));
+    assert!(
+        setup.proxy.blocked_count() > 0,
+        "the proxy must have rejected manager puts, or this test exercises nothing"
+    );
+    assert!(
+        !payment_is_succeeded(&setup.node_a, &hash2),
+        "second payment must stay pending while the manager cannot reach VSS"
+    );
+
+    setup.proxy.allow_all();
+    wait_for_succeeded_payment_in_list(&setup.node_a, &hash1, Duration::from_secs(60));
+    wait_for_succeeded_payment_in_list(&setup.node_a, &hash2, Duration::from_secs(60));
+
+    setup.node_a.shutdown();
+
+    let (node_a, unlock_res) = restore_node_a(&setup);
+    unlock_res.expect("restore after a recovered outage must unlock");
+    let channels = node_a.list_channels().expect("node A list_channels");
+    assert!(
+        channels.iter().any(|c| c.channel_id == setup.channel_id),
+        "channel must survive the restore"
+    );
+    assert!(
+        payment_is_succeeded(&node_a, &hash1) && payment_is_succeeded(&node_a, &hash2),
+        "restored node must know both payments as succeeded"
+    );
+
+    // The channel must be functional, not just listed.
+    node_a
+        .connectpeer(setup.peer_uri.clone())
+        .expect("node A reconnect");
+    wait_for_channel_ready(&node_a, setup.channel_id, Duration::from_secs(60));
+
     node_a.shutdown();
-    node_b.shutdown();
+    setup.node_b.shutdown();
+}
+
+/// If the node stops while VSS is still down, the bounded shutdown flush gives
+/// up and the backup keeps the stale manager; the restore must then refuse to
+/// unlock instead of silently force-closing.
+#[test]
+#[serial]
+fn restore_refuses_when_final_flush_fails() {
+    ensure_regtest_available();
+    if !vss_server_available() {
+        eprintln!("SKIP: VSS server not available at {VSS_SERVER_ADDR}");
+        return;
+    }
+
+    let setup = setup_with_open_channel("vss_manager_lag_refuses");
+
+    setup.proxy.block_manager_writes();
+    let _hash = keysend_raw(&setup.node_a, setup.node_b_pubkey);
+    std::thread::sleep(Duration::from_secs(10));
+    assert!(
+        setup.proxy.blocked_count() > 0,
+        "the proxy must have rejected manager puts, or this test exercises nothing"
+    );
+
+    // Monitors advanced past the last manager that reached VSS; the bounded
+    // flush gives up on the newer manager while the proxy still blocks it.
+    let shutdown_started = std::time::Instant::now();
+    setup.node_a.shutdown();
+    let shutdown_elapsed = shutdown_started.elapsed();
+    assert!(
+        shutdown_elapsed >= Duration::from_secs(25),
+        "shutdown must have waited for the bounded flush (took {shutdown_elapsed:?})"
+    );
+    setup.proxy.allow_all();
+
+    let (node_a, unlock_res) = restore_node_a(&setup);
+    assert!(
+        unlock_res.is_err(),
+        "restore with a stale manager must refuse to unlock"
+    );
+    // A retry must hit the guard again, not skip the restore and force-close.
+    assert!(
+        node_a.unlock(unlock_request(PASSWORD_A)).is_err(),
+        "second unlock attempt must be refused again"
+    );
+    assert!(
+        !node_ldk_log_contains(&setup.node_a_dir, "force closed, should broadcast: true"),
+        "a refused unlock must not have broadcast a force-close"
+    );
+    // Nothing was broadcast: node B must still see the channel open on-chain.
+    mine(6);
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        setup
+            .node_b
+            .list_channels()
+            .expect("node B list_channels")
+            .iter()
+            .any(|c| c.channel_id == setup.channel_id),
+        "counterparty must still see the channel open after a refused restore"
+    );
+    node_a.shutdown();
+    drop(node_a);
+
+    // The explicit override accepts the force-close: unlock proceeds and the
+    // channel is gone, proving the refusal above was the consistency guard.
+    fs::remove_dir_all(&setup.node_a_dir).expect("wipe refused node dir");
+    let node_a = make_node_with_vss_allow_empty(
+        &setup.node_a_dir,
+        NODE_A_DAEMON_PORT + NODE_A_PORT_OFFSET,
+        NODE_A_PEER_PORT + NODE_A_PORT_OFFSET,
+        &setup.proxy.url(),
+    );
+    node_a
+        .init(PASSWORD_A.to_string(), Some(setup.mnemonic_a.clone()))
+        .expect("override re-init");
+    node_a
+        .vss_clear_fence(SdkVssClearFenceRequest {
+            password: PASSWORD_A.to_string(),
+        })
+        .expect("override clear fence");
+    node_a
+        .unlock(unlock_request(PASSWORD_A))
+        .expect("unlock with --vss-allow-empty-restore must proceed");
+    assert!(
+        node_a
+            .list_channels()
+            .expect("node A list_channels")
+            .is_empty(),
+        "override accepts the force-close: the stale-manager channel is gone"
+    );
+
+    node_a.shutdown();
+    setup.node_b.shutdown();
 }
