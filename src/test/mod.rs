@@ -2949,6 +2949,7 @@ mod lock_unlock_changepassword;
 mod missing_acceptor;
 mod multi_hop;
 mod multi_open_close;
+mod private_multihop;
 mod open_after_double_send;
 mod openchannel_fail;
 mod openchannel_no_indexer;

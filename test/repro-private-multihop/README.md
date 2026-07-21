@@ -28,14 +28,25 @@ This test verifies if `rgb-lightning-node` correctly:
 - **Install RLN binary**: Run `cargo install --locked --path .` in the project root. This ensures the binary is built and available.
 
 ## Automated Execution
-1.  **Start the environment**:
+1.  **Build and start the environment** (always build to pick up source changes):
     ```bash
-    docker-compose up -d
+    docker compose up -d --build
     ```
 2.  **Run the reproduction script**:
     ```bash
     python3 test_routing.py
     ```
+
+> **Note:** Always use `--build` when running after source code changes. Without it, Docker reuses the cached image and the binary will not reflect any modifications to `src/`.
+
+## Verifying Node B Configuration
+
+Node B should start with the accept_forwards_to_priv_channels configuration `data/nodeB/config.toml`:
+
+```
+[channels] 
+accept_forwards_to_priv_channels = true
+```
 
 ## Manual Debugging Workflow
 If you want to manually interact with the nodes to debug:
