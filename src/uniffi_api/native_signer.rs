@@ -26,13 +26,18 @@ impl NativeExternalSigner {
             "testnet" | "testnet4" => Ok(Network::Testnet),
             "signet" => Ok(Network::Signet),
             "regtest" => Ok(Network::Regtest),
-            _ => Err(RlnError::InvalidRequest),
+            _ => Err(RlnError::InvalidRequest(format!(
+                "invalid network: {network}"
+            ))),
         }
     }
 
     fn parse_seed_hex(seed_hex: &str) -> Result<[u8; 32], RlnError> {
-        let seed_vec = Vec::<u8>::from_hex(seed_hex).map_err(|_| RlnError::InvalidRequest)?;
-        let seed: [u8; 32] = seed_vec.try_into().map_err(|_| RlnError::InvalidRequest)?;
+        let seed_vec = Vec::<u8>::from_hex(seed_hex)
+            .map_err(|e| RlnError::InvalidRequest(format!("invalid seed hex: {e}")))?;
+        let seed: [u8; 32] = seed_vec
+            .try_into()
+            .map_err(|_| RlnError::InvalidRequest("seed must be 32 bytes".to_string()))?;
         Ok(seed)
     }
 
@@ -52,7 +57,9 @@ impl NativeExternalSigner {
         let permissive = permissive_policy.unwrap_or(false);
         if permissive && network == Network::Bitcoin {
             tracing::error!("permissive VLS policy is not allowed on mainnet");
-            return Err(RlnError::InvalidRequest);
+            return Err(RlnError::InvalidRequest(
+                "permissive VLS policy is not allowed on mainnet".to_string(),
+            ));
         }
         Ok(permissive)
     }
@@ -85,7 +92,7 @@ impl NativeExternalSigner {
         let (backend, transport) =
             in_process_vls::build_backend_ephemeral(network, seed, permissive).map_err(|e| {
                 tracing::error!(error = ?e, "native signer transport init failed");
-                RlnError::Internal
+                RlnError::internal(format!("native signer transport init failed: {e}"))
             })?;
         Ok(Arc::new(Self { backend, transport }))
     }
@@ -117,12 +124,14 @@ impl NativeExternalSigner {
             in_process_vls::open_restricted_persister(std::path::Path::new(&storage_dir_path))
                 .map_err(|e| {
                     tracing::error!(error = ?e, "native signer VLS store init failed");
-                    RlnError::Internal
+                    RlnError::internal(format!("native signer VLS store init failed: {e}"))
                 })?;
         let (backend, transport) =
             in_process_vls::build_backend(network, seed, permissive, persister).map_err(|e| {
                 tracing::error!(error = ?e, "native signer persistent transport init failed");
-                RlnError::Internal
+                RlnError::internal(format!(
+                    "native signer persistent transport init failed: {e}"
+                ))
             })?;
         Ok(Arc::new(Self { backend, transport }))
     }
@@ -130,12 +139,14 @@ impl NativeExternalSigner {
     pub fn bootstrap(&self) -> Result<SdkExternalSignerBootstrap, RlnError> {
         let bootstrap = match self.backend.call(SignerRequest::Bootstrap).map_err(|e| {
             tracing::error!(error = ?e, "native external signer bootstrap failed");
-            RlnError::Internal
+            RlnError::internal(format!("native external signer bootstrap failed: {e}"))
         })? {
             signer_external::contract::SignerResponse::Bootstrap(data) => data,
             other => {
                 tracing::error!(response = ?other, "native external signer returned non-bootstrap response");
-                return Err(RlnError::Internal);
+                return Err(RlnError::internal(
+                    "native external signer returned non-bootstrap response",
+                ));
             }
         };
         Ok(Self::map_bootstrap(bootstrap))
@@ -147,7 +158,7 @@ impl ExternalSignerHost for NativeExternalSigner {
         in_process_vls::handle_envelope(self.backend.as_ref(), &self.transport, &request).map_err(
             |e| {
                 tracing::error!(error = ?e, "native external signer envelope failed");
-                RlnError::Internal
+                RlnError::internal(format!("native external signer envelope failed: {e}"))
             },
         )
     }

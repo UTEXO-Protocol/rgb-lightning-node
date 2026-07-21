@@ -18,21 +18,21 @@ fn uniffi_entrypoints_require_initialized_state() {
     clear_uniffi_state_for_tests();
 
     assert!(!uniffi_is_initialized());
-    assert!(matches!(sdk_node_info(), Err(RlnError::NotInitialized)));
+    assert!(matches!(sdk_node_info(), Err(RlnError::NotInitialized(_))));
     assert!(matches!(
         sdk_get_channel_id(lightning::ln::types::ChannelId([0u8; 32])),
-        Err(RlnError::NotInitialized)
+        Err(RlnError::NotInitialized(_))
     ));
     assert!(matches!(
         sdk_get_payment(
             lightning::types::payment::PaymentHash([0u8; 32]),
             PaymentType::Outbound
         ),
-        Err(RlnError::NotInitialized)
+        Err(RlnError::NotInitialized(_))
     ));
     assert!(matches!(
         sdk_get_swap(lightning::types::payment::PaymentHash([0u8; 32]), true),
-        Err(RlnError::NotInitialized)
+        Err(RlnError::NotInitialized(_))
     ));
 }
 
@@ -43,7 +43,7 @@ fn register_and_clear_uniffi_state_transitions() {
     register_uniffi_state_for_tests(&state);
 
     assert!(uniffi_is_initialized());
-    assert!(matches!(sdk_node_info(), Err(RlnError::NotInitialized)));
+    assert!(matches!(sdk_node_info(), Err(RlnError::NotInitialized(_))));
 
     clear_uniffi_state_for_tests();
     assert!(!uniffi_is_initialized());
@@ -64,7 +64,7 @@ fn locked_state_does_not_bypass_unlock_guards() {
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     });
-    assert!(matches!(invoice, Err(RlnError::NotInitialized)));
+    assert!(matches!(invoice, Err(RlnError::NotInitialized(_))));
 
     let send_rgb = sdk_send_rgb(SendRgbRequest {
         donation: false,
@@ -72,7 +72,7 @@ fn locked_state_does_not_bypass_unlock_guards() {
         min_confirmations: 1,
         recipient_groups: vec![],
     });
-    assert!(matches!(send_rgb, Err(RlnError::InvalidRequest)));
+    assert!(matches!(send_rgb, Err(RlnError::InvalidRequest(_))));
 
     clear_uniffi_state_for_tests();
 }
@@ -133,9 +133,9 @@ fn custom_types_reject_invalid_values() {
 fn api_error_mapping_remains_stable() {
     let snapshot = error_mapping_snapshot_for_tests();
 
-    assert!(matches!(snapshot.locked_node, RlnError::NotInitialized));
-    assert!(matches!(snapshot.payment_not_found, RlnError::NotFound));
-    assert!(matches!(snapshot.io_error, RlnError::Internal));
+    assert!(matches!(snapshot.locked_node, RlnError::NotInitialized(_)));
+    assert!(matches!(snapshot.payment_not_found, RlnError::NotFound(_)));
+    assert!(matches!(snapshot.io_error, RlnError::Internal(_)));
 }
 
 #[test]

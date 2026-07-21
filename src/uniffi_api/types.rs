@@ -14,49 +14,59 @@ pub struct SdkNode {
     pub(crate) handle: NodeHandle,
 }
 
+// Flat UniFFI error: bindings expose the variant as the category and the
+// `Display` string (the payload) as the exception message.
 #[derive(Debug, thiserror::Error)]
 pub enum RlnError {
-    #[error("node is not initialized")]
-    NotInitialized,
-    #[error("invalid request")]
-    InvalidRequest,
-    #[error("resource not found")]
-    NotFound,
-    #[error("conflict with current node state")]
-    Conflict,
-    #[error("failed bitcoind connection")]
-    FailedBitcoindConnection,
-    #[error("failed bdk sync")]
-    FailedBdkSync,
-    #[error("failed broadcast")]
-    FailedBroadcast,
-    #[error("failed peer connection")]
-    FailedPeerConnection,
-    #[error("insufficient capacity")]
-    InsufficientCapacity,
-    #[error("insufficient funds")]
-    InsufficientFunds,
-    #[error("no available utxos")]
-    NoAvailableUtxos,
-    #[error("no route")]
-    NoRoute,
-    #[error("external signer required")]
-    ExternalSignerRequired,
-    #[error("external signer mismatch")]
-    ExternalSignerMismatch,
-    #[error("external signer unavailable")]
-    ExternalSignerUnavailable,
-    #[error("external signer protocol error")]
-    ExternalSignerProtocolError,
-    #[error("unsupported in external signer mode")]
-    UnsupportedInExternalSignerMode,
-    #[error("internal error")]
-    Internal,
+    #[error("{0}")]
+    NotInitialized(String),
+    #[error("{0}")]
+    InvalidRequest(String),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    FailedBitcoindConnection(String),
+    #[error("{0}")]
+    FailedBdkSync(String),
+    #[error("{0}")]
+    FailedBroadcast(String),
+    #[error("{0}")]
+    FailedPeerConnection(String),
+    #[error("{0}")]
+    InsufficientCapacity(String),
+    #[error("{0}")]
+    InsufficientFunds(String),
+    #[error("{0}")]
+    NoAvailableUtxos(String),
+    #[error("{0}")]
+    NoRoute(String),
+    #[error("{0}")]
+    ExternalSignerRequired(String),
+    #[error("{0}")]
+    ExternalSignerMismatch(String),
+    #[error("{0}")]
+    ExternalSignerUnavailable(String),
+    #[error("{0}")]
+    ExternalSignerProtocolError(String),
+    #[error("{0}")]
+    UnsupportedInExternalSignerMode(String),
+    #[error("{0}")]
+    FailedVssInit(String),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl RlnError {
+    pub(crate) fn internal(msg: impl std::fmt::Display) -> Self {
+        Self::Internal(msg.to_string())
+    }
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for RlnError {
-    fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
-        Self::Internal
+    fn from(e: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::Internal(e.to_string())
     }
 }
 

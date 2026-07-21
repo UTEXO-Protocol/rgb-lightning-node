@@ -40,7 +40,9 @@ fn network_from_str(network: &str) -> Result<rgb_lib::BitcoinNetwork, RlnError> 
         "testnet4" => Ok(rgb_lib::BitcoinNetwork::Testnet4),
         "signet" => Ok(rgb_lib::BitcoinNetwork::Signet),
         "regtest" => Ok(rgb_lib::BitcoinNetwork::Regtest),
-        _ => Err(RlnError::InvalidRequest),
+        _ => Err(RlnError::InvalidRequest(format!(
+            "invalid network: {network}"
+        ))),
     }
 }
 
@@ -83,11 +85,13 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
     if let Some(url) = &request.vss_url {
         #[cfg(feature = "vss")]
         crate::utils::validate_vss_url(url, request.vss_allow_http)
-            .map_err(|_| RlnError::InvalidRequest)?;
+            .map_err(|e| RlnError::InvalidRequest(e.to_string()))?;
         #[cfg(not(feature = "vss"))]
         {
             let _ = url;
-            return Err(RlnError::InvalidRequest);
+            return Err(RlnError::InvalidRequest(
+                "vss_url requires the vss feature".to_string(),
+            ));
         }
     }
     let config = NodeConfig {
@@ -155,7 +159,7 @@ fn send_rgb_from_state(
     };
 
     let data = block_on_sdk(sdk::send_rgb_from_groups(state, sdk_request))?;
-    let txid = Txid::from_str(&data.txid).map_err(|_| RlnError::Internal)?;
+    let txid = Txid::from_str(&data.txid).map_err(RlnError::internal)?;
     Ok(SendRgbResponse {
         txid,
         batch_transfer_idx: data.batch_transfer_idx,
@@ -163,13 +167,13 @@ fn send_rgb_from_state(
 }
 
 fn map_payment_data(data: crate::sdk::PaymentData) -> Result<Payment, RlnError> {
-    let payee_pubkey = PublicKey::from_str(&data.payee_pubkey).map_err(|_| RlnError::Internal)?;
+    let payee_pubkey = PublicKey::from_str(&data.payee_pubkey).map_err(RlnError::internal)?;
     let asset_id = match data.asset_id {
-        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
+        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(RlnError::internal)?),
         None => None,
     };
     let payment_hash = <PaymentHash as UniffiCustomTypeConverter>::into_custom(data.payment_hash)
-        .map_err(|_| RlnError::Internal)?;
+        .map_err(RlnError::internal)?;
     let payment_type = match data.payment_type {
         crate::sdk::PaymentType::Outbound => PaymentType::Outbound,
         crate::sdk::PaymentType::InboundAutoClaim => PaymentType::InboundAutoClaim,
@@ -201,15 +205,15 @@ fn map_payment_data(data: crate::sdk::PaymentData) -> Result<Payment, RlnError> 
 
 fn map_swap_data(data: crate::sdk::SwapViewData) -> Result<Swap, RlnError> {
     let from_asset = match data.from_asset {
-        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
+        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(RlnError::internal)?),
         None => None,
     };
     let to_asset = match data.to_asset {
-        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(|_| RlnError::Internal)?),
+        Some(asset_id) => Some(ContractId::from_str(&asset_id).map_err(RlnError::internal)?),
         None => None,
     };
     let payment_hash = <PaymentHash as UniffiCustomTypeConverter>::into_custom(data.payment_hash)
-        .map_err(|_| RlnError::Internal)?;
+        .map_err(RlnError::internal)?;
     let status = match data.status {
         crate::sdk::SwapStatus::Waiting => SwapStatus::Waiting,
         crate::sdk::SwapStatus::Pending => SwapStatus::Pending,
@@ -287,7 +291,7 @@ fn map_token(data: crate::sdk::Token) -> Token {
 }
 
 fn map_transaction(tx: crate::sdk::TransactionData) -> Result<Transaction, RlnError> {
-    let txid = Txid::from_str(&tx.txid).map_err(|_| RlnError::Internal)?;
+    let txid = Txid::from_str(&tx.txid).map_err(RlnError::internal)?;
     let transaction_type = match tx.transaction_type {
         crate::sdk::TransactionType::RgbSend => TransactionType::RgbSend,
         crate::sdk::TransactionType::Drain => TransactionType::Drain,
@@ -311,7 +315,7 @@ fn map_transaction(tx: crate::sdk::TransactionData) -> Result<Transaction, RlnEr
 fn map_transfer(t: crate::sdk::TransferData) -> Result<Transfer, RlnError> {
     let txid = t
         .txid
-        .map(|v| Txid::from_str(&v).map_err(|_| RlnError::Internal))
+        .map(|v| Txid::from_str(&v).map_err(RlnError::internal))
         .transpose()?;
     Ok(Transfer {
         idx: t.idx,
@@ -469,7 +473,7 @@ impl SdkNode {
         ))?;
 
         Ok(AssetNia {
-            asset_id: ContractId::from_str(&asset.asset_id).map_err(|_| RlnError::Internal)?,
+            asset_id: ContractId::from_str(&asset.asset_id).map_err(RlnError::internal)?,
             ticker: asset.ticker,
             name: asset.name,
             details: asset.details,
@@ -496,7 +500,7 @@ impl SdkNode {
         ))?;
 
         Ok(AssetCfa {
-            asset_id: ContractId::from_str(&asset.asset_id).map_err(|_| RlnError::Internal)?,
+            asset_id: ContractId::from_str(&asset.asset_id).map_err(RlnError::internal)?,
             name: asset.name,
             details: asset.details,
             precision: asset.precision,
@@ -523,7 +527,7 @@ impl SdkNode {
         ))?;
 
         Ok(AssetIfa {
-            asset_id: ContractId::from_str(&asset.asset_id).map_err(|_| RlnError::Internal)?,
+            asset_id: ContractId::from_str(&asset.asset_id).map_err(RlnError::internal)?,
             ticker: asset.ticker,
             name: asset.name,
             details: asset.details,
@@ -554,7 +558,7 @@ impl SdkNode {
         ))?;
 
         Ok(AssetUda {
-            asset_id: ContractId::from_str(&asset.asset_id).map_err(|_| RlnError::Internal)?,
+            asset_id: ContractId::from_str(&asset.asset_id).map_err(RlnError::internal)?,
             ticker: asset.ticker,
             name: asset.name,
             details: asset.details,
@@ -646,7 +650,7 @@ impl SdkNode {
         };
         let payment_hash =
             <PaymentHash as UniffiCustomTypeConverter>::into_custom(response.payment_hash)
-                .map_err(|_| RlnError::Internal)?;
+                .map_err(RlnError::internal)?;
         Ok(SdkKeysendResponse {
             payment_hash,
             payment_preimage: response.payment_preimage,
@@ -665,7 +669,7 @@ impl SdkNode {
                 skip_sync: request.skip_sync,
             },
         ))?;
-        let txid = Txid::from_str(&response.txid).map_err(|_| RlnError::Internal)?;
+        let txid = Txid::from_str(&response.txid).map_err(RlnError::internal)?;
         Ok(SdkSendBtcResponse { txid })
     }
 
@@ -686,7 +690,7 @@ impl SdkNode {
         ))?;
         let payment_hash =
             <PaymentHash as UniffiCustomTypeConverter>::into_custom(response.payment_hash)
-                .map_err(|_| RlnError::Internal)?;
+                .map_err(RlnError::internal)?;
         Ok(SdkMakerInitResponse {
             payment_hash,
             payment_secret: response.payment_secret,
@@ -760,9 +764,9 @@ impl SdkNode {
             },
         ))?;
         let hex = response.temporary_channel_id;
-        let bytes = Vec::<u8>::from_hex(&hex).map_err(|_| RlnError::Internal)?;
+        let bytes = Vec::<u8>::from_hex(&hex).map_err(RlnError::internal)?;
         if bytes.len() != 32 {
-            return Err(RlnError::Internal);
+            return Err(RlnError::internal("invalid temporary channel ID length"));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
@@ -797,7 +801,7 @@ impl SdkNode {
             .payment_hash
             .map(|s| {
                 <PaymentHash as UniffiCustomTypeConverter>::into_custom(s)
-                    .map_err(|_| RlnError::Internal)
+                    .map_err(RlnError::internal)
             })
             .transpose()?;
         Ok(SdkSendPaymentResponse {
@@ -846,8 +850,8 @@ impl SdkNode {
     pub fn node_info(&self) -> Result<NodeInfo, RlnError> {
         let state = self.handle.app_state();
         let data = block_on_sdk(sdk::node_info(state))?;
-        let pubkey = bitcoin::secp256k1::PublicKey::from_str(&data.pubkey)
-            .map_err(|_| RlnError::Internal)?;
+        let pubkey =
+            bitcoin::secp256k1::PublicKey::from_str(&data.pubkey).map_err(RlnError::internal)?;
         Ok(NodeInfo {
             pubkey,
             num_channels: data.num_channels as u64,
@@ -877,9 +881,9 @@ impl SdkNode {
             state,
             temporary_channel_id.0.as_hex().to_string(),
         ))?;
-        let bytes = Vec::<u8>::from_hex(&data.channel_id).map_err(|_| RlnError::Internal)?;
+        let bytes = Vec::<u8>::from_hex(&data.channel_id).map_err(RlnError::internal)?;
         if bytes.len() != 32 {
-            return Err(RlnError::Internal);
+            return Err(RlnError::internal("invalid channel ID length"));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
@@ -944,22 +948,22 @@ impl SdkNode {
             .into_iter()
             .map(|c| {
                 let channel_id_bytes =
-                    Vec::<u8>::from_hex(&c.channel_id).map_err(|_| RlnError::Internal)?;
+                    Vec::<u8>::from_hex(&c.channel_id).map_err(RlnError::internal)?;
                 if channel_id_bytes.len() != 32 {
-                    return Err(RlnError::Internal);
+                    return Err(RlnError::internal("invalid channel ID length"));
                 }
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&channel_id_bytes);
                 let channel_id = lightning::ln::types::ChannelId(arr);
                 let peer_pubkey =
-                    PublicKey::from_str(&c.peer_pubkey).map_err(|_| RlnError::Internal)?;
+                    PublicKey::from_str(&c.peer_pubkey).map_err(RlnError::internal)?;
                 let funding_txid = c
                     .funding_txid
-                    .map(|txid| Txid::from_str(&txid).map_err(|_| RlnError::Internal))
+                    .map(|txid| Txid::from_str(&txid).map_err(RlnError::internal))
                     .transpose()?;
                 let asset_id = c
                     .asset_id
-                    .map(|id| ContractId::from_str(&id).map_err(|_| RlnError::Internal))
+                    .map(|id| ContractId::from_str(&id).map_err(RlnError::internal))
                     .transpose()?;
                 let status = match c.status {
                     crate::sdk::ChannelStatus::Opening => ChannelStatus::Opening,
@@ -997,7 +1001,7 @@ impl SdkNode {
         peers
             .into_iter()
             .map(|p| {
-                let pubkey = PublicKey::from_str(&p.pubkey).map_err(|_| RlnError::Internal)?;
+                let pubkey = PublicKey::from_str(&p.pubkey).map_err(RlnError::internal)?;
                 Ok(Peer { pubkey })
             })
             .collect()
@@ -1145,7 +1149,9 @@ impl SdkNode {
                 "uda" => Ok(rgb_lib::AssetSchema::Uda),
                 "cfa" => Ok(rgb_lib::AssetSchema::Cfa),
                 "ifa" => Ok(rgb_lib::AssetSchema::Ifa),
-                _ => Err(RlnError::InvalidRequest),
+                _ => Err(RlnError::InvalidRequest(format!(
+                    "invalid asset schema: {s}"
+                ))),
             })
             .collect::<Result<Vec<_>, _>>()?;
         let resp = block_on_sdk(sdk::list_assets(state, filters))?;
@@ -1156,7 +1162,7 @@ impl SdkNode {
                     .map(|a| {
                         Ok(AssetNia {
                             asset_id: ContractId::from_str(&a.asset_id)
-                                .map_err(|_| RlnError::Internal)?,
+                                .map_err(RlnError::internal)?,
                             ticker: a.ticker,
                             name: a.name,
                             details: a.details,
@@ -1178,7 +1184,7 @@ impl SdkNode {
                     .map(|a| {
                         Ok(AssetUda {
                             asset_id: ContractId::from_str(&a.asset_id)
-                                .map_err(|_| RlnError::Internal)?,
+                                .map_err(RlnError::internal)?,
                             ticker: a.ticker,
                             name: a.name,
                             details: a.details,
@@ -1215,7 +1221,7 @@ impl SdkNode {
                     .map(|a| {
                         Ok(AssetCfa {
                             asset_id: ContractId::from_str(&a.asset_id)
-                                .map_err(|_| RlnError::Internal)?,
+                                .map_err(RlnError::internal)?,
                             name: a.name,
                             details: a.details,
                             precision: a.precision,
@@ -1236,7 +1242,7 @@ impl SdkNode {
                     .map(|a| {
                         Ok(AssetIfa {
                             asset_id: ContractId::from_str(&a.asset_id)
-                                .map_err(|_| RlnError::Internal)?,
+                                .map_err(RlnError::internal)?,
                             ticker: a.ticker,
                             name: a.name,
                             details: a.details,
@@ -1265,14 +1271,14 @@ impl SdkNode {
         let resp = block_on_sdk(sdk::decode_ln_invoice(state, invoice.to_string()))?;
         let asset_id = resp
             .asset_id
-            .map(|id| ContractId::from_str(&id).map_err(|_| RlnError::Internal))
+            .map(|id| ContractId::from_str(&id).map_err(RlnError::internal))
             .transpose()?;
         let payment_hash =
             <PaymentHash as UniffiCustomTypeConverter>::into_custom(resp.payment_hash)
-                .map_err(|_| RlnError::Internal)?;
+                .map_err(RlnError::internal)?;
         let payee_pubkey = resp
             .payee_pubkey
-            .map(|p| PublicKey::from_str(&p).map_err(|_| RlnError::Internal))
+            .map(|p| PublicKey::from_str(&p).map_err(RlnError::internal))
             .transpose()?;
         Ok(DecodeLnInvoiceResponse {
             amt_msat: resp.amt_msat,
@@ -1296,7 +1302,7 @@ impl SdkNode {
         let resp = block_on_sdk(sdk::decode_rgb_invoice(state, invoice))?;
         let asset_id = resp
             .asset_id
-            .map(|id| ContractId::from_str(&id).map_err(|_| RlnError::Internal))
+            .map(|id| ContractId::from_str(&id).map_err(RlnError::internal))
             .transpose()?;
         Ok(DecodeRgbInvoiceResponse {
             recipient_id: resp.recipient_id,
@@ -1353,7 +1359,7 @@ impl SdkNode {
                         .map(|a| {
                             let asset_id = a
                                 .asset_id
-                                .map(|id| ContractId::from_str(&id).map_err(|_| RlnError::Internal))
+                                .map(|id| ContractId::from_str(&id).map_err(RlnError::internal))
                                 .transpose()?;
                             Ok(RgbAllocation {
                                 asset_id,
@@ -1384,7 +1390,7 @@ impl SdkNode {
             description_hash,
             min_final_cltv_expiry_delta,
         ))?;
-        let invoice = Bolt11Invoice::from_str(&data.invoice).map_err(|_| RlnError::Internal)?;
+        let invoice = Bolt11Invoice::from_str(&data.invoice).map_err(RlnError::internal)?;
         Ok(LnInvoiceResponse { invoice })
     }
 
@@ -1427,7 +1433,7 @@ impl SdkNode {
                 min_confirmations: request.min_confirmations,
             },
         ))?;
-        let txid = Txid::from_str(&response.txid).map_err(|_| RlnError::Internal)?;
+        let txid = Txid::from_str(&response.txid).map_err(RlnError::internal)?;
         Ok(InflateResponse { txid })
     }
 

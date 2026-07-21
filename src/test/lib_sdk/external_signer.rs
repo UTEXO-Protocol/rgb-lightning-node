@@ -50,13 +50,17 @@ impl TunableNativeSignerHost {
 impl rgb_lightning_node::ExternalSignerHost for TunableNativeSignerHost {
     fn call(&self, request: Vec<u8>) -> Result<Vec<u8>, rgb_lightning_node::RlnError> {
         if !self.available.load(Ordering::Relaxed) {
-            return Err(rgb_lightning_node::RlnError::Internal);
+            return Err(rgb_lightning_node::RlnError::Internal(
+                "signer unavailable".to_string(),
+            ));
         }
         if self.fail_sign_rgb_psbt.load(Ordering::Relaxed) {
             let req = decode_signer_request_wire(&request)
-                .map_err(|_| rgb_lightning_node::RlnError::Internal)?;
+                .map_err(|e| rgb_lightning_node::RlnError::Internal(e.to_string()))?;
             if matches!(&req, SignerRequest::SignRgbPsbt { .. }) {
-                return Err(rgb_lightning_node::RlnError::Internal);
+                return Err(rgb_lightning_node::RlnError::Internal(
+                    "sign_rgb_psbt failure injected".to_string(),
+                ));
             }
         }
         self.inner.call(request)
@@ -259,10 +263,13 @@ fn external_restart_with_mismatched_signer_fails_unlock() {
                 Some("RLN_external".to_string()),
             )
             .expect_err("unlock must fail for mismatched signer");
-        let msg = err.to_string().to_lowercase();
         assert!(
-            msg.contains("conflict") || msg.contains("mismatch"),
-            "unexpected error for mismatched signer: {msg}"
+            matches!(
+                err,
+                rgb_lightning_node::RlnError::ExternalSignerMismatch(_)
+                    | rgb_lightning_node::RlnError::Conflict(_)
+            ),
+            "unexpected error for mismatched signer: {err}"
         );
         restarted.shutdown();
     }));

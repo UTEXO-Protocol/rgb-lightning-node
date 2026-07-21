@@ -20,7 +20,7 @@ impl UniffiCustomTypeConverter for bitcoin::secp256k1::PublicKey {
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
         bitcoin::secp256k1::PublicKey::from_str(&val)
-            .map_err(|_| crate::RlnError::InvalidRequest.into())
+            .map_err(|e| crate::RlnError::InvalidRequest(format!("invalid public key: {e}")).into())
     }
 
     fn from_custom(obj: Self) -> Self::Builtin {
@@ -33,7 +33,8 @@ impl UniffiCustomTypeConverter for bitcoin::Txid {
     type Builtin = String;
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-        bitcoin::Txid::from_str(&val).map_err(|_| crate::RlnError::InvalidRequest.into())
+        bitcoin::Txid::from_str(&val)
+            .map_err(|e| crate::RlnError::InvalidRequest(format!("invalid txid: {e}")).into())
     }
 
     fn from_custom(obj: Self) -> Self::Builtin {
@@ -46,7 +47,9 @@ impl UniffiCustomTypeConverter for rgb_lib::ContractId {
     type Builtin = String;
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-        rgb_lib::ContractId::from_str(&val).map_err(|_| crate::RlnError::InvalidRequest.into())
+        rgb_lib::ContractId::from_str(&val).map_err(|e| {
+            crate::RlnError::InvalidRequest(format!("invalid contract ID: {e}")).into()
+        })
     }
 
     fn from_custom(obj: Self) -> Self::Builtin {
@@ -59,9 +62,12 @@ impl UniffiCustomTypeConverter for lightning::ln::types::ChannelId {
     type Builtin = String;
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-        let bytes = Vec::<u8>::from_hex(&val).map_err(|_| crate::RlnError::InvalidRequest)?;
+        let bytes = Vec::<u8>::from_hex(&val)
+            .map_err(|e| crate::RlnError::InvalidRequest(format!("invalid channel ID: {e}")))?;
         if bytes.len() != 32 {
-            return Err(crate::RlnError::InvalidRequest.into());
+            return Err(
+                crate::RlnError::InvalidRequest("invalid channel ID length".to_string()).into(),
+            );
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
@@ -78,9 +84,12 @@ impl UniffiCustomTypeConverter for lightning::types::payment::PaymentHash {
     type Builtin = String;
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-        let bytes = Vec::<u8>::from_hex(&val).map_err(|_| crate::RlnError::InvalidRequest)?;
+        let bytes = Vec::<u8>::from_hex(&val)
+            .map_err(|e| crate::RlnError::InvalidRequest(format!("invalid payment hash: {e}")))?;
         if bytes.len() != 32 {
-            return Err(crate::RlnError::InvalidRequest.into());
+            return Err(
+                crate::RlnError::InvalidRequest("invalid payment hash length".to_string()).into(),
+            );
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
@@ -98,7 +107,7 @@ impl UniffiCustomTypeConverter for crate::RecipientId {
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
         rgb_lib::wallet::RecipientInfo::new(val.clone())
-            .map_err(|_| crate::RlnError::InvalidRequest)?;
+            .map_err(|e| crate::RlnError::InvalidRequest(format!("invalid recipient ID: {e}")))?;
         Ok(crate::RecipientId(val))
     }
 
@@ -113,7 +122,7 @@ impl UniffiCustomTypeConverter for lightning_invoice::Bolt11Invoice {
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
         lightning_invoice::Bolt11Invoice::from_str(&val)
-            .map_err(|_| crate::RlnError::InvalidRequest.into())
+            .map_err(|e| crate::RlnError::InvalidRequest(format!("invalid invoice: {e}")).into())
     }
 
     fn from_custom(obj: Self) -> Self::Builtin {
@@ -126,7 +135,9 @@ impl UniffiCustomTypeConverter for crate::TransportEndpoint {
     type Builtin = String;
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-        rgb_lib::RgbTransport::from_str(&val).map_err(|_| crate::RlnError::InvalidRequest)?;
+        rgb_lib::RgbTransport::from_str(&val).map_err(|e| {
+            crate::RlnError::InvalidRequest(format!("invalid transport endpoint: {e}"))
+        })?;
         Ok(crate::TransportEndpoint(val))
     }
 
