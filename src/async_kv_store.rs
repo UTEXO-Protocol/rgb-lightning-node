@@ -229,17 +229,17 @@ impl KVStore for RemoteFirstKvStore {
 }
 
 /// Routes the background processor's persistence per key: the channel manager
-/// is remote-first (the backup must never lag the monitors), network graph and
-/// scorer are local-only (rebuildable), anything else keeps best-effort
-/// replication.
+/// and sweeper state are remote-first (the backup must never lag the monitors,
+/// and forgotten sweeper outputs are unrecoverable), network graph and scorer
+/// are local-only (rebuildable), anything else keeps best-effort replication.
 pub struct BpKvStoreRouter {
-    manager: Arc<RemoteFirstKvStore>,
+    remote_first: Arc<RemoteFirstKvStore>,
     local: Arc<SeaOrmKvStore>,
     rest: Arc<crate::synced_kv_store::SyncedKvStore>,
 }
 
 enum BpRoute {
-    Manager,
+    RemoteFirst,
     LocalOnly,
     Rest,
 }
@@ -249,8 +249,9 @@ fn bp_route(primary: &str, secondary: &str, key: &str) -> BpRoute {
         CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
         CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
         NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-        SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-        SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+        OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+        OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+        SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
     };
     if (primary, secondary, key)
         == (
@@ -258,8 +259,14 @@ fn bp_route(primary: &str, secondary: &str, key: &str) -> BpRoute {
             CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
             CHANNEL_MANAGER_PERSISTENCE_KEY,
         )
+        || (primary, secondary, key)
+            == (
+                OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+                OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
+                OUTPUT_SWEEPER_PERSISTENCE_KEY,
+            )
     {
-        BpRoute::Manager
+        BpRoute::RemoteFirst
     } else if (primary, secondary, key)
         == (
             NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -281,12 +288,12 @@ fn bp_route(primary: &str, secondary: &str, key: &str) -> BpRoute {
 
 impl BpKvStoreRouter {
     pub fn new(
-        manager: Arc<RemoteFirstKvStore>,
+        remote_first: Arc<RemoteFirstKvStore>,
         local: Arc<SeaOrmKvStore>,
         rest: Arc<crate::synced_kv_store::SyncedKvStore>,
     ) -> Self {
         Self {
-            manager,
+            remote_first,
             local,
             rest,
         }
@@ -301,9 +308,10 @@ impl KVStore for BpKvStoreRouter {
         key: &str,
     ) -> AsyncResult<'static, Vec<u8>, io::Error> {
         match bp_route(primary_namespace, secondary_namespace, key) {
-            BpRoute::Manager => self
-                .manager
-                .read(primary_namespace, secondary_namespace, key),
+            BpRoute::RemoteFirst => {
+                self.remote_first
+                    .read(primary_namespace, secondary_namespace, key)
+            }
             BpRoute::LocalOnly => {
                 let res =
                     KVStoreSync::read(&*self.local, primary_namespace, secondary_namespace, key);
@@ -325,8 +333,8 @@ impl KVStore for BpKvStoreRouter {
         buf: Vec<u8>,
     ) -> AsyncResult<'static, (), io::Error> {
         match bp_route(primary_namespace, secondary_namespace, key) {
-            BpRoute::Manager => {
-                self.manager
+            BpRoute::RemoteFirst => {
+                self.remote_first
                     .write(primary_namespace, secondary_namespace, key, buf)
             }
             BpRoute::LocalOnly => {
@@ -360,8 +368,8 @@ impl KVStore for BpKvStoreRouter {
         lazy: bool,
     ) -> AsyncResult<'static, (), io::Error> {
         match bp_route(primary_namespace, secondary_namespace, key) {
-            BpRoute::Manager => {
-                self.manager
+            BpRoute::RemoteFirst => {
+                self.remote_first
                     .remove(primary_namespace, secondary_namespace, key, lazy)
             }
             BpRoute::LocalOnly => {

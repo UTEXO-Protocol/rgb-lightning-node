@@ -5252,6 +5252,26 @@ pub(crate) async fn start_ldk(
         },
     ));
 
+    // Periodically drain queued VSS replications so an idle node still heals
+    // after an outage (drains are otherwise only triggered by new writes).
+    #[cfg(feature = "vss")]
+    {
+        let drain_store = Arc::clone(&kv_store);
+        let stop_drain = Arc::clone(&stop_processing);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if stop_drain.load(Ordering::Acquire) {
+                    break;
+                }
+                let store = Arc::clone(&drain_store);
+                let _ = tokio::task::spawn_blocking(move || store.drain_pending()).await;
+            }
+        });
+    }
+
     // Regularly reconnect to channel peers.
     let connect_cm = Arc::clone(&channel_manager);
     let connect_pm = Arc::clone(&peer_manager);
@@ -5565,9 +5585,27 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
     #[cfg(feature = "vss")]
     {
         if let Some((kv_store, monitor_kv_store)) = stores {
-            // Abort outage-pending monitor writes before giving up the fence:
-            // a retry landing after another instance owns the store would
-            // corrupt its state.
+            // Best-effort flush of queued replications before the fence goes.
+            let flush_store = Arc::clone(&kv_store);
+            let flush = tokio::task::spawn_blocking(move || {
+                flush_store.flush_pending_until(std::time::Instant::now() + Duration::from_secs(10))
+            });
+            match flush.await {
+                Ok(0) => {}
+                Ok(n) => tracing::error!(
+                    pending = n,
+                    "VSS replications still queued at shutdown; they persist locally and \
+                     will retry on next unlock"
+                ),
+                Err(e) => tracing::warn!(error = %e, "pending-queue flush task failed"),
+            }
+            // Stop drains and abort outage-pending monitor writes before
+            // giving up the fence: a write landing after another instance
+            // owns the store would corrupt its state.
+            let stop_store = Arc::clone(&kv_store);
+            if let Err(e) = tokio::task::spawn_blocking(move || stop_store.stop()).await {
+                tracing::warn!(error = %e, "pending-queue stop task failed");
+            }
             monitor_kv_store.stop();
             match tokio::task::spawn_blocking(move || kv_store.release_vss_fence_if_owned()).await {
                 Ok(Ok(())) => {}

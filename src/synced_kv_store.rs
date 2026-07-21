@@ -18,6 +18,11 @@ const PENDING_QUEUE_CAP: usize = 1000;
 #[cfg(feature = "vss")]
 const PENDING_DRAIN_BATCH: usize = 16;
 
+/// Local-only namespace persisting the pending queue across restarts. Rows are
+/// written straight to the local store, so they never replicate to VSS.
+#[cfg(feature = "vss")]
+const PENDING_NS: &str = "vss_pending";
+
 /// KVStore wrapper that writes to the local SeaORM store and (optionally)
 /// replicates to a remote VSS server. Reads always go to the local store for
 /// latency. When `remote` is `None`, this behaves identically to a plain
@@ -37,6 +42,16 @@ pub struct SyncedKvStore {
     /// removal correctly).
     #[cfg(feature = "vss")]
     pending: Arc<std::sync::Mutex<std::collections::HashMap<String, Option<Vec<u8>>>>>,
+    /// Serializes VSS puts per key across writes and drains so a drained stale
+    /// value can never land after a newer one.
+    #[cfg(feature = "vss")]
+    key_locks: std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>,
+    /// Set at teardown; [`Self::stop`] then waits out an in-flight drain via
+    /// `drain_gate` so no queued put can land after the fence is released.
+    #[cfg(feature = "vss")]
+    stopped: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "vss")]
+    drain_gate: std::sync::Mutex<()>,
 }
 
 impl SyncedKvStore {
@@ -48,19 +63,96 @@ impl SyncedKvStore {
             remote: None,
             #[cfg(feature = "vss")]
             pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(feature = "vss")]
+            key_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            #[cfg(feature = "vss")]
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "vss")]
+            drain_gate: std::sync::Mutex::new(()),
         }
     }
 
-    /// Creates a SyncedKvStore with local storage and VSS replication.
+    /// Creates a SyncedKvStore with local storage and VSS replication,
+    /// reloading queued replications persisted by a previous run.
     #[cfg(feature = "vss")]
     pub fn with_vss(
         local: Arc<SeaOrmKvStore>,
         remote: Arc<crate::vss_kv_store::VssKvStore>,
     ) -> Self {
+        let mut pending = std::collections::HashMap::new();
+        if let Ok(keys) = local.list(PENDING_NS, "") {
+            for key in keys {
+                match local.read(PENDING_NS, "", &key) {
+                    Ok(row) => match row.split_first() {
+                        Some((1, buf)) => {
+                            pending.insert(key, Some(buf.to_vec()));
+                        }
+                        Some((0, _)) => {
+                            pending.insert(key, None);
+                        }
+                        _ => tracing::warn!(key, "dropping malformed pending VSS row"),
+                    },
+                    Err(e) => tracing::warn!(key, error = %e, "failed to load pending VSS row"),
+                }
+            }
+        }
+        if !pending.is_empty() {
+            tracing::info!(
+                count = pending.len(),
+                "reloaded pending VSS replications from previous run"
+            );
+        }
         Self {
             local,
             remote: Some(remote),
-            pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            pending: Arc::new(std::sync::Mutex::new(pending)),
+            key_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            drain_gate: std::sync::Mutex::new(()),
+        }
+    }
+
+    #[cfg(feature = "vss")]
+    fn key_lock(&self, vss_key: &str) -> Arc<std::sync::Mutex<()>> {
+        self.key_locks
+            .lock()
+            .unwrap()
+            .entry(vss_key.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Stops future drains and waits for an in-flight one to finish. Call at
+    /// teardown before releasing the VSS fence.
+    #[cfg(feature = "vss")]
+    pub(crate) fn stop(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        drop(self.drain_gate.lock().unwrap());
+    }
+
+    /// Persist a queue entry so it survives restarts.
+    #[cfg(feature = "vss")]
+    fn persist_pending_row(&self, vss_key: &str, value: &Option<Vec<u8>>) {
+        let mut row = Vec::with_capacity(1 + value.as_ref().map_or(0, |v| v.len()));
+        match value {
+            Some(buf) => {
+                row.push(1);
+                row.extend_from_slice(buf);
+            }
+            None => row.push(0),
+        }
+        if let Err(e) = self.local.write(PENDING_NS, "", vss_key, row) {
+            tracing::warn!(vss_key, error = %e, "failed to persist pending VSS row");
+        }
+    }
+
+    #[cfg(feature = "vss")]
+    fn clear_pending_row(&self, vss_key: &str) {
+        if let Err(e) = self.local.remove(PENDING_NS, "", vss_key, false) {
+            if e.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(vss_key, error = %e, "failed to clear pending VSS row");
+            }
         }
     }
 
@@ -164,17 +256,20 @@ impl SyncedKvStore {
         self.pending.lock().unwrap().len()
     }
 
-    /// Enqueue a failed VSS replication for later retry.
+    /// Enqueue a failed VSS replication for later retry, persisted so it
+    /// survives restarts.
     #[cfg(feature = "vss")]
     fn enqueue_pending(&self, vss_key: String, value: Option<Vec<u8>>) {
+        self.persist_pending_row(&vss_key, &value);
         let mut pending = self.pending.lock().unwrap();
         if pending.len() >= PENDING_QUEUE_CAP && !pending.contains_key(&vss_key) {
-            // Drop one entry to make room. HashMap iteration order is
-            // arbitrary; for "drop newest of the same key" we still want the
-            // newer value for that key, so we just evict an arbitrary other
-            // key. Logged as a metric so the operator can alert on it.
+            // Evict an arbitrary other key to bound the queue; logged so the
+            // operator can alert on it.
             if let Some(evict) = pending.keys().next().cloned() {
                 pending.remove(&evict);
+                drop(pending);
+                self.clear_pending_row(&evict);
+                pending = self.pending.lock().unwrap();
                 tracing::warn!(
                     evicted_key = evict,
                     cap = PENDING_QUEUE_CAP,
@@ -186,45 +281,84 @@ impl SyncedKvStore {
     }
 
     /// Attempt to drain up to [`PENDING_DRAIN_BATCH`] entries from the
-    /// pending queue. Called opportunistically after each successful VSS
-    /// write. Entries that re-fail are re-queued.
+    /// pending queue. Called after each successful VSS write and periodically
+    /// from a background task. Entries that re-fail are re-queued.
     #[cfg(feature = "vss")]
-    fn drain_pending(&self) {
+    pub(crate) fn drain_pending(&self) {
         let Some(ref remote) = self.remote else {
             return;
         };
-        let to_retry: Vec<(String, Option<Vec<u8>>)> = {
-            let mut pending = self.pending.lock().unwrap();
-            let take_n = pending.len().min(PENDING_DRAIN_BATCH);
-            let keys: Vec<String> = pending.keys().take(take_n).cloned().collect();
-            keys.into_iter()
-                .filter_map(|k| pending.remove(&k).map(|v| (k, v)))
-                .collect()
-        };
-        if to_retry.is_empty() {
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        let drained = to_retry.len();
-        for (vss_key, value) in to_retry {
+        let _gate = self.drain_gate.lock().unwrap();
+        // Snapshot without removing: entries leave the queue only once VSS
+        // confirms them, so nothing is ever in flight outside the map.
+        let snapshot: Vec<(String, Option<Vec<u8>>)> = {
+            let pending = self.pending.lock().unwrap();
+            pending
+                .iter()
+                .take(PENDING_DRAIN_BATCH)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        if snapshot.is_empty() {
+            return;
+        }
+        let mut drained = 0usize;
+        for (vss_key, value) in snapshot {
+            let lock = self.key_lock(&vss_key);
+            let _guard = lock.lock().unwrap();
+            // Re-check under the key lock: a concurrent write may have
+            // superseded or delivered this entry.
+            if self.pending.lock().unwrap().get(&vss_key) != Some(&value) {
+                continue;
+            }
             let parsed = crate::vss_kv_store::parse_vss_key(&vss_key);
             let Some((primary, secondary, key)) = parsed else {
                 tracing::warn!(vss_key, "Dropping unparseable key from pending queue");
+                self.pending.lock().unwrap().remove(&vss_key);
+                self.clear_pending_row(&vss_key);
                 continue;
             };
             let result = match &value {
                 Some(buf) => remote.write(&primary, &secondary, &key, buf.clone()),
                 None => remote.remove(&primary, &secondary, &key, false),
             };
-            if let Err(e) = result {
-                tracing::debug!(
-                    vss_key,
-                    error = %e,
-                    "Pending VSS replication still failing; re-queued"
-                );
-                self.enqueue_pending(vss_key, value);
+            match result {
+                Ok(()) => {
+                    self.pending.lock().unwrap().remove(&vss_key);
+                    self.clear_pending_row(&vss_key);
+                    drained += 1;
+                }
+                Err(e) => {
+                    // VSS is likely still down; the entry stays queued.
+                    tracing::debug!(
+                        vss_key,
+                        error = %e,
+                        "Pending VSS replication still failing"
+                    );
+                    break;
+                }
             }
         }
         tracing::debug!(drained, "Drained pending VSS writes");
+    }
+
+    /// Drain until the queue is empty, the deadline passes, or no progress is
+    /// made (VSS unreachable). Returns the number of entries still pending.
+    #[cfg(feature = "vss")]
+    pub(crate) fn flush_pending_until(&self, deadline: std::time::Instant) -> usize {
+        loop {
+            let before = self.pending_remote_writes();
+            if before == 0 || std::time::Instant::now() >= deadline {
+                return before;
+            }
+            self.drain_pending();
+            if self.pending_remote_writes() >= before {
+                return self.pending_remote_writes();
+            }
+        }
     }
 }
 
@@ -254,22 +388,32 @@ impl KVStoreSync for SyncedKvStore {
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
             let vss_key = crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
-            match remote.write(primary_namespace, secondary_namespace, key, buf.clone()) {
-                Ok(()) => {
-                    // Drop any stale queued value so the drain can't regress the remote.
-                    self.pending.lock().unwrap().remove(&vss_key);
-                    self.drain_pending();
+            let replicated = {
+                let lock = self.key_lock(&vss_key);
+                let _guard = lock.lock().unwrap();
+                match remote.write(primary_namespace, secondary_namespace, key, buf.clone()) {
+                    Ok(()) => {
+                        // Drop any stale queued value so a drain can't regress the remote.
+                        if self.pending.lock().unwrap().remove(&vss_key).is_some() {
+                            self.clear_pending_row(&vss_key);
+                        }
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            primary_namespace,
+                            secondary_namespace,
+                            key,
+                            error = %e,
+                            "VSS replication write failed; queued for retry"
+                        );
+                        self.enqueue_pending(vss_key, Some(buf));
+                        false
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        primary_namespace,
-                        secondary_namespace,
-                        key,
-                        error = %e,
-                        "VSS replication write failed; queued for retry"
-                    );
-                    self.enqueue_pending(vss_key, Some(buf));
-                }
+            };
+            if replicated {
+                self.drain_pending();
             }
         }
 
@@ -291,22 +435,32 @@ impl KVStoreSync for SyncedKvStore {
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
             let vss_key = crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
-            match remote.remove(primary_namespace, secondary_namespace, key, lazy) {
-                Ok(()) => {
-                    // Same as in `write`.
-                    self.pending.lock().unwrap().remove(&vss_key);
-                    self.drain_pending();
+            let replicated = {
+                let lock = self.key_lock(&vss_key);
+                let _guard = lock.lock().unwrap();
+                match remote.remove(primary_namespace, secondary_namespace, key, lazy) {
+                    Ok(()) => {
+                        // Same as in `write`.
+                        if self.pending.lock().unwrap().remove(&vss_key).is_some() {
+                            self.clear_pending_row(&vss_key);
+                        }
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            primary_namespace,
+                            secondary_namespace,
+                            key,
+                            error = %e,
+                            "VSS replication remove failed; queued for retry"
+                        );
+                        self.enqueue_pending(vss_key, None);
+                        false
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        primary_namespace,
-                        secondary_namespace,
-                        key,
-                        error = %e,
-                        "VSS replication remove failed; queued for retry"
-                    );
-                    self.enqueue_pending(vss_key, None);
-                }
+            };
+            if replicated {
+                self.drain_pending();
             }
         }
 

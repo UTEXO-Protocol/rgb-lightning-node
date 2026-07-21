@@ -1058,6 +1058,28 @@ mod tests {
         );
 
         router
+            .write(
+                lightning::util::persist::OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+                lightning::util::persist::OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
+                lightning::util::persist::OUTPUT_SWEEPER_PERSISTENCE_KEY,
+                b"sw1".to_vec(),
+            )
+            .await
+            .expect("sweeper write");
+        assert_eq!(
+            remote
+                .read_async(
+                    lightning::util::persist::OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+                    lightning::util::persist::OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
+                    lightning::util::persist::OUTPUT_SWEEPER_PERSISTENCE_KEY,
+                )
+                .await
+                .expect("on VSS"),
+            b"sw1".to_vec(),
+            "sweeper state must be durable on VSS when the write completes"
+        );
+
+        router
             .write("", "", NETWORK_GRAPH_PERSISTENCE_KEY, b"g1".to_vec())
             .await
             .expect("graph write");
@@ -1105,5 +1127,110 @@ mod tests {
             remote.read_async("", "", "manager").await.expect("on VSS"),
             b"m2".to_vec(),
         );
+    }
+
+    /// Queued replications must survive a restart: a new SyncedKvStore over
+    /// the same local DB reloads them and a drain delivers them to VSS.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_queue_survives_restart_and_drains() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let proxy = super::super::vss_offline_force_close::VssProxy::start();
+        let (signing_key, store_id) = generate_test_keys();
+        let remote =
+            Arc::new(VssKvStore::new(proxy.url(), store_id, signing_key).expect("vss store"));
+        let conn = create_test_sqlite();
+        let local = Arc::new(SeaOrmKvStore::from_connection(Arc::clone(&conn)));
+
+        proxy.go_offline();
+        {
+            let synced = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&remote));
+            synced
+                .write("", "", "aux_a", b"v_a".to_vec())
+                .expect("local write during outage");
+            synced
+                .write("", "", "aux_b", b"v_b".to_vec())
+                .expect("local write during outage");
+            assert_eq!(synced.pending_remote_writes(), 2);
+        }
+
+        // "Restart": fresh store instance over the same local DB.
+        let synced = SyncedKvStore::with_vss(
+            Arc::new(SeaOrmKvStore::from_connection(conn)),
+            Arc::clone(&remote),
+        );
+        assert_eq!(
+            synced.pending_remote_writes(),
+            2,
+            "pending replications must be reloaded from the local DB"
+        );
+
+        proxy.go_online();
+        synced.drain_pending();
+        assert_eq!(synced.pending_remote_writes(), 0);
+        assert_eq!(
+            KVStoreSync::read(&*remote, "", "", "aux_a").expect("on VSS"),
+            b"v_a".to_vec()
+        );
+        assert_eq!(
+            KVStoreSync::read(&*remote, "", "", "aux_b").expect("on VSS"),
+            b"v_b".to_vec()
+        );
+
+        // Delivered rows must be gone from disk, or a later restart would
+        // resurrect and re-send stale values.
+        let reopened = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&remote));
+        assert_eq!(
+            reopened.pending_remote_writes(),
+            0,
+            "drained entries must not survive on disk"
+        );
+    }
+
+    /// A queued removal must also survive a restart and converge on VSS.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_removal_survives_restart_and_drains() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let proxy = super::super::vss_offline_force_close::VssProxy::start();
+        let (signing_key, store_id) = generate_test_keys();
+        let remote =
+            Arc::new(VssKvStore::new(proxy.url(), store_id, signing_key).expect("vss store"));
+        let conn = create_test_sqlite();
+        let local = Arc::new(SeaOrmKvStore::from_connection(Arc::clone(&conn)));
+
+        {
+            let synced = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&remote));
+            synced
+                .write("", "", "aux_rm", b"v".to_vec())
+                .expect("write");
+            proxy.go_offline();
+            synced
+                .remove("", "", "aux_rm", false)
+                .expect("local remove");
+            assert_eq!(synced.pending_remote_writes(), 1);
+        }
+
+        let synced = SyncedKvStore::with_vss(
+            Arc::new(SeaOrmKvStore::from_connection(conn)),
+            Arc::clone(&remote),
+        );
+        assert_eq!(synced.pending_remote_writes(), 1);
+
+        proxy.go_online();
+        synced.drain_pending();
+        assert_eq!(synced.pending_remote_writes(), 0);
+        assert!(
+            KVStoreSync::read(&*remote, "", "", "aux_rm").is_err(),
+            "queued removal must have converged on VSS"
+        );
+        let reopened = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&remote));
+        assert_eq!(reopened.pending_remote_writes(), 0);
     }
 }
