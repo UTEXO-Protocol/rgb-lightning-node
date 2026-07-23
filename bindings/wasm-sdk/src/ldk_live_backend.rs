@@ -17,7 +17,7 @@ use lightning::bitcoin::block::Header;
 use lightning::bitcoin::consensus::deserialize;
 use lightning::bitcoin::hash_types::Txid;
 use lightning::chain::chaininterface::{
-    BroadcasterInterface, FeeEstimator, FEERATE_FLOOR_SATS_PER_KW,
+    BroadcasterInterface, ConfirmationTarget, FeeEstimator, FEERATE_FLOOR_SATS_PER_KW,
 };
 use lightning::chain::chainmonitor;
 use lightning::chain::Confirm;
@@ -36,6 +36,7 @@ use lightning::onion_message::messenger::DefaultMessageRouter;
 use lightning::rgb_utils::{
     update_rgb_channel_amount, write_rgb_payment_info_file, ContractId, RgbInfo, RgbKvStoreExt,
     RgbPaymentInfo, RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
+    RGB_TRANSFER_INFO_NS,
 };
 use lightning::routing::gossip::NetworkGraph;
 use lightning::routing::router::{DefaultRouter, PaymentParameters, RouteParameters};
@@ -43,14 +44,17 @@ use lightning::routing::scoring::{
     ProbabilisticScorer, ProbabilisticScoringDecayParameters, ProbabilisticScoringFeeParameters,
 };
 use lightning::sign::KeysManager;
-use lightning::sign::{EntropySource, InMemorySigner, NodeSigner, Recipient};
+use lightning::sign::{
+    EntropySource, InMemorySigner, NodeSigner, OutputSpender, Recipient,
+    SpendableOutputDescriptor,
+};
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::UserConfig;
 use lightning::util::errors::APIError;
 use lightning::util::logger::{Logger, Record};
 use lightning::util::persist::KVStoreSync;
 use lightning::util::persist::MonitorName;
-use lightning::util::ser::{ReadableArgs, Writeable};
+use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use secp256k1::PublicKey as SecpPublicKey;
 use wasm_bindgen::prelude::JsValue;
@@ -211,6 +215,61 @@ enum PendingRgbFundingWork {
     ProcessPendingTransactions,
 }
 
+/// One queued post-close sweep: the serialized `SpendableOutputDescriptor`s from a single
+/// `Event::SpendableOutputs`. Persisted durably (the event fires exactly once per output set,
+/// so dropping an item would strand the funds) and drained by the drive tick, which builds and
+/// broadcasts the sweep transaction — colored when the closing tx carries an RGB allocation
+/// (the wasm equivalent of the native `RgbOutputSpender`), vanilla BTC otherwise.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PendingSweepWork {
+    descriptors_hex: Vec<String>,
+    channel_id: Option<String>,
+}
+
+/// Durable state for the post-close sweep pipeline: the queue of unprocessed
+/// `SpendableOutputs` descriptor sets plus, per processed set, the finished sweep tx (keyed by
+/// a hash of the descriptor set) so a replayed event or a retry after a crash rebroadcasts the
+/// SAME transaction instead of building a conflicting double-spend.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PersistedSweepState {
+    pending: Vec<PendingSweepWork>,
+    swept: HashMap<String, String>,
+}
+
+fn sweep_state_storage_key(runtime_key: &str) -> String {
+    format!("rln:wasm:ldk-sweeps:{runtime_key}")
+}
+
+/// Stable identity of a descriptor set, used as the idempotency key for built sweep txs.
+fn sweep_descriptors_key(descriptors_hex: &[String]) -> String {
+    let joined = descriptors_hex.join(",");
+    <Sha256 as bitcoin_hashes::Hash>::hash(joined.as_bytes()).to_string()
+}
+
+/// RGB transport-endpoint form (`rpc://` / `rpcs://`) of a proxy URL. `witness_receive`
+/// validates its transport endpoints as `RgbTransport` strings, while the proxy client (and
+/// `post_consignment`) use the plain `http(s)://` URL — the SDK stores the latter.
+fn rgb_transport_endpoint_from_http(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("rpcs://{rest}")
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("rpc://{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
+/// Plain `http(s)://` form of a proxy URL that may have been configured in `rpc://` form.
+fn http_endpoint_from_any(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("rpcs://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = url.strip_prefix("rpc://") {
+        format!("http://{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
 pub trait LdkLiveBackend {
     fn new_outbound_connection(&self, peer_pubkey: &str) -> Result<String, JsValue>;
     fn read_event(&self, payload_hex: &str) -> Result<(), JsValue>;
@@ -341,6 +400,15 @@ pub trait LdkLiveBackend {
     }
 
     fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
+        Ok(Vec::new())
+    }
+
+    /// Outputs the chain monitor asked the `Filter` to watch for SPENDS, as
+    /// `(funding txid, vout)`. The chain sync driver checks these against the indexer's
+    /// outspend endpoint — that is how a closing/commitment tx (which the monitor has never
+    /// seen and therefore cannot list in `chain_relevant_txids`) gets discovered and fed back
+    /// via `chain_apply_confirmed_tx`, eventually maturing into `Event::SpendableOutputs`.
+    fn chain_watched_outputs(&self) -> Result<Vec<(String, u32)>, JsValue> {
         Ok(Vec::new())
     }
 
@@ -559,6 +627,10 @@ pub struct WasmLdkLiveBackend {
     /// Channel ids the live `ChannelManager` reported closed via `Event::ChannelClosed`, pending
     /// propagation to the runtime channel view (drained by `take_closed_live_channels`).
     closed_channels: RefCell<Vec<String>>,
+    /// Post-close sweep work queued from `Event::SpendableOutputs` (drained by the drive tick).
+    pending_sweep_work: RefCell<VecDeque<PendingSweepWork>>,
+    /// Built sweep txs keyed by descriptor-set hash (see `PersistedSweepState::swept`).
+    sweep_txes: RefCell<HashMap<String, String>>,
     object_graph: RefCell<Option<LdkObjectGraph>>,
 }
 
@@ -668,6 +740,11 @@ struct FixedFeeEstimator;
 // counterparty reading that estimate rejects a channel opened at the protocol floor (253 sat/kw)
 // with "Peer's feerate much too low". So we must open at a realistic feerate, not the floor.
 const REGTEST_CHANNEL_FEERATE_SATS_PER_KW: u32 = 5000;
+
+// Sat value of each colored output on a post-close sweep tx (the RGB allocation rides on it;
+// the BTC value only needs to clear the dust floor). Matches the native node's default
+// `dust_limit_msat / 1000` used by `RgbOutputSpender`.
+const SWEEP_COLORED_OUTPUT_SAT: u64 = 546;
 
 // Per-channel handshake parameters for non-virtual opens, matching native `open_channel`.
 const OPEN_CHANNEL_HTLC_MIN_MSAT: u64 = 3_000_000;
@@ -1357,6 +1434,14 @@ fn load_scorer_snapshot(
 
 impl WasmLdkLiveBackend {
     fn new(runtime_key: String, node_seed32: Option<[u8; 32]>) -> Self {
+        // Restore the durable sweep state: `Event::SpendableOutputs` fires exactly once per
+        // output set, so pending items must survive a reload or the closing outputs strand.
+        let sweep_state: PersistedSweepState = browser_persistent_state_store()
+            .get(&sweep_state_storage_key(&runtime_key))
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
         Self {
             runtime_key,
             node_seed32,
@@ -1377,7 +1462,20 @@ impl WasmLdkLiveBackend {
             hodl_claim_deadlines: RefCell::new(HashMap::new()),
             async_recipient_preimages: RefCell::new(HashMap::new()),
             closed_channels: RefCell::new(Vec::new()),
+            pending_sweep_work: RefCell::new(sweep_state.pending.into()),
+            sweep_txes: RefCell::new(sweep_state.swept),
             object_graph: RefCell::new(None),
+        }
+    }
+
+    fn persist_sweep_state(&self) {
+        let state = PersistedSweepState {
+            pending: self.pending_sweep_work.borrow().iter().cloned().collect(),
+            swept: self.sweep_txes.borrow().clone(),
+        };
+        if let Ok(raw) = serde_json::to_string(&state) {
+            let _ = browser_persistent_state_store()
+                .set(&sweep_state_storage_key(&self.runtime_key), &raw);
         }
     }
 
@@ -1638,6 +1736,15 @@ impl WasmLdkLiveBackend {
             collected_events.borrow_mut().push(event);
             Ok::<(), ReplayEvent>(())
         });
+        // The ChainMonitor is its own `EventsProvider`: post-close `Event::SpendableOutputs`
+        // (matured closing/commitment outputs) surfaces ONLY here, never via the
+        // ChannelManager. Without this drain the wasm side never observes its closing
+        // outputs, so neither the BTC nor the RGB share of a closed channel ever settles
+        // on-chain (native counterpart: `Event::SpendableOutputs` in `src/ldk.rs`).
+        g.chain_monitor.process_pending_events(&|event: Event| {
+            collected_events.borrow_mut().push(event);
+            Ok::<(), ReplayEvent>(())
+        });
         for event in collected_events.into_inner().into_iter() {
             self.handle_ldk_event_sync(g, event);
         }
@@ -1772,6 +1879,29 @@ impl WasmLdkLiveBackend {
                     "[rln-wasm-sdk ldk-live] ChannelClosed channel_id={id_hex}"
                 ));
                 self.closed_channels.borrow_mut().push(id_hex);
+            }
+            // ---- Matured post-close outputs: queue the sweep (native: OutputSweeper +
+            // RgbOutputSpender). The descriptors are persisted immediately — this event fires
+            // exactly once, and losing it would strand the closing outputs (both the BTC and
+            // any RGB allocation riding on the colored closing tx).
+            Event::SpendableOutputs {
+                outputs,
+                channel_id,
+            } => {
+                let descriptors_hex: Vec<String> =
+                    outputs.iter().map(|d| hex::encode(d.encode())).collect();
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk sweep] SpendableOutputs: {} descriptor(s), channel={:?}",
+                    descriptors_hex.len(),
+                    channel_id.map(|c| format!("{c}")),
+                ));
+                self.pending_sweep_work
+                    .borrow_mut()
+                    .push_back(PendingSweepWork {
+                        descriptors_hex,
+                        channel_id: channel_id.map(|c| format!("{c}")),
+                    });
+                self.persist_sweep_state();
             }
             // ---- Real payment lifecycle (outbound, this node is the payer) ----
             Event::PaymentSent {
@@ -2881,6 +3011,22 @@ impl LdkLiveBackend for WasmLdkLiveBackend {
         })
     }
 
+    fn chain_watched_outputs(&self) -> Result<Vec<(String, u32)>, JsValue> {
+        self.with_graph(|g| {
+            Ok(g.chain_source
+                .watched_outputs
+                .borrow()
+                .iter()
+                .map(|output| {
+                    (
+                        output.outpoint.txid.to_string(),
+                        u32::from(output.outpoint.index),
+                    )
+                })
+                .collect())
+        })
+    }
+
     fn chain_apply_best_block(&self, height: u32, header_hex: &str) -> Result<(), JsValue> {
         let header_bytes =
             hex::decode(header_hex).map_err(|e| JsValue::from_str(&format!("header hex: {e}")))?;
@@ -3790,6 +3936,374 @@ impl WasmLdkLiveBackend {
                 .map_err(|e| {
                     JsValue::from_str(&format!("RGB pending transactions failed: {e:?}"))
                 })?;
+        }
+        // Phase G: post-close sweeps (SpendableOutputs → colored/vanilla sweep tx). Drain
+        // events first: after a close there may be no peer traffic left, so the frame-driven
+        // `process_events` path can stop running — without this drain a matured
+        // `Event::SpendableOutputs` would sit in the ChainMonitor forever. Errors defer the
+        // item to the next drive tick (e.g. closing tx not confirmed yet) and never fail the
+        // funding pipeline.
+        {
+            let graph = this.object_graph.borrow();
+            if let Some(g) = graph.as_ref() {
+                this.ingest_funding_generation_ready_events(g);
+            }
+        }
+        Self::drive_sweep_work(&this).await;
+        Ok(())
+    }
+
+    /// Drains the post-close sweep queue. Each item is one `Event::SpendableOutputs`
+    /// descriptor set; a failed item is re-queued at the front and retried on the next drive
+    /// tick (the dominant "failure" is simply the closing tx not yet confirmed / indexed).
+    async fn drive_sweep_work(this: &Rc<Self>) {
+        loop {
+            let item = this.pending_sweep_work.borrow_mut().pop_front();
+            let Some(item) = item else { break };
+            match Self::process_sweep_item(this, &item).await {
+                Ok(()) => {
+                    this.persist_sweep_state();
+                }
+                Err(e) => {
+                    ldk_live_debug(&format!(
+                        "[rln-wasm-sdk sweep] deferring sweep to next drive tick: {e}"
+                    ));
+                    this.pending_sweep_work.borrow_mut().push_front(item);
+                    this.persist_sweep_state();
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Builds, colors (when the closing tx carries RGB), signs and broadcasts the sweep
+    /// transaction for one descriptor set — the wasm equivalent of the native
+    /// `RgbOutputSpender::spend_spendable_outputs` (`src/ldk.rs`).
+    ///
+    /// RGB flow per colored closing txid: `update_witnesses` (register the confirmed closing
+    /// tx as a settled RGB witness) → `witness_receive` (allocate a wallet-owned receive slot)
+    /// → `create_spendable_outputs_psbt` + `color_psbt_and_consume` (move the allocation onto
+    /// the sweep output) → sign/broadcast → `post_consignment` (so the wallet's refresh can
+    /// accept the transfer and credit `getAssetBalance`).
+    async fn process_sweep_item(this: &Rc<Self>, item: &PendingSweepWork) -> Result<(), String> {
+        let mut descriptors: Vec<SpendableOutputDescriptor> = Vec::new();
+        for descriptor_hex in &item.descriptors_hex {
+            let bytes =
+                hex::decode(descriptor_hex).map_err(|e| format!("descriptor hex: {e}"))?;
+            let mut cursor = std::io::Cursor::new(bytes);
+            descriptors.push(
+                SpendableOutputDescriptor::read(&mut cursor)
+                    .map_err(|e| format!("descriptor decode: {e:?}"))?,
+            );
+        }
+        if descriptors.is_empty() {
+            return Ok(());
+        }
+
+        let (keys_manager, broadcaster, rgb_kv_store, fee_estimator) = {
+            let graph = this.object_graph.borrow();
+            let g = graph
+                .as_ref()
+                .ok_or_else(|| "LDK object graph not initialized".to_string())?;
+            (
+                Arc::clone(&g.keys_manager),
+                Arc::clone(&g.broadcaster),
+                Arc::clone(&g.rgb_kv_store),
+                Arc::clone(&g.fee_estimator),
+            )
+        };
+
+        // Idempotency: a replayed event / retry after a crash must rebroadcast the SAME tx
+        // rather than build a conflicting double-spend of the closing outputs.
+        let sweep_key = sweep_descriptors_key(&item.descriptors_hex);
+        if let Some(tx_hex) = this.sweep_txes.borrow().get(&sweep_key).cloned() {
+            let tx_bytes = hex::decode(&tx_hex).map_err(|e| format!("sweep tx hex: {e}"))?;
+            let tx: bitcoin::Transaction =
+                deserialize(&tx_bytes).map_err(|e| format!("sweep tx decode: {e}"))?;
+            broadcaster.broadcast_transactions(&[&tx]);
+            return Ok(());
+        }
+
+        let wallet_rc = RGB_WALLET_REGISTRY
+            .with(|reg| reg.borrow().get(&this.runtime_key).cloned())
+            .ok_or_else(|| "no RGB wallet attached".to_string())?;
+        const WALLET_BUSY: &str = "RGB wallet is busy; retrying sweep on next drive tick";
+        let busy = |_: std::cell::BorrowError| WALLET_BUSY.to_string();
+        let busy_mut = |_: std::cell::BorrowMutError| WALLET_BUSY.to_string();
+
+        let change_script = {
+            let mut wallet = wallet_rc.try_borrow_mut().map_err(busy_mut)?;
+            let address = wallet
+                .get_address()
+                .map_err(|e| format!("sweep change address: {e}"))?;
+            address
+                .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+                .map_err(|e| format!("sweep change address parse: {e}"))?
+                .assume_checked()
+                .script_pubkey()
+        };
+        let fee_rate =
+            fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::OutputSpendingFee);
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+
+        // Partition the descriptor set: which closing txids carry an RGB allocation
+        // (recorded by the fork's `color_closing`/`color_commitment` under
+        // RGB_TRANSFER_INFO_NS)? Everything else sweeps as vanilla BTC.
+        let mut txouts: Vec<bitcoin::TxOut> = Vec::new();
+        // contract id (string) → (colored vout, total rgb amount, recipient id)
+        let mut asset_info: HashMap<String, (u32, u64, String)> = HashMap::new();
+        let mut vanilla_descriptor = true;
+        let mut next_colored_vout: u32 = 0;
+        let mut proxy_endpoint: Option<String> = None;
+
+        for descriptor in &descriptors {
+            let outpoint = match descriptor {
+                SpendableOutputDescriptor::StaticPaymentOutput(d) => d.outpoint,
+                SpendableOutputDescriptor::DelayedPaymentOutput(d) => d.outpoint,
+                SpendableOutputDescriptor::StaticOutput { outpoint, .. } => *outpoint,
+            };
+            let txid_str = outpoint.txid.to_string();
+            if rgb_kv_store
+                .read(RGB_PRIMARY_NS, RGB_TRANSFER_INFO_NS, &txid_str)
+                .is_err()
+            {
+                continue;
+            }
+            let transfer_info = rgb_kv_store
+                .read_rgb_transfer_info(&txid_str)
+                .map_err(|e| format!("read_rgb_transfer_info({txid_str}): {e}"))?;
+            if transfer_info.rgb_amount == 0 {
+                continue;
+            }
+            vanilla_descriptor = false;
+
+            let endpoint = match proxy_endpoint.clone() {
+                Some(endpoint) => endpoint,
+                None => {
+                    let idb_key = wallet_rc.try_borrow().map_err(busy)?.idb_key();
+                    let endpoint = crate::effective_rgb_proxy_endpoint_for_wallet_key(&idb_key)
+                        .ok_or_else(|| {
+                            "no RGB proxy transport configured; cannot sweep colored output"
+                                .to_string()
+                        })?;
+                    proxy_endpoint = Some(endpoint.clone());
+                    endpoint
+                }
+            };
+
+            let online = wallet_rc
+                .try_borrow()
+                .map_err(busy)?
+                .get_online()
+                .ok_or_else(|| "RGB wallet is not online".to_string())?;
+
+            // The closing tx must be confirmed before rgb-lib will accept it as a witness.
+            let closing_height = {
+                let wallet = wallet_rc.try_borrow().map_err(busy)?;
+                wallet
+                    .get_tx_height(online.clone(), txid_str.clone())
+                    .await
+                    .map_err(|e| format!("get_tx_height({txid_str}): {e}"))?
+            };
+            let Some(closing_height) = closing_height else {
+                return Err(format!("closing tx {txid_str} not confirmed yet"));
+            };
+            let rgb_txid = txid_str
+                .parse::<rgb_lib_wasm::RgbTxid>()
+                .map_err(|_| format!("invalid rgb txid {txid_str}"))?;
+            let update_res = {
+                let mut wallet = wallet_rc.try_borrow_mut().map_err(busy_mut)?;
+                wallet
+                    .update_witnesses(online.clone(), closing_height, vec![rgb_txid])
+                    .await
+                    .map_err(|e| format!("update_witnesses({txid_str}): {e}"))?
+            };
+            // Only the closing tx witness (force-listed and pre-fetched above) gates the
+            // sweep. The stock's update pass also re-resolves OTHER tentative witnesses —
+            // e.g. never-broadcast commitment transfers of the channel being closed — which
+            // the wasm pre-fetch resolver cannot resolve and reports as failed. Those are
+            // irrelevant to (and would otherwise permanently defer) this sweep.
+            if update_res
+                .failed
+                .keys()
+                .any(|failed_txid| failed_txid.to_string() == txid_str)
+            {
+                return Err(format!(
+                    "update_witnesses failed for closing tx {txid_str}: {:?}",
+                    update_res.failed
+                ));
+            }
+            if !update_res.failed.is_empty() {
+                ldk_live_debug(&format!(
+                    "[rln-wasm-sdk sweep] update_witnesses reported unrelated unresolved witnesses (ignored): {:?}",
+                    update_res.failed
+                ));
+            }
+
+            let contract_id_str = transfer_info.contract_id.to_string();
+            let mut new_asset = false;
+            let recipient_id =
+                if let Some((_, _, recipient_id)) = asset_info.get(&contract_id_str) {
+                    recipient_id.clone()
+                } else {
+                    new_asset = true;
+                    let receive_data = {
+                        let mut wallet = wallet_rc.try_borrow_mut().map_err(busy_mut)?;
+                        wallet
+                            .witness_receive(
+                                None,
+                                rgb_lib_wasm::Assignment::Any,
+                                None,
+                                vec![rgb_transport_endpoint_from_http(&endpoint)],
+                                0,
+                            )
+                            .map_err(|e| format!("witness_receive: {e}"))?
+                    };
+                    let script = rgb_lib_wasm::utils::script_buf_from_recipient_id(
+                        receive_data.recipient_id.clone(),
+                    )
+                    .map_err(|e| format!("sweep recipient id: {e}"))?
+                    .ok_or_else(|| "sweep recipient id has no script".to_string())?;
+                    txouts.push(bitcoin::TxOut {
+                        value: bitcoin::Amount::from_sat(SWEEP_COLORED_OUTPUT_SAT),
+                        script_pubkey: bitcoin::ScriptBuf::from_bytes(script.to_bytes()),
+                    });
+                    receive_data.recipient_id
+                };
+
+            asset_info
+                .entry(contract_id_str)
+                .and_modify(|(_, amount, _)| *amount += transfer_info.rgb_amount)
+                .or_insert_with(|| {
+                    (next_colored_vout, transfer_info.rgb_amount, recipient_id)
+                });
+            if new_asset {
+                next_colored_vout += 1;
+            }
+        }
+
+        let descriptor_refs: Vec<&SpendableOutputDescriptor> = descriptors.iter().collect();
+
+        if vanilla_descriptor {
+            let tx = keys_manager
+                .spend_spendable_outputs(
+                    &descriptor_refs,
+                    txouts,
+                    change_script,
+                    fee_rate,
+                    None,
+                    &secp,
+                )
+                .map_err(|_| "vanilla sweep tx build failed".to_string())?;
+            broadcaster.broadcast_transactions(&[&tx]);
+            let txid = tx.compute_txid().to_string();
+            ldk_live_debug(&format!("[rln-wasm-sdk sweep] vanilla sweep broadcast {txid}"));
+            this.sweep_txes
+                .borrow_mut()
+                .insert(sweep_key, bitcoin::consensus::encode::serialize_hex(&tx));
+            return Ok(());
+        }
+
+        // ---- colored sweep (mirrors native `RgbOutputSpender`) ----
+        let (psbt, _expected_max_weight) =
+            SpendableOutputDescriptor::create_spendable_outputs_psbt(
+                &secp,
+                &descriptor_refs,
+                txouts,
+                change_script,
+                fee_rate,
+                None,
+            )
+            .map_err(|_| "failed to build sweep PSBT".to_string())?;
+
+        let mut asset_info_map = HashMap::new();
+        for (contract_id_str, (vout, amount, _)) in asset_info.clone() {
+            let contract_id = contract_id_str
+                .parse::<rgb_lib_wasm::ContractId>()
+                .map_err(|_| format!("invalid contract id {contract_id_str}"))?;
+            asset_info_map.insert(
+                contract_id,
+                rgb_lib_wasm::wallet::rust_only::AssetColoringInfo {
+                    output_map: HashMap::from_iter([(vout, amount)]),
+                    static_blinding: None,
+                },
+            );
+        }
+        let coloring_info = rgb_lib_wasm::wallet::rust_only::ColoringInfo {
+            asset_info_map,
+            static_blinding: None,
+            nonce: None,
+        };
+
+        let mut rgb_psbt = psbt
+            .to_string()
+            .parse::<rgb_lib_wasm::bitcoin::Psbt>()
+            .map_err(|e| format!("sweep PSBT roundtrip: {e}"))?;
+        let consignments = {
+            let wallet = wallet_rc.try_borrow().map_err(busy)?;
+            wallet
+                .color_psbt_and_consume(&mut rgb_psbt, coloring_info)
+                .await
+                .map_err(|e| format!("color_psbt_and_consume: {e}"))?
+        };
+
+        let psbt = rgb_psbt
+            .to_string()
+            .parse::<bitcoin::Psbt>()
+            .map_err(|e| format!("colored sweep PSBT roundtrip: {e}"))?;
+        let psbt = keys_manager
+            .sign_spendable_outputs_psbt(&descriptor_refs, psbt, &secp)
+            .map_err(|_| "failed to sign sweep PSBT".to_string())?;
+        let spending_tx = match psbt.extract_tx() {
+            Ok(tx) => tx,
+            Err(bitcoin::psbt::ExtractTxError::MissingInputValue { tx }) => tx,
+            Err(e) => return Err(format!("sweep tx extract: {e}")),
+        };
+        let sweep_txid = spending_tx.compute_txid().to_string();
+
+        // Post each consignment BEFORE broadcasting (native order): a broadcast sweep whose
+        // consignment never reached the proxy could not be accepted by the receiving side.
+        let proxy_endpoint = http_endpoint_from_any(
+            &proxy_endpoint.ok_or_else(|| "missing sweep proxy endpoint".to_string())?,
+        );
+        for consignment in consignments {
+            use rgb_lib_wasm::{ConsignmentExt, FileContent};
+            let contract_id_str = consignment.contract_id().to_string();
+            let (mut vout, _, recipient_id) = asset_info
+                .get(&contract_id_str)
+                .cloned()
+                .ok_or_else(|| format!("no asset info for contract {contract_id_str}"))?;
+            vout += 1;
+            let mut consignment_bytes = Vec::new();
+            consignment
+                .save(&mut consignment_bytes)
+                .map_err(|e| format!("consignment serialize: {e}"))?;
+            let wallet = wallet_rc.try_borrow().map_err(busy)?;
+            wallet
+                .post_consignment(
+                    &proxy_endpoint,
+                    recipient_id,
+                    &consignment_bytes,
+                    sweep_txid.clone(),
+                    Some(vout),
+                )
+                .await
+                .map_err(|e| format!("post_consignment: {e}"))?;
+        }
+
+        broadcaster.broadcast_transactions(&[&spending_tx]);
+        ldk_live_debug(&format!("[rln-wasm-sdk sweep] colored sweep broadcast {sweep_txid}"));
+        this.sweep_txes.borrow_mut().insert(
+            sweep_key,
+            bitcoin::consensus::encode::serialize_hex(&spending_tx),
+        );
+
+        // Best-effort refresh so the incoming sweep transfer is pulled from the proxy and the
+        // on-chain RGB balance credits without waiting for an app-driven refresh.
+        if let Ok(mut wallet) = wallet_rc.try_borrow_mut() {
+            if let Some(online) = wallet.get_online() {
+                let _ = wallet.refresh(online, None, vec![], false).await;
+            }
         }
         Ok(())
     }

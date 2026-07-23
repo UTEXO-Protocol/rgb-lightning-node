@@ -117,6 +117,10 @@ async function main() {
       const t = msg.text();
       if (t.startsWith("[e2e]")) {
         console.log(t);
+      } else if (t.includes("height-only best block")) {
+        // Height-only chain sync (fresh wallet, no monitors yet): surfaced so runs can verify
+        // the ChannelManager's best block advances before the first channel exists.
+        console.log(`[wasm] ${t.slice(0, 200)}`);
       } else if (
         process.env.E2E_VERBOSE &&
         // Narrow filter: the router's path-finding decision lines, plus HTLC-handling failures

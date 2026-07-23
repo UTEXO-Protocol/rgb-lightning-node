@@ -527,6 +527,27 @@ fn wallet_rgb_proxy_transport_get(idb_key: &str) -> Option<RlnWasmRgbProxyTransp
     Some(config)
 }
 
+/// The effective RGB proxy endpoint (with auth query params applied) for a wallet, resolved
+/// from its registered proxy-transport config or the SDK default. Used by the live backend's
+/// post-close sweep, which needs a transport endpoint for `witness_receive` and a proxy URL for
+/// `post_consignment` outside any facade call. `None` when no transport has been configured.
+pub(crate) fn effective_rgb_proxy_endpoint_for_wallet_key(idb_key: &str) -> Option<String> {
+    let config = wallet_rgb_proxy_transport_get(idb_key).or_else(sdk_default_rgb_proxy_transport)?;
+    match (&config.auth_token, &config.node_id) {
+        (Some(token), Some(node_id)) => {
+            let separator = if config.endpoint.contains('?') { '&' } else { '?' };
+            Some(format!(
+                "{}{}auth_token={}&node_id={}",
+                config.endpoint,
+                separator,
+                urlencoding::encode(token),
+                urlencoding::encode(node_id),
+            ))
+        }
+        _ => Some(config.endpoint.clone()),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn local_storage_get_item(key: &str) -> Result<Option<String>, JsValue> {
     let Some(window) = web_sys::window() else {

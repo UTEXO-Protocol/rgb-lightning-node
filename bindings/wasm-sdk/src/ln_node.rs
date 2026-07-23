@@ -4125,6 +4125,60 @@ async fn fetch_tx_status(indexer_url: &str, txid: &str) -> Result<Option<(u32, S
     Ok(Some((height, block_hash)))
 }
 
+/// Esplora: `GET /tx/:txid/outspend/:vout` → whether (and by which tx) an output is spent.
+/// Returns the spender txid only once the spend itself is CONFIRMED — an unconfirmed spend
+/// cannot be fed to LDK's `transactions_confirmed` anyway.
+#[cfg(target_arch = "wasm32")]
+async fn fetch_outspend_txid(
+    indexer_url: &str,
+    txid: &str,
+    vout: u32,
+) -> Result<Option<String>, JsValue> {
+    let url = format!("{indexer_url}/tx/{txid}/outspend/{vout}");
+    let response = Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    if !response.ok() {
+        return Err(JsValue::from_str(&format!(
+            "outspend query failed with status {}",
+            response.status()
+        )));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let spent = value
+        .get("spent")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !spent {
+        return Ok(None);
+    }
+    let confirmed = value
+        .get("status")
+        .and_then(|s| s.get("confirmed"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !confirmed {
+        return Ok(None);
+    }
+    Ok(value
+        .get("txid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_outspend_txid(
+    _indexer_url: &str,
+    _txid: &str,
+    _vout: u32,
+) -> Result<Option<String>, JsValue> {
+    Err(JsValue::from_str(sdk_contracts::ERR_CHAIN_SYNC_WASM32_ONLY))
+}
+
 /// Esplora: `GET /block/:hash/txids` returns the ordered txid list for the block.
 /// LDK's `transactions_confirmed` requires the transaction's index within that list (coinbase is 0).
 #[cfg(target_arch = "wasm32")]
@@ -6001,8 +6055,49 @@ async fn apply_chain_sync_to_live_ldk(
         return Ok(());
     }
 
-    let relevant = ldk_runtime.chain_relevant_txids()?;
+    let mut relevant = ldk_runtime.chain_relevant_txids()?;
+    // Watched-output spend detection: the monitor watches its funding outpoints via the
+    // `Filter`, but the tx that SPENDS one (closing/commitment tx) is unknown to it until we
+    // feed it in — `chain_relevant_txids` can never list it. Ask the indexer who spent each
+    // watched outpoint and treat any confirmed spender as a relevant tx; applying it via
+    // `chain_apply_confirmed_tx` below lets the monitor resolve the close and (after maturity)
+    // emit `Event::SpendableOutputs`, which drives the post-close sweep.
+    let watched_outputs = ldk_runtime.chain_watched_outputs()?;
+    let max_outspends = 64usize;
+    for (txid, vout) in watched_outputs.into_iter().take(max_outspends) {
+        match fetch_outspend_txid(&indexer_url, &txid, vout).await {
+            Ok(Some(spender_txid)) => {
+                if !relevant.contains(&spender_txid) {
+                    relevant.push(spender_txid);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                wasm_debug(&format!(
+                    "[rln-wasm-sdk chain-sync] outspend lookup failed for {txid}:{vout}: {e:?}"
+                ));
+            }
+        }
+    }
     if relevant.is_empty() {
+        // Height-only sync. A wallet with no monitors and no watched txids (fresh node before
+        // its first channel, restored wallet with zero channels, virtual-channel onboarding
+        // window) previously returned early here on EVERY tick, freezing the ChannelManager's
+        // best block at the network genesis. Outbound route CLTVs were then computed from that
+        // frozen height and rejected by peers at the real chain height ("cltv expiry too
+        // soon" — compensating would need an ever-growing CLTV delta), and the hodl-HTLC
+        // deadline fail-back (driven inside chain_apply_best_block) could never fire. Apply
+        // the tip unconditionally; tolerate a missing LDK object graph (e.g. wallet attached
+        // but LDK not started yet) instead of failing the whole chain-sync tick.
+        let tip_header_hex = fetch_block_header_hex_by_height(&indexer_url, tip_height).await?;
+        match ldk_runtime.chain_apply_best_block(tip_height, &tip_header_hex) {
+            Ok(()) => wasm_debug(&format!(
+                "[rln-wasm-sdk chain-sync] height-only best block applied height={tip_height}"
+            )),
+            Err(e) => wasm_debug(&format!(
+                "[rln-wasm-sdk chain-sync] height-only best block skipped (backend not ready): {e:?}"
+            )),
+        }
         return Ok(());
     }
 

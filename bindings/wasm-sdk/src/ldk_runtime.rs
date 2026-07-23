@@ -491,6 +491,12 @@ pub trait LdkRuntimeManager {
         Ok(Vec::new())
     }
 
+    /// `(funding txid, vout)` pairs the chain monitor watches for spends; see
+    /// `LdkLiveBackend::chain_watched_outputs`.
+    fn chain_watched_outputs(&self) -> Result<Vec<(String, u32)>, JsValue> {
+        Ok(Vec::new())
+    }
+
     fn chain_apply_best_block(&self, _height: u32, _header_hex: &str) -> Result<(), JsValue> {
         Ok(())
     }
@@ -1168,6 +1174,11 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
     fn chain_relevant_txids(&self) -> Result<Vec<String>, JsValue> {
         let backend = self.ensure_live_backend()?;
         backend.chain_relevant_txids()
+    }
+
+    fn chain_watched_outputs(&self) -> Result<Vec<(String, u32)>, JsValue> {
+        let backend = self.ensure_live_backend()?;
+        backend.chain_watched_outputs()
     }
 
     fn chain_apply_best_block(&self, height: u32, header_hex: &str) -> Result<(), JsValue> {

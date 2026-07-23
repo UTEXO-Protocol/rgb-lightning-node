@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RLN WASM — Coop-Close RGB Settlement Repro</title>
+    <style>
+      body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 1.5rem; }
+      button { padding: 0.5rem 0.9rem; font-size: 1rem; }
+      #out { border: 1px solid #bbb; padding: 0.8rem; margin-top: 1rem; max-height: 80vh; overflow: auto; }
+      pre { margin: 0.3rem 0; white-space: pre-wrap; }
+      .hint { color: #666; font-size: 0.85em; }
+    </style>
+  </head>
+  <body>
+    <h1>Cooperative Close — On-Chain RGB Settlement on the WASM Side</h1>
+    <p class="hint">
+      The native hub opens a <strong>real, on-chain-funded, anchors</strong> RGB channel to this
+      wasm node with <code>push_asset_amount</code>, one RGB keysend lands hub→wasm, then the wasm
+      side <strong>cooperatively closes</strong> the channel. The flow then asserts that the wasm
+      side's RGB share of the colored closing transaction settles into the on-chain wallet
+      (<code>getAssetBalance</code> &gt; 0) — the bug under test is that it stays 0 forever because
+      the wasm backend never drains <code>ChainMonitor</code> events, never handles
+      <code>SpendableOutputs</code>, and has no colored sweep pipeline. Requires
+      compose.wasm-infra.yaml infra, the wasm-proxy-gateway (dev-http), and a fresh native
+      <code>rgb-lightning-node</code> (peer 9802, REST 3101). Driven headlessly by
+      <code>run_coop_close_settlement_flow.mjs</code> (auto-runs when <code>?autorun</code> is
+      present).
+    </p>
+    <button id="run">Run Settlement Flow</button>
+    <div id="out"></div>
+    <script type="module" src="./manual_js_rgb_coop_close_settlement_flow.js"></script>
+  </body>
+</html>
