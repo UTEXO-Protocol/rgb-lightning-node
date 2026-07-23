@@ -4093,6 +4093,15 @@ async fn fetch_tx_status(indexer_url: &str, txid: &str) -> Result<Option<(u32, S
         .send()
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    // Esplora deployments differ on unknown txids: some answer 200 {"confirmed":false},
+    // others 404. A relevant txid the indexer has never seen is NORMAL here — a trusted
+    // virtual channel's funding tx is intentionally never broadcast, yet its monitor still
+    // registers it with the `Filter`. Treating the 404 as an error would abort the whole
+    // chain-sync tick before `chain_apply_best_block`, permanently freezing the wallet's
+    // best-block height (frozen-height CLTV failures, e.g. PaymentClaimBuffer).
+    if response.status() == 404 {
+        return Ok(None);
+    }
     if !response.ok() {
         return Err(JsValue::from_str(&format!(
             "tx status query failed with status {}",
@@ -4139,6 +4148,11 @@ async fn fetch_outspend_txid(
         .send()
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    // Unknown funding txid (e.g. a never-broadcast virtual channel funding): treat as
+    // unspent rather than an error, mirroring `fetch_tx_status`.
+    if response.status() == 404 {
+        return Ok(None);
+    }
     if !response.ok() {
         return Err(JsValue::from_str(&format!(
             "outspend query failed with status {}",
