@@ -45,8 +45,7 @@ use lightning::routing::scoring::{
 };
 use lightning::sign::KeysManager;
 use lightning::sign::{
-    EntropySource, InMemorySigner, NodeSigner, OutputSpender, Recipient,
-    SpendableOutputDescriptor,
+    EntropySource, InMemorySigner, NodeSigner, OutputSpender, Recipient, SpendableOutputDescriptor,
 };
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::config::UserConfig;
@@ -3937,12 +3936,7 @@ impl WasmLdkLiveBackend {
                     JsValue::from_str(&format!("RGB pending transactions failed: {e:?}"))
                 })?;
         }
-        // Phase G: post-close sweeps (SpendableOutputs → colored/vanilla sweep tx). Drain
-        // events first: after a close there may be no peer traffic left, so the frame-driven
-        // `process_events` path can stop running — without this drain a matured
-        // `Event::SpendableOutputs` would sit in the ChainMonitor forever. Errors defer the
-        // item to the next drive tick (e.g. closing tx not confirmed yet) and never fail the
-        // funding pipeline.
+
         {
             let graph = this.object_graph.borrow();
             if let Some(g) = graph.as_ref() {
@@ -3988,8 +3982,7 @@ impl WasmLdkLiveBackend {
     async fn process_sweep_item(this: &Rc<Self>, item: &PendingSweepWork) -> Result<(), String> {
         let mut descriptors: Vec<SpendableOutputDescriptor> = Vec::new();
         for descriptor_hex in &item.descriptors_hex {
-            let bytes =
-                hex::decode(descriptor_hex).map_err(|e| format!("descriptor hex: {e}"))?;
+            let bytes = hex::decode(descriptor_hex).map_err(|e| format!("descriptor hex: {e}"))?;
             let mut cursor = std::io::Cursor::new(bytes);
             descriptors.push(
                 SpendableOutputDescriptor::read(&mut cursor)
@@ -4142,41 +4135,39 @@ impl WasmLdkLiveBackend {
 
             let contract_id_str = transfer_info.contract_id.to_string();
             let mut new_asset = false;
-            let recipient_id =
-                if let Some((_, _, recipient_id)) = asset_info.get(&contract_id_str) {
-                    recipient_id.clone()
-                } else {
-                    new_asset = true;
-                    let receive_data = {
-                        let mut wallet = wallet_rc.try_borrow_mut().map_err(busy_mut)?;
-                        wallet
-                            .witness_receive(
-                                None,
-                                rgb_lib_wasm::Assignment::Any,
-                                None,
-                                vec![rgb_transport_endpoint_from_http(&endpoint)],
-                                0,
-                            )
-                            .map_err(|e| format!("witness_receive: {e}"))?
-                    };
-                    let script = rgb_lib_wasm::utils::script_buf_from_recipient_id(
-                        receive_data.recipient_id.clone(),
-                    )
-                    .map_err(|e| format!("sweep recipient id: {e}"))?
-                    .ok_or_else(|| "sweep recipient id has no script".to_string())?;
-                    txouts.push(bitcoin::TxOut {
-                        value: bitcoin::Amount::from_sat(SWEEP_COLORED_OUTPUT_SAT),
-                        script_pubkey: bitcoin::ScriptBuf::from_bytes(script.to_bytes()),
-                    });
-                    receive_data.recipient_id
+            let recipient_id = if let Some((_, _, recipient_id)) = asset_info.get(&contract_id_str)
+            {
+                recipient_id.clone()
+            } else {
+                new_asset = true;
+                let receive_data = {
+                    let mut wallet = wallet_rc.try_borrow_mut().map_err(busy_mut)?;
+                    wallet
+                        .witness_receive(
+                            None,
+                            rgb_lib_wasm::Assignment::Any,
+                            None,
+                            vec![rgb_transport_endpoint_from_http(&endpoint)],
+                            0,
+                        )
+                        .map_err(|e| format!("witness_receive: {e}"))?
                 };
+                let script = rgb_lib_wasm::utils::script_buf_from_recipient_id(
+                    receive_data.recipient_id.clone(),
+                )
+                .map_err(|e| format!("sweep recipient id: {e}"))?
+                .ok_or_else(|| "sweep recipient id has no script".to_string())?;
+                txouts.push(bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(SWEEP_COLORED_OUTPUT_SAT),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(script.to_bytes()),
+                });
+                receive_data.recipient_id
+            };
 
             asset_info
                 .entry(contract_id_str)
                 .and_modify(|(_, amount, _)| *amount += transfer_info.rgb_amount)
-                .or_insert_with(|| {
-                    (next_colored_vout, transfer_info.rgb_amount, recipient_id)
-                });
+                .or_insert_with(|| (next_colored_vout, transfer_info.rgb_amount, recipient_id));
             if new_asset {
                 next_colored_vout += 1;
             }
@@ -4197,7 +4188,9 @@ impl WasmLdkLiveBackend {
                 .map_err(|_| "vanilla sweep tx build failed".to_string())?;
             broadcaster.broadcast_transactions(&[&tx]);
             let txid = tx.compute_txid().to_string();
-            ldk_live_debug(&format!("[rln-wasm-sdk sweep] vanilla sweep broadcast {txid}"));
+            ldk_live_debug(&format!(
+                "[rln-wasm-sdk sweep] vanilla sweep broadcast {txid}"
+            ));
             this.sweep_txes
                 .borrow_mut()
                 .insert(sweep_key, bitcoin::consensus::encode::serialize_hex(&tx));
@@ -4292,7 +4285,9 @@ impl WasmLdkLiveBackend {
         }
 
         broadcaster.broadcast_transactions(&[&spending_tx]);
-        ldk_live_debug(&format!("[rln-wasm-sdk sweep] colored sweep broadcast {sweep_txid}"));
+        ldk_live_debug(&format!(
+            "[rln-wasm-sdk sweep] colored sweep broadcast {sweep_txid}"
+        ));
         this.sweep_txes.borrow_mut().insert(
             sweep_key,
             bitcoin::consensus::encode::serialize_hex(&spending_tx),

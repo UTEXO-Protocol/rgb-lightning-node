@@ -80,8 +80,8 @@ async function main() {
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: true,
-    // STEP 4 keeps the page's JS busy with long wallet refresh calls; the default 180s
-    // protocol timeout can kill the final __E2E_RESULT evaluate on an unsettled (repro) run.
+    // The settlement wait keeps the page's JS busy with long wallet refresh calls; the default
+    // 180s protocol timeout can kill the final __E2E_RESULT evaluate on an unsettled (repro) run.
     protocolTimeout: 300_000,
     userDataDir,
     args: [

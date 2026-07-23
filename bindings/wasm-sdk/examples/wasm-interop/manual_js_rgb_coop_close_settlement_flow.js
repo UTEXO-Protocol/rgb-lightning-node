@@ -17,13 +17,12 @@
 // >= the expected in-channel amount within the settlement timeout, while passing end-to-end once
 // the wasm sweep pipeline exists.
 //
-// Steps:
-//   0. hub funds its wallet, issues NIA, opens the real RGB channel to us with push (300 RGB).
-//   1. hub → wasm RGB keysend (50 RGB) → wasm in-channel RGB = 350.
-//   2. snapshot pre-close wallet balances (on-chain RGB expected 0 — everything is in-channel).
-//   3. wasm cooperatively closes the channel; both sides negotiate the colored closing tx.
-//   4. pump chain sync + RGB work while mining; wait for the native side to settle (control),
-//      then assert the wasm side's getAssetBalance reaches the expected 350 on-chain.
+// The flow: the hub funds its wallet, issues NIA and opens the real RGB channel to us with
+// push (300 RGB); a hub → wasm RGB keysend (50 RGB) brings the wasm in-channel RGB to 350;
+// pre-close wallet balances are snapshotted (on-chain RGB expected 0 — everything is
+// in-channel); the wasm side cooperatively closes and both sides negotiate the colored closing
+// tx; finally chain sync + RGB work are pumped while mining until the native side settles
+// (control) and the wasm side's getAssetBalance reaches the expected 350 on-chain.
 //
 // Driven headlessly by run_coop_close_settlement_flow.mjs, or manually via
 // rgb_coop_close_settlement_flow.html.
@@ -59,7 +58,7 @@ const EXPECTED_HUB_RGB = ASSET_CHANNEL_AMOUNT - ASSET_PUSH_AMOUNT - RGB_KEYSEND_
 const CHANNEL_READY_TIMEOUT_MS = 240_000;
 const FUND_TIMEOUT_MS = 60_000;
 const PAYMENT_TIMEOUT_MS = 90_000;
-const RGB_FUNDING_STEP_TIMEOUT_MS = 30_000;
+const RGB_FUNDING_WORK_TIMEOUT_MS = 30_000;
 const FETCH_TIMEOUT_MS = 15_000;
 // Settlement needs: closing tx broadcast + confirm, SpendableOutputs maturity (ANTI_REORG_DELAY
 // = 6 confs), sweep broadcast + confirm, refresh. We mine continuously, so this bounds the
@@ -274,7 +273,7 @@ async function waitForUsableChannel(node, peer, gatewayUrl, walletAddress, timeo
       log(`chainSyncTick err iter=${iter}`, String(e));
     }
     try {
-      await withTimeout(node.driveRgbFundingWork(), RGB_FUNDING_STEP_TIMEOUT_MS, "driveRgbFundingWork");
+      await withTimeout(node.driveRgbFundingWork(), RGB_FUNDING_WORK_TIMEOUT_MS, "driveRgbFundingWork");
     } catch (e) {
       if (String(e).includes("timed out")) throw e;
     }
@@ -404,10 +403,10 @@ async function runFlow(cfg, runtimeId) {
   const nativePubkey = nativeInfo.pubkey;
   log("Native hub info", { pubkey: nativePubkey });
 
-  // === STEP 0a: hub issues the asset ===
+  // === bootstrap: hub issues the asset ===
   const assetId = await nativeBootstrapRgbAsset(cfg, walletAddress);
 
-  // === STEP 0b: connect to the hub ===
+  // === bootstrap: connect to the hub ===
   await node.connectPeer(cfg.nativePeerAddr, nativePubkey);
   {
     const live = JSON.parse(node.nodePubkeyJson());
@@ -424,7 +423,7 @@ async function runFlow(cfg, runtimeId) {
     await waitForNativePeer(node, cfg.nativeMgmtUrl, myPubkeyHex, 20_000).catch(() => {});
   };
 
-  // === STEP 0c: hub opens the REAL RGB channel to us ===
+  // === bootstrap: hub opens the REAL RGB channel to us ===
   log("Requesting native hub to open a REAL RGB channel to us...", {
     assetId, assetAmount: ASSET_CHANNEL_AMOUNT, pushAssetAmount: ASSET_PUSH_AMOUNT,
   });
@@ -457,7 +456,7 @@ async function runFlow(cfg, runtimeId) {
     Number(nativeChannel.asset_local_amount) === ASSET_CHANNEL_AMOUNT - ASSET_PUSH_AMOUNT,
     `hub-side asset_local_amount should be ${ASSET_CHANNEL_AMOUNT - ASSET_PUSH_AMOUNT}, got ${nativeChannel.asset_local_amount}`,
   );
-  log("✅ STEP 0 done — REAL RGB channel open + ready on both sides", {
+  log("✅ REAL RGB channel open + ready on both sides", {
     id: rgbChannelId,
     wasm_asset_local: rgbChannel.asset_local_amount,
     hub_asset_local: nativeChannel.asset_local_amount,
@@ -465,8 +464,8 @@ async function runFlow(cfg, runtimeId) {
 
   await settleChainConvergence(node);
 
-  // === STEP 1: hub → wasm RGB keysend (makes the wasm in-channel balance ≠ the pushed amount) ===
-  log("STEP 1: hub → wasm RGB keysend...", { assetId, asset: RGB_KEYSEND_AMOUNT, amtMsat: RGB_HTLC_MSAT });
+  // === hub → wasm RGB keysend (makes the wasm in-channel balance ≠ the pushed amount) ===
+  log("hub → wasm RGB keysend...", { assetId, asset: RGB_KEYSEND_AMOUNT, amtMsat: RGB_HTLC_MSAT });
   const hubKeysend = await nativePost(cfg.nativeMgmtUrl, "/keysend", {
     dest_pubkey: myPubkeyHex,
     amt_msat: RGB_HTLC_MSAT,
@@ -476,14 +475,14 @@ async function runFlow(cfg, runtimeId) {
   const hubKeysendSettled = await waitNativePaymentSettled(
     node, cfg, hubKeysend.payment_hash, "hub→wasm RGB keysend", PAYMENT_TIMEOUT_MS,
   );
-  log("✅ STEP 1 done — hub→wasm RGB keysend settled", hubKeysendSettled);
+  log("✅ hub→wasm RGB keysend settled", hubKeysendSettled);
 
-  // === STEP 2: pre-close snapshot ===
+  // === pre-close snapshot ===
   await settleChainConvergence(node, 4);
   const preCloseChannel = node.listChannelsValue().find((c) => c.channel_id === rgbChannelId);
   const preCloseWasmRgb = assetBalanceOrZero(wallet, assetId);
   const preCloseWasmBtc = wallet.getBtcBalanceValue();
-  log("STEP 2: pre-close snapshot", {
+  log("pre-close snapshot", {
     channel_asset_local: preCloseChannel?.asset_local_amount,
     channel_asset_remote: preCloseChannel?.asset_remote_amount,
     wasm_onchain_rgb: preCloseWasmRgb,
@@ -494,8 +493,8 @@ async function runFlow(cfg, runtimeId) {
     `wasm in-channel RGB should be ${EXPECTED_WASM_RGB} before close, got ${preCloseChannel?.asset_local_amount}`,
   );
 
-  // === STEP 3: WASM side cooperatively closes the channel ===
-  log("STEP 3: wasm initiates cooperative close...", { channel: rgbChannelId.slice(0, 16) });
+  // === WASM side cooperatively closes the channel ===
+  log("wasm initiates cooperative close...", { channel: rgbChannelId.slice(0, 16) });
   node.closeChannelWithOptions(rgbChannelId, nativePubkey, false);
   // Pump until both sides agree the channel is gone (shutdown + closing_signed negotiation
   // rides the normal peer pump; the colored closing tx needs process_pending_rgb_transactions,
@@ -515,12 +514,12 @@ async function runFlow(cfg, runtimeId) {
     assert(closedOnNative, "channel still listed on the native side after cooperative close");
   }
   await mineBlocks(cfg.gatewayUrl, walletAddress, 3);
-  log("✅ STEP 3 done — cooperative close negotiated, closing tx mined");
+  log("✅ cooperative close negotiated, closing tx mined");
 
-  // === STEP 4: settlement — mine + pump until BOTH sides recover their RGB on-chain ===
+  // === settlement — mine + pump until BOTH sides recover their RGB on-chain ===
   // Native side first (control: proves the closing tx really is colored and the infra works —
   // the native SpendableOutputs → RgbOutputSpender pipeline settles automatically).
-  log("STEP 4: waiting for on-chain RGB settlement (native control first, then wasm)...", {
+  log("waiting for on-chain RGB settlement (native control first, then wasm)...", {
     expected_hub: EXPECTED_HUB_RGB, expected_wasm: EXPECTED_WASM_RGB,
   });
   let nativeSettled = null;
