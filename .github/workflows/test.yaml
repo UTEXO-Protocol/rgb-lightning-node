@@ -143,6 +143,8 @@ jobs:
         run: VSS=1 ./regtest.sh start
       - name: Run VSS tests (e2e against regtest + VSS server)
         run: cargo test --features vss "test::vss::tests" -- --test-threads=1
+      - name: Run VSS unreachable openchannel e2e test
+        run: cargo test --features vss "test::vss_unreachable_openchannel" -- --test-threads=1
       - name: Run VSS full-restore e2e test (wipe node dir, restore from seed)
         run: cargo test --features "uniffi,test-utils,vls,vss" --test lib_sdk vss_restore -- --test-threads=1
       - name: Stop regtest and VSS services
