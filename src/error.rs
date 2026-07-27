@@ -109,6 +109,10 @@ pub enum APIError {
     #[error("Failed to initialize VSS: {0}")]
     FailedVssInit(String),
 
+    #[cfg(feature = "vss")]
+    #[error("VSS server is unreachable")]
+    VssUnreachable,
+
     #[error("Failed to disconnect to peer: {0}")]
     FailedPeerDisconnection(String),
 
@@ -634,7 +638,7 @@ impl IntoResponse for APIError {
                 self.name(),
             ),
             #[cfg(feature = "vss")]
-            APIError::FailedVssInit(_) => (
+            APIError::FailedVssInit(_) | APIError::VssUnreachable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.to_string(),
                 self.name(),

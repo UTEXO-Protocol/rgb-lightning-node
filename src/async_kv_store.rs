@@ -59,6 +59,18 @@ impl RemoteFirstKvStore {
     pub fn stop(&self) {
         let _ = self.shutdown.send(true);
     }
+
+    /// Probes the configured VSS server. `true` when VSS is not configured or
+    /// answered (a missing probe key still proves the server responded).
+    pub async fn remote_reachable(&self) -> bool {
+        match &self.remote {
+            None => true,
+            Some(remote) => match remote.read_async("", "", "vss_health_probe").await {
+                Ok(_) => true,
+                Err(e) => e.kind() == io::ErrorKind::NotFound,
+            },
+        }
+    }
 }
 
 /// Runs `op` until it succeeds, retrying transient VSS failures with capped

@@ -4115,6 +4115,13 @@ pub(crate) async fn open_channel(
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
 
+        // Channel persistence is remote-first: without VSS the open would
+        // accept and then stall silently, so refuse it up front.
+        #[cfg(feature = "vss")]
+        if !unlocked_state.monitor_kv_store.remote_reachable().await {
+            return Err(APIError::VssUnreachable);
+        }
+
         let is_virtual_open = match payload.virtual_open_mode.as_deref() {
             None => false,
             Some(VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST) => true,
