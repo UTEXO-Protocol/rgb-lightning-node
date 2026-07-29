@@ -380,7 +380,7 @@ def mine_until_tx_confirmed(
         node.sync()
         if peer_node is not None:
             peer_node.sync()
-        txs = node.list_transactions(False)
+        txs = node.list_transactions(False, None)
         tx = next((t for t in txs if str(t.txid) == txid), None)
         if tx is not None and tx.confirmation_time is not None:
             return

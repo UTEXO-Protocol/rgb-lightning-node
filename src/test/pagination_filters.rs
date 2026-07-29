@@ -276,6 +276,26 @@ async fn by_txid() {
         .iter()
         .all(|t| t.txid.as_deref() == Some(rcv_txid.as_str())));
 
+    // asset_id + txid combine as an intersection
+    let (txid_1, expected_1) = idx_by_txid.iter().next().unwrap();
+    let mut expected_1 = expected_1.clone();
+    expected_1.sort_unstable();
+    let mut both: Vec<i32> = list_transfers_by_asset_and_txid(node1_addr, &asset_id, txid_1)
+        .await
+        .iter()
+        .map(|t| t.idx)
+        .collect();
+    both.sort_unstable();
+    assert_eq!(both, expected_1, "asset+txid intersection mismatch");
+
+    // an asset with no transfers in that tx yields empty
+    let other_asset_id = issue_asset_cfa(node1_addr, None).await.asset_id;
+    assert!(
+        list_transfers_by_asset_and_txid(node1_addr, &other_asset_id, txid_1)
+            .await
+            .is_empty()
+    );
+
     // unknown txid yields empty results on both endpoints
     let unknown = "0".repeat(64);
     assert!(list_transfers_by_txid(node1_addr, &unknown)

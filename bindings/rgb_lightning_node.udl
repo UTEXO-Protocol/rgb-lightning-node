@@ -23,9 +23,7 @@ interface SdkNode {
     [Throws=RlnError]
     sequence<Peer> list_peers();
     [Throws=RlnError]
-    sequence<Transaction> list_transactions(boolean skip_sync);
-    [Throws=RlnError]
-    sequence<Transaction> list_transactions_by_txid(string txid, boolean skip_sync);
+    sequence<Transaction> list_transactions(boolean skip_sync, string? txid);
     [Throws=RlnError]
     NetworkInfo network_info();
     [Throws=RlnError]
@@ -113,9 +111,7 @@ interface SdkNode {
     [Throws=RlnError]
     InvoiceStatus invoice_status(Bolt11Invoice invoice);
     [Throws=RlnError]
-    sequence<Transfer> list_transfers(ContractId asset_id);
-    [Throws=RlnError]
-    sequence<Transfer> list_transfers_by_txid(string txid);
+    sequence<Transfer> list_transfers(ContractId? asset_id, string? txid);
     [Throws=RlnError]
     sequence<Unspent> list_unspents(boolean skip_sync);
     [Throws=RlnError]

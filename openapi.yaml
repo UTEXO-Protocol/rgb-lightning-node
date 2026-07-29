@@ -2899,8 +2899,9 @@ components:
     ListTransfersRequest:
       type: object
       description: >-
-        Provide either asset_id (list that asset's transfers) or txid (list the
-        transfers committed by that on-chain transaction, across all assets).
+        Provide asset_id (list that asset's transfers), txid (list the
+        transfers committed by that on-chain transaction, across all assets),
+        or both (their intersection). At least one is required.
       properties:
         asset_id:
           type:
@@ -2913,7 +2914,7 @@ components:
             - 'null'
           description: >-
             Return the transfers committed by the on-chain transaction with this
-            txid. Takes precedence over asset_id when both are given.
+            txid. Combined with asset_id it acts as an intersection.
         index_offset:
           type:
             - integer

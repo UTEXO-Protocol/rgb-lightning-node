@@ -2735,8 +2735,15 @@ impl RlnWasmWallet {
         js_to_json(&parsed)
     }
 
+    /// With no asset_id, list transfers not connected to a specific asset unless a txid is
+    /// given, in which case list that transaction's transfers across all assets. Providing
+    /// both acts as an intersection.
     #[wasm_bindgen(js_name = listTransfersValue)]
-    pub fn list_transfers_value(&self, asset_id: Option<String>) -> Result<JsValue, JsValue> {
+    pub fn list_transfers_value(
+        &self,
+        asset_id: Option<String>,
+        txid: Option<String>,
+    ) -> Result<JsValue, JsValue> {
         if let Some(id) = &asset_id {
             if id.trim().is_empty() {
                 return Err(JsValue::from_str(
@@ -2744,16 +2751,25 @@ impl RlnWasmWallet {
                 ));
             }
         }
+        let filter = match asset_id {
+            Some(id) => rgb_lib_wasm::wallet::AssetFilter::Id(id),
+            None if txid.is_some() => rgb_lib_wasm::wallet::AssetFilter::Any,
+            None => rgb_lib_wasm::wallet::AssetFilter::NoAsset,
+        };
         let transfers = self
             .wallet_ref()?
-            .list_transfers(asset_id)
+            .list_transfers(filter, txid)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         js_obj(&transfers)
     }
 
     #[wasm_bindgen(js_name = listTransfersJson)]
-    pub fn list_transfers_json(&self, asset_id: Option<String>) -> Result<String, JsValue> {
-        let value = self.list_transfers_value(asset_id)?;
+    pub fn list_transfers_json(
+        &self,
+        asset_id: Option<String>,
+        txid: Option<String>,
+    ) -> Result<String, JsValue> {
+        let value = self.list_transfers_value(asset_id, txid)?;
         let parsed: serde_json::Value = js_from(value)?;
         js_to_json(&parsed)
     }

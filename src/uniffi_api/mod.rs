@@ -1068,19 +1068,13 @@ impl SdkNode {
             .collect()
     }
 
-    pub fn list_transactions(&self, skip_sync: bool) -> Result<Vec<Transaction>, RlnError> {
-        let state = self.handle.app_state();
-        let txs = block_on_sdk(sdk::list_transactions(state, skip_sync))?;
-        txs.into_iter().map(map_transaction).collect()
-    }
-
-    pub fn list_transactions_by_txid(
+    pub fn list_transactions(
         &self,
-        txid: String,
         skip_sync: bool,
+        txid: Option<String>,
     ) -> Result<Vec<Transaction>, RlnError> {
         let state = self.handle.app_state();
-        let txs = block_on_sdk(sdk::list_transactions_by_txid(state, txid, skip_sync))?;
+        let txs = block_on_sdk(sdk::list_transactions(state, skip_sync, txid))?;
         txs.into_iter().map(map_transaction).collect()
     }
 
@@ -1400,15 +1394,17 @@ impl SdkNode {
         })
     }
 
-    pub fn list_transfers(&self, asset_id: ContractId) -> Result<Vec<Transfer>, RlnError> {
+    pub fn list_transfers(
+        &self,
+        asset_id: Option<ContractId>,
+        txid: Option<String>,
+    ) -> Result<Vec<Transfer>, RlnError> {
         let state = self.handle.app_state();
-        let resp = block_on_sdk(sdk::list_transfers(state, asset_id.to_string()))?;
-        resp.into_iter().map(map_transfer).collect()
-    }
-
-    pub fn list_transfers_by_txid(&self, txid: String) -> Result<Vec<Transfer>, RlnError> {
-        let state = self.handle.app_state();
-        let resp = block_on_sdk(sdk::list_transfers_by_txid(state, txid))?;
+        let resp = block_on_sdk(sdk::list_transfers(
+            state,
+            asset_id.map(|a| a.to_string()),
+            txid,
+        ))?;
         resp.into_iter().map(map_transfer).collect()
     }
 
@@ -1706,9 +1702,12 @@ pub fn sdk_list_peers() -> Result<Vec<Peer>, RlnError> {
     SdkNode { handle }.list_peers()
 }
 
-pub fn sdk_list_transactions(skip_sync: bool) -> Result<Vec<Transaction>, RlnError> {
+pub fn sdk_list_transactions(
+    skip_sync: bool,
+    txid: Option<String>,
+) -> Result<Vec<Transaction>, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
-    SdkNode { handle }.list_transactions(skip_sync)
+    SdkNode { handle }.list_transactions(skip_sync, txid)
 }
 
 pub fn sdk_network_info() -> Result<NetworkInfo, RlnError> {
@@ -1794,9 +1793,12 @@ pub fn sdk_invoice_status(invoice: Bolt11Invoice) -> Result<InvoiceStatus, RlnEr
     SdkNode { handle }.invoice_status(invoice)
 }
 
-pub fn sdk_list_transfers(asset_id: ContractId) -> Result<Vec<Transfer>, RlnError> {
+pub fn sdk_list_transfers(
+    asset_id: Option<ContractId>,
+    txid: Option<String>,
+) -> Result<Vec<Transfer>, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
-    SdkNode { handle }.list_transfers(asset_id)
+    SdkNode { handle }.list_transfers(asset_id, txid)
 }
 
 pub fn sdk_list_unspents(skip_sync: bool) -> Result<Vec<Unspent>, RlnError> {

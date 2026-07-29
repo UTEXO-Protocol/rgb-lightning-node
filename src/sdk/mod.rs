@@ -4321,6 +4321,7 @@ fn to_transfer_data(transfer: rgb_lib::wallet::Transfer) -> TransferData {
 pub(crate) async fn list_transactions(
     state: Arc<AppState>,
     skip_sync: bool,
+    txid: Option<String>,
 ) -> Result<Vec<TransactionData>, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
@@ -4329,48 +4330,29 @@ pub(crate) async fn list_transactions(
         .rgb_list_transactions(skip_sync)?
         .into_iter()
         .map(to_transaction_data)
-        .collect())
-}
-
-pub(crate) async fn list_transactions_by_txid(
-    state: Arc<AppState>,
-    txid: String,
-    skip_sync: bool,
-) -> Result<Vec<TransactionData>, APIError> {
-    let guard = check_unlocked(&state).await?;
-    let unlocked_state = guard.as_ref().unwrap();
-
-    Ok(unlocked_state
-        .rgb_list_transactions(skip_sync)?
-        .into_iter()
-        .map(to_transaction_data)
-        .filter(|tx| tx.txid == txid)
+        .filter(|tx| txid.as_ref().is_none_or(|t| &tx.txid == t))
         .collect())
 }
 
 pub(crate) async fn list_transfers(
     state: Arc<AppState>,
-    asset_id: String,
+    asset_id: Option<String>,
+    txid: Option<String>,
 ) -> Result<Vec<TransferData>, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
+    if asset_id.is_none() && txid.is_none() {
+        return Err(APIError::InvalidRequest(s!(
+            "either asset_id or txid must be provided"
+        )));
+    }
+    let filter = match asset_id {
+        Some(asset_id) => rgb_lib::wallet::AssetFilter::Id(asset_id),
+        None => rgb_lib::wallet::AssetFilter::Any,
+    };
     Ok(unlocked_state
-        .rgb_list_transfers(asset_id)?
-        .into_iter()
-        .map(to_transfer_data)
-        .collect())
-}
-
-pub(crate) async fn list_transfers_by_txid(
-    state: Arc<AppState>,
-    txid: String,
-) -> Result<Vec<TransferData>, APIError> {
-    let guard = check_unlocked(&state).await?;
-    let unlocked_state = guard.as_ref().unwrap();
-
-    Ok(unlocked_state
-        .rgb_list_transfers_by_txid(txid)?
+        .rgb_list_transfers(filter, txid)?
         .into_iter()
         .map(to_transfer_data)
         .collect())

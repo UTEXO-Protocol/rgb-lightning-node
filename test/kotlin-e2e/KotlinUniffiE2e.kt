@@ -268,7 +268,7 @@ private fun mineUntilTxConfirmed(
     val deadline = System.currentTimeMillis() + timeoutSec * 1000L
     while (System.currentTimeMillis() < deadline) {
         node.sync()
-        val tx = node.listTransactions(false).firstOrNull { it.txid == txid }
+        val tx = node.listTransactions(false, null).firstOrNull { it.txid == txid }
         if (tx != null && tx.confirmationTime != null) {
             println("funding tx confirmed in block: $txid")
             return

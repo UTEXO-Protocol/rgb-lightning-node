@@ -217,7 +217,7 @@ class RestartTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         while (System.currentTimeMillis() < deadline) {
             node.sync()
-            val tx = node.listTransactions(false).firstOrNull { it.txid == txid }
+            val tx = node.listTransactions(false, null).firstOrNull { it.txid == txid }
             if (tx != null && tx.confirmationTime != null) {
                 log("funding tx confirmed in block: $txid")
                 return

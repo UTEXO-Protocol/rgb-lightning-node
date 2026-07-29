@@ -372,19 +372,12 @@ pub extern "C" fn rln_inflate(node: &COpaqueStruct, request_json: *const c_char)
 #[unsafe(no_mangle)]
 pub extern "C" fn rln_list_transfers(
     node: &COpaqueStruct,
-    asset_id: *const c_char,
-) -> CResultString {
-    ffi_call!("rln_list_transfers", api::list_transfers(node, asset_id))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_list_transfers_by_txid(
-    node: &COpaqueStruct,
-    txid: *const c_char,
+    asset_id_opt: *const c_char,
+    txid_opt: *const c_char,
 ) -> CResultString {
     ffi_call!(
-        "rln_list_transfers_by_txid",
-        api::list_transfers_by_txid(node, txid)
+        "rln_list_transfers",
+        api::list_transfers(node, asset_id_opt, txid_opt)
     )
 }
 
@@ -585,22 +578,14 @@ pub extern "C" fn rln_create_utxos(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_list_transactions(node: &COpaqueStruct, skip_sync: bool) -> CResultString {
-    ffi_call!(
-        "rln_list_transactions",
-        api::list_transactions(node, skip_sync)
-    )
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_list_transactions_by_txid(
+pub extern "C" fn rln_list_transactions(
     node: &COpaqueStruct,
-    txid: *const c_char,
     skip_sync: bool,
+    txid_opt: *const c_char,
 ) -> CResultString {
     ffi_call!(
-        "rln_list_transactions_by_txid",
-        api::list_transactions_by_txid(node, txid, skip_sync)
+        "rln_list_transactions",
+        api::list_transactions(node, skip_sync, txid_opt)
     )
 }
 

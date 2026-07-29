@@ -18,11 +18,11 @@ use rgb_lib::{
     bitcoin::psbt::Psbt as BitcoinPsbt,
     wallet::{
         rust_only::{check_proxy_url, ColoringInfo},
-        AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, IfaIssuanceType,
-        Metadata, Online, OperationResult, Outpoint, ReceiveData, Recipient, RefreshFilter,
-        RefreshResult, RgbWalletOpsOffline, RgbWalletOpsOnline, SendBeginResult, SinglesigKeys,
-        SyncOptions, Transaction as RgbLibTransaction, Transfer, TransferKind, TransportEndpoint,
-        Unspent, Wallet as RgbLibWallet,
+        AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance,
+        IfaIssuanceType, Metadata, Online, OperationResult, Outpoint, ReceiveData, Recipient,
+        RefreshFilter, RefreshResult, RgbWalletOpsOffline, RgbWalletOpsOnline, SendBeginResult,
+        SinglesigKeys, SyncOptions, Transaction as RgbLibTransaction, Transfer, TransferKind,
+        TransportEndpoint, Unspent, Wallet as RgbLibWallet,
     },
     AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, Fascia, RgbTransfer,
     RgbTransport, RgbTxid, UpdateRes, WitnessOrd,
@@ -304,7 +304,7 @@ impl UnlockedAppState {
         contract_id: ContractId,
     ) -> Result<Option<Transfer>, RgbLibError> {
         Ok(self
-            .rgb_list_transfers(contract_id.to_string())?
+            .rgb_list_transfers(AssetFilter::Id(contract_id.to_string()), None)?
             .into_iter()
             .find(|transfer| transfer.kind == TransferKind::Link))
     }
@@ -373,16 +373,10 @@ impl UnlockedAppState {
 
     pub(crate) fn rgb_list_transfers(
         &self,
-        asset_id: String,
+        filter: AssetFilter,
+        txid: Option<String>,
     ) -> Result<Vec<Transfer>, RgbLibError> {
-        self.rgb_wallet_wrapper.list_transfers(asset_id)
-    }
-
-    pub(crate) fn rgb_list_transfers_by_txid(
-        &self,
-        txid: String,
-    ) -> Result<Vec<Transfer>, RgbLibError> {
-        self.rgb_wallet_wrapper.list_transfers_by_txid(txid)
+        self.rgb_wallet_wrapper.list_transfers(filter, txid)
     }
 
     pub(crate) fn rgb_list_unspents(
@@ -863,15 +857,12 @@ impl RgbLibWalletWrapper {
         self.get_rgb_wallet().list_transactions(online, skip_sync)
     }
 
-    pub(crate) fn list_transfers(&self, asset_id: String) -> Result<Vec<Transfer>, RgbLibError> {
-        self.get_rgb_wallet().list_transfers(Some(asset_id))
-    }
-
-    pub(crate) fn list_transfers_by_txid(
+    pub(crate) fn list_transfers(
         &self,
-        txid: String,
+        filter: AssetFilter,
+        txid: Option<String>,
     ) -> Result<Vec<Transfer>, RgbLibError> {
-        self.get_rgb_wallet().list_transfers_by_txid(txid)
+        self.get_rgb_wallet().list_transfers(filter, txid)
     }
 
     pub(crate) fn list_unspents(

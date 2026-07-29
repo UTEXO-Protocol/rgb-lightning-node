@@ -1959,7 +1959,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib-wasm"
 version = "0.3.0-beta.5"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib-wasm.git?branch=dev#97a8531d82355ef5f0aa3866a043631cf03e61dc"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib-wasm.git?branch=dev#30e6567d5d6a6b6276d391b5af0273902c1ea9e8"
 dependencies = [
  "amplify",
  "base64 0.22.1",

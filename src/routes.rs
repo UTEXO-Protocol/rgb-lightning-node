@@ -3466,15 +3466,16 @@ pub(crate) async fn list_transfers(
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let raw_transfers = match (payload.txid, payload.asset_id) {
-        (Some(txid), _) => unlocked_state.rgb_list_transfers_by_txid(txid)?,
-        (None, Some(asset_id)) => unlocked_state.rgb_list_transfers(asset_id)?,
-        (None, None) => {
-            return Err(APIError::InvalidRequest(s!(
-                "either asset_id or txid must be provided"
-            )));
-        }
+    if payload.txid.is_none() && payload.asset_id.is_none() {
+        return Err(APIError::InvalidRequest(s!(
+            "either asset_id or txid must be provided"
+        )));
+    }
+    let filter = match payload.asset_id {
+        Some(asset_id) => rgb_lib::wallet::AssetFilter::Id(asset_id),
+        None => rgb_lib::wallet::AssetFilter::Any,
     };
+    let raw_transfers = unlocked_state.rgb_list_transfers(filter, payload.txid)?;
 
     let mut transfers = vec![];
     for transfer in raw_transfers {

@@ -227,7 +227,7 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         while (System.currentTimeMillis() < deadline) {
             node.sync()
-            val tx = node.listTransactions(false).firstOrNull { it.txid == txid }
+            val tx = node.listTransactions(false, null).firstOrNull { it.txid == txid }
             if (tx != null && tx.confirmationTime != null) {
                 log("funding tx confirmed in block: $txid")
                 return
@@ -757,7 +757,7 @@ class PaymentTest {
             assertEquals(25uL, assetBalanceSpendable(nodeB, assetId))
             assertEquals(950uL, assetBalanceSpendable(nodeC, assetId))
 
-            val transactions = nodeA.listTransactions(false)
+            val transactions = nodeA.listTransactions(false, null)
             val txUser = transactions.first { it.received == 100_000_000uL }
             val txUtxos = transactions.first { it.sent == 100_000_000uL }
             val txSend = transactions.first { it.sent == 128_000uL }
@@ -766,7 +766,7 @@ class PaymentTest {
             assertEquals(TransactionType.RGB_SEND, txSend.transactionType)
             assertNotNull(txUtxos.confirmationTime)
 
-            val transfers = nodeA.listTransfers(assetId)
+            val transfers = nodeA.listTransfers(assetId, null)
             val xfer1 = transfers.first { it.idx == 1 }
             assertEquals("Settled", xfer1.status)
             assertEquals("Issuance", xfer1.kind)

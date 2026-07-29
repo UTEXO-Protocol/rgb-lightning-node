@@ -1509,6 +1509,35 @@ async fn list_transfers_by_txid(node_address: SocketAddr, txid: &str) -> Vec<Tra
         .transfers
 }
 
+async fn list_transfers_by_asset_and_txid(
+    node_address: SocketAddr,
+    asset_id: &str,
+    txid: &str,
+) -> Vec<Transfer> {
+    println!("listing transfers for asset {asset_id} and txid {txid} on node {node_address}");
+    let payload = ListTransfersRequest {
+        asset_id: Some(asset_id.to_string()),
+        txid: Some(txid.to_string()),
+        index_offset: None,
+        max_transfers: None,
+        status: None,
+        created_after: None,
+        created_before: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/listtransfers"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<ListTransfersResponse>()
+        .await
+        .unwrap()
+        .transfers
+}
+
 async fn list_transactions_by_txid(node_address: SocketAddr, txid: &str) -> Vec<Transaction> {
     println!("listing transactions for txid {txid} on node {node_address}");
     let payload = ListTransactionsRequest {

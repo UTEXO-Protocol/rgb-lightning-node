@@ -646,7 +646,7 @@ version = "2.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
- "bitcoin_hashes 0.14.101",
+ "bitcoin_hashes 0.12.0",
  "serde",
  "unicode-normalization",
 ]
@@ -4269,7 +4269,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.6"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.31#4450094e6fe046a8ea68cded4f1813f6ec72d815"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.32#9ce4e5f6a14450ae7d924b0c4b40185519fa5fc3"
 dependencies = [
  "amplify",
  "base64 0.22.1",
@@ -4314,7 +4314,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib-migration"
 version = "0.3.0-beta.4"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.31#4450094e6fe046a8ea68cded4f1813f6ec72d815"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.32#9ce4e5f6a14450ae7d924b0c4b40185519fa5fc3"
 dependencies = [
  "sea-orm-migration",
  "tokio",
@@ -4991,7 +4991,7 @@ version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
- "bitcoin_hashes 0.14.101",
+ "bitcoin_hashes 0.12.0",
  "rand 0.8.7",
  "secp256k1-sys 0.10.1",
  "serde",

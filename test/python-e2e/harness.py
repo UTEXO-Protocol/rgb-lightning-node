@@ -251,7 +251,7 @@ def mine_until_tx_confirmed(
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         node.sync()
-        transactions = node.list_transactions(False)
+        transactions = node.list_transactions(False, None)
         tx = next((t for t in transactions if str(t.txid) == str(txid)), None)
         if tx is not None and tx.confirmation_time is not None:
             print(f"funding tx confirmed in block: {txid}")

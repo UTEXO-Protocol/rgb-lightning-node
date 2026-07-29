@@ -367,25 +367,16 @@ pub(crate) fn inflate(node: &COpaqueStruct, request_json: *const c_char) -> Resu
 
 pub(crate) fn list_transfers(
     node: &COpaqueStruct,
-    asset_id: *const c_char,
+    asset_id_opt: *const c_char,
+    txid_opt: *const c_char,
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
-    let asset_id = parse_contract_id(&ptr_to_string(asset_id))?;
-    let transfers = node.list_transfers(asset_id)?;
-    json(
-        transfers
-            .into_iter()
-            .map(JsonTransfer::from)
-            .collect::<Vec<_>>(),
-    )
-}
-
-pub(crate) fn list_transfers_by_txid(
-    node: &COpaqueStruct,
-    txid: *const c_char,
-) -> Result<String, Error> {
-    let node = require_handle(node)?;
-    let transfers = node.list_transfers_by_txid(ptr_to_string(txid))?;
+    let asset_id = match convert_optional_string(asset_id_opt) {
+        Some(id) => Some(parse_contract_id(&id)?),
+        None => None,
+    };
+    let txid = convert_optional_string(txid_opt);
+    let transfers = node.list_transfers(asset_id, txid)?;
     json(
         transfers
             .into_iter()
@@ -599,23 +590,14 @@ pub(crate) fn create_utxos(
     ok_void()
 }
 
-pub(crate) fn list_transactions(node: &COpaqueStruct, skip_sync: bool) -> Result<String, Error> {
-    let node = require_handle(node)?;
-    let txs = node.list_transactions(skip_sync)?;
-    json(
-        txs.into_iter()
-            .map(JsonTransaction::from)
-            .collect::<Vec<_>>(),
-    )
-}
-
-pub(crate) fn list_transactions_by_txid(
+pub(crate) fn list_transactions(
     node: &COpaqueStruct,
-    txid: *const c_char,
     skip_sync: bool,
+    txid_opt: *const c_char,
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
-    let txs = node.list_transactions_by_txid(ptr_to_string(txid), skip_sync)?;
+    let txid = convert_optional_string(txid_opt);
+    let txs = node.list_transactions(skip_sync, txid)?;
     json(
         txs.into_iter()
             .map(JsonTransaction::from)

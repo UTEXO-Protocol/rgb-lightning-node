@@ -106,15 +106,13 @@ CResultString rln_list_peers(const COpaqueStruct *node);
 
 CResultString rln_list_swaps(const COpaqueStruct *node);
 
-CResultString rln_list_transactions(const COpaqueStruct *node, bool skip_sync);
+CResultString rln_list_transactions(const COpaqueStruct *node,
+                                    bool skip_sync,
+                                    const char *txid_opt);
 
-CResultString rln_list_transactions_by_txid(const COpaqueStruct *node,
-                                            const char *txid,
-                                            bool skip_sync);
-
-CResultString rln_list_transfers(const COpaqueStruct *node, const char *asset_id);
-
-CResultString rln_list_transfers_by_txid(const COpaqueStruct *node, const char *txid);
+CResultString rln_list_transfers(const COpaqueStruct *node,
+                                 const char *asset_id_opt,
+                                 const char *txid_opt);
 
 CResultString rln_list_unspents(const COpaqueStruct *node, bool skip_sync);
 
