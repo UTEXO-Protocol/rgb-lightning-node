@@ -17,39 +17,45 @@ const PASSWORD_A: &str = "nodeApass";
 const PASSWORD_B: &str = "nodeBpass";
 const MANAGER_VSS_KEY: &[u8] = b"_/_/manager";
 
-fn vss_server_available() -> bool {
+pub(crate) fn vss_server_available() -> bool {
     std::net::TcpStream::connect_timeout(&VSS_SERVER_ADDR.parse().unwrap(), Duration::from_secs(2))
         .is_ok()
 }
 
-/// VSS proxy that can reject channel-manager-key writes, passing all else through.
-struct ManagerFilterProxy {
+/// VSS proxy that can reject channel-manager-key and/or RGB-backup writes,
+/// passing all else through.
+pub(crate) struct ManagerFilterProxy {
     port: u16,
-    filter: Arc<AtomicBool>,
+    filter_manager: Arc<AtomicBool>,
+    filter_rgb_backup: Arc<AtomicBool>,
     blocked: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ManagerFilterProxy {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let filter = Arc::new(AtomicBool::new(false));
+        let filter_manager = Arc::new(AtomicBool::new(false));
+        let filter_rgb_backup = Arc::new(AtomicBool::new(false));
         let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let flag = Arc::clone(&filter);
+        let manager_flag = Arc::clone(&filter_manager);
+        let rgb_flag = Arc::clone(&filter_rgb_backup);
         let hits = Arc::clone(&blocked);
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { break };
-                let flag = Arc::clone(&flag);
+                let manager_flag = Arc::clone(&manager_flag);
+                let rgb_flag = Arc::clone(&rgb_flag);
                 let hits = Arc::clone(&hits);
                 std::thread::spawn(move || {
-                    let _ = handle_conn(stream, flag, hits);
+                    let _ = handle_conn(stream, manager_flag, rgb_flag, hits);
                 });
             }
         });
         Self {
             port,
-            filter,
+            filter_manager,
+            filter_rgb_backup,
             blocked,
         }
     }
@@ -58,16 +64,21 @@ impl ManagerFilterProxy {
         self.blocked.load(Ordering::SeqCst)
     }
 
-    fn url(&self) -> String {
+    pub(crate) fn url(&self) -> String {
         format!("http://127.0.0.1:{}/vss", self.port)
     }
 
-    fn block_manager_writes(&self) {
-        self.filter.store(true, Ordering::SeqCst);
+    pub(crate) fn block_manager_writes(&self) {
+        self.filter_manager.store(true, Ordering::SeqCst);
     }
 
-    fn allow_all(&self) {
-        self.filter.store(false, Ordering::SeqCst);
+    pub(crate) fn block_rgb_backup_writes(&self) {
+        self.filter_rgb_backup.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn allow_all(&self) {
+        self.filter_manager.store(false, Ordering::SeqCst);
+        self.filter_rgb_backup.store(false, Ordering::SeqCst);
     }
 }
 
@@ -106,9 +117,14 @@ fn read_http_request(
     Ok(Some((head, body)))
 }
 
+fn body_contains(body: &[u8], needle: &[u8]) -> bool {
+    body.windows(needle.len()).any(|w| w == needle)
+}
+
 fn handle_conn(
     mut client: std::net::TcpStream,
-    filter: Arc<AtomicBool>,
+    filter_manager: Arc<AtomicBool>,
+    filter_rgb_backup: Arc<AtomicBool>,
     blocked: Arc<std::sync::atomic::AtomicUsize>,
 ) -> std::io::Result<()> {
     while let Some((head, body)) = read_http_request(&mut client)? {
@@ -117,10 +133,10 @@ fn handle_conn(
             .lines()
             .next()
             .is_some_and(|l| l.contains("putObject"));
-        let has_manager_key = body
-            .windows(MANAGER_VSS_KEY.len())
-            .any(|w| w == MANAGER_VSS_KEY);
-        if filter.load(Ordering::SeqCst) && is_put && has_manager_key {
+        let is_blocked = is_put
+            && ((filter_manager.load(Ordering::SeqCst) && body_contains(&body, MANAGER_VSS_KEY))
+                || (filter_rgb_backup.load(Ordering::SeqCst) && body_contains(&body, b"backup/")));
+        if is_blocked {
             blocked.fetch_add(1, Ordering::SeqCst);
             client.write_all(
                 b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
