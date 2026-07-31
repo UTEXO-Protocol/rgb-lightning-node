@@ -875,6 +875,22 @@ impl RgbLibWalletWrapper {
             .list_unspents(online, settled_only, skip_sync)
     }
 
+    pub(crate) fn accept_transfer(
+        &self,
+        txid: String,
+        vout: u32,
+        proxy_endpoint: &str,
+        blinding: u64,
+    ) -> Result<(RgbTransfer, Vec<Assignment>), RgbLibError> {
+        let consignment_endpoint = RgbTransport::from_str(proxy_endpoint).map_err(|e| {
+            RgbLibError::InvalidTransportEndpoint {
+                details: e.to_string(),
+            }
+        })?;
+        self.get_rgb_wallet()
+            .accept_transfer(txid, vout, consignment_endpoint, blinding)
+    }
+
     pub(crate) fn post_consignment<P: AsRef<Path>>(
         &self,
         proxy_url: &str,

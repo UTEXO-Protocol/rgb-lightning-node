@@ -38,8 +38,9 @@ use lightning::onion_message::messenger::{
     DefaultMessageRouter, OnionMessenger as LdkOnionMessenger,
 };
 use lightning::rgb_utils::{
-    get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount, RgbKvStoreExt,
-    RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
+    deserialize_fascia, get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount,
+    RgbKvStoreExt, RGB_COMMITMENT_FASCIA_NS, RGB_PAYMENT_INFO_INBOUND_NS,
+    RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
 use lightning::rgb_utils::{RgbPaymentInfo, STATIC_BLINDING};
 use lightning::routing::gossip;
@@ -104,14 +105,13 @@ use rgb_lib::{
     Fascia, FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,
 };
 use std::collections::HashMap;
-#[cfg(feature = "vss")]
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::ToSocketAddrs;
 use std::net::{SocketAddr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
@@ -142,6 +142,13 @@ const ASSET_LINK_SWAP_AUTHORIZATION_MAX_EXPIRY_SECS: u64 = 24 * 60 * 60;
 const OUTPUT_SPENDER_TXES_KEY: &str = "output_spender_txes";
 const PSBT_NAMESPACE: &str = "psbt";
 const PENDING_FUNDING_NAMESPACE: &str = "pending_funding";
+/// Funding consignments keyed by funding txid, kept for wallet re-seeding
+/// after a restore without an RGB backup (issue #111).
+const FUNDING_CONSIGNMENT_NAMESPACE: &str = "funding_consignment";
+/// Local-only marker: absent on a freshly restored device, so the fascia
+/// replay reruns until it completes once.
+const REIMPORT_MARKER_NAMESPACE: &str = "reimport_marker";
+const REIMPORT_MARKER_KEY: &str = "fascia_replay";
 const CONFIG_INDEXER_URL: &str = "indexer_url";
 const CONFIG_BITCOIN_NETWORK: &str = "bitcoin_network";
 const CONFIG_WALLET_FINGERPRINT: &str = "wallet_fingerprint";
@@ -2376,6 +2383,13 @@ async fn handle_ldk_events(
 
                 let consignment_path =
                     unlocked_state.rgb_get_send_consignment_path(&asset_id, &funding_txid_str);
+                match fs::read(&consignment_path) {
+                    Ok(data) => unlocked_state
+                        .kv_store
+                        .write(FUNDING_CONSIGNMENT_NAMESPACE, "", &funding_txid_str, data)
+                        .unwrap(),
+                    Err(e) => tracing::error!("cannot store funding consignment: {e}"),
+                }
                 let proxy_url = TransportEndpoint::new(unlocked_state.proxy_endpoint.clone())
                     .unwrap()
                     .endpoint;
@@ -3125,6 +3139,15 @@ async fn handle_ldk_events(
                                 return Ok(());
                             }
                         };
+                    unlocked_state
+                        .kv_store
+                        .write(
+                            FUNDING_CONSIGNMENT_NAMESPACE,
+                            "",
+                            &funding_txid,
+                            consignment_data.clone(),
+                        )
+                        .unwrap();
                     let consignment =
                         RgbTransfer::load(&mut std::io::Cursor::new(consignment_data))
                             .expect("successful consignment load");
@@ -4145,6 +4168,168 @@ mod watchdog_tests {
     }
 }
 
+/// Re-seed the RGB wallet with funding consignments the wallet doesn't know,
+/// so a wallet restored without an RGB backup can color force-close sweeps
+/// (issue #111). Failures are logged, never fatal: unlock must proceed.
+async fn reimport_funding_consignments(
+    rgb_wallet_wrapper: &Arc<RgbLibWalletWrapper>,
+    kv_store: &Arc<SyncedKvStore>,
+    proxy_endpoint: &str,
+    ldk_data_dir: &Path,
+) {
+    let mark_replay_done = || {
+        let _ =
+            kv_store.write_local_only(REIMPORT_MARKER_NAMESPACE, "", REIMPORT_MARKER_KEY, vec![1]);
+    };
+    let replay_pending = kv_store
+        .read(REIMPORT_MARKER_NAMESPACE, "", REIMPORT_MARKER_KEY)
+        .is_err();
+    let txids = match kv_store.list(FUNDING_CONSIGNMENT_NAMESPACE, "") {
+        Ok(keys) => keys,
+        Err(e) => {
+            tracing::error!("cannot list stored funding consignments: {e}");
+            return;
+        }
+    };
+    if txids.is_empty() {
+        mark_replay_done();
+        return;
+    }
+    let known: HashSet<String> = match rgb_wallet_wrapper.list_assets(vec![]) {
+        Ok(assets) => assets
+            .nia
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| a.asset_id)
+            .chain(
+                assets
+                    .cfa
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|a| a.asset_id),
+            )
+            .chain(
+                assets
+                    .uda
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|a| a.asset_id),
+            )
+            .chain(
+                assets
+                    .ifa
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|a| a.asset_id),
+            )
+            .collect(),
+        Err(e) => {
+            tracing::error!("cannot list assets before consignment re-import: {e}");
+            return;
+        }
+    };
+    let mut imported_any = false;
+    for txid in txids {
+        let data = match kv_store.read(FUNDING_CONSIGNMENT_NAMESPACE, "", &txid) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::error!("cannot read stored funding consignment for {txid}: {e}");
+                continue;
+            }
+        };
+        let consignment = match RgbTransfer::load(&mut std::io::Cursor::new(&data)) {
+            Ok(consignment) => consignment,
+            Err(e) => {
+                tracing::error!("cannot load stored funding consignment for {txid}: {e}");
+                continue;
+            }
+        };
+        if known.contains(&consignment.contract_id().to_string()) {
+            continue;
+        }
+        let wrapper = Arc::clone(rgb_wallet_wrapper);
+        let txid_copy = txid.clone();
+        let proxy_endpoint = proxy_endpoint.to_string();
+        let consignment_path = ldk_data_dir.join(format!("reimport_consignment_{txid}"));
+        // Re-post our stored copy so the proxy can serve it, then accept it
+        // like the funding-time acceptor flow does: this consumes the
+        // consignment into the RGB runtime, which save_new_asset requires.
+        let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            fs::write(&consignment_path, &data).map_err(|e| e.to_string())?;
+            let proxy_url = TransportEndpoint::new(proxy_endpoint.clone())
+                .map_err(|e| e.to_string())?
+                .endpoint;
+            if let Err(e) = wrapper.post_consignment(
+                &proxy_url,
+                txid_copy.clone(),
+                &consignment_path,
+                txid_copy.clone(),
+                None,
+            ) {
+                tracing::debug!("re-posting funding consignment for {txid_copy}: {e}");
+            }
+            let _ = fs::remove_file(&consignment_path);
+            let (consignment, _) = wrapper
+                .accept_transfer(txid_copy.clone(), 1, &proxy_endpoint, STATIC_BLINDING)
+                .map_err(|e| e.to_string())?;
+            match wrapper.save_new_asset(consignment, txid_copy) {
+                Ok(()) => Ok(()),
+                Err(e) if e.to_string().contains("UNIQUE constraint failed") => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .await;
+        match res {
+            Ok(Ok(())) => {
+                imported_any = true;
+                tracing::info!("re-imported funding consignment for {txid}");
+            }
+            Ok(Err(e)) => tracing::error!("cannot re-import funding consignment for {txid}: {e}"),
+            Err(e) => tracing::error!("funding consignment re-import task failed for {txid}: {e}"),
+        }
+    }
+
+    // The runtime also needs the funding->commitment transitions to color
+    // force-close sweeps; re-consume the stored latest fascia of each channel.
+    if !imported_any && !replay_pending {
+        return;
+    }
+    let fascia_keys = match kv_store.list(RGB_PRIMARY_NS, RGB_COMMITMENT_FASCIA_NS) {
+        Ok(keys) => keys,
+        Err(e) => {
+            tracing::error!("cannot list stored commitment fascias: {e}");
+            return;
+        }
+    };
+    for key in fascia_keys {
+        let data = match kv_store.read(RGB_PRIMARY_NS, RGB_COMMITMENT_FASCIA_NS, &key) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::error!("cannot read stored commitment fascia {key}: {e}");
+                continue;
+            }
+        };
+        let fascia = match deserialize_fascia(data) {
+            Ok(fascia) => fascia,
+            Err(e) => {
+                tracing::error!("cannot deserialize stored commitment fascia {key}: {e}");
+                continue;
+            }
+        };
+        let wrapper = Arc::clone(rgb_wallet_wrapper);
+        match tokio::task::spawn_blocking(move || {
+            wrapper.consume_fascia(fascia, Some(WitnessOrd::Ignored))
+        })
+        .await
+        {
+            Ok(Ok(())) => tracing::info!("re-consumed commitment fascia {key}"),
+            Ok(Err(e)) => tracing::error!("cannot re-consume commitment fascia {key}: {e}"),
+            Err(e) => tracing::error!("commitment fascia re-consume task failed for {key}: {e}"),
+        }
+    }
+    mark_replay_done();
+}
+
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     key_source: NodeKeySource,
@@ -4959,6 +5144,14 @@ pub(crate) async fn start_ldk(
         Arc::new(Mutex::new(rgb_wallet)),
         rgb_online,
     ));
+
+    reimport_funding_consignments(
+        &rgb_wallet_wrapper,
+        &kv_store,
+        proxy_endpoint,
+        &ldk_data_dir,
+    )
+    .await;
 
     // Initialize the OutputSweeper.
     let txes: OutputSpenderTxes = match kv_store.read("", "", OUTPUT_SPENDER_TXES_KEY) {

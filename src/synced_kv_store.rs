@@ -236,6 +236,19 @@ impl SyncedKvStore {
         Ok(restored)
     }
 
+    /// Local-only write; the row is never replicated, so a wipe-and-restore
+    /// intentionally loses it.
+    pub(crate) fn write_local_only(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+        buf: Vec<u8>,
+    ) -> Result<(), io::Error> {
+        self.local
+            .write(primary_namespace, secondary_namespace, key, buf)
+    }
+
     /// Local-only removal; lets the restore guard discard a restored key.
     #[cfg(feature = "vss")]
     pub(crate) fn remove_local_only(
