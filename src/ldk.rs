@@ -5238,9 +5238,13 @@ pub(crate) async fn start_ldk(
     let stop_processing = Arc::new(AtomicBool::new(false));
     let stop_listen = Arc::clone(&stop_processing);
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(format!("[::]:{listening_port}"))
-            .await
-            .expect("Failed to bind to listen port - is something else already listening on it?");
+        // Dual-stack when available; hosts with IPv6 disabled fall back to IPv4.
+        let listener = crate::utils::bind_first_available(&[
+            format!("[::]:{listening_port}"),
+            format!("0.0.0.0:{listening_port}"),
+        ])
+        .await
+        .expect("Failed to bind to listen port - is something else already listening on it?");
         loop {
             let peer_mgr = peer_manager_connection_handler.clone();
             let tcp_stream = listener.accept().await.unwrap().0;

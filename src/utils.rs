@@ -889,8 +889,41 @@ pub(crate) fn validate_and_parse_payment_preimage(
     Ok(preimage)
 }
 
+/// Binds the first address that accepts a listener, so an IPv6 dual-stack
+/// bind can fall back to IPv4-only on hosts without IPv6.
+pub(crate) async fn bind_first_available(
+    addrs: &[String],
+) -> std::io::Result<tokio::net::TcpListener> {
+    let mut last_err = None;
+    for addr in addrs {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) => {
+                tracing::warn!(addr, error = %e, "listen bind failed; trying next address");
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no addresses to bind")
+    }))
+}
+
 #[cfg(test)]
 mod utils_tests {
+    #[tokio::test]
+    async fn bind_first_available_falls_back_when_first_addr_fails() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taken = occupied.local_addr().unwrap().to_string();
+        let listener = super::bind_first_available(&[taken.clone(), "127.0.0.1:0".to_string()])
+            .await
+            .expect("must fall back to the second address");
+        assert_ne!(listener.local_addr().unwrap().to_string(), taken);
+
+        let err = super::bind_first_available(&[taken.clone(), taken]).await;
+        assert!(err.is_err(), "all candidates failing must surface an error");
+    }
+
     use super::validate_vss_url;
 
     #[test]
