@@ -4899,7 +4899,16 @@ pub(crate) async fn start_ldk(
                     ldk_data_dir_path.clone(),
                     Arc::clone(&kv_store) as Arc<dyn KVStoreSync + Send + Sync>,
                 );
-                <(BlockHash, ChannelManager)>::read(&mut &bytes[..], read_args).unwrap()
+                match <(BlockHash, ChannelManager)>::read(&mut &bytes[..], read_args) {
+                    Ok(read) => read,
+                    Err(e) => {
+                        return Err(APIError::FailedLoadingChannelState(format!(
+                            "cannot deserialize the channel manager ({e:?}); the persisted \
+                             channel state is incomplete or incompatible, a missing channel \
+                             monitor is the most common cause (see the LDK logs)"
+                        )))
+                    }
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // We're starting a fresh node.

@@ -96,6 +96,9 @@ pub enum APIError {
     #[error("Failed to issue asset: {0}")]
     FailedIssuingAsset(String),
 
+    #[error("Failed to load channel state: {0}")]
+    FailedLoadingChannelState(String),
+
     #[error("Failed to open channel: {0}")]
     FailedOpenChannel(String),
 
@@ -523,6 +526,7 @@ impl IntoResponse for APIError {
             APIError::FailedClosingChannel(_)
             | APIError::FailedInvoiceCreation(_)
             | APIError::FailedIssuingAsset(_)
+            | APIError::FailedLoadingChannelState(_)
             | APIError::FailedOpenChannel(_)
             | APIError::FailedPayment(_)
             | APIError::FailedPeerDisconnection(_)
