@@ -97,8 +97,8 @@ The cached resolver deduplicates witness transaction IDs for the operation and u
 - Run interoperability against the intended production LSP, proxy, indexer, VSS deployment, and signer configuration. Local regtest and Signet-like replay validate protocol behavior, but they cannot certify a deployment that was not exercised.
 - Exercise the repository's explicitly ignored disruptive VSS scenarios in an isolated release environment. They stop infrastructure or depend on timing and are intentionally excluded from the normal suite.
 - Ambiguous post-intent broadcast recovery intentionally requires explicit intervention when chain evidence cannot determine whether the exact transaction was published. This is a safety policy, not an automatic recovery gap; the operator/user path must be present in the consuming product.
-- Publish the committed rgb-ops, rgb-lib, rust-lightning, and RLN experiment revisions, then pin every downstream manifest and independent binding lockfile to those immutable commits. Local path overrides were used only while running cross-repository validation; the current manifests and lockfiles contain no local path sources.
+- Before release, replace the published experiment-branch dependencies with approved immutable commit pins in every downstream manifest and independent binding lockfile. Local path overrides were used only while running cross-repository validation; the current manifests and lockfiles contain no local path sources.
 - Run the four explicit live `mempool.space` compatibility probes from a release environment with outbound access. Deterministic local HTTP-contract tests cover the same status and raw-transaction parsing paths in the normal suite, but this host cannot establish a TCP connection to the public service.
 - The pinned rust-lightning revision emits nightly deprecation warnings and one future-incompatibility notice from `proc-macro-error2`; these are dependency-maintenance items, not failures in the funding state machine.
 
-The experiment changes are committed locally but have not been pushed.
+The experiment changes are published on `hardik/rgb-witness-resolution-experiment`.
