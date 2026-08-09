@@ -2,7 +2,9 @@
 //! [`ExternalSignerHost`] wrapper for availability / `SignRgbPsbt` failure injection. The wire format
 //! matches production (`rgb_lightning_node::signer_integration_wire` → `signer::proto`).
 use crate::helpers::*;
-use rgb_lightning_node::signer_integration_wire::{decode_signer_request_wire, SignerRequest};
+use rgb_lightning_node::signer_integration_wire::{
+    decode_signer_request_wire, ChannelOp, ChannelRequest, SignerRequest,
+};
 use serial_test::serial;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +29,8 @@ struct TunableNativeSignerHost {
     available: Arc<AtomicBool>,
     /// When set, [`SignerRequest::SignRgbPsbt`] returns a host error (simulates signer / transport failure).
     fail_sign_rgb_psbt: Arc<AtomicBool>,
+    /// Rejects exactly one initial counterparty commitment signature, then recovers.
+    fail_next_sign_counterparty_commitment: Arc<AtomicBool>,
 }
 
 impl TunableNativeSignerHost {
@@ -35,6 +39,7 @@ impl TunableNativeSignerHost {
             inner,
             available: Arc::new(AtomicBool::new(true)),
             fail_sign_rgb_psbt: Arc::new(AtomicBool::new(false)),
+            fail_next_sign_counterparty_commitment: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -44,6 +49,11 @@ impl TunableNativeSignerHost {
 
     fn set_fail_sign_rgb_psbt(&self, fail: bool) {
         self.fail_sign_rgb_psbt.store(fail, Ordering::Relaxed);
+    }
+
+    fn fail_next_sign_counterparty_commitment(&self) {
+        self.fail_next_sign_counterparty_commitment
+            .store(true, Ordering::Release);
     }
 }
 
@@ -60,6 +70,27 @@ impl rgb_lightning_node::ExternalSignerHost for TunableNativeSignerHost {
             if matches!(&req, SignerRequest::SignRgbPsbt { .. }) {
                 return Err(rgb_lightning_node::RlnError::Internal(
                     "sign_rgb_psbt failure injected".to_string(),
+                ));
+            }
+        }
+        if self
+            .fail_next_sign_counterparty_commitment
+            .load(Ordering::Acquire)
+        {
+            let req = decode_signer_request_wire(&request)
+                .map_err(|e| rgb_lightning_node::RlnError::Internal(e.to_string()))?;
+            if matches!(
+                &req,
+                SignerRequest::Channel(ChannelRequest::Op {
+                    op: ChannelOp::SignCounterpartyCommitment { .. },
+                    ..
+                })
+            ) && self
+                .fail_next_sign_counterparty_commitment
+                .swap(false, Ordering::AcqRel)
+            {
+                return Err(rgb_lightning_node::RlnError::Internal(
+                    "sign_counterparty_commitment failure injected".to_string(),
                 ));
             }
         }
@@ -80,7 +111,7 @@ fn unlock_with_attached_external_signer(node: &SdkNode, announce_alias: &str) {
     node.unlock_with_attached_external_signer(
         Some("user".to_string()),
         Some("password".to_string()),
-        Some("localhost".to_string()),
+        Some("127.0.0.1".to_string()),
         Some(18443),
         Some("127.0.0.1:50001".to_string()),
         Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -173,7 +204,7 @@ fn external_init_unlock_and_restart_same_signer() {
             signer.clone(),
             Some("user".to_string()),
             Some("password".to_string()),
-            Some("localhost".to_string()),
+            Some("127.0.0.1".to_string()),
             Some(18443),
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -194,7 +225,7 @@ fn external_init_unlock_and_restart_same_signer() {
                 signer.clone(),
                 Some("user".to_string()),
                 Some("password".to_string()),
-                Some("localhost".to_string()),
+                Some("127.0.0.1".to_string()),
                 Some(18443),
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -236,7 +267,7 @@ fn external_restart_with_mismatched_signer_fails_unlock() {
             signer_a.clone(),
             Some("user".to_string()),
             Some("password".to_string()),
-            Some("localhost".to_string()),
+            Some("127.0.0.1".to_string()),
             Some(18443),
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -255,7 +286,7 @@ fn external_restart_with_mismatched_signer_fails_unlock() {
                 signer_b,
                 Some("user".to_string()),
                 Some("password".to_string()),
-                Some("localhost".to_string()),
+                Some("127.0.0.1".to_string()),
                 Some(18443),
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -547,6 +578,105 @@ fn external_signer_vanilla_funding_sign_failure_is_retryable() {
     }
 }
 
+/// An inbound RGB channel must survive temporary signer unavailability at the exact point where
+/// `funding_signed` is generated. RGB acceptance and the initial monitor become durable first; the
+/// signature is then retried without panicking or leaking the staged acceptance.
+#[test]
+#[serial]
+fn rgb_external_signer_initial_funding_signature_is_retryable() {
+    ensure_regtest_available();
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    const PORT_OFF: u16 = 350;
+    let test_dir = test_dir("sdk_rgb_external_initial_funding_signature_retry");
+    if test_dir.exists() {
+        fs::remove_dir_all(&test_dir).expect("remove previous lib_sdk test dir");
+    }
+    fs::create_dir_all(&test_dir).expect("create lib_sdk test dir");
+
+    let node_a = make_node(
+        &test_dir.join("node_a"),
+        NODE_A_DAEMON_PORT + PORT_OFF,
+        NODE_A_PEER_PORT + PORT_OFF,
+    );
+    let node_b = make_node(
+        &test_dir.join("node_b"),
+        NODE_B_DAEMON_PORT + PORT_OFF,
+        NODE_B_PEER_PORT + PORT_OFF,
+    );
+    let signer = make_native_signer(&test_dir.join("signer_b"), None);
+    let bootstrap = signer.bootstrap().expect("bootstrap");
+    let host = Arc::new(TunableNativeSignerHost::new(signer));
+
+    node_a
+        .init("nodeApass".to_string(), None)
+        .expect("node A init");
+    node_b
+        .init_with_external_signer(clone_bootstrap(&bootstrap))
+        .expect("node B external init");
+    attach_external_signer_host(&node_b, host.clone(), &bootstrap);
+    node_a
+        .unlock(unlock_request("nodeApass"))
+        .expect("node A unlock");
+    unlock_with_attached_external_signer(&node_b, "RLN_rgb_initial_signature_retry");
+
+    fund_and_create_utxos(&node_a, "node A RGB signature retry");
+    node_a
+        .createutxos(SdkCreateUtxosRequest {
+            up_to: false,
+            num: Some(25),
+            size: Some(32_000),
+            fee_rate: CREATE_UTXOS_FEE_RATE,
+            skip_sync: false,
+        })
+        .expect("node A createutxos");
+    let asset_id = node_a
+        .issueassetnia(SdkIssueAssetNiaRequest {
+            amounts: vec![1_000],
+            ticker: "ASIG".to_string(),
+            name: "AsyncSignerRgb".to_string(),
+            precision: 0,
+        })
+        .expect("issueassetnia")
+        .asset_id;
+
+    let peer_uri = format!(
+        "{}@127.0.0.1:{}",
+        node_b.node_info().expect("node B node_info").pubkey,
+        NODE_B_PEER_PORT + PORT_OFF,
+    );
+    node_a.connectpeer(peer_uri.clone()).expect("connectpeer");
+    host.fail_next_sign_counterparty_commitment();
+    node_a
+        .openchannel(SdkOpenChannelRequest {
+            peer_pubkey_and_opt_addr: peer_uri,
+            capacity_sat: OPEN_CHANNEL_CAPACITY_SAT,
+            push_msat: OPEN_CHANNEL_PUSH_MSAT,
+            public: false,
+            with_anchors: true,
+            fee_base_msat: None,
+            fee_proportional_millionths: None,
+            temporary_channel_id: None,
+            asset_id: Some(asset_id.clone()),
+            asset_amount: Some(OPEN_CHANNEL_ASSET_AMOUNT),
+            push_asset_amount: None,
+            virtual_open_mode: None,
+        })
+        .expect("open RGB channel");
+
+    wait_for_channel_funding_tx(&node_a, &node_b, &asset_id, Duration::from_secs(120));
+    assert!(
+        !host
+            .fail_next_sign_counterparty_commitment
+            .load(Ordering::Acquire),
+        "the receiver never reached the injected initial signature failure"
+    );
+
+    node_a.shutdown();
+    node_b.shutdown();
+    thread::sleep(Duration::from_millis(300));
+}
+
 /// RGB payment with node A (internal signer) and node B (native in-process VLS signer).
 ///
 /// Regtest: `./regtest.sh start`, then:
@@ -600,7 +730,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_quick() {
                 signer_b.clone(),
                 Some("user".to_string()),
                 Some("password".to_string()),
-                Some("localhost".to_string()),
+                Some("127.0.0.1".to_string()),
                 Some(18443),
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -745,7 +875,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
                 signer_b.clone(),
                 Some("user".to_string()),
                 Some("password".to_string()),
-                Some("localhost".to_string()),
+                Some("127.0.0.1".to_string()),
                 Some(18443),
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -907,7 +1037,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
                 signer_b.clone(),
                 Some("user".to_string()),
                 Some("password".to_string()),
-                Some("localhost".to_string()),
+                Some("127.0.0.1".to_string()),
                 Some(18443),
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -1081,7 +1211,7 @@ fn external_signer_virtual_channel_survives_restart() {
             signer.clone(),
             Some("user".to_string()),
             Some("password".to_string()),
-            Some("localhost".to_string()),
+            Some("127.0.0.1".to_string()),
             Some(18443),
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),

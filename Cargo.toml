@@ -72,8 +72,9 @@ rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", branch = "cod
 ] }
 psrgbt = { package = "rgb-psbt-utils", version = "=0.11.1-rc.10", default-features = false }
 rln-migration = { path = "migration" }
-# Pinned fork/branch for RGB compatibility work; CI and clones do not require a sibling checkout.
-signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer.git", branch = "main", default-features = false }
+# Pin the exact external-signer API consumed by this release. Tracking `main` made independent
+# binding workspaces resolve a newer, incompatible constructor on clean machines.
+signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer.git", rev = "0fb005ec4b927ddbe13e1646d247b5bb11e8ffed", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
@@ -150,10 +151,6 @@ lightning-transaction-sync = { path = "./rust-lightning/lightning-transaction-sy
 # Use the UTEXO RGB compatibility branches; no sibling local checkout required.
 vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
 vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
-
-[patch."https://github.com/UTEXO-Protocol/rgb-lib.git"]
-rgb-lib = { git = "https://github.com/Jainakin/rgb-lib.git", branch = "codex/rgb-witness-resolution-experiment" }
-rgb-lib-migration = { git = "https://github.com/Jainakin/rgb-lib.git", branch = "codex/rgb-witness-resolution-experiment" }
 
 [lints.rust.unexpected_cfgs]
 level = "allow"

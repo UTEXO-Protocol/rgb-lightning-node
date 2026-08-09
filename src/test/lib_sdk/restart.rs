@@ -4,7 +4,6 @@ use std::{fs, time::Duration};
 
 #[test]
 #[serial]
-#[ignore = "flaky SDK restart persistence issue: ChannelManager::read returns InvalidValue after restart"]
 fn restart() {
     ensure_regtest_available();
 

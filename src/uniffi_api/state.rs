@@ -154,6 +154,7 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::NetworkMismatch(_, _)
         | APIError::DuplicatePayment(_)
         | APIError::RecipientIDAlreadyUsed
+        | APIError::RgbFundingRecoveryRequired(_)
         | APIError::TemporaryChannelIdAlreadyUsed
         | APIError::UnsupportedLayer1(_)
         | APIError::UnsupportedTransportType

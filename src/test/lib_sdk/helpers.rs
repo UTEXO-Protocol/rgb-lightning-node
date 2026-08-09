@@ -1,13 +1,15 @@
 use electrum_client::ElectrumApi;
 use once_cell::sync::Lazy;
+#[cfg(feature = "vss")]
+pub(crate) use rgb_lightning_node::SdkVssClearFenceRequest;
 pub(crate) use rgb_lightning_node::{
     AssetBalanceInfo, AssetRecipients, AssignmentKind, Channel, ContractId, HtlcStatus,
-    InvoiceStatus, LnInvoiceRequest, Payment, PaymentHash, RecipientId, RgbRecipient,
+    InvoiceStatus, LnInvoiceRequest, Payment, PaymentHash, RecipientId, RgbRecipient, RlnError,
     SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkExternalSignerBootstrap, SdkInitRequest,
     SdkIssueAssetCfaRequest, SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkNode,
     SdkOpenChannelRequest, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest,
-    SdkSendPaymentRequest, SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest,
-    TransactionType, TransportEndpoint, WitnessData,
+    SdkSendPaymentRequest, SdkUnlockRequest, SendRgbRequest, TransactionType, TransportEndpoint,
+    WitnessData,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -334,7 +336,7 @@ pub(crate) fn unlock_request(password: &str) -> SdkUnlockRequest {
         password: password.to_string(),
         bitcoind_rpc_username: Some("user".to_string()),
         bitcoind_rpc_password: Some("password".to_string()),
-        bitcoind_rpc_host: Some("localhost".to_string()),
+        bitcoind_rpc_host: Some("127.0.0.1".to_string()),
         bitcoind_rpc_port: Some(18443),
         indexer_url: Some("127.0.0.1:50001".to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -391,15 +393,41 @@ pub(crate) fn fund_and_create_utxos(node: &SdkNode, node_name: &str) {
 }
 
 pub(crate) fn asset_balance_spendable(node: &SdkNode, asset_id: &ContractId) -> u64 {
-    node.asset_balance(asset_id.clone())
-        .expect("asset_balance spendable")
-        .spendable
+    asset_balance_after_transient_operations(node, asset_id).spendable
 }
 
 pub(crate) fn asset_balance_offchain_outbound(node: &SdkNode, asset_id: &ContractId) -> u64 {
-    node.asset_balance(asset_id.clone())
-        .expect("asset_balance offchain_outbound")
-        .offchain_outbound
+    asset_balance_after_transient_operations(node, asset_id).offchain_outbound
+}
+
+fn retry_while_node_is_changing_state<T>(
+    operation_name: &str,
+    mut operation: impl FnMut() -> Result<T, RlnError>,
+) -> T {
+    const CHANGING_STATE_MESSAGE: &str = "Cannot call other APIs while node is changing state";
+    const RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+    let deadline = Instant::now() + RETRY_TIMEOUT;
+
+    loop {
+        match operation() {
+            Ok(value) => return value,
+            Err(RlnError::Conflict(message)) if message == CHANGING_STATE_MESSAGE => {
+                assert!(
+                    Instant::now() < deadline,
+                    "{operation_name} remained blocked by a node state transition for {RETRY_TIMEOUT:?}"
+                );
+                sleep(Duration::from_millis(25));
+            }
+            Err(error) => panic!("{operation_name} failed: {error}"),
+        }
+    }
+}
+
+fn asset_balance_after_transient_operations(
+    node: &SdkNode,
+    asset_id: &ContractId,
+) -> AssetBalanceInfo {
+    retry_while_node_is_changing_state("asset_balance", || node.asset_balance(*asset_id))
 }
 
 pub(crate) fn wait_for_asset_balance(
@@ -409,9 +437,10 @@ pub(crate) fn wait_for_asset_balance(
 ) -> AssetBalanceInfo {
     let deadline = Instant::now() + timeout;
     loop {
-        node.sync()
-            .expect("node sync while waiting for asset_balance");
-        if let Ok(balance) = node.asset_balance(asset_id.clone()) {
+        retry_while_node_is_changing_state("node sync while waiting for asset_balance", || {
+            node.sync()
+        });
+        if let Ok(balance) = node.asset_balance(*asset_id) {
             return balance;
         }
         assert!(
@@ -456,20 +485,21 @@ pub(crate) fn wait_for_channel_funding_tx(
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        node_a
-            .sync()
-            .expect("node A sync while waiting for funding tx");
-        node_b
-            .sync()
-            .expect("node B sync while waiting for funding tx");
+        retry_while_node_is_changing_state("node A sync while waiting for funding tx", || {
+            node_a.sync()
+        });
+        retry_while_node_is_changing_state("node B sync while waiting for funding tx", || {
+            node_b.sync()
+        });
 
-        let funding_seen = node_a
-            .list_channels()
-            .expect("node A list_channels while waiting for funding tx")
-            .into_iter()
-            .any(|channel| {
-                channel.asset_id.as_ref() == Some(asset_id) && channel.funding_txid.is_some()
-            });
+        let funding_seen = retry_while_node_is_changing_state(
+            "node A list_channels while waiting for funding tx",
+            || node_a.list_channels(),
+        )
+        .into_iter()
+        .any(|channel| {
+            channel.asset_id.as_ref() == Some(asset_id) && channel.funding_txid.is_some()
+        });
 
         if funding_seen {
             return;
@@ -493,11 +523,13 @@ where
 {
     let deadline = Instant::now() + timeout;
     let channel_id = loop {
-        node.sync()
-            .expect("node sync while waiting for channel open");
-        let channels = node
-            .list_channels()
-            .expect("list_channels while waiting for channel open");
+        retry_while_node_is_changing_state("node sync while waiting for channel open", || {
+            node.sync()
+        });
+        let channels = retry_while_node_is_changing_state(
+            "list_channels while waiting for channel open",
+            || node.list_channels(),
+        );
 
         if let Some(channel) = channels
             .iter()
@@ -530,18 +562,19 @@ pub(crate) fn wait_for_usable_channel(
 
     loop {
         polls += 1;
-        node_a
-            .sync()
-            .expect("node A sync while waiting for usable channel");
-        node_b
-            .sync()
-            .expect("node B sync while waiting for usable channel");
+        retry_while_node_is_changing_state("node A sync while waiting for usable channel", || {
+            node_a.sync()
+        });
+        retry_while_node_is_changing_state("node B sync while waiting for usable channel", || {
+            node_b.sync()
+        });
 
-        let ready = node_a
-            .list_channels()
-            .expect("node A list_channels while waiting for usable channel")
-            .into_iter()
-            .any(|channel| channel.asset_id.as_ref() == Some(asset_id) && channel.is_usable);
+        let ready = retry_while_node_is_changing_state(
+            "node A list_channels while waiting for usable channel",
+            || node_a.list_channels(),
+        )
+        .into_iter()
+        .any(|channel| channel.asset_id.as_ref() == Some(asset_id) && channel.is_usable);
 
         if ready {
             return;
@@ -551,7 +584,7 @@ pub(crate) fn wait_for_usable_channel(
             Instant::now() < deadline,
             "timeout waiting for usable channel"
         );
-        if polls % 5 == 0 {
+        if polls.is_multiple_of(5) {
             mine(1);
         }
         sleep(Duration::from_secs(2));
@@ -569,16 +602,20 @@ pub(crate) fn wait_for_channel_asset_state(
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        node.sync()
-            .unwrap_or_else(|_| panic!("{label}: node sync while waiting for channel state"));
-        let channel = node
-            .list_channels()
-            .unwrap_or_else(|_| panic!("{label}: list_channels while waiting for channel state"))
-            .into_iter()
-            .find(|channel| channel.channel_id == channel_id)
-            .unwrap_or_else(|| panic!("{label}: expected channel {channel_id}"));
+        retry_while_node_is_changing_state(
+            &format!("{label}: node sync while waiting for channel state"),
+            || node.sync(),
+        );
+        let channel = retry_while_node_is_changing_state(
+            &format!("{label}: list_channels while waiting for channel state"),
+            || node.list_channels(),
+        )
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id)
+        .unwrap_or_else(|| panic!("{label}: expected channel {channel_id}"));
         if channel.ready
             && channel.is_usable
+            && !channel.has_inflight_htlcs
             && channel.asset_local_amount == expected_asset_local
             && channel.asset_remote_amount == expected_asset_remote
             && min_outbound_msat
@@ -595,6 +632,32 @@ pub(crate) fn wait_for_channel_asset_state(
     }
 }
 
+pub(crate) fn wait_for_channel_quiescence(
+    label: &str,
+    node: &SdkNode,
+    channel_id: lightning::ln::types::ChannelId,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let channel = retry_while_node_is_changing_state(
+            &format!("{label}: list_channels while waiting for quiescence"),
+            || node.list_channels(),
+        )
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id)
+        .unwrap_or_else(|| panic!("{label}: expected channel {channel_id}"));
+        if channel.ready && channel.is_usable && !channel.has_inflight_htlcs {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label}: channel did not become quiescent"
+        );
+        sleep(Duration::from_millis(100));
+    }
+}
+
 pub(crate) fn wait_for_channel_ready(
     node: &SdkNode,
     channel_id: lightning::ln::types::ChannelId,
@@ -602,11 +665,14 @@ pub(crate) fn wait_for_channel_ready(
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        node.sync()
-            .expect("node sync while waiting for re-established channel");
-        let channels = node
-            .list_channels()
-            .expect("list_channels while waiting for re-established channel");
+        retry_while_node_is_changing_state(
+            "node sync while waiting for re-established channel",
+            || node.sync(),
+        );
+        let channels = retry_while_node_is_changing_state(
+            "list_channels while waiting for re-established channel",
+            || node.list_channels(),
+        );
         if let Some(channel) = channels.iter().find(|c| c.channel_id == channel_id) {
             if channel.ready {
                 return;
@@ -627,10 +693,11 @@ pub(crate) fn wait_for_usable_channels(
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        let usable = node
-            .node_info()
-            .expect("node_info while waiting for usable channels")
-            .num_usable_channels as usize;
+        let usable = retry_while_node_is_changing_state(
+            "node_info while waiting for usable channels",
+            || node.node_info(),
+        )
+        .num_usable_channels as usize;
         if usable == expected_num_usable_channels {
             return;
         }
@@ -649,14 +716,17 @@ pub(crate) fn wait_for_usable_channel_counts(nodes: &[(&SdkNode, usize)], timeou
         polls += 1;
         let mut all_ready = true;
         for (node, expected) in nodes {
-            node.sync()
-                .expect("node sync while waiting for usable channel counts");
-            let usable = node
-                .list_channels()
-                .expect("list_channels while waiting for usable channel counts")
-                .into_iter()
-                .filter(|channel| channel.ready && channel.is_usable)
-                .count();
+            retry_while_node_is_changing_state(
+                "node sync while waiting for usable channel counts",
+                || node.sync(),
+            );
+            let usable = retry_while_node_is_changing_state(
+                "list_channels while waiting for usable channel counts",
+                || node.list_channels(),
+            )
+            .into_iter()
+            .filter(|channel| channel.ready && channel.is_usable)
+            .count();
             if usable != *expected {
                 all_ready = false;
             }
@@ -668,7 +738,7 @@ pub(crate) fn wait_for_usable_channel_counts(nodes: &[(&SdkNode, usize)], timeou
             Instant::now() < deadline,
             "usable channel counts did not reach expected values in time"
         );
-        if polls % 5 == 0 {
+        if polls.is_multiple_of(5) {
             mine(1);
         }
         sleep(Duration::from_secs(1));
@@ -678,9 +748,10 @@ pub(crate) fn wait_for_usable_channel_counts(nodes: &[(&SdkNode, usize)], timeou
 pub(crate) fn wait_for_num_peers(node: &SdkNode, expected_num_peers: u64, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
-        let node_info = node
-            .node_info()
-            .expect("node_info while waiting for num_peers");
+        let node_info =
+            retry_while_node_is_changing_state("node_info while waiting for num_peers", || {
+                node.node_info()
+            });
         if node_info.num_peers == expected_num_peers {
             return;
         }
@@ -694,6 +765,7 @@ pub(crate) fn wait_for_num_peers(node: &SdkNode, expected_num_peers: u64, timeou
     }
 }
 
+#[track_caller]
 pub(crate) fn wait_for_payment_status(
     node: &SdkNode,
     payment_hash: &PaymentHash,
@@ -701,22 +773,63 @@ pub(crate) fn wait_for_payment_status(
 ) -> Payment {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(payment) = node
-            .list_payments()
-            .expect("list_payments while waiting for payment success")
+        let payments = retry_while_node_is_changing_state(
+            "list_payments while waiting for payment success",
+            || node.list_payments(),
+        );
+        if let Some(payment) = payments
             .into_iter()
-            .find(|payment| {
-                payment.payment_hash == *payment_hash
-                    && matches!(payment.status, HtlcStatus::Succeeded)
-            })
+            .find(|payment| payment.payment_hash == *payment_hash)
         {
-            return payment;
+            match payment.status {
+                HtlcStatus::Succeeded => return payment,
+                HtlcStatus::Cancelled => {
+                    panic!("payment reached terminal status cancelled while waiting for success")
+                }
+                HtlcStatus::Failed => {
+                    panic!("payment reached terminal status failed while waiting for success")
+                }
+                HtlcStatus::Pending | HtlcStatus::Claimable | HtlcStatus::Claiming => {}
+            }
         }
 
-        assert!(
-            Instant::now() < deadline,
-            "timeout waiting for payment success"
-        );
+        if Instant::now() >= deadline {
+            let observed_status = retry_while_node_is_changing_state(
+                "final list_payments after payment timeout",
+                || node.list_payments(),
+            )
+            .into_iter()
+            .find(|payment| payment.payment_hash == *payment_hash)
+            .map(|payment| match payment.status {
+                HtlcStatus::Pending => "pending",
+                HtlcStatus::Claimable => "claimable",
+                HtlcStatus::Claiming => "claiming",
+                HtlcStatus::Succeeded => "succeeded",
+                HtlcStatus::Cancelled => "cancelled",
+                HtlcStatus::Failed => "failed",
+            })
+            .unwrap_or("absent");
+            let channels =
+                retry_while_node_is_changing_state("list_channels after payment timeout", || {
+                    node.list_channels()
+                });
+            let channel_states = channels
+                .iter()
+                .map(|channel| {
+                    format!(
+                        "{}:ready={}:usable={}:inflight={}",
+                        channel.channel_id,
+                        channel.ready,
+                        channel.is_usable,
+                        channel.has_inflight_htlcs,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            panic!(
+                "timeout waiting for payment success: status={observed_status}, channels=[{channel_states}]"
+            );
+        }
         sleep(Duration::from_secs(1));
     }
 }
@@ -748,17 +861,23 @@ pub(crate) fn wait_for_balance(
     timeout: Duration,
 ) {
     let deadline = Instant::now() + timeout;
+    let mut polls = 0u32;
     loop {
+        polls += 1;
         let balance = asset_balance_spendable(node, asset_id);
         if balance == expected_balance {
             return;
         }
-        node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
-            .expect("refreshtransfers while waiting for balance");
+        retry_while_node_is_changing_state("refreshtransfers while waiting for balance", || {
+            node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
+        });
         assert!(
             Instant::now() < deadline,
             "spendable balance ({balance}) did not become {expected_balance}"
         );
+        if polls.is_multiple_of(5) {
+            mine(1);
+        }
         sleep(Duration::from_secs(1));
     }
 }
@@ -770,7 +889,7 @@ pub(crate) fn wait_for_payment_present_in_list(
 ) -> Payment {
     let deadline = Instant::now() + timeout;
     loop {
-        let payments = node.list_payments().expect("list_payments");
+        let payments = retry_while_node_is_changing_state("list_payments", || node.list_payments());
         if let Some(payment) = payments
             .into_iter()
             .find(|payment| payment.payment_hash == *payment_hash)
@@ -792,9 +911,11 @@ pub(crate) fn wait_for_succeeded_payment_in_list(
 ) -> Payment {
     let deadline = Instant::now() + timeout;
     loop {
-        node.sync()
-            .expect("node sync while waiting for succeeded payment in list");
-        let payments = node.list_payments().expect("list_payments");
+        retry_while_node_is_changing_state(
+            "node sync while waiting for succeeded payment in list",
+            || node.sync(),
+        );
+        let payments = retry_while_node_is_changing_state("list_payments", || node.list_payments());
         if let Some(payment) = payments
             .into_iter()
             .find(|payment| payment.payment_hash == *payment_hash)
@@ -863,11 +984,27 @@ pub(crate) fn keysend_with_ln_balance(
     initial_sender_ln_balance: u64,
     initial_receiver_ln_balance: u64,
 ) {
+    let channel_id = sender
+        .list_channels()
+        .expect("list_channels before keysend with ln balance checks")
+        .into_iter()
+        .find(|channel| {
+            channel.peer_pubkey == dest_pubkey && channel.asset_id.as_ref() == Some(asset_id)
+        })
+        .expect("matching RGB channel before keysend")
+        .channel_id;
+    wait_for_channel_quiescence(
+        "sender before RGB keysend",
+        sender,
+        channel_id,
+        Duration::from_secs(30),
+    );
+
     let keysend = sender
         .keysend(SdkKeysendRequest {
             dest_pubkey,
             amt_msat: amt_msat.unwrap_or(PAYMENT_MSAT),
-            asset_id: Some(asset_id.clone()),
+            asset_id: Some(*asset_id),
             asset_amount: Some(asset_amount),
         })
         .expect("keysend with ln balance checks");
@@ -900,6 +1037,25 @@ pub(crate) fn keysend(
     asset_id: Option<&ContractId>,
     asset_amount: Option<u64>,
 ) -> Payment {
+    let channel_id = retry_while_node_is_changing_state("list_channels before keysend", || {
+        sender.list_channels()
+    })
+    .into_iter()
+    .find(|channel| {
+        channel.peer_pubkey == dest_pubkey
+            && asset_id
+                .map(|asset_id| channel.asset_id.as_ref() == Some(asset_id))
+                .unwrap_or(true)
+    })
+    .expect("matching channel before keysend")
+    .channel_id;
+    wait_for_channel_quiescence(
+        "sender before keysend",
+        sender,
+        channel_id,
+        Duration::from_secs(30),
+    );
+
     let keysend = sender
         .keysend(SdkKeysendRequest {
             dest_pubkey,
@@ -908,7 +1064,15 @@ pub(crate) fn keysend(
             asset_amount,
         })
         .expect("keysend");
-    wait_for_succeeded_payment_in_list(sender, &keysend.payment_hash, Duration::from_secs(60))
+    let payment =
+        wait_for_succeeded_payment_in_list(sender, &keysend.payment_hash, Duration::from_secs(60));
+    wait_for_channel_quiescence(
+        "sender after keysend",
+        sender,
+        channel_id,
+        Duration::from_secs(30),
+    );
+    payment
 }
 
 pub(crate) fn close_channel(
@@ -926,6 +1090,12 @@ pub(crate) fn close_channel_with_force(
     force: bool,
 ) {
     stop_mining();
+    wait_for_channel_quiescence(
+        "channel before close",
+        node,
+        channel_id,
+        Duration::from_secs(30),
+    );
     node.closechannel(SdkCloseChannelRequest {
         channel_id,
         peer_pubkey,
@@ -951,6 +1121,7 @@ pub(crate) fn close_channel_with_force(
 }
 
 pub(crate) fn refresh_transfers(node: &SdkNode) {
-    node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
-        .expect("refreshtransfers");
+    retry_while_node_is_changing_state("refreshtransfers", || {
+        node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
+    });
 }

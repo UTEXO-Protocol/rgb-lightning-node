@@ -111,43 +111,43 @@ fn handle_conn(
     filter: Arc<AtomicBool>,
     blocked: Arc<std::sync::atomic::AtomicUsize>,
 ) -> std::io::Result<()> {
-    while let Some((head, body)) = read_http_request(&mut client)? {
-        let head_str = String::from_utf8_lossy(&head).to_string();
-        let is_put = head_str
-            .lines()
-            .next()
-            .is_some_and(|l| l.contains("putObject"));
-        let has_manager_key = body
-            .windows(MANAGER_VSS_KEY.len())
-            .any(|w| w == MANAGER_VSS_KEY);
-        if filter.load(Ordering::SeqCst) && is_put && has_manager_key {
-            blocked.fetch_add(1, Ordering::SeqCst);
-            client.write_all(
-                b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-            )?;
-            return Ok(());
-        }
-        // Fresh upstream connection with `Connection: close`: response is EOF-delimited.
-        let mut upstream = std::net::TcpStream::connect(VSS_SERVER_ADDR)?;
-        let mut new_head = String::new();
-        for line in head_str.split("\r\n") {
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((name, _)) = line.split_once(':') {
-                if name.eq_ignore_ascii_case("connection") {
-                    continue;
-                }
-            }
-            new_head.push_str(line);
-            new_head.push_str("\r\n");
-        }
-        new_head.push_str("connection: close\r\n\r\n");
-        upstream.write_all(new_head.as_bytes())?;
-        upstream.write_all(&body)?;
-        std::io::copy(&mut upstream, &mut client)?;
+    let Some((head, body)) = read_http_request(&mut client)? else {
+        return Ok(());
+    };
+    let head_str = String::from_utf8_lossy(&head).to_string();
+    let is_put = head_str
+        .lines()
+        .next()
+        .is_some_and(|l| l.contains("putObject"));
+    let has_manager_key = body
+        .windows(MANAGER_VSS_KEY.len())
+        .any(|w| w == MANAGER_VSS_KEY);
+    if filter.load(Ordering::SeqCst) && is_put && has_manager_key {
+        blocked.fetch_add(1, Ordering::SeqCst);
+        client.write_all(
+            b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )?;
         return Ok(());
     }
+    // Fresh upstream connection with `Connection: close`: response is EOF-delimited.
+    let mut upstream = std::net::TcpStream::connect(VSS_SERVER_ADDR)?;
+    let mut new_head = String::new();
+    for line in head_str.split("\r\n") {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name, _)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("connection") {
+                continue;
+            }
+        }
+        new_head.push_str(line);
+        new_head.push_str("\r\n");
+    }
+    new_head.push_str("connection: close\r\n\r\n");
+    upstream.write_all(new_head.as_bytes())?;
+    upstream.write_all(&body)?;
+    std::io::copy(&mut upstream, &mut client)?;
     Ok(())
 }
 
@@ -162,10 +162,10 @@ fn node_ldk_log_contains(dir: &std::path::Path, needle: &str) -> bool {
             if node_ldk_log_contains(&path, needle) {
                 return true;
             }
-        } else if path.file_name().is_some_and(|n| n == "logs.txt") {
-            if fs::read_to_string(&path).is_ok_and(|c| c.contains(needle)) {
-                return true;
-            }
+        } else if path.file_name().is_some_and(|n| n == "logs.txt")
+            && fs::read_to_string(&path).is_ok_and(|c| c.contains(needle))
+        {
+            return true;
         }
     }
     false
@@ -251,7 +251,7 @@ fn setup_with_open_channel(test_name: &str) -> LagSetup {
             fee_base_msat: None,
             fee_proportional_millionths: None,
             temporary_channel_id: None,
-            asset_id: Some(asset_id.clone()),
+            asset_id: Some(asset_id),
             asset_amount: Some(600),
             push_asset_amount: None,
             virtual_open_mode: None,

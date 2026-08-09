@@ -2515,7 +2515,7 @@ fn unlock_req(password: &str) -> UnlockRequest {
         password: password.to_string(),
         bitcoind_rpc_username: Some(s!("user")),
         bitcoind_rpc_password: Some(s!("password")),
-        bitcoind_rpc_host: Some(s!("localhost")),
+        bitcoind_rpc_host: Some(s!("127.0.0.1")),
         bitcoind_rpc_port: Some(18443),
         indexer_url: Some(ELECTRUM_URL_REGTEST.to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -2565,6 +2565,64 @@ async fn unlock(node_address: SocketAddr, password: &str) {
         .json::<EmptyResponse>()
         .await
         .unwrap();
+}
+
+async fn unlock_with_indexer(node_address: SocketAddr, password: &str, indexer_url: &str) {
+    println!("unlocking node {node_address} with indexer {indexer_url}");
+    let mut payload = unlock_req(password);
+    payload.indexer_url = Some(indexer_url.to_string());
+    payload.bitcoind_rpc_username = None;
+    payload.bitcoind_rpc_password = None;
+    payload.bitcoind_rpc_host = None;
+    payload.bitcoind_rpc_port = None;
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/unlock"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<EmptyResponse>()
+        .await
+        .unwrap();
+}
+
+async fn start_node_with_reuse_addresses_and_indexer(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    indexer_url: &str,
+    reuse_addresses: bool,
+    keep_node_dir: bool,
+) -> (SocketAddr, String) {
+    if !keep_node_dir && Path::new(node_test_dir).is_dir() {
+        std::fs::remove_dir_all(node_test_dir).unwrap();
+    }
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let node_address = listener.local_addr().unwrap();
+    std::fs::create_dir_all(node_test_dir).unwrap();
+    let args = UserArgs {
+        storage_dir_path: node_test_dir.into(),
+        ldk_peer_listening_port: node_peer_port,
+        reuse_addresses,
+        ..Default::default()
+    };
+    let (router, app_state) = app(args).await.unwrap();
+    register_app_state(node_address, Arc::clone(&app_state));
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal(app_state))
+            .await
+            .unwrap();
+    });
+
+    let password = format!("{node_test_dir}.{node_peer_port}");
+    if !keep_node_dir {
+        init(node_address, &password, None).await;
+    }
+    unlock_with_indexer(node_address, &password, indexer_url).await;
+    wait_for_peer_port_ready(node_peer_port).await;
+    (node_address, password)
 }
 
 async fn wait_for_balance(node_address: SocketAddr, asset_id: &str, expected_balance: u64) {
@@ -2936,6 +2994,7 @@ mod fail_transfers;
 mod getchannelid;
 mod gossip_p2p;
 mod gossip_rgs;
+mod high_history_channel;
 mod hodl_invoice;
 mod htlc_amount_checks;
 mod ifa_channel;

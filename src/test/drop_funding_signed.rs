@@ -25,8 +25,7 @@ async fn drop_funding_signed() {
     let node3_pubkey = node_info(node3_addr).await.pubkey;
 
     // make node1 drop outgoing funding_signed and reply with an error
-    *DROP_FUNDING_SIGNED_ON_NODE.lock().unwrap() =
-        Some(PublicKey::from_str(&node2_pubkey).unwrap());
+    DROP_FUNDING_SIGNED_ON_NODE.set(Some(PublicKey::from_str(&node2_pubkey).unwrap()));
 
     open_channel_request_raw(
         node1_addr,
@@ -60,7 +59,7 @@ async fn drop_funding_signed() {
     }
 
     // restore normal behavior before opening a new channel to a different peer
-    *DROP_FUNDING_SIGNED_ON_NODE.lock().unwrap() = None;
+    DROP_FUNDING_SIGNED_ON_NODE.set(None);
 
     // opening a new channel to a different peer must succeed: the UTXOs locked for the discarded
     // funding TX must have been released
@@ -80,8 +79,7 @@ async fn drop_funding_signed() {
     // do the same but with a colored channel
     fund_with_and_create_utxos(node1_addr, Some(3), 500_000).await;
     let asset_cfa = issue_asset_cfa(node1_addr, None).await;
-    *DROP_FUNDING_SIGNED_ON_NODE.lock().unwrap() =
-        Some(PublicKey::from_str(&node2_pubkey).unwrap());
+    DROP_FUNDING_SIGNED_ON_NODE.set(Some(PublicKey::from_str(&node2_pubkey).unwrap()));
     open_channel_request_raw(
         node1_addr,
         &node2_pubkey,
@@ -110,7 +108,7 @@ async fn drop_funding_signed() {
             panic!("channel is not disappearing");
         }
     }
-    *DROP_FUNDING_SIGNED_ON_NODE.lock().unwrap() = None;
+    DROP_FUNDING_SIGNED_ON_NODE.set(None);
     open_channel_with_retry(
         node1_addr,
         &node3_pubkey,

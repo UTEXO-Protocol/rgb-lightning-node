@@ -75,8 +75,14 @@ pub extern "C" fn free_sdk_node(obj: COpaqueStruct) {
 }
 
 /// Free a string previously returned in `CResultString.inner`.
+///
+/// # Safety
+///
+/// `s` must be null or a pointer returned by this library in `CResultString.inner` that has not
+/// already been freed. Passing any other pointer, or freeing the same pointer twice, is undefined
+/// behavior.
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_free_string(s: *mut c_char) {
+pub unsafe extern "C" fn rln_free_string(s: *mut c_char) {
     if s.is_null() {
         return;
     }
@@ -100,7 +106,10 @@ pub extern "C" fn rln_sdk_node_init(
     password: *const c_char,
     mnemonic_opt: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_sdk_node_init", api::sdk_node_init(node, password, mnemonic_opt))
+    ffi_call!(
+        "rln_sdk_node_init",
+        api::sdk_node_init(node, password, mnemonic_opt)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -108,7 +117,10 @@ pub extern "C" fn rln_sdk_node_unlock(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_sdk_node_unlock", api::sdk_node_unlock(node, request_json))
+    ffi_call!(
+        "rln_sdk_node_unlock",
+        api::sdk_node_unlock(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -126,7 +138,10 @@ pub extern "C" fn rln_sdk_node_vss_clear_fence(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_sdk_node_vss_clear_fence", api::sdk_node_vss_clear_fence(node, request_json))
+    ffi_call!(
+        "rln_sdk_node_vss_clear_fence",
+        api::sdk_node_vss_clear_fence(node, request_json)
+    )
 }
 
 /// Force an immediate VSS backup flush. Returns `{"version": i64}` JSON
@@ -153,7 +168,10 @@ pub extern "C" fn rln_sdk_node_apay_new(
     node: &COpaqueStruct,
     host_node_id: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_sdk_node_apay_new", api::sdk_node_apay_new(node, host_node_id))
+    ffi_call!(
+        "rln_sdk_node_apay_new",
+        api::sdk_node_apay_new(node, host_node_id)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +183,10 @@ pub extern "C" fn rln_connect_peer(
     node: &COpaqueStruct,
     peer_pubkey_and_addr: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_connect_peer", api::connect_peer(node, peer_pubkey_and_addr))
+    ffi_call!(
+        "rln_connect_peer",
+        api::connect_peer(node, peer_pubkey_and_addr)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -173,7 +194,10 @@ pub extern "C" fn rln_disconnect_peer(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_disconnect_peer", api::disconnect_peer(node, request_json))
+    ffi_call!(
+        "rln_disconnect_peer",
+        api::disconnect_peer(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -198,6 +222,25 @@ pub extern "C" fn rln_list_channels(node: &COpaqueStruct) -> CResultString {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rln_list_rgb_funding_recoveries(node: &COpaqueStruct) -> CResultString {
+    ffi_call!(
+        "rln_list_rgb_funding_recoveries",
+        api::list_rgb_funding_recoveries(node)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_resolve_rgb_funding_recovery(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_resolve_rgb_funding_recovery",
+        api::resolve_rgb_funding_recovery(node, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rln_list_peers(node: &COpaqueStruct) -> CResultString {
     ffi_call!("rln_list_peers", api::list_peers(node))
 }
@@ -207,7 +250,10 @@ pub extern "C" fn rln_get_channel_id(
     node: &COpaqueStruct,
     temporary_channel_id_hex: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_get_channel_id", api::get_channel_id(node, temporary_channel_id_hex))
+    ffi_call!(
+        "rln_get_channel_id",
+        api::get_channel_id(node, temporary_channel_id_hex)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -223,10 +269,7 @@ pub extern "C" fn rln_send_payment(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_keysend(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> CResultString {
+pub extern "C" fn rln_keysend(node: &COpaqueStruct, request_json: *const c_char) -> CResultString {
     ffi_call!("rln_keysend", api::keysend(node, request_json))
 }
 
@@ -243,7 +286,10 @@ pub extern "C" fn rln_cancel_hodl_invoice(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_cancel_hodl_invoice", api::cancel_hodl_invoice(node, request_json))
+    ffi_call!(
+        "rln_cancel_hodl_invoice",
+        api::cancel_hodl_invoice(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -251,7 +297,10 @@ pub extern "C" fn rln_claim_hodl_invoice(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_claim_hodl_invoice", api::claim_hodl_invoice(node, request_json))
+    ffi_call!(
+        "rln_claim_hodl_invoice",
+        api::claim_hodl_invoice(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -267,7 +316,10 @@ pub extern "C" fn rln_decode_ln_invoice(
     node: &COpaqueStruct,
     invoice: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_decode_ln_invoice", api::decode_ln_invoice(node, invoice))
+    ffi_call!(
+        "rln_decode_ln_invoice",
+        api::decode_ln_invoice(node, invoice)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -275,7 +327,10 @@ pub extern "C" fn rln_decode_rgb_invoice(
     node: &COpaqueStruct,
     invoice: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_decode_rgb_invoice", api::decode_rgb_invoice(node, invoice))
+    ffi_call!(
+        "rln_decode_rgb_invoice",
+        api::decode_rgb_invoice(node, invoice)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -284,7 +339,10 @@ pub extern "C" fn rln_get_payment(
     payment_hash_hex: *const c_char,
     payment_type: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_get_payment", api::get_payment(node, payment_hash_hex, payment_type))
+    ffi_call!(
+        "rln_get_payment",
+        api::get_payment(node, payment_hash_hex, payment_type)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -305,10 +363,7 @@ pub extern "C" fn rln_rgb_invoice(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_send_rgb(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> CResultString {
+pub extern "C" fn rln_send_rgb(node: &COpaqueStruct, request_json: *const c_char) -> CResultString {
     ffi_call!("rln_send_rgb", api::send_rgb(node, request_json))
 }
 
@@ -317,7 +372,10 @@ pub extern "C" fn rln_refresh_transfers(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_refresh_transfers", api::refresh_transfers(node, request_json))
+    ffi_call!(
+        "rln_refresh_transfers",
+        api::refresh_transfers(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -325,14 +383,14 @@ pub extern "C" fn rln_fail_transfers(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_fail_transfers", api::fail_transfers(node, request_json))
+    ffi_call!(
+        "rln_fail_transfers",
+        api::fail_transfers(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_inflate(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> CResultString {
+pub extern "C" fn rln_inflate(node: &COpaqueStruct, request_json: *const c_char) -> CResultString {
     ffi_call!("rln_inflate", api::inflate(node, request_json))
 }
 
@@ -365,7 +423,10 @@ pub extern "C" fn rln_post_asset_media(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_post_asset_media", api::post_asset_media(node, request_json))
+    ffi_call!(
+        "rln_post_asset_media",
+        api::post_asset_media(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -385,7 +446,10 @@ pub extern "C" fn rln_issue_asset_nia(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_issue_asset_nia", api::issue_asset_nia(node, request_json))
+    ffi_call!(
+        "rln_issue_asset_nia",
+        api::issue_asset_nia(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -393,7 +457,10 @@ pub extern "C" fn rln_issue_asset_cfa(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_issue_asset_cfa", api::issue_asset_cfa(node, request_json))
+    ffi_call!(
+        "rln_issue_asset_cfa",
+        api::issue_asset_cfa(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -401,7 +468,10 @@ pub extern "C" fn rln_issue_asset_ifa(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_issue_asset_ifa", api::issue_asset_ifa(node, request_json))
+    ffi_call!(
+        "rln_issue_asset_ifa",
+        api::issue_asset_ifa(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -409,7 +479,10 @@ pub extern "C" fn rln_issue_asset_uda(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_issue_asset_uda", api::issue_asset_uda(node, request_json))
+    ffi_call!(
+        "rln_issue_asset_uda",
+        api::issue_asset_uda(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -417,7 +490,10 @@ pub extern "C" fn rln_list_assets(
     node: &COpaqueStruct,
     filter_asset_schemas_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_list_assets", api::list_assets(node, filter_asset_schemas_json))
+    ffi_call!(
+        "rln_list_assets",
+        api::list_assets(node, filter_asset_schemas_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -466,10 +542,7 @@ pub extern "C" fn rln_btc_balance(node: &COpaqueStruct, skip_sync: bool) -> CRes
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_sign_message(
-    node: &COpaqueStruct,
-    message: *const c_char,
-) -> CResultString {
+pub extern "C" fn rln_sign_message(node: &COpaqueStruct, message: *const c_char) -> CResultString {
     ffi_call!("rln_sign_message", api::sign_message(node, message))
 }
 
@@ -495,7 +568,10 @@ pub extern "C" fn rln_check_indexer_url(
     node: &COpaqueStruct,
     indexer_url: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_check_indexer_url", api::check_indexer_url(node, indexer_url))
+    ffi_call!(
+        "rln_check_indexer_url",
+        api::check_indexer_url(node, indexer_url)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -503,14 +579,14 @@ pub extern "C" fn rln_check_proxy_endpoint(
     node: &COpaqueStruct,
     proxy_endpoint: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_check_proxy_endpoint", api::check_proxy_endpoint(node, proxy_endpoint))
+    ffi_call!(
+        "rln_check_proxy_endpoint",
+        api::check_proxy_endpoint(node, proxy_endpoint)
+    )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_send_btc(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> CResultString {
+pub extern "C" fn rln_send_btc(node: &COpaqueStruct, request_json: *const c_char) -> CResultString {
     ffi_call!("rln_send_btc", api::send_btc(node, request_json))
 }
 
@@ -523,11 +599,11 @@ pub extern "C" fn rln_create_utxos(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_list_transactions(
-    node: &COpaqueStruct,
-    skip_sync: bool,
-) -> CResultString {
-    ffi_call!("rln_list_transactions", api::list_transactions(node, skip_sync))
+pub extern "C" fn rln_list_transactions(node: &COpaqueStruct, skip_sync: bool) -> CResultString {
+    ffi_call!(
+        "rln_list_transactions",
+        api::list_transactions(node, skip_sync)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -568,10 +644,7 @@ pub extern "C" fn rln_maker_execute(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_taker(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> CResultString {
+pub extern "C" fn rln_taker(node: &COpaqueStruct, request_json: *const c_char) -> CResultString {
     ffi_call!("rln_taker", api::taker(node, request_json))
 }
 
@@ -580,7 +653,10 @@ pub extern "C" fn rln_send_onion_message(
     node: &COpaqueStruct,
     request_json: *const c_char,
 ) -> CResultString {
-    ffi_call!("rln_send_onion_message", api::send_onion_message(node, request_json))
+    ffi_call!(
+        "rln_send_onion_message",
+        api::send_onion_message(node, request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -589,7 +665,10 @@ pub extern "C" fn rln_get_swap(
     payment_hash: *const c_char,
     taker_flag: bool,
 ) -> CResultString {
-    ffi_call!("rln_get_swap", api::get_swap(node, payment_hash, taker_flag))
+    ffi_call!(
+        "rln_get_swap",
+        api::get_swap(node, payment_hash, taker_flag)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -613,7 +692,10 @@ pub extern "C" fn rln_uniffi_is_initialized() -> CResultString {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rln_sdk_initialize(request_json: *const c_char) -> CResultString {
-    ffi_call!("rln_sdk_initialize", api::sdk_global_initialize(request_json))
+    ffi_call!(
+        "rln_sdk_initialize",
+        api::sdk_global_initialize(request_json)
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -637,6 +719,90 @@ pub extern "C" fn free_native_external_signer(obj: COpaqueStruct) {
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_native_external_signer_new(
+    seed_hex: *const c_char,
+    network: *const c_char,
+    permissive_policy: bool,
+) -> CResult {
+    ffi_call!(
+        "rln_native_external_signer_new",
+        api::native_external_signer_new(seed_hex, network, permissive_policy)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_native_external_signer_bootstrap(signer: &COpaqueStruct) -> CResultString {
+    ffi_call!(
+        "rln_native_external_signer_bootstrap",
+        api::native_external_signer_bootstrap(signer)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_sdk_node_init_with_native_external_signer(
+    node: &COpaqueStruct,
+    signer: &COpaqueStruct,
+) -> CResultString {
+    ffi_call!(
+        "rln_sdk_node_init_with_native_external_signer",
+        api::sdk_node_init_with_native_external_signer(node, signer)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_sdk_node_attach_native_external_signer(
+    node: &COpaqueStruct,
+    signer: &COpaqueStruct,
+) -> CResultString {
+    ffi_call!(
+        "rln_sdk_node_attach_native_external_signer",
+        api::sdk_node_attach_native_external_signer(node, signer)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_sdk_node_unlock_with_native_external_signer(
+    node: &COpaqueStruct,
+    signer: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_sdk_node_unlock_with_native_external_signer",
+        api::sdk_node_unlock_with_native_external_signer(node, signer, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_sdk_node_init_with_external_signer(
+    node: &COpaqueStruct,
+    bootstrap_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_sdk_node_init_with_external_signer",
+        api::sdk_node_init_with_external_signer(node, bootstrap_json)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_sdk_node_detach_external_signer(node: &COpaqueStruct) -> CResultString {
+    ffi_call!(
+        "rln_sdk_node_detach_external_signer",
+        api::sdk_node_detach_external_signer(node)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_sdk_node_unlock_with_attached_external_signer(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_sdk_node_unlock_with_attached_external_signer",
+        api::sdk_node_unlock_with_attached_external_signer(node, request_json)
+    )
+}
+
 #[cfg(test)]
 mod free_tests {
     use super::*;
@@ -646,68 +812,4 @@ mod free_tests {
         free_sdk_node(COpaqueStruct::null());
         free_native_external_signer(COpaqueStruct::null());
     }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_native_external_signer_new(
-    seed_hex: *const c_char,
-    network: *const c_char,
-    permissive_policy: bool,
-) -> CResult {
-    ffi_call!("rln_native_external_signer_new", api::native_external_signer_new(seed_hex, network, permissive_policy))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_native_external_signer_bootstrap(
-    signer: &COpaqueStruct,
-) -> CResultString {
-    ffi_call!("rln_native_external_signer_bootstrap", api::native_external_signer_bootstrap(signer))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_sdk_node_init_with_native_external_signer(
-    node: &COpaqueStruct,
-    signer: &COpaqueStruct,
-) -> CResultString {
-    ffi_call!("rln_sdk_node_init_with_native_external_signer", api::sdk_node_init_with_native_external_signer(node, signer))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_sdk_node_attach_native_external_signer(
-    node: &COpaqueStruct,
-    signer: &COpaqueStruct,
-) -> CResultString {
-    ffi_call!("rln_sdk_node_attach_native_external_signer", api::sdk_node_attach_native_external_signer(node, signer))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_sdk_node_unlock_with_native_external_signer(
-    node: &COpaqueStruct,
-    signer: &COpaqueStruct,
-    request_json: *const c_char,
-) -> CResultString {
-    ffi_call!("rln_sdk_node_unlock_with_native_external_signer", api::sdk_node_unlock_with_native_external_signer(node, signer, request_json))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_sdk_node_init_with_external_signer(
-    node: &COpaqueStruct,
-    bootstrap_json: *const c_char,
-) -> CResultString {
-    ffi_call!("rln_sdk_node_init_with_external_signer", api::sdk_node_init_with_external_signer(node, bootstrap_json))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_sdk_node_detach_external_signer(
-    node: &COpaqueStruct,
-) -> CResultString {
-    ffi_call!("rln_sdk_node_detach_external_signer", api::sdk_node_detach_external_signer(node))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_sdk_node_unlock_with_attached_external_signer(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> CResultString {
-    ffi_call!("rln_sdk_node_unlock_with_attached_external_signer", api::sdk_node_unlock_with_attached_external_signer(node, request_json))
 }

@@ -79,7 +79,9 @@ use crate::core_types::async_order::{
     AsyncOrderOutboundInvoiceResponse,
 };
 use crate::ldk::{
-    clear_rgb_payment_pending, peer_has_live_channel, start_ldk, stop_ldk, LdkBackgroundServices,
+    clear_rgb_payment_pending, list_rgb_funding_recoveries as ldk_list_rgb_funding_recoveries,
+    peer_has_live_channel, resolve_rgb_funding_recovery as ldk_resolve_rgb_funding_recovery,
+    start_ldk, stop_ldk, LdkBackgroundServices, RgbFundingRecoveryCommand,
     VirtualChannelSessionStatus,
 };
 #[cfg(feature = "vss")]
@@ -109,6 +111,19 @@ use crate::{
 };
 
 const VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RgbFundingRecoveryAction {
+    Recheck,
+    ResumeBroadcast,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResolveRgbFundingRecoveryRequest {
+    pub(crate) funding_txid: String,
+    pub(crate) action: RgbFundingRecoveryAction,
+}
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AddressResponse {
@@ -439,6 +454,7 @@ pub(crate) struct Channel {
     pub(crate) next_outbound_htlc_limit_msat: u64,
     pub(crate) next_outbound_htlc_minimum_msat: u64,
     pub(crate) is_usable: bool,
+    pub(crate) has_inflight_htlcs: bool,
     pub(crate) public: bool,
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_local_amount: Option<u64>,
@@ -1577,6 +1593,7 @@ pub(crate) async fn address(
 ) -> Result<Json<AddressResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let address = unlocked_state.rgb_get_address()?;
 
@@ -1588,6 +1605,7 @@ pub(crate) async fn rotate_address(
 ) -> Result<Json<AddressResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let address = unlocked_state.rgb_rotate_address()?;
 
@@ -1601,6 +1619,7 @@ pub(crate) async fn async_order_new(
     let guard = state.check_unlocked().await?;
     let unlocked_state = Arc::clone(guard.as_ref().unwrap());
     drop(guard);
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let host_node_id =
         hex_str_to_compressed_pubkey(&payload.host_node_id).ok_or(APIError::InvalidPubkey)?;
@@ -1710,6 +1729,7 @@ pub(crate) async fn async_order_outbound_invoice(
     let guard = state.check_unlocked().await?;
     let unlocked_state = Arc::clone(guard.as_ref().unwrap());
     drop(guard);
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let peer_node_id =
         hex_str_to_compressed_pubkey(&payload.client_node_id).ok_or(APIError::InvalidPubkey)?;
@@ -1784,6 +1804,7 @@ pub(crate) async fn asset_balance(
 ) -> Result<Json<AssetBalanceResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let contract_id = ContractId::from_str(&payload.asset_id)
         .map_err(|_| APIError::InvalidAssetID(payload.asset_id))?;
@@ -1825,12 +1846,10 @@ pub(crate) async fn asset_metadata(
     let contract_id = ContractId::from_str(&payload.asset_id)
         .map_err(|_| APIError::InvalidAssetID(payload.asset_id))?;
 
-    let metadata = state
-        .check_unlocked()
-        .await?
-        .clone()
-        .unwrap()
-        .rgb_get_asset_metadata(contract_id)?;
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
+    let metadata = unlocked_state.rgb_get_asset_metadata(contract_id)?;
 
     Ok(Json(AssetMetadataResponse {
         asset_schema: metadata.asset_schema.into(),
@@ -1872,6 +1891,7 @@ pub(crate) async fn btc_balance(
 ) -> Result<Json<BtcBalanceResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let btc_balance = unlocked_state.rgb_get_btc_balance(payload.skip_sync)?;
 
@@ -1897,6 +1917,7 @@ pub(crate) async fn cancel_hodl_invoice(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let payment_hash = validate_and_parse_payment_hash(&payload.payment_hash)?;
         let payment_info = unlocked_state
@@ -1974,6 +1995,7 @@ pub(crate) async fn claim_hodl_invoice(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let payment_hash = validate_and_parse_payment_hash(&payload.payment_hash)?;
         let preimage =
@@ -2058,6 +2080,7 @@ pub(crate) async fn close_channel(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let channel_id_vec = hex_str_to_vec(&payload.channel_id);
         if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
@@ -2270,6 +2293,7 @@ pub(crate) async fn create_utxos(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let num = payload.num.unwrap_or(unlocked_state.config.rgb.utxo_num);
         let size = payload
@@ -2423,12 +2447,10 @@ pub(crate) async fn estimate_fee(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<EstimateFeeRequest>, APIError>,
 ) -> Result<Json<EstimateFeeResponse>, APIError> {
-    let fee_rate = state
-        .check_unlocked()
-        .await?
-        .clone()
-        .unwrap()
-        .rgb_get_fee_estimation(payload.blocks)?;
+    let guard = state.check_unlocked().await?;
+    let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
+    let fee_rate = unlocked_state.rgb_get_fee_estimation(payload.blocks)?;
 
     Ok(Json(EstimateFeeResponse { fee_rate }))
 }
@@ -2440,6 +2462,7 @@ pub(crate) async fn fail_transfers(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let unlocked_state_copy = unlocked_state.clone();
         let transfers_changed = tokio::task::spawn_blocking(move || {
@@ -2636,6 +2659,7 @@ pub(crate) async fn inflate(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
         if unlocked_state.external_signer_mode {
             return Err(APIError::UnsupportedInExternalSignerMode(
                 "inflate is not supported in external signer mode".to_string(),
@@ -2789,6 +2813,7 @@ pub(crate) async fn issue_asset_cfa(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
         if unlocked_state.external_signer_mode {
             return Err(APIError::UnsupportedInExternalSignerMode(
                 "asset issuance is not supported in external signer mode".to_string(),
@@ -2825,6 +2850,7 @@ pub(crate) async fn issue_asset_ifa(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
         if unlocked_state.external_signer_mode {
             return Err(APIError::UnsupportedInExternalSignerMode(
                 "asset issuance is not supported in external signer mode".to_string(),
@@ -2854,6 +2880,7 @@ pub(crate) async fn issue_asset_nia(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
         if unlocked_state.external_signer_mode {
             return Err(APIError::UnsupportedInExternalSignerMode(
                 "asset issuance is not supported in external signer mode".to_string(),
@@ -2881,6 +2908,7 @@ pub(crate) async fn issue_asset_uda(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
         if unlocked_state.external_signer_mode {
             return Err(APIError::UnsupportedInExternalSignerMode(
                 "asset issuance is not supported in external signer mode".to_string(),
@@ -2924,6 +2952,7 @@ pub(crate) async fn keysend(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let dest_pubkey = match hex_str_to_compressed_pubkey(&payload.dest_pubkey) {
             Some(pk) => pk,
@@ -3033,6 +3062,7 @@ pub(crate) async fn list_assets(
 ) -> Result<Json<ListAssetsResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let rgb_assets = unlocked_state.rgb_list_assets(
         payload
@@ -3149,6 +3179,7 @@ pub(crate) async fn list_channels(
             next_outbound_htlc_limit_msat: chan_info.next_outbound_htlc_limit_msat,
             next_outbound_htlc_minimum_msat: chan_info.next_outbound_htlc_minimum_msat,
             is_usable: chan_info.is_usable,
+            has_inflight_htlcs: chan_info.has_inflight_htlcs,
             public: chan_info.is_announced,
             ..Default::default()
         };
@@ -3201,6 +3232,71 @@ pub(crate) async fn list_channels(
     }
 
     Ok(Json(ListChannelsResponse { channels }))
+}
+
+pub(crate) async fn list_rgb_funding_recoveries(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::ldk::RgbFundingRecovery>>, APIError> {
+    let unlocked_state = {
+        let guard = state.check_unlocked().await?;
+        Arc::clone(guard.as_ref().unwrap())
+    };
+    let recovery_guard = Arc::clone(&unlocked_state.rgb_funding_recovery_guard);
+    let recoveries = tokio::task::spawn_blocking(move || {
+        let _operation = recovery_guard.blocking_lock_operation();
+        let recoveries = ldk_list_rgb_funding_recoveries(
+            unlocked_state.channel_manager.as_ref(),
+            unlocked_state.rgb_wallet_wrapper.as_ref(),
+            unlocked_state.kv_store.as_ref(),
+        )?;
+        recovery_guard.replace(&recoveries);
+        Ok::<_, rgb_lib::Error>(recoveries)
+    })
+    .await
+    .map_err(|error| {
+        APIError::Unexpected(format!("RGB funding recovery task failed: {error}"))
+    })??;
+    Ok(Json(recoveries))
+}
+
+pub(crate) async fn resolve_rgb_funding_recovery(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<
+        Json<ResolveRgbFundingRecoveryRequest>,
+        APIError,
+    >,
+) -> Result<Json<Option<crate::ldk::RgbFundingRecovery>>, APIError> {
+    let action = match payload.action {
+        RgbFundingRecoveryAction::Recheck => RgbFundingRecoveryCommand::Recheck,
+        RgbFundingRecoveryAction::ResumeBroadcast => RgbFundingRecoveryCommand::ResumeBroadcast,
+    };
+    let unlocked_state = {
+        let guard = state.check_unlocked().await?;
+        Arc::clone(guard.as_ref().unwrap())
+    };
+    let recovery_guard = Arc::clone(&unlocked_state.rgb_funding_recovery_guard);
+    let recovery = tokio::task::spawn_blocking(move || {
+        let _operation = recovery_guard.blocking_lock_operation();
+        let recovery = ldk_resolve_rgb_funding_recovery(
+            &payload.funding_txid,
+            action,
+            unlocked_state.channel_manager.as_ref(),
+            unlocked_state.rgb_wallet_wrapper.as_ref(),
+            unlocked_state.kv_store.as_ref(),
+        )?;
+        let recoveries = ldk_list_rgb_funding_recoveries(
+            unlocked_state.channel_manager.as_ref(),
+            unlocked_state.rgb_wallet_wrapper.as_ref(),
+            unlocked_state.kv_store.as_ref(),
+        )?;
+        recovery_guard.replace(&recoveries);
+        Ok::<_, rgb_lib::Error>(recovery)
+    })
+    .await
+    .map_err(|error| {
+        APIError::Unexpected(format!("RGB funding recovery task failed: {error}"))
+    })??;
+    Ok(Json(recovery))
 }
 
 pub(crate) async fn list_payments(
@@ -3367,6 +3463,7 @@ pub(crate) async fn list_transactions(
 ) -> Result<Json<ListTransactionsResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let mut transactions = vec![];
     for tx in unlocked_state.rgb_list_transactions(payload.skip_sync)? {
@@ -3428,6 +3525,7 @@ pub(crate) async fn list_transfers(
 ) -> Result<Json<ListTransfersResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let raw_transfers = match (payload.txid, payload.asset_id) {
         (Some(txid), _) => unlocked_state.rgb_list_transfers_by_txid(txid)?,
@@ -3516,6 +3614,7 @@ pub(crate) async fn list_unspents(
 ) -> Result<Json<ListUnspentsResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let mut unspents = vec![];
     for unspent in unlocked_state.rgb_list_unspents(payload.settled_only, payload.skip_sync)? {
@@ -3570,6 +3669,7 @@ pub(crate) async fn ln_invoice(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let contract_id = if let Some(asset_id) = &payload.asset_id {
             Some(
@@ -3706,6 +3806,7 @@ pub(crate) async fn maker_execute(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let swapstring = SwapString::from_str(&payload.swapstring)
             .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
@@ -3927,6 +4028,7 @@ pub(crate) async fn maker_init(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let from_asset = match &payload.from_asset {
             None => None,
@@ -4019,6 +4121,7 @@ pub(crate) async fn node_info(
 ) -> Result<Json<NodeInfoResponse>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
     let chans = unlocked_state.channel_manager.list_channels();
 
@@ -4114,6 +4217,7 @@ pub(crate) async fn open_channel(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let is_virtual_open = match payload.virtual_open_mode.as_deref() {
             None => false,
@@ -4425,7 +4529,7 @@ pub(crate) async fn open_channel(
 
         let temporary_channel_id = unlocked_state
             .channel_manager
-            .create_channel(
+            .create_rgb_channel(
                 peer_pubkey,
                 payload.capacity_sat,
                 payload.push_msat,
@@ -4532,6 +4636,7 @@ pub(crate) async fn refresh_transfers(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
         let unlocked_state_copy = unlocked_state.clone();
 
         let filter = payload.filter.into_iter().map(|f| f.into()).collect();
@@ -4606,6 +4711,7 @@ pub(crate) async fn rgb_invoice(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let assignment = payload.assignment.unwrap_or(Assignment::Any).into();
 
@@ -4644,6 +4750,7 @@ pub(crate) async fn send_btc(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let txid = if unlocked_state.external_signer_mode {
             let unsigned_psbt = unlocked_state.rgb_send_btc_begin(
@@ -4742,6 +4849,7 @@ pub(crate) async fn send_payment(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let mut status = HTLCStatus::Pending;
         let created_at = get_current_timestamp();
@@ -4961,6 +5069,7 @@ pub(crate) async fn send_rgb(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         let recipient_map: HashMap<String, Vec<RgbLibRecipient>> = payload
             .recipient_map
@@ -5054,6 +5163,7 @@ pub(crate) async fn sync(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
 
         unlocked_state.rgb_sync(payload.options.into())?;
 
@@ -5069,6 +5179,7 @@ pub(crate) async fn taker(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
+        let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
         let swapstring = SwapString::from_str(&payload.swapstring)
             .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
 
@@ -5191,6 +5302,7 @@ pub(crate) async fn vss_backup(
 ) -> Result<Json<serde_json::Value>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap().clone();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
     drop(guard);
 
     let vss_client = unlocked_state
@@ -5217,6 +5329,7 @@ pub(crate) async fn vss_backup_info(
 ) -> Result<Json<serde_json::Value>, APIError> {
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap().clone();
+    let _financial_operation = unlocked_state.ensure_financial_operations_allowed()?;
     drop(guard);
 
     let vss_client = unlocked_state
@@ -5461,6 +5574,7 @@ mod external_signer_auth_tests {
 
         Arc::new(AppState {
             static_state: Arc::new(StaticState {
+                config: Default::default(),
                 ldk_peer_listening_port: 9735,
                 network: rgb_lib::BitcoinNetwork::Regtest,
                 storage_dir_path: path.clone(),

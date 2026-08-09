@@ -21,8 +21,7 @@ use crate::COpaqueStruct;
 // ---------------------------------------------------------------------------
 
 fn parse_bolt11(s: &str) -> Result<rln::Bolt11Invoice, Error> {
-    rln::Bolt11Invoice::from_str(s)
-        .map_err(|e| Error::StringParse(format!("invalid bolt11: {e}")))
+    rln::Bolt11Invoice::from_str(s).map_err(|e| Error::StringParse(format!("invalid bolt11: {e}")))
 }
 
 fn parse_payment_hash(s: &str) -> Result<rln::PaymentHash, Error> {
@@ -185,7 +184,35 @@ pub(crate) fn close_channel(
 pub(crate) fn list_channels(node: &COpaqueStruct) -> Result<String, Error> {
     let node = require_handle(node)?;
     let channels = node.list_channels()?;
-    json(channels.into_iter().map(JsonChannel::from).collect::<Vec<_>>())
+    json(
+        channels
+            .into_iter()
+            .map(JsonChannel::from)
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(crate) fn list_rgb_funding_recoveries(node: &COpaqueStruct) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let recoveries = node.list_rgb_funding_recoveries()?;
+    json(
+        recoveries
+            .into_iter()
+            .map(JsonRgbFundingRecovery::from)
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(crate) fn resolve_rgb_funding_recovery(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let request: JsonResolveRgbFundingRecoveryRequest = parse_req(request_json)?;
+    let funding_txid = rln::Txid::from_str(&request.funding_txid)
+        .map_err(|error| Error::StringParse(format!("invalid funding txid: {error}")))?;
+    let recovery = node.resolve_rgb_funding_recovery(funding_txid, request.action.into())?;
+    json(recovery.map(JsonRgbFundingRecovery::from))
 }
 
 pub(crate) fn list_peers(node: &COpaqueStruct) -> Result<String, Error> {
@@ -199,7 +226,8 @@ pub(crate) fn get_channel_id(
     temporary_channel_id_hex: *const c_char,
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
-    let temp = lightning::ln::types::ChannelId(parse_32_hex(&ptr_to_string(temporary_channel_id_hex))?);
+    let temp =
+        lightning::ln::types::ChannelId(parse_32_hex(&ptr_to_string(temporary_channel_id_hex))?);
     let result = node.get_channel_id(temp)?;
     json(JsonChannelIdResponse {
         channel_id: result.0.as_hex().to_string(),
@@ -220,10 +248,7 @@ pub(crate) fn send_payment(
     json(JsonSendPaymentResponse::from(resp))
 }
 
-pub(crate) fn keysend(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> Result<String, Error> {
+pub(crate) fn keysend(node: &COpaqueStruct, request_json: *const c_char) -> Result<String, Error> {
     let node = require_handle(node)?;
     let req: JsonKeysendRequest = parse_req(request_json)?;
     let resp = node.keysend(req.try_into()?)?;
@@ -307,7 +332,12 @@ pub(crate) fn get_payment(
 pub(crate) fn list_payments(node: &COpaqueStruct) -> Result<String, Error> {
     let node = require_handle(node)?;
     let payments = node.list_payments()?;
-    json(payments.into_iter().map(JsonPayment::from).collect::<Vec<_>>())
+    json(
+        payments
+            .into_iter()
+            .map(JsonPayment::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -324,10 +354,7 @@ pub(crate) fn rgb_invoice(
     json(JsonRgbInvoiceResponse::from(resp))
 }
 
-pub(crate) fn send_rgb(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> Result<String, Error> {
+pub(crate) fn send_rgb(node: &COpaqueStruct, request_json: *const c_char) -> Result<String, Error> {
     let node = require_handle(node)?;
     let req: JsonSendRgbRequest = parse_req(request_json)?;
     let resp = node.send_rgb(req.try_into()?)?;
@@ -354,10 +381,7 @@ pub(crate) fn fail_transfers(
     json(JsonFailTransfersResponse::from(resp))
 }
 
-pub(crate) fn inflate(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> Result<String, Error> {
+pub(crate) fn inflate(node: &COpaqueStruct, request_json: *const c_char) -> Result<String, Error> {
     let node = require_handle(node)?;
     let req: JsonInflateRequest = parse_req(request_json)?;
     let resp = node.inflate(req.try_into()?)?;
@@ -371,7 +395,12 @@ pub(crate) fn list_transfers(
     let node = require_handle(node)?;
     let asset_id = parse_contract_id(&ptr_to_string(asset_id))?;
     let transfers = node.list_transfers(asset_id)?;
-    json(transfers.into_iter().map(JsonTransfer::from).collect::<Vec<_>>())
+    json(
+        transfers
+            .into_iter()
+            .map(JsonTransfer::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(crate) fn list_transfers_by_txid(
@@ -380,16 +409,23 @@ pub(crate) fn list_transfers_by_txid(
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
     let transfers = node.list_transfers_by_txid(ptr_to_string(txid))?;
-    json(transfers.into_iter().map(JsonTransfer::from).collect::<Vec<_>>())
+    json(
+        transfers
+            .into_iter()
+            .map(JsonTransfer::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
-pub(crate) fn list_unspents(
-    node: &COpaqueStruct,
-    skip_sync: bool,
-) -> Result<String, Error> {
+pub(crate) fn list_unspents(node: &COpaqueStruct, skip_sync: bool) -> Result<String, Error> {
     let node = require_handle(node)?;
     let unspents = node.list_unspents(skip_sync)?;
-    json(unspents.into_iter().map(JsonUnspent::from).collect::<Vec<_>>())
+    json(
+        unspents
+            .into_iter()
+            .map(JsonUnspent::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(crate) fn post_asset_media(
@@ -513,19 +549,13 @@ pub(crate) fn rotate_address(node: &COpaqueStruct) -> Result<String, Error> {
     json(JsonAddressInfo::from(resp))
 }
 
-pub(crate) fn btc_balance(
-    node: &COpaqueStruct,
-    skip_sync: bool,
-) -> Result<String, Error> {
+pub(crate) fn btc_balance(node: &COpaqueStruct, skip_sync: bool) -> Result<String, Error> {
     let node = require_handle(node)?;
     let resp = node.btc_balance(skip_sync)?;
     json(JsonBtcBalanceInfo::from(resp))
 }
 
-pub(crate) fn sign_message(
-    node: &COpaqueStruct,
-    message: *const c_char,
-) -> Result<String, Error> {
+pub(crate) fn sign_message(node: &COpaqueStruct, message: *const c_char) -> Result<String, Error> {
     let node = require_handle(node)?;
     let resp = node.sign_message(ptr_to_string(message))?;
     json(JsonSignMessageResponse::from(resp))
@@ -565,10 +595,7 @@ pub(crate) fn check_proxy_endpoint(
     ok_void()
 }
 
-pub(crate) fn send_btc(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> Result<String, Error> {
+pub(crate) fn send_btc(node: &COpaqueStruct, request_json: *const c_char) -> Result<String, Error> {
     let node = require_handle(node)?;
     let req: JsonSendBtcRequest = parse_req(request_json)?;
     let resp = node.sendbtc(req.into())?;
@@ -585,13 +612,14 @@ pub(crate) fn create_utxos(
     ok_void()
 }
 
-pub(crate) fn list_transactions(
-    node: &COpaqueStruct,
-    skip_sync: bool,
-) -> Result<String, Error> {
+pub(crate) fn list_transactions(node: &COpaqueStruct, skip_sync: bool) -> Result<String, Error> {
     let node = require_handle(node)?;
     let txs = node.list_transactions(skip_sync)?;
-    json(txs.into_iter().map(JsonTransaction::from).collect::<Vec<_>>())
+    json(
+        txs.into_iter()
+            .map(JsonTransaction::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(crate) fn list_transactions_by_txid(
@@ -601,7 +629,11 @@ pub(crate) fn list_transactions_by_txid(
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
     let txs = node.list_transactions_by_txid(ptr_to_string(txid), skip_sync)?;
-    json(txs.into_iter().map(JsonTransaction::from).collect::<Vec<_>>())
+    json(
+        txs.into_iter()
+            .map(JsonTransaction::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(crate) fn sync(node: &COpaqueStruct) -> Result<String, Error> {
@@ -634,10 +666,7 @@ pub(crate) fn maker_execute(
     ok_void()
 }
 
-pub(crate) fn taker(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> Result<String, Error> {
+pub(crate) fn taker(node: &COpaqueStruct, request_json: *const c_char) -> Result<String, Error> {
     let node = require_handle(node)?;
     let req: JsonTakerRequest = parse_req(request_json)?;
     node.taker(req.into())?;
@@ -718,9 +747,7 @@ pub(crate) fn native_external_signer_new(
     )?)
 }
 
-pub(crate) fn native_external_signer_bootstrap(
-    signer: &COpaqueStruct,
-) -> Result<String, Error> {
+pub(crate) fn native_external_signer_bootstrap(signer: &COpaqueStruct) -> Result<String, Error> {
     let signer = require_signer(signer)?;
     let bootstrap = signer.bootstrap()?;
     json(JsonSdkExternalSignerBootstrap::from(bootstrap))
@@ -778,9 +805,7 @@ pub(crate) fn sdk_node_init_with_external_signer(
     ok_void()
 }
 
-pub(crate) fn sdk_node_detach_external_signer(
-    node: &COpaqueStruct,
-) -> Result<String, Error> {
+pub(crate) fn sdk_node_detach_external_signer(node: &COpaqueStruct) -> Result<String, Error> {
     let node = require_handle(node)?;
     node.detach_external_signer();
     ok_void()

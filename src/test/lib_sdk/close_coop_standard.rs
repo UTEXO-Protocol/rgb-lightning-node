@@ -280,4 +280,15 @@ fn close_coop_standard() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+
+    for node_dir in [&node_a_dir, &node_b_dir] {
+        let log_path = node_dir.join(".ldk/logs/logs.txt");
+        let log = fs::read_to_string(&log_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", log_path.display()));
+        assert!(
+            !log.contains("CannotFailBatchTransfer"),
+            "cooperative close attempted to fail an already-settled RGB batch in {}",
+            log_path.display()
+        );
+    }
 }

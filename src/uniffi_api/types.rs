@@ -190,6 +190,7 @@ pub struct Channel {
     pub next_outbound_htlc_limit_msat: u64,
     pub next_outbound_htlc_minimum_msat: u64,
     pub is_usable: bool,
+    pub has_inflight_htlcs: bool,
     pub public: bool,
     pub funding_txid: Option<Txid>,
     pub peer_alias: Option<String>,
@@ -204,6 +205,49 @@ pub enum ChannelStatus {
     Opening,
     Opened,
     Closing,
+}
+
+pub struct RgbFundingRecovery {
+    pub role: RgbFundingRecoveryRole,
+    pub funding_txid: Txid,
+    pub temporary_channel_id: ChannelId,
+    pub final_channel_id: Option<ChannelId>,
+    pub stage: RgbFundingRecoveryStage,
+    pub channel_is_durable: bool,
+    pub transaction_is_known: Option<bool>,
+    pub observation_error: Option<String>,
+    pub required_action: RgbFundingRecoveryRequiredAction,
+}
+
+pub enum RgbFundingRecoveryRole {
+    Sender,
+    Receiver,
+}
+
+pub enum RgbFundingRecoveryStage {
+    Preparing,
+    StockPromoted,
+    HandoffReady,
+    HandedToLdk,
+    BroadcastSafeObserved,
+    Broadcasting,
+    BroadcastCommitted,
+    Finalized,
+    RollingBack,
+    RetryRequired,
+}
+
+pub enum RgbFundingRecoveryRequiredAction {
+    AutomaticReconciliation,
+    AwaitingLdkEventReplay,
+    ResumeBroadcast,
+    RetryChainObservation,
+    ManualChannelStateRecovery,
+}
+
+pub enum RgbFundingRecoveryAction {
+    Recheck,
+    ResumeBroadcast,
 }
 
 pub struct Peer {

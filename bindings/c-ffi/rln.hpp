@@ -68,6 +68,12 @@ CResultString rln_estimate_fee(const COpaqueStruct *node, uint16_t blocks);
 CResultString rln_fail_transfers(const COpaqueStruct *node, const char *request_json);
 
 /// Free a string previously returned in `CResultString.inner`.
+///
+/// # Safety
+///
+/// `s` must be null or a pointer returned by this library in `CResultString.inner` that has not
+/// already been freed. Passing any other pointer, or freeing the same pointer twice, is undefined
+/// behavior.
 void rln_free_string(char *s);
 
 CResultString rln_get_asset_media(const COpaqueStruct *node, const char *digest);
@@ -101,6 +107,8 @@ CResultString rln_list_channels(const COpaqueStruct *node);
 CResultString rln_list_payments(const COpaqueStruct *node);
 
 CResultString rln_list_peers(const COpaqueStruct *node);
+
+CResultString rln_list_rgb_funding_recoveries(const COpaqueStruct *node);
 
 CResultString rln_list_swaps(const COpaqueStruct *node);
 
@@ -137,6 +145,8 @@ CResultString rln_open_channel(const COpaqueStruct *node, const char *request_js
 CResultString rln_post_asset_media(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_refresh_transfers(const COpaqueStruct *node, const char *request_json);
+
+CResultString rln_resolve_rgb_funding_recovery(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_rgb_invoice(const COpaqueStruct *node, const char *request_json);
 

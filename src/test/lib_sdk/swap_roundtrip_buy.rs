@@ -44,7 +44,6 @@ fn wait_for_swap_status(
 
 #[test]
 #[serial]
-#[ignore = "flaky SDK restart persistence issue: ChannelManager::read returns InvalidValue after restart"]
 fn swap_roundtrip_buy() {
     ensure_regtest_available();
 

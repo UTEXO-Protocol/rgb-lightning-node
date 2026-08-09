@@ -232,7 +232,7 @@ pub(crate) fn catch_panic<T>(
     label: &'static str,
     f: &mut dyn FnMut() -> Result<T, Error>,
 ) -> Result<T, Error> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(payload) => {
             let msg = panic_payload_to_string(&payload);

@@ -279,6 +279,12 @@ fn success() {
             })
             .expect("node B ln_invoice third")
             .invoice;
+        wait_for_channel_quiescence(
+            "node A before third RGB payment",
+            &node_a,
+            channel_id,
+            Duration::from_secs(30),
+        );
         node_a
             .sendpayment(SdkSendPaymentRequest {
                 invoice: invoice.to_string(),
@@ -313,6 +319,12 @@ fn success() {
             })
             .expect("node A ln_invoice fourth")
             .invoice;
+        wait_for_channel_quiescence(
+            "node B before fourth RGB payment",
+            &node_b,
+            channel_id,
+            Duration::from_secs(30),
+        );
         node_b
             .sendpayment(SdkSendPaymentRequest {
                 invoice: invoice.to_string(),

@@ -4,6 +4,10 @@ RM        = rm -f
 BUILDDIR = target/debug
 LDFLAGS = -L$(BUILDDIR) -lrlncffi -lm -ldl -lpthread
 
+ifeq ($(shell uname -s),Darwin)
+LDFLAGS += -framework Security -framework SystemConfiguration -framework CoreFoundation -liconv
+endif
+
 default: all
 
 all: example

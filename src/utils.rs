@@ -37,7 +37,10 @@ use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
-use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
+use crate::ldk::{
+    ChannelIdsMap, RgbFundingRecoveryGuard, Router, VirtualChannelDraftStore,
+    VirtualChannelSessionStore,
+};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::signer::{
     read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment,
@@ -193,9 +196,17 @@ pub(crate) struct UnlockedAppState {
     pub(crate) virtual_channel_draft_store: Arc<Mutex<VirtualChannelDraftStore>>,
     pub(crate) virtual_channel_session_store: Arc<Mutex<VirtualChannelSessionStore>>,
     pub(crate) next_payment_idx: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) rgb_funding_recovery_guard: Arc<RgbFundingRecoveryGuard>,
 }
 
 impl UnlockedAppState {
+    pub(crate) fn ensure_financial_operations_allowed(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, APIError> {
+        self.rgb_funding_recovery_guard
+            .ensure_financial_operations_allowed()
+    }
+
     pub(crate) fn attach_apay_signatures(
         &self,
         mut params: crate::async_order::AsyncOrderNewParamsWire,

@@ -3888,6 +3888,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
+name = "redb"
+version = "1.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a0b35b8077c954324cc3504bea8d35e27a2f5d07c0ba41052a35d92f020f84"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4140,7 +4158,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.6"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.27#d8dba807d5028635143ffc8098e1b59086b646a0"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=codex%2Frgb-witness-resolution-experiment#cd6fc1e91f080f947b7f3b33512ddac6859e2236"
 dependencies = [
  "amplify",
  "base64 0.22.1",
@@ -4185,7 +4203,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib-migration"
 version = "0.3.0-beta.4"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.27#d8dba807d5028635143ffc8098e1b59086b646a0"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?branch=codex%2Frgb-witness-resolution-experiment#cd6fc1e91f080f947b7f3b33512ddac6859e2236"
 dependencies = [
  "sea-orm-migration",
  "tokio",
@@ -4214,6 +4232,7 @@ dependencies = [
  "esplora-client",
  "futures",
  "hex-conservative 0.3.2",
+ "libc",
  "lightning 0.2.2",
  "lightning-background-processor",
  "lightning-block-sync",
@@ -4243,6 +4262,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tower-http",
  "tracing",
  "tracing-appender",
@@ -4251,6 +4271,7 @@ dependencies = [
  "uniffi",
  "uuid",
  "vls-core",
+ "vls-persist",
  "vls-protocol",
  "vls-protocol-client",
  "vls-protocol-signer",
@@ -5124,7 +5145,7 @@ dependencies = [
 [[package]]
 name = "signer-external"
 version = "0.1.0-alpha"
-source = "git+https://github.com/UTEXO-Protocol/rln-external-signer.git?branch=main#594d8c08e812aa9d237a177391ea6f56b7c58e8f"
+source = "git+https://github.com/UTEXO-Protocol/rln-external-signer.git?rev=0fb005ec4b927ddbe13e1646d247b5bb11e8ffed#0fb005ec4b927ddbe13e1646d247b5bb11e8ffed"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
@@ -6244,7 +6265,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
+ "js-sys",
  "serde_core",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -6303,6 +6326,24 @@ dependencies = [
  "txoo",
  "vls-common",
  "vls-policy-derive",
+]
+
+[[package]]
+name = "vls-persist"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84526aaf721d6086c433aa838b9cb668740e8784d29d8b6a273745ef80dae8f6"
+dependencies = [
+ "hex",
+ "log",
+ "redb 1.5.2",
+ "redb 2.6.3",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tracing",
+ "uuid",
+ "vls-core",
 ]
 
 [[package]]

@@ -236,6 +236,73 @@ fn map_swap_data(data: crate::sdk::SwapViewData) -> Result<Swap, RlnError> {
     })
 }
 
+fn channel_id_from_hex(value: &str) -> Result<ChannelId, RlnError> {
+    let bytes = Vec::<u8>::from_hex(value).map_err(RlnError::internal)?;
+    if bytes.len() != 32 {
+        return Err(RlnError::internal("invalid channel ID length"));
+    }
+    let mut channel_id = [0u8; 32];
+    channel_id.copy_from_slice(&bytes);
+    Ok(lightning::ln::types::ChannelId(channel_id))
+}
+
+fn map_rgb_funding_recovery(
+    recovery: crate::ldk::RgbFundingRecovery,
+) -> Result<RgbFundingRecovery, RlnError> {
+    let role = match recovery.role {
+        crate::ldk::RgbFundingRecoveryRole::Sender => RgbFundingRecoveryRole::Sender,
+        crate::ldk::RgbFundingRecoveryRole::Receiver => RgbFundingRecoveryRole::Receiver,
+    };
+    let stage = match recovery.stage {
+        crate::ldk::RgbSenderFundingStage::Preparing => RgbFundingRecoveryStage::Preparing,
+        crate::ldk::RgbSenderFundingStage::StockPromoted => RgbFundingRecoveryStage::StockPromoted,
+        crate::ldk::RgbSenderFundingStage::HandoffReady => RgbFundingRecoveryStage::HandoffReady,
+        crate::ldk::RgbSenderFundingStage::HandedToLdk => RgbFundingRecoveryStage::HandedToLdk,
+        crate::ldk::RgbSenderFundingStage::BroadcastSafeObserved => {
+            RgbFundingRecoveryStage::BroadcastSafeObserved
+        }
+        crate::ldk::RgbSenderFundingStage::Broadcasting => RgbFundingRecoveryStage::Broadcasting,
+        crate::ldk::RgbSenderFundingStage::BroadcastCommitted => {
+            RgbFundingRecoveryStage::BroadcastCommitted
+        }
+        crate::ldk::RgbSenderFundingStage::Finalized => RgbFundingRecoveryStage::Finalized,
+        crate::ldk::RgbSenderFundingStage::RollingBack => RgbFundingRecoveryStage::RollingBack,
+        crate::ldk::RgbSenderFundingStage::RetryRequired => RgbFundingRecoveryStage::RetryRequired,
+    };
+    let required_action = match recovery.required_action {
+        crate::ldk::RgbFundingRecoveryRequiredAction::AutomaticReconciliation => {
+            RgbFundingRecoveryRequiredAction::AutomaticReconciliation
+        }
+        crate::ldk::RgbFundingRecoveryRequiredAction::AwaitingLdkEventReplay => {
+            RgbFundingRecoveryRequiredAction::AwaitingLdkEventReplay
+        }
+        crate::ldk::RgbFundingRecoveryRequiredAction::ResumeBroadcast => {
+            RgbFundingRecoveryRequiredAction::ResumeBroadcast
+        }
+        crate::ldk::RgbFundingRecoveryRequiredAction::RetryChainObservation => {
+            RgbFundingRecoveryRequiredAction::RetryChainObservation
+        }
+        crate::ldk::RgbFundingRecoveryRequiredAction::ManualChannelStateRecovery => {
+            RgbFundingRecoveryRequiredAction::ManualChannelStateRecovery
+        }
+    };
+    Ok(RgbFundingRecovery {
+        role,
+        funding_txid: Txid::from_str(&recovery.funding_txid).map_err(RlnError::internal)?,
+        temporary_channel_id: channel_id_from_hex(&recovery.temporary_channel_id)?,
+        final_channel_id: recovery
+            .final_channel_id
+            .as_deref()
+            .map(channel_id_from_hex)
+            .transpose()?,
+        stage,
+        channel_is_durable: recovery.channel_is_durable,
+        transaction_is_known: recovery.transaction_is_known,
+        observation_error: recovery.observation_error,
+        required_action,
+    })
+}
+
 fn map_asset_balance_data(data: crate::sdk::AssetBalanceData) -> AssetBalanceInfo {
     AssetBalanceInfo {
         settled: data.settled,
@@ -947,14 +1014,7 @@ impl SdkNode {
         channels
             .into_iter()
             .map(|c| {
-                let channel_id_bytes =
-                    Vec::<u8>::from_hex(&c.channel_id).map_err(RlnError::internal)?;
-                if channel_id_bytes.len() != 32 {
-                    return Err(RlnError::internal("invalid channel ID length"));
-                }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&channel_id_bytes);
-                let channel_id = lightning::ln::types::ChannelId(arr);
+                let channel_id = channel_id_from_hex(&c.channel_id)?;
                 let peer_pubkey =
                     PublicKey::from_str(&c.peer_pubkey).map_err(RlnError::internal)?;
                 let funding_txid = c
@@ -982,6 +1042,7 @@ impl SdkNode {
                     next_outbound_htlc_limit_msat: c.next_outbound_htlc_limit_msat,
                     next_outbound_htlc_minimum_msat: c.next_outbound_htlc_minimum_msat,
                     is_usable: c.is_usable,
+                    has_inflight_htlcs: c.has_inflight_htlcs,
                     public: c.public,
                     funding_txid,
                     peer_alias: c.peer_alias,
@@ -993,6 +1054,34 @@ impl SdkNode {
                 })
             })
             .collect()
+    }
+
+    pub fn list_rgb_funding_recoveries(&self) -> Result<Vec<RgbFundingRecovery>, RlnError> {
+        let state = self.handle.app_state();
+        block_on_sdk(sdk::list_rgb_funding_recoveries(state))?
+            .into_iter()
+            .map(map_rgb_funding_recovery)
+            .collect()
+    }
+
+    pub fn resolve_rgb_funding_recovery(
+        &self,
+        funding_txid: Txid,
+        action: RgbFundingRecoveryAction,
+    ) -> Result<Option<RgbFundingRecovery>, RlnError> {
+        let action = match action {
+            RgbFundingRecoveryAction::Recheck => sdk::RgbFundingRecoveryActionData::Recheck,
+            RgbFundingRecoveryAction::ResumeBroadcast => {
+                sdk::RgbFundingRecoveryActionData::ResumeBroadcast
+            }
+        };
+        block_on_sdk(sdk::resolve_rgb_funding_recovery(
+            self.handle.app_state(),
+            funding_txid.to_string(),
+            action,
+        ))?
+        .map(map_rgb_funding_recovery)
+        .transpose()
     }
 
     pub fn list_peers(&self) -> Result<Vec<Peer>, RlnError> {

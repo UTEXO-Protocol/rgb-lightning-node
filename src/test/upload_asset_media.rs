@@ -103,6 +103,7 @@ async fn fail() {
     );
     let res = reqwest::Client::new()
         .post(format!("http://{node1_addr}/postassetmedia"))
+        .header(reqwest::header::EXPECT, "100-continue")
         .multipart(form)
         .send()
         .await
