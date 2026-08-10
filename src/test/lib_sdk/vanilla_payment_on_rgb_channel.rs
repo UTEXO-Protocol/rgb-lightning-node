@@ -102,6 +102,7 @@ fn vanilla_payment_on_rgb_channel() {
                 asset_id: None,
                 asset_amount: None,
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })

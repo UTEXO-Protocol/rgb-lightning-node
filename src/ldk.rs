@@ -173,11 +173,12 @@ use crate::signer::{
 };
 use crate::swap::{SwapData, SwapInfo};
 use crate::utils::{
-    check_port_is_available, connect_peer_if_necessary, description_hash_from_invoice,
-    do_connect_peer, get_current_timestamp, get_max_local_rgb_amount, hex_str,
-    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState, StaticState,
-    UnlockedAppState, ELECTRUM_URL_MAINNET, ELECTRUM_URL_REGTEST, ELECTRUM_URL_SIGNET,
-    ELECTRUM_URL_TESTNET, ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
+    check_port_is_available, connect_peer_if_necessary, description_from_invoice,
+    description_hash_from_invoice, do_connect_peer, get_current_timestamp,
+    get_max_local_rgb_amount, hex_str, validate_and_parse_payment_hash,
+    validate_and_parse_payment_preimage, AppState, StaticState, UnlockedAppState,
+    ELECTRUM_URL_MAINNET, ELECTRUM_URL_REGTEST, ELECTRUM_URL_SIGNET, ELECTRUM_URL_TESTNET,
+    ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
 };
 
 const VIRTUAL_CHANNEL_DOMAIN_SEPARATOR: &[u8] = b"rln_virtual_channels_v0";
@@ -283,6 +284,7 @@ pub(crate) struct PaymentInfo {
     pub(crate) expires_at: Option<u64>,
     pub(crate) claim_deadline_height: Option<u32>,
     pub(crate) invoice_type: Option<InvoiceType>,
+    pub(crate) description: Option<String>,
     pub(crate) description_hash: Option<[u8; 32]>,
     pub(crate) payment_idx: Option<u64>,
     pub(crate) async_hash_index: Option<u64>,
@@ -304,6 +306,8 @@ impl_writeable_tlv_based!(PaymentInfo, {
     (22, payment_idx, option),
     (24, async_hash_index, option),
     (26, async_host_node_id, option),
+    // odd type so older binaries skip the field instead of failing the whole read
+    (29, description, option),
 });
 
 pub(crate) struct InboundPaymentInfoStorage {
@@ -724,6 +728,7 @@ impl UnlockedAppState {
                     expires_at: None,
                     claim_deadline_height,
                     invoice_type,
+                    description: None,
                     description_hash: None,
                     payment_idx: None,
                     async_hash_index: None,
@@ -1566,6 +1571,7 @@ impl AsyncOrderInvoiceProvider for AsyncOrderRecipientInvoiceProvider {
                 invoice_type: Some(InvoiceType::Hodl {
                     async_payment_recipient: true,
                 }),
+                description: description_from_invoice(&invoice),
                 description_hash: description_hash_from_invoice(&invoice),
                 payment_idx: None,
                 async_hash_index: self.external_signer_mode.then_some(hash_index),

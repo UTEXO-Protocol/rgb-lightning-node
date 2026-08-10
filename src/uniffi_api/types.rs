@@ -139,6 +139,7 @@ pub struct Payment {
     pub updated_at: u64,
     pub payee_pubkey: PublicKey,
     pub preimage: Option<String>,
+    pub description: Option<String>,
     pub description_hash: Option<String>,
 }
 
@@ -465,6 +466,7 @@ pub struct LnInvoiceRequest {
     pub asset_id: Option<ContractId>,
     pub asset_amount: Option<u64>,
     pub payment_hash: Option<PaymentHash>,
+    pub description: Option<String>,
     pub description_hash: Option<String>,
     pub min_final_cltv_expiry_delta: Option<u16>,
 }

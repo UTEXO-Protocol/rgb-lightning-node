@@ -35,7 +35,7 @@ use lightning::{
     util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig},
     util::{errors::APIError as LDKAPIError, IS_SWAP_SCID},
 };
-use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description, PaymentSecret};
+use lightning_invoice::{Bolt11Invoice, PaymentSecret};
 use regex::Regex;
 use rgb_lib::utils::recipient_id_from_script_buf;
 use rgb_lib::{
@@ -95,11 +95,11 @@ use crate::signer::read_key_source_file;
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    description_hash_from_invoice, encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_route,
-    hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec, is_external_signer_mode_configured,
-    new_jsonrpc_request_id, open_database_pool, validate_and_parse_description_hash,
-    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, UnlockedAppState,
-    UserOnionMessageContents,
+    description_from_invoice, description_hash_from_invoice, encrypt_and_save_mnemonic,
+    get_max_local_rgb_amount, get_route, hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec,
+    is_external_signer_mode_configured, new_jsonrpc_request_id, open_database_pool,
+    parse_invoice_description, validate_and_parse_payment_hash,
+    validate_and_parse_payment_preimage, UnlockedAppState, UserOnionMessageContents,
 };
 use crate::{
     backup::{do_backup, restore_backup},
@@ -533,6 +533,7 @@ pub(crate) struct DecodeLNInvoiceResponse {
     pub(crate) timestamp: u64,
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
+    pub(crate) description: Option<String>,
     pub(crate) description_hash: Option<String>,
     pub(crate) payment_hash: String,
     pub(crate) payment_secret: String,
@@ -928,6 +929,7 @@ pub(crate) struct LNInvoiceRequest {
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
     pub(crate) payment_hash: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) description_hash: Option<String>,
     pub(crate) min_final_cltv_expiry_delta: Option<u16>,
 }
@@ -1065,6 +1067,7 @@ pub(crate) struct Payment {
     pub(crate) updated_at: u64,
     pub(crate) payee_pubkey: String,
     pub(crate) preimage: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) description_hash: Option<String>,
 }
 
@@ -2357,6 +2360,7 @@ pub(crate) async fn decode_ln_invoice(
         timestamp: invoice.duration_since_epoch().as_secs(),
         asset_id: invoice.rgb_contract_id().map(|c| c.to_string()),
         asset_amount: invoice.rgb_amount(),
+        description: description_from_invoice(&invoice),
         description_hash: match invoice.description() {
             lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(hash) => {
                 Some(hex_str(&hash.0.to_byte_array()))
@@ -2566,6 +2570,7 @@ pub(crate) async fn get_payment(
                             updated_at: payment_info.updated_at,
                             payee_pubkey: payment_info.payee_pubkey.to_string(),
                             preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+                            description: payment_info.description.clone(),
                             description_hash: payment_info.description_hash.map(|h| hex_str(&h)),
                         },
                     }));
@@ -2596,6 +2601,7 @@ pub(crate) async fn get_payment(
                             updated_at: payment_info.updated_at,
                             payee_pubkey: payment_info.payee_pubkey.to_string(),
                             preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+                            description: payment_info.description.clone(),
                             description_hash: payment_info.description_hash.map(|h| hex_str(&h)),
                         },
                     }));
@@ -3011,6 +3017,7 @@ pub(crate) async fn keysend(
                 expires_at: None,
                 invoice_type: None,
                 payee_pubkey: dest_pubkey,
+                description: None,
                 description_hash: None,
                 payment_idx: None,
                 async_hash_index: None,
@@ -3273,6 +3280,7 @@ pub(crate) async fn list_payments(
                 updated_at: payment_info.updated_at,
                 payee_pubkey: payment_info.payee_pubkey.to_string(),
                 preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+                description: payment_info.description.clone(),
                 description_hash: payment_info.description_hash.map(|h| hex_str(&h)),
             },
         ));
@@ -3302,6 +3310,7 @@ pub(crate) async fn list_payments(
                 updated_at: payment_info.updated_at,
                 payee_pubkey: payment_info.payee_pubkey.to_string(),
                 preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+                description: payment_info.description.clone(),
                 description_hash: payment_info.description_hash.map(|h| hex_str(&h)),
             },
         ));
@@ -3645,12 +3654,10 @@ pub(crate) async fn ln_invoice(
             }
             None => None,
         };
-        let description = match &payload.description_hash {
-            Some(description_hash) => Bolt11InvoiceDescription::Hash(
-                validate_and_parse_description_hash(description_hash)?,
-            ),
-            None => Bolt11InvoiceDescription::Direct(Description::empty()),
-        };
+        let description = parse_invoice_description(
+            payload.description.as_deref(),
+            payload.description_hash.as_deref(),
+        )?;
 
         let invoice_params = Bolt11InvoiceParameters {
             amount_msats: payload.amt_msat,
@@ -3693,6 +3700,7 @@ pub(crate) async fn ln_invoice(
                 expires_at: Some(created_at + payload.expiry_sec as u64),
                 claim_deadline_height: None,
                 invoice_type: Some(invoice_type),
+                description: description_from_invoice(&invoice),
                 description_hash: description_hash_from_invoice(&invoice),
                 payment_idx: None,
                 async_hash_index: None,
@@ -4829,6 +4837,7 @@ pub(crate) async fn send_payment(
                     expires_at: None,
                     claim_deadline_height: None,
                     invoice_type: None,
+                    description: None,
                     description_hash: None,
                     payment_idx: None,
                     async_hash_index: None,
@@ -4983,6 +4992,7 @@ pub(crate) async fn send_payment(
                     expires_at: None,
                     claim_deadline_height: None,
                     invoice_type: None,
+                    description: description_from_invoice(&invoice),
                     description_hash: description_hash_from_invoice(&invoice),
                     payment_idx: None,
                     async_hash_index: None,

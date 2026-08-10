@@ -1644,7 +1644,38 @@ async fn ln_invoice_with_description_hash(
         asset_id: None,
         asset_amount: None,
         payment_hash: None,
+        description: None,
         description_hash: description_hash.map(|s| s.to_string()),
+        min_final_cltv_expiry_delta: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/lninvoice"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<LNInvoiceResponse>()
+        .await
+        .unwrap()
+}
+
+async fn ln_invoice_with_description(
+    node_address: SocketAddr,
+    amt_msat: Option<u64>,
+    expiry_sec: u32,
+    description: Option<&str>,
+) -> LNInvoiceResponse {
+    println!("generating invoice with description {description:?} for node {node_address}");
+    let payload = LNInvoiceRequest {
+        amt_msat: Some(amt_msat.unwrap_or(HTLC_MIN_MSAT)),
+        expiry_sec,
+        asset_id: None,
+        asset_amount: None,
+        payment_hash: None,
+        description: description.map(|s| s.to_string()),
+        description_hash: None,
         min_final_cltv_expiry_delta: None,
     };
     let res = reqwest::Client::new()
@@ -1700,6 +1731,7 @@ async fn ln_invoice_with_type(
         asset_id: asset_id.map(|a| a.to_string()),
         asset_amount,
         payment_hash,
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };

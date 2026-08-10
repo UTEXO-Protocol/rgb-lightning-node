@@ -176,6 +176,9 @@ pub enum APIError {
     #[error("Invalid right outpoint: {0}")]
     InvalidRightOutpoint(String),
 
+    #[error("Invalid description: {0}")]
+    InvalidDescription(String),
+
     #[error("Invalid description hash: {0}")]
     InvalidDescriptionHash(String),
 
@@ -554,6 +557,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidChannelID
             | APIError::InvalidContractLink(_)
             | APIError::InvalidRightOutpoint(_)
+            | APIError::InvalidDescription(_)
             | APIError::InvalidDescriptionHash(_)
             | APIError::InvalidDetails(_)
             | APIError::InvalidEstimationBlocks

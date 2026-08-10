@@ -200,6 +200,7 @@ fn map_payment_data(data: crate::sdk::PaymentData) -> Result<Payment, RlnError> 
         updated_at: data.updated_at,
         payee_pubkey,
         preimage: data.preimage,
+        description: data.description,
         description_hash: data.description_hash,
     })
 }
@@ -1444,6 +1445,7 @@ impl SdkNode {
         let state = self.handle.app_state();
         let asset_id = request.asset_id.map(|a| a.to_string());
         let payment_hash = request.payment_hash.map(|h| h.0.as_hex().to_string());
+        let description = request.description;
         let description_hash = request.description_hash;
         let min_final_cltv_expiry_delta = request.min_final_cltv_expiry_delta;
         let data = block_on_sdk(sdk::create_ln_invoice(
@@ -1453,6 +1455,7 @@ impl SdkNode {
             asset_id,
             request.asset_amount,
             payment_hash,
+            description,
             description_hash,
             min_final_cltv_expiry_delta,
         ))?;

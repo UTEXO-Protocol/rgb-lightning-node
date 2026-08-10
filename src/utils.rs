@@ -19,7 +19,7 @@ use lightning::{
     util::persist::KVStoreSync,
     util::ser::{Writeable, Writer},
 };
-use lightning_invoice::Bolt11Invoice;
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
 use rln_migration::{Migrator, MigratorTrait};
@@ -558,6 +558,17 @@ pub(crate) fn description_hash_from_invoice(invoice: &Bolt11Invoice) -> Option<[
     }
 }
 
+// Empty direct descriptions surface as None.
+pub(crate) fn description_from_invoice(invoice: &Bolt11Invoice) -> Option<String> {
+    match invoice.description() {
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(description) => {
+            let description = description.to_string();
+            (!description.is_empty()).then_some(description)
+        }
+        _ => None,
+    }
+}
+
 pub(crate) async fn do_connect_peer(
     pubkey: PublicKey,
     address: SocketAddr,
@@ -862,6 +873,31 @@ pub(crate) fn validate_and_parse_payment_hash(
         return Err(APIError::InvalidPaymentHash(payment_hash_str.to_string()));
     }
     Ok(PaymentHash(payment_hash_vec.unwrap().try_into().unwrap()))
+}
+
+pub(crate) fn validate_and_parse_description(
+    description_str: &str,
+) -> Result<lightning_invoice::Description, APIError> {
+    lightning_invoice::Description::new(description_str.to_string())
+        .map_err(|e| APIError::InvalidDescription(e.to_string()))
+}
+
+pub(crate) fn parse_invoice_description(
+    description: Option<&str>,
+    description_hash: Option<&str>,
+) -> Result<Bolt11InvoiceDescription, APIError> {
+    match (description, description_hash) {
+        (Some(_), Some(_)) => Err(APIError::InvalidRequest(s!(
+            "cannot provide both description and description_hash"
+        ))),
+        (Some(description), None) => Ok(Bolt11InvoiceDescription::Direct(
+            validate_and_parse_description(description)?,
+        )),
+        (None, Some(description_hash)) => Ok(Bolt11InvoiceDescription::Hash(
+            validate_and_parse_description_hash(description_hash)?,
+        )),
+        (None, None) => Ok(Bolt11InvoiceDescription::Direct(Description::empty())),
+    }
 }
 
 pub(crate) fn validate_and_parse_description_hash(

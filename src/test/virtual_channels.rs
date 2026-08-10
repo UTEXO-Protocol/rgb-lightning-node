@@ -1460,6 +1460,7 @@ async fn virtual_one_sat_htlc_routes_both_directions() {
         asset_id: Some(issued_asset_id.clone()),
         asset_amount: Some(1),
         payment_hash: None,
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };

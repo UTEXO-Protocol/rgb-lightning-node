@@ -24,6 +24,7 @@ async fn invoice() {
         asset_id: Some(asset_id.clone()),
         asset_amount: Some(1),
         payment_hash: None,
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };
@@ -42,6 +43,7 @@ async fn invoice() {
         asset_id: Some(asset_id.clone()),
         asset_amount: Some(1),
         payment_hash: None,
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };
@@ -60,6 +62,7 @@ async fn invoice() {
         asset_id: None,
         asset_amount: None,
         payment_hash: None,
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };
@@ -93,6 +96,7 @@ async fn description_hash_invoice() {
         asset_id: None,
         asset_amount: None,
         payment_hash: None,
+        description: None,
         description_hash: Some(description_hash.0.to_string()),
         min_final_cltv_expiry_delta: Some(inbound_min_final_cltv),
     };
@@ -134,6 +138,7 @@ async fn invalid_description_hash_invoice() {
         asset_id: None,
         asset_amount: None,
         payment_hash: None,
+        description: None,
         description_hash: Some("not-a-valid-description-hash".to_string()),
         min_final_cltv_expiry_delta: None,
     };
@@ -149,6 +154,125 @@ async fn invalid_description_hash_invoice() {
         reqwest::StatusCode::BAD_REQUEST,
         "Invalid description hash: not-a-valid-description-hash",
         "InvalidDescriptionHash",
+    )
+    .await;
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn description_invoice() {
+    initialize();
+
+    let test_dir_node1 = format!("{TEST_DIR_BASE}description/node1");
+    let (node1_addr, _) = start_node(&test_dir_node1, NODE1_PEER_PORT, false).await;
+
+    fund_and_create_utxos(node1_addr, None).await;
+
+    let description = "1 cup of coffee";
+    let payload = LNInvoiceRequest {
+        amt_msat: None,
+        expiry_sec: 900,
+        asset_id: None,
+        asset_amount: None,
+        payment_hash: None,
+        description: Some(description.to_string()),
+        description_hash: None,
+        min_final_cltv_expiry_delta: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node1_addr}/lninvoice"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap()
+        .json::<LNInvoiceResponse>()
+        .await
+        .unwrap();
+
+    let invoice = Bolt11Invoice::from_str(&res.invoice).unwrap();
+    assert!(matches!(
+        invoice.description(),
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(d) if d.to_string() == description
+    ));
+
+    let decoded = decode_ln_invoice(node1_addr, &res.invoice).await;
+    assert_eq!(decoded.description.as_deref(), Some(description));
+    assert_eq!(decoded.description_hash, None);
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn description_and_description_hash_invoice() {
+    initialize();
+
+    let test_dir_node1 = format!("{TEST_DIR_BASE}description_and_hash/node1");
+    let (node1_addr, _) = start_node(&test_dir_node1, NODE1_PEER_PORT, false).await;
+
+    fund_and_create_utxos(node1_addr, None).await;
+
+    let payload = LNInvoiceRequest {
+        amt_msat: None,
+        expiry_sec: 900,
+        asset_id: None,
+        asset_amount: None,
+        payment_hash: None,
+        description: Some(s!("a description")),
+        description_hash: Some(s!(
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        )),
+        min_final_cltv_expiry_delta: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node1_addr}/lninvoice"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    check_response_is_nok(
+        res,
+        reqwest::StatusCode::BAD_REQUEST,
+        "Invalid request: cannot provide both description and description_hash",
+        "InvalidRequest",
+    )
+    .await;
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn invalid_description_invoice() {
+    initialize();
+
+    let test_dir_node1 = format!("{TEST_DIR_BASE}invalid_description/node1");
+    let (node1_addr, _) = start_node(&test_dir_node1, NODE1_PEER_PORT, false).await;
+
+    fund_and_create_utxos(node1_addr, None).await;
+
+    let payload = LNInvoiceRequest {
+        amt_msat: None,
+        expiry_sec: 900,
+        asset_id: None,
+        asset_amount: None,
+        payment_hash: None,
+        description: Some("a".repeat(640)),
+        description_hash: None,
+        min_final_cltv_expiry_delta: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node1_addr}/lninvoice"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    check_response_is_nok(
+        res,
+        reqwest::StatusCode::BAD_REQUEST,
+        "Invalid description",
+        "InvalidDescription",
     )
     .await;
 }
@@ -190,6 +314,7 @@ async fn zero_amount_invoice() {
         asset_id: None,
         asset_amount: None,
         payment_hash: None,
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };
@@ -279,6 +404,7 @@ async fn zero_amount_invoice() {
         asset_id: Some(asset_id.clone()),
         asset_amount: None,
         payment_hash: None,
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };
@@ -304,6 +430,7 @@ async fn zero_amount_invoice() {
         asset_id: Some(asset_id.clone()),
         asset_amount: Some(50),
         payment_hash: None,
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };

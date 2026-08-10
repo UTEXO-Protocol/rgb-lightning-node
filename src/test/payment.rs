@@ -495,6 +495,86 @@ async fn description_hash() {
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
+async fn description() {
+    initialize();
+
+    let test_dir_base = format!("{TEST_DIR_BASE}description/");
+    let test_dir_node1 = format!("{test_dir_base}node1");
+    let test_dir_node2 = format!("{test_dir_base}node2");
+    let (node1_addr, _) = start_node(&test_dir_node1, NODE1_PEER_PORT, false).await;
+    let (node2_addr, _) = start_node(&test_dir_node2, NODE2_PEER_PORT, false).await;
+
+    fund_and_create_utxos(node1_addr, None).await;
+    fund_and_create_utxos(node2_addr, None).await;
+
+    let node2_pubkey = node_info(node2_addr).await.pubkey;
+    open_channel(
+        node1_addr,
+        &node2_pubkey,
+        Some(NODE2_PEER_PORT),
+        Some(600_000),
+        Some(300_000_000),
+        None,
+        None,
+    )
+    .await;
+
+    let desc = "1 cup of coffee";
+
+    // Invoice WITH a description.
+    let invoice = ln_invoice_with_description(node2_addr, Some(3_000_000), 900, Some(desc))
+        .await
+        .invoice;
+    let decoded = decode_ln_invoice(node1_addr, &invoice).await;
+    assert_eq!(decoded.description.as_deref(), Some(desc));
+    assert_eq!(decoded.description_hash, None);
+    send_payment(node1_addr, invoice.clone()).await;
+
+    let out = get_payment(node1_addr, &decoded.payment_hash, PaymentType::Outbound).await;
+    assert_eq!(out.description.as_deref(), Some(desc));
+    let inb = get_payment(
+        node2_addr,
+        &decoded.payment_hash,
+        PaymentType::InboundAutoClaim,
+    )
+    .await;
+    assert_eq!(inb.description.as_deref(), Some(desc));
+
+    let listed = list_payments(node2_addr)
+        .await
+        .into_iter()
+        .find(|p| p.payment_hash == decoded.payment_hash)
+        .unwrap();
+    assert_eq!(listed.description.as_deref(), Some(desc));
+
+    // Invoice WITHOUT a description.
+    let invoice2 = ln_invoice(node2_addr, Some(3_000_000), None, None, 900)
+        .await
+        .invoice;
+    let decoded2 = decode_ln_invoice(node1_addr, &invoice2).await;
+    assert_eq!(decoded2.description, None);
+    send_payment(node1_addr, invoice2.clone()).await;
+    let out2 = get_payment(node1_addr, &decoded2.payment_hash, PaymentType::Outbound).await;
+    assert_eq!(out2.description, None);
+
+    // The description must survive a restart (persisted PaymentInfo round-trip).
+    shutdown(&[node1_addr, node2_addr]).await;
+    let (node1_addr, _) = start_node(&test_dir_node1, NODE1_PEER_PORT, true).await;
+    let (node2_addr, _) = start_node(&test_dir_node2, NODE2_PEER_PORT, true).await;
+    let out = get_payment(node1_addr, &decoded.payment_hash, PaymentType::Outbound).await;
+    assert_eq!(out.description.as_deref(), Some(desc));
+    let inb = get_payment(
+        node2_addr,
+        &decoded.payment_hash,
+        PaymentType::InboundAutoClaim,
+    )
+    .await;
+    assert_eq!(inb.description.as_deref(), Some(desc));
+}
+
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
 async fn pagination() {
     initialize();
 

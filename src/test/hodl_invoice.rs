@@ -541,6 +541,7 @@ async fn claim_hodl_invoice_btc_rgb() {
         asset_id: None,
         asset_amount: None,
         payment_hash: Some(payment_hash.clone()),
+        description: None,
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     };

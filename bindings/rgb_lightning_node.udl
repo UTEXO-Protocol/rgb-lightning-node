@@ -222,6 +222,7 @@ dictionary Payment {
     u64 updated_at;
     PublicKey payee_pubkey;
     string? preimage;
+    string? description;
     string? description_hash;
 };
 
@@ -548,6 +549,7 @@ dictionary LnInvoiceRequest {
     ContractId? asset_id;
     u64? asset_amount;
     PaymentHash? payment_hash;
+    string? description = null;
     string? description_hash;
     u16? min_final_cltv_expiry_delta;
 };

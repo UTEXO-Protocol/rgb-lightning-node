@@ -158,6 +158,7 @@ fn restart() {
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(100),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })

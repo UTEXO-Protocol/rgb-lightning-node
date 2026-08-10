@@ -608,6 +608,7 @@ pub(crate) struct JsonPayment {
     pub updated_at: u64,
     pub payee_pubkey: String,
     pub preimage: Option<String>,
+    pub description: Option<String>,
     pub description_hash: Option<String>,
 }
 
@@ -624,6 +625,7 @@ impl From<Payment> for JsonPayment {
             updated_at: p.updated_at,
             payee_pubkey: fmt_pubkey(&p.payee_pubkey),
             preimage: p.preimage,
+            description: p.description,
             description_hash: p.description_hash,
         }
     }
@@ -640,6 +642,8 @@ pub(crate) struct JsonLnInvoiceRequest {
     pub asset_amount: Option<u64>,
     #[serde(default)]
     pub payment_hash: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub description_hash: Option<String>,
     // APay outbound flow (added by upstream PR #29). Wallets register a batch of
@@ -661,6 +665,7 @@ impl TryFrom<JsonLnInvoiceRequest> for LnInvoiceRequest {
             asset_id: j.asset_id.map(|s| parse_contract_id(&s)).transpose()?,
             asset_amount: j.asset_amount,
             payment_hash: j.payment_hash.map(|s| parse_payment_hash(&s)).transpose()?,
+            description: j.description,
             description_hash: j.description_hash,
             min_final_cltv_expiry_delta: j.min_final_cltv_expiry_delta,
         })

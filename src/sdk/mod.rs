@@ -27,10 +27,10 @@ use crate::signer::{
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    connect_peer_if_necessary, description_hash_from_invoice, encrypt_and_save_mnemonic,
-    get_current_timestamp, get_max_local_rgb_amount, get_route, hex_str,
+    connect_peer_if_necessary, description_from_invoice, description_hash_from_invoice,
+    encrypt_and_save_mnemonic, get_current_timestamp, get_max_local_rgb_amount, get_route, hex_str,
     hex_str_to_compressed_pubkey, hex_str_to_vec, is_external_signer_mode_configured,
-    new_jsonrpc_request_id, parse_peer_info, validate_and_parse_description_hash,
+    new_jsonrpc_request_id, parse_invoice_description, parse_peer_info,
     validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState,
     UserOnionMessageContents,
 };
@@ -582,6 +582,7 @@ pub(crate) struct PaymentData {
     pub(crate) updated_at: u64,
     pub(crate) payee_pubkey: String,
     pub(crate) preimage: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) description_hash: Option<String>,
 }
 
@@ -2610,6 +2611,7 @@ pub(crate) async fn keysend(
             payee_pubkey: dest_pubkey,
             expires_at: None,
             invoice_type: None,
+            description: None,
             description_hash: None,
             payment_idx: None,
             async_hash_index: None,
@@ -3149,6 +3151,7 @@ pub(crate) async fn send_payment(
                     .ok_or(APIError::InvalidInvoice(s!("missing signing pubkey")))?,
                 expires_at: None,
                 invoice_type: None,
+                description: None,
                 description_hash: None,
                 payment_idx: None,
                 async_hash_index: None,
@@ -3254,6 +3257,7 @@ pub(crate) async fn send_payment(
                 payee_pubkey: invoice.get_payee_pub_key(),
                 expires_at: None,
                 invoice_type: None,
+                description: description_from_invoice(&invoice),
                 description_hash: description_hash_from_invoice(&invoice),
                 payment_idx: None,
                 async_hash_index: None,
@@ -3789,6 +3793,7 @@ pub(crate) async fn create_ln_invoice(
     asset_id: Option<String>,
     asset_amount: Option<u64>,
     payment_hash: Option<String>,
+    description: Option<String>,
     description_hash: Option<String>,
     min_final_cltv_expiry_delta: Option<u16>,
 ) -> Result<LnInvoiceData, APIError> {
@@ -3827,12 +3832,8 @@ pub(crate) async fn create_ln_invoice(
         }
         None => None,
     };
-    let description = match description_hash {
-        Some(description_hash) => {
-            Bolt11InvoiceDescription::Hash(validate_and_parse_description_hash(&description_hash)?)
-        }
-        None => Bolt11InvoiceDescription::Direct(Description::empty()),
-    };
+    let description =
+        parse_invoice_description(description.as_deref(), description_hash.as_deref())?;
 
     let invoice_params = Bolt11InvoiceParameters {
         amount_msats: amt_msat,
@@ -3877,6 +3878,7 @@ pub(crate) async fn create_ln_invoice(
             payee_pubkey: unlocked_state.runtime_node_id(),
             expires_at: Some(created_at + expiry_sec as u64),
             invoice_type: Some(invoice_type),
+            description: description_from_invoice(&invoice),
             description_hash: description_hash_from_invoice(&invoice),
             payment_idx: None,
             async_hash_index: None,
@@ -3924,6 +3926,7 @@ pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentDat
             updated_at: payment_info.updated_at,
             payee_pubkey: payment_info.payee_pubkey.to_string(),
             preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+            description: payment_info.description.clone(),
             description_hash: payment_info.description_hash.map(|h| hex_str(&h)),
         });
     }
@@ -3949,6 +3952,7 @@ pub(crate) async fn list_payments(state: Arc<AppState>) -> Result<Vec<PaymentDat
             updated_at: payment_info.updated_at,
             payee_pubkey: payment_info.payee_pubkey.to_string(),
             preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+            description: payment_info.description.clone(),
             description_hash: payment_info.description_hash.map(|h| hex_str(&h)),
         });
     }
@@ -3995,6 +3999,7 @@ pub(crate) async fn get_payment(
                         updated_at: payment_info.updated_at,
                         payee_pubkey: payment_info.payee_pubkey.to_string(),
                         preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+                        description: payment_info.description.clone(),
                         description_hash: payment_info.description_hash.map(|h| hex_str(&h)),
                     });
                 }
@@ -4023,6 +4028,7 @@ pub(crate) async fn get_payment(
                         updated_at: payment_info.updated_at,
                         payee_pubkey: payment_info.payee_pubkey.to_string(),
                         preimage: payment_info.preimage.map(|p| hex_str(&p.0)),
+                        description: payment_info.description.clone(),
                         description_hash: payment_info.description_hash.map(|h| hex_str(&h)),
                     });
                 }

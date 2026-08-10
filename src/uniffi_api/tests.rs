@@ -48,6 +48,7 @@ mod uniffi_smoke_tests {
             asset_id: None,
             asset_amount: None,
             payment_hash: None,
+            description: None,
             description_hash: None,
             min_final_cltv_expiry_delta: None,
         });
@@ -423,6 +424,7 @@ mod uniffi_smoke_tests {
             payee_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .to_string(),
             preimage: expected_preimage.clone(),
+            description: None,
             description_hash: None,
         };
 

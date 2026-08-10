@@ -171,6 +171,7 @@ fn success() {
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(asset_amount),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })
@@ -238,6 +239,7 @@ fn success() {
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(asset_amount),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })
@@ -274,6 +276,7 @@ fn success() {
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(asset_amount),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })
@@ -308,6 +311,7 @@ fn success() {
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(asset_amount),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })

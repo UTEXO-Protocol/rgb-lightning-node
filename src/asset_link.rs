@@ -43,8 +43,8 @@ use crate::{
     ldk::{clear_rgb_payment_pending, write_rgb_payment_info_file, PaymentInfo},
     rgb::get_rgb_channel_info_optional,
     utils::{
-        description_hash_from_invoice, get_current_timestamp, get_route, hex_str,
-        new_jsonrpc_request_id, UnlockedAppState,
+        description_from_invoice, description_hash_from_invoice, get_current_timestamp, get_route,
+        hex_str, new_jsonrpc_request_id, UnlockedAppState,
     },
 };
 
@@ -797,6 +797,7 @@ pub(crate) async fn send_linked_asset_payment(
             expires_at: None,
             claim_deadline_height: None,
             invoice_type: None,
+            description: description_from_invoice(invoice),
             description_hash: description_hash_from_invoice(invoice),
             payment_idx: None,
             async_hash_index: None,

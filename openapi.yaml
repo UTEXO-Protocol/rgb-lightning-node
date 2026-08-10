@@ -859,7 +859,8 @@ paths:
       summary: Get a LN invoice
       description: >-
         Get a LN invoice to receive a payment. Provide `payment_hash` to create a HODL invoice.
-        Provide `description_hash` to include an out-of-band BOLT11 description hash.
+        Provide `description` to include a BOLT11 description, or `description_hash` to include
+        an out-of-band BOLT11 description hash (mutually exclusive).
         Provide `min_final_cltv_expiry_delta` to request an explicit inbound final CLTV policy.
       requestBody:
         content:
@@ -2203,6 +2204,11 @@ components:
             - integer
             - 'null'
           example: 42
+        description:
+          type:
+            - string
+            - 'null'
+          example: 1 cup of coffee
         description_hash:
           type:
             - string
@@ -3053,9 +3059,13 @@ components:
           type: string
           description: Optional. When provided, the invoice is created as HODL.
           example: 3febfae1e68b190c15461f4c2a3290f9af1dae63fd7d620d2bd61601869026cd
+        description:
+          type: string
+          description: Optional. When provided, the invoice includes a BOLT11 description. Mutually exclusive with description_hash.
+          example: 1 cup of coffee
         description_hash:
           type: string
-          description: Optional. When provided, the invoice includes a BOLT11 description hash.
+          description: Optional. When provided, the invoice includes a BOLT11 description hash. Mutually exclusive with description.
           example: 5ca5d81b482b4015e7b14df7a27fe0a38c226273604ffd3b008b752571811938
         min_final_cltv_expiry_delta:
           type: integer
@@ -3352,6 +3362,12 @@ components:
         preimage:
           type: string
           example: 89d28bd306aa9bb906fd0ac31092d04c37c919a171b343083167e2a3cdc60578
+        description:
+          type:
+            - string
+            - 'null'
+          description: BOLT11 description (the d tag), if present
+          example: 1 cup of coffee
         description_hash:
           type:
             - string

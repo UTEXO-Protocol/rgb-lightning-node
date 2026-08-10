@@ -670,6 +670,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_quick() {
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(PAY_ASSET),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })
@@ -813,6 +814,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(PAY_ASSET),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })
@@ -836,6 +838,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(PAY_ASSET),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })
@@ -980,6 +983,7 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
                 asset_id: Some(asset_id.clone()),
                 asset_amount: Some(PAY_ASSET),
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })
@@ -1117,6 +1121,7 @@ fn external_signer_virtual_channel_survives_restart() {
                 asset_id: None,
                 asset_amount: None,
                 payment_hash: None,
+                description: None,
                 description_hash: None,
                 min_final_cltv_expiry_delta: None,
             })
