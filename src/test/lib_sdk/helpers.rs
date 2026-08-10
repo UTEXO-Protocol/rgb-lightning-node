@@ -1,13 +1,15 @@
 use electrum_client::ElectrumApi;
 use once_cell::sync::Lazy;
+#[cfg(feature = "vss")]
+pub(crate) use rgb_lightning_node::SdkVssClearFenceRequest;
 pub(crate) use rgb_lightning_node::{
     AssetBalanceInfo, AssetRecipients, AssignmentKind, Channel, ContractId, HtlcStatus,
     InvoiceStatus, LnInvoiceRequest, Payment, PaymentHash, RecipientId, RgbRecipient, RlnError,
     SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkExternalSignerBootstrap, SdkInitRequest,
     SdkIssueAssetCfaRequest, SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkNode,
     SdkOpenChannelRequest, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest,
-    SdkSendPaymentRequest, SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest,
-    TransactionType, TransportEndpoint, WitnessData,
+    SdkSendPaymentRequest, SdkUnlockRequest, SendRgbRequest, TransactionType, TransportEndpoint,
+    WitnessData,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -749,7 +751,12 @@ pub(crate) fn wait_for_ln_balance(
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        let balance = asset_balance_offchain_outbound(node, asset_id);
+        let balance = retry_while_node_is_changing_state_until(
+            "asset_balance while waiting for offchain_outbound balance",
+            deadline,
+            || node.asset_balance(asset_id.clone()),
+        )
+        .offchain_outbound;
         if balance == expected_balance {
             return;
         }
@@ -769,12 +776,20 @@ pub(crate) fn wait_for_balance(
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        let balance = asset_balance_spendable(node, asset_id);
+        let balance = retry_while_node_is_changing_state_until(
+            "asset_balance while waiting for spendable balance",
+            deadline,
+            || node.asset_balance(asset_id.clone()),
+        )
+        .spendable;
         if balance == expected_balance {
             return;
         }
-        node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
-            .expect("refreshtransfers while waiting for balance");
+        retry_while_node_is_changing_state_until(
+            "refreshtransfers while waiting for balance",
+            deadline,
+            || node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false }),
+        );
         assert!(
             Instant::now() < deadline,
             "spendable balance ({balance}) did not become {expected_balance}"
