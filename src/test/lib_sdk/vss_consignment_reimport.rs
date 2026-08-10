@@ -44,8 +44,8 @@ fn restored_node_recovers_force_closed_channel_funds() {
 
     let proxy = ManagerFilterProxy::start();
 
-    // Phase 1: build the incomplete backup through the product path — the
-    // node replicates normally except that no RGB backup ever reaches VSS.
+    // Phase 1: build a fully durable channel through the product path. Funding
+    // must not bypass the VSS acknowledgement required by the recovery journal.
     let node_a = make_node_with_vss(
         &node_a_dir,
         NODE_A_DAEMON_PORT + NODE_A_PORT_OFFSET,
@@ -70,8 +70,6 @@ fn restored_node_recovers_force_closed_channel_funds() {
     node_b
         .unlock(unlock_request(PASSWORD_B))
         .expect("node B initial unlock");
-
-    proxy.block_rgb_backup_writes();
 
     fund_and_create_utxos(&node_a, "node A");
     fund_and_create_utxos(&node_b, "node B");
@@ -159,10 +157,12 @@ fn restored_node_recovers_force_closed_channel_funds() {
     );
     std::thread::sleep(Duration::from_secs(5));
 
-    // Phase 2: graceful shutdown, device wiped, restore from VSS + seed.
+    // Phase 2: graceful shutdown, device wiped, restore from VSS + seed. Hide
+    // only RGB backup reads during restore to model a legacy/missing backup;
+    // all funding-critical writes above were acknowledged normally.
     node_a.shutdown();
     drop(node_a);
-    proxy.allow_all();
+    proxy.hide_rgb_backup_reads();
     fs::remove_dir_all(&node_a_dir).expect("wipe node A storage");
 
     let node_a = make_node_with_vss(
@@ -183,6 +183,11 @@ fn restored_node_recovers_force_closed_channel_funds() {
     node_a
         .unlock(unlock_request(PASSWORD_A))
         .expect("node A unlock after restore");
+    assert!(
+        proxy.blocked_count() > 0,
+        "legacy-restore fixture must hide at least one RGB backup read"
+    );
+    proxy.allow_all();
 
     // Phase 3: right after unlock the wallet must know the channel asset
     // again, re-imported from the consignment in the replicated KV data.
