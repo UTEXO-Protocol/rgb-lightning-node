@@ -515,11 +515,16 @@ where
 {
     let deadline = Instant::now() + timeout;
     let channel_id = loop {
-        node.sync()
-            .expect("node sync while waiting for channel open");
-        let channels = node
-            .list_channels()
-            .expect("list_channels while waiting for channel open");
+        retry_while_node_is_changing_state_until(
+            "node sync while waiting for channel open",
+            deadline,
+            || node.sync(),
+        );
+        let channels = retry_while_node_is_changing_state_until(
+            "list_channels while waiting for channel open",
+            deadline,
+            || node.list_channels(),
+        );
 
         if let Some(channel) = channels
             .iter()
@@ -552,18 +557,24 @@ pub(crate) fn wait_for_usable_channel(
 
     loop {
         polls += 1;
-        node_a
-            .sync()
-            .expect("node A sync while waiting for usable channel");
-        node_b
-            .sync()
-            .expect("node B sync while waiting for usable channel");
+        retry_while_node_is_changing_state_until(
+            "node A sync while waiting for usable channel",
+            deadline,
+            || node_a.sync(),
+        );
+        retry_while_node_is_changing_state_until(
+            "node B sync while waiting for usable channel",
+            deadline,
+            || node_b.sync(),
+        );
 
-        let ready = node_a
-            .list_channels()
-            .expect("node A list_channels while waiting for usable channel")
-            .into_iter()
-            .any(|channel| channel.asset_id.as_ref() == Some(asset_id) && channel.is_usable);
+        let ready = retry_while_node_is_changing_state_until(
+            "node A list_channels while waiting for usable channel",
+            deadline,
+            || node_a.list_channels(),
+        )
+        .into_iter()
+        .any(|channel| channel.asset_id.as_ref() == Some(asset_id) && channel.is_usable);
 
         if ready {
             return;
