@@ -122,9 +122,11 @@ fn restored_node_recovers_force_closed_channel_funds() {
     wait_for_channel_funding_tx(&node_a, &node_b, &asset_id, Duration::from_secs(120));
     mine(OPEN_CHANNEL_CONFIRM_BLOCKS);
     wait_for_usable_channel(&node_a, &node_b, &asset_id, Duration::from_secs(300));
-    let _colored_channel_id = node_a
-        .get_channel_id(open_channel.temporary_channel_id)
-        .expect("node A get_channel_id");
+    let _colored_channel_id = retry_while_node_is_changing_state_until(
+        "node A get_channel_id",
+        Instant::now() + Duration::from_secs(30),
+        || node_a.get_channel_id(open_channel.temporary_channel_id),
+    );
 
     // A second, vanilla channel: its force-close sweep must also recover.
     node_a
@@ -198,11 +200,13 @@ fn restored_node_recovers_force_closed_channel_funds() {
 
     // Phase 3: right after unlock the wallet must know the channel asset
     // again, re-imported from the consignment in the replicated KV data.
-    let assets = node_a
-        .list_assets(vec![])
-        .expect("node A list_assets")
-        .nia
-        .unwrap_or_default();
+    let assets = retry_while_node_is_changing_state_until(
+        "node A list_assets after restore",
+        Instant::now() + Duration::from_secs(30),
+        || node_a.list_assets(vec![]),
+    )
+    .nia
+    .unwrap_or_default();
     assert!(
         assets.iter().any(|a| a.asset_id == asset_id),
         "restored node must re-import the channel asset from the stored consignment"
@@ -216,7 +220,11 @@ fn restored_node_recovers_force_closed_channel_funds() {
 
     // Phase 4: force-close both channels; the sweeps must return the BTC of
     // both to_self outputs and make the channel's asset amount spendable.
-    let channels = node_a.list_channels().expect("node A list_channels");
+    let channels = retry_while_node_is_changing_state_until(
+        "node A list_channels before force close",
+        Instant::now() + Duration::from_secs(30),
+        || node_a.list_channels(),
+    );
     assert_eq!(channels.len(), 2);
     for channel in channels {
         close_channel_with_force(&node_a, channel.channel_id, node_b_pubkey, true);

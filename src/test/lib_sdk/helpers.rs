@@ -393,9 +393,12 @@ pub(crate) fn fund_and_create_utxos(node: &SdkNode, node_name: &str) {
 }
 
 pub(crate) fn asset_balance_spendable(node: &SdkNode, asset_id: &ContractId) -> u64 {
-    node.asset_balance(asset_id.clone())
-        .expect("asset_balance spendable")
-        .spendable
+    retry_while_node_is_changing_state_until(
+        "asset_balance spendable",
+        Instant::now() + Duration::from_secs(30),
+        || node.asset_balance(asset_id.clone()),
+    )
+    .spendable
 }
 
 pub(crate) fn retry_while_node_is_changing_state_until<T>(
