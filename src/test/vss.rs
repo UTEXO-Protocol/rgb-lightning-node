@@ -1519,50 +1519,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_remote_required_write_fails_closed_and_retains_retry_intent() {
-        let (signing_key, store_id) = generate_test_keys();
-        let connection = create_test_sqlite();
-        let local = Arc::new(SeaOrmKvStore::from_connection(Arc::clone(&connection)));
-        let unreachable = Arc::new(
-            VssKvStore::new("http://127.0.0.1:5/vss".to_string(), store_id, signing_key)
-                .expect("vss store"),
-        );
-        let synced = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&unreachable));
-        let channel_info = b"canonical-rgb-channel-info".to_vec();
-
-        synced
-            .write_remote_required(
-                lightning::rgb_utils::RGB_PRIMARY_NS,
-                lightning::rgb_utils::RGB_CHANNEL_INFO_NS,
-                "final-channel",
-                channel_info.clone(),
-            )
-            .expect_err("canonical channel state must not acknowledge a local-only write");
-        assert_eq!(
-            local
-                .read(
-                    lightning::rgb_utils::RGB_PRIMARY_NS,
-                    lightning::rgb_utils::RGB_CHANNEL_INFO_NS,
-                    "final-channel",
-                )
-                .expect("local recovery value"),
-            channel_info,
-        );
-        assert_eq!(synced.pending_remote_writes(), 1);
-        drop(synced);
-
-        let reopened = SyncedKvStore::with_vss(
-            Arc::new(SeaOrmKvStore::from_connection(connection)),
-            unreachable,
-        );
-        assert_eq!(
-            reopened.pending_remote_writes(),
-            1,
-            "restart must recover the failed canonical metadata replication"
-        );
-    }
-
-    #[test]
     #[ignore = "subprocess used by synced_kv_os_kill_matrix"]
     fn synced_kv_os_kill_child() {
         let mode = std::env::var("RLN_SYNCED_KV_CHILD_MODE").expect("child mode");

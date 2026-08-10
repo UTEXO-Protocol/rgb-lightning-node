@@ -486,26 +486,12 @@ impl SyncedKvStore {
         }
     }
 
-    /// Persists a value locally and requires an acknowledgement from VSS when remote backup is
-    /// configured. A failed remote write keeps the atomic local mutation and its retry intent, but
-    /// returns the error so a protocol transition cannot discard its recovery journal.
-    pub(crate) fn write_remote_required(
-        &self,
-        primary_namespace: &str,
-        secondary_namespace: &str,
-        key: &str,
-        buf: Vec<u8>,
-    ) -> Result<(), io::Error> {
-        self.write_with_durability(primary_namespace, secondary_namespace, key, buf, true)
-    }
-
     fn write_with_durability(
         &self,
         primary_namespace: &str,
         secondary_namespace: &str,
         key: &str,
         buf: Vec<u8>,
-        require_remote: bool,
     ) -> Result<(), io::Error> {
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
@@ -517,8 +503,8 @@ impl SyncedKvStore {
                 ));
             }
             let vss_key = crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
-            let remote_required = require_remote
-                || Self::requires_remote_durability(primary_namespace, secondary_namespace);
+            let remote_required =
+                Self::requires_remote_durability(primary_namespace, secondary_namespace);
             let (replicated, remote_error) = {
                 let lock = self.key_lock(&vss_key);
                 let _guard = lock.lock().unwrap();
@@ -579,7 +565,6 @@ impl SyncedKvStore {
             return Ok(());
         }
 
-        let _ = require_remote;
         self.local
             .write(primary_namespace, secondary_namespace, key, buf)
     }
@@ -603,7 +588,7 @@ impl KVStoreSync for SyncedKvStore {
         key: &str,
         buf: Vec<u8>,
     ) -> Result<(), io::Error> {
-        self.write_with_durability(primary_namespace, secondary_namespace, key, buf, false)
+        self.write_with_durability(primary_namespace, secondary_namespace, key, buf)
     }
 
     fn remove(
