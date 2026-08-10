@@ -6200,12 +6200,18 @@ async fn supervise_background_processor(
             if !stopping {
                 match &res {
                     Ok(()) => {
-                        tracing::error!("background processor exited unexpectedly; shutting down")
+                        tracing::error!("background processor exited unexpectedly; shutting down");
+                        eprintln!("fatal: background processor exited unexpectedly; shutting down");
                     }
-                    Err(e) => tracing::error!(
-                        error = %e,
-                        "background processor failed unexpectedly; shutting down"
-                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "background processor failed unexpectedly; shutting down"
+                        );
+                        eprintln!(
+                            "fatal: background processor failed unexpectedly; shutting down: {e}"
+                        );
+                    }
                 }
                 std::process::exit(70);
             }
@@ -6221,6 +6227,10 @@ async fn supervise_background_processor(
                 panic = %msg,
                 "background processor panicked; shutting down instead of running without \
                  event processing"
+            );
+            eprintln!(
+                "fatal: background processor panicked; shutting down instead of running without \
+                 event processing: {msg}"
             );
             std::process::exit(70);
         }

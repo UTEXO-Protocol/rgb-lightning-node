@@ -2,7 +2,7 @@ use electrum_client::ElectrumApi;
 use once_cell::sync::Lazy;
 pub(crate) use rgb_lightning_node::{
     AssetBalanceInfo, AssetRecipients, AssignmentKind, Channel, ContractId, HtlcStatus,
-    InvoiceStatus, LnInvoiceRequest, Payment, PaymentHash, RecipientId, RgbRecipient,
+    InvoiceStatus, LnInvoiceRequest, Payment, PaymentHash, RecipientId, RgbRecipient, RlnError,
     SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkExternalSignerBootstrap, SdkInitRequest,
     SdkIssueAssetCfaRequest, SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkNode,
     SdkOpenChannelRequest, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest,
@@ -402,6 +402,29 @@ pub(crate) fn asset_balance_offchain_outbound(node: &SdkNode, asset_id: &Contrac
         .offchain_outbound
 }
 
+fn retry_while_node_is_changing_state_until<T>(
+    operation_name: &str,
+    deadline: Instant,
+    mut operation: impl FnMut() -> Result<T, RlnError>,
+) -> T {
+    const CHANGING_STATE_MESSAGE: &str = "Cannot call other APIs while node is changing state";
+
+    loop {
+        match operation() {
+            Ok(value) => return value,
+            Err(RlnError::Conflict(message)) if message == CHANGING_STATE_MESSAGE => {
+                assert!(
+                    Instant::now() < deadline,
+                    "{operation_name} remained blocked by a node state transition until the \
+                     operation deadline"
+                );
+                sleep(Duration::from_millis(25));
+            }
+            Err(error) => panic!("{operation_name} failed: {error}"),
+        }
+    }
+}
+
 pub(crate) fn wait_for_asset_balance(
     node: &SdkNode,
     asset_id: &ContractId,
@@ -450,26 +473,23 @@ pub(crate) fn wait_for_synced_to_tip(node: &SdkNode, node_name: &str) {
 
 pub(crate) fn wait_for_channel_funding_tx(
     node_a: &SdkNode,
-    node_b: &SdkNode,
+    _node_b: &SdkNode,
     asset_id: &ContractId,
     timeout: Duration,
 ) {
     let deadline = Instant::now() + timeout;
     loop {
-        node_a
-            .sync()
-            .expect("node A sync while waiting for funding tx");
-        node_b
-            .sync()
-            .expect("node B sync while waiting for funding tx");
-
-        let funding_seen = node_a
-            .list_channels()
-            .expect("node A list_channels while waiting for funding tx")
-            .into_iter()
-            .any(|channel| {
-                channel.asset_id.as_ref() == Some(asset_id) && channel.funding_txid.is_some()
-            });
+        // Funding construction and broadcast are driven by LDK's background
+        // processor. Full RGB wallet syncs only compete with that transition.
+        let funding_seen = retry_while_node_is_changing_state_until(
+            "node A list_channels while waiting for funding tx",
+            deadline,
+            || node_a.list_channels(),
+        )
+        .into_iter()
+        .any(|channel| {
+            channel.asset_id.as_ref() == Some(asset_id) && channel.funding_txid.is_some()
+        });
 
         if funding_seen {
             return;
