@@ -294,6 +294,7 @@ impl RgbFundingRecoveryRequiredAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum RgbFundingRecoveryCommand {
     Recheck,
     ResumeBroadcast,
@@ -2894,6 +2895,7 @@ fn should_complete_deferred_rgb_consistency_check(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn list_rgb_funding_recoveries(
     channel_manager: &ChannelManager,
     wallet: &RgbLibWalletWrapper,
@@ -2948,6 +2950,7 @@ pub(crate) fn list_rgb_funding_recoveries(
     Ok(recoveries)
 }
 
+#[allow(dead_code)]
 pub(crate) fn resolve_rgb_funding_recovery(
     funding_txid: &str,
     command: RgbFundingRecoveryCommand,

@@ -53,8 +53,9 @@ const PENDING_DRAIN_BATCH: usize = 16;
 
 // Protocol records that must be remotely acknowledged before channel funding may advance.
 // These names are persisted storage contracts and intentionally live with the durability policy.
-#[cfg(feature = "vss")]
 pub(crate) const RGB_SENDER_FUNDING_NAMESPACE: &str = "rgb_sender_funding";
+pub(crate) const PSBT_NAMESPACE: &str = "psbt";
+pub(crate) const PENDING_FUNDING_NAMESPACE: &str = "pending_funding";
 #[cfg(feature = "vss")]
 pub(crate) const RGB_PRIMARY_NAMESPACE: &str = "rgb";
 #[cfg(feature = "vss")]

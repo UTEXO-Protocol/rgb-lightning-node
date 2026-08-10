@@ -203,6 +203,7 @@ pub(crate) struct UnlockedAppState {
 }
 
 impl UnlockedAppState {
+    #[allow(dead_code)]
     pub(crate) fn ensure_financial_operations_allowed(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, APIError> {
