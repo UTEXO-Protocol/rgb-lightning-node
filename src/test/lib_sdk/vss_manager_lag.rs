@@ -4,12 +4,12 @@
 //! (`docker compose --profile vss up -d`).
 
 use crate::helpers::*;
-use prost::Message;
 use serial_test::serial;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{fs, time::Duration};
+use vss_client::prost::Message;
 use vss_client::types::{ErrorCode, ErrorResponse};
 
 const VSS_SERVER_ADDR: &str = "127.0.0.1:8081";
