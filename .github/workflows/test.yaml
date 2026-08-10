@@ -122,7 +122,7 @@ jobs:
       - name: Start regtest services
         run: ./regtest.sh start
       - name: Run lib_sdk tests
-        run: cargo test --features "uniffi,test-utils,vls" --test lib_sdk -- --test-threads=1
+        run: SKIP_INIT=1 cargo test --features "uniffi,test-utils,vls" --test lib_sdk -- --test-threads=1
       - name: Stop regtest services
         if: always()
         run: ./regtest.sh stop
@@ -142,15 +142,75 @@ jobs:
       - name: Start regtest and VSS services
         run: VSS=1 ./regtest.sh start
       - name: Run VSS tests (e2e against regtest + VSS server)
-        run: cargo test --features vss "test::vss::tests" -- --test-threads=1
+        run: SKIP_INIT=1 cargo test --features vss "test::vss::tests" -- --test-threads=1
       - name: Run VSS unreachable openchannel e2e test
         run: cargo test --features vss "test::vss_unreachable_openchannel" -- --test-threads=1
+      - name: Run local SQLite process-kill matrix
+        run: cargo test --features "uniffi,test-utils,vls,vss" --lib kv_store_os_kill_matrix -- --test-threads=1
+      - name: Run VSS process-kill matrix
+        run: cargo test --features "uniffi,test-utils,vls,vss" --bin rgb-lightning-node synced_kv_os_kill_matrix -- --ignored --test-threads=1
       - name: Run VSS full-restore e2e test (wipe node dir, restore from seed)
-        run: cargo test --features "uniffi,test-utils,vls,vss" --test lib_sdk vss_restore -- --test-threads=1
+        run: SKIP_INIT=1 cargo test --features "uniffi,test-utils,vls,vss" --test lib_sdk vss_restore -- --test-threads=1
       - name: Run consignment re-import e2e test (restore without RGB backup)
         run: cargo test --features "uniffi,test-utils,vls,vss" --test lib_sdk vss_consignment_reimport -- --test-threads=1
       - name: Stop regtest and VSS services
         if: always()
+        run: docker compose --profile vss down -v --remove-orphans
+
+  persistence-sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, thread]
+    env:
+      CARGO_BUILD_JOBS: 1
+      RUSTFLAGS: >-
+        -Zsanitizer=${{ matrix.sanitizer }} -Cdebuginfo=0 -Copt-level=0
+        -Ccodegen-units=256 -Clinker=clang -Clink-arg=-fuse-ld=lld
+      RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+      - name: Install sanitizer build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld cmake pkg-config libssl-dev libsqlite3-dev protobuf-compiler libudev-dev
+      - name: Run SQLite persistence kill matrix under AddressSanitizer
+        if: matrix.sanitizer == 'address'
+        run: >-
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
+          --features "uniffi,test-utils,vls,vss" --lib
+          kv_store::persistence_tests::kv_store_os_kill_matrix -- --exact --test-threads=1
+      - name: Start VSS services for ThreadSanitizer
+        if: matrix.sanitizer == 'thread'
+        run: |
+          docker compose --profile vss up -d --build vss-postgres vss-server
+          for attempt in $(seq 1 60); do
+            if curl --silent --show-error --max-time 2 --output /dev/null http://127.0.0.1:8081/vss/list-key-versions; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose --profile vss logs vss-postgres vss-server
+          exit 1
+      - name: Run VSS ordering regression under ThreadSanitizer
+        if: matrix.sanitizer == 'thread'
+        run: >-
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
+          --all-features --bin rgb-lightning-node
+          test::vss::tests::synced_kv_store_drain_never_regresses_newer_write
+          -- --exact --test-threads=1
+      - name: Stop sanitizer VSS services
+        if: always() && matrix.sanitizer == 'thread'
         run: docker compose --profile vss down -v --remove-orphans
 
   gossip-tests:
@@ -168,7 +228,7 @@ jobs:
       - name: Start regtest services
         run: ./regtest.sh start
       - name: Run gossip tests (e2e against regtest + RGS server)
-        run: cargo test "test::gossip_" -- --test-threads=1
+        run: SKIP_INIT=1 cargo test "test::gossip_" -- --test-threads=1
       - name: Dump gossip service logs (on failure)
         if: failure()
         run: |

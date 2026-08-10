@@ -5,15 +5,17 @@
 
 #[cfg(feature = "vss")]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use bitcoin::secp256k1::{rand::rngs::OsRng, Secp256k1, SecretKey};
     use hex::DisplayHex;
     use lightning::util::persist::KVStoreSync;
-    use sea_orm::{ConnectOptions, Database};
+    use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseBackend, Statement};
 
-    use crate::kv_store::SeaOrmKvStore;
+    use crate::kv_store::{KvStoreEntry, KvStoreKey, SeaOrmKvStore};
     use crate::synced_kv_store::SyncedKvStore;
     use crate::vss_kv_store::{parse_vss_key, vss_key, VssKvStore};
 
@@ -47,6 +49,143 @@ mod tests {
         let db = crate::runtime::block_on(Database::connect(opt)).expect("test db");
         crate::runtime::block_on(rln_migration::Migrator::up(&db, None)).expect("migration");
         Arc::new(db)
+    }
+
+    fn open_test_sqlite(path: &Path) -> Arc<sea_orm::DatabaseConnection> {
+        use rln_migration::MigratorTrait;
+
+        let conn_str = format!("sqlite:{}?mode=rwc", path.display());
+        let mut opt = ConnectOptions::new(conn_str);
+        opt.max_connections(1)
+            .connect_timeout(Duration::from_secs(5));
+        let db = crate::runtime::block_on(Database::connect(opt)).expect("persistent test DB");
+        crate::runtime::block_on(rln_migration::Migrator::up(&db, None)).expect("migration");
+        Arc::new(db)
+    }
+
+    fn synced_kv_child_command(
+        mode: &str,
+        db_path: &Path,
+        store_id: &str,
+        signing_key: &SecretKey,
+    ) -> Command {
+        let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .args([
+                "--exact",
+                "test::vss::tests::synced_kv_os_kill_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("RLN_SYNCED_KV_CHILD_MODE", mode)
+            .env("RLN_SYNCED_KV_CHILD_DB", db_path)
+            .env("RLN_SYNCED_KV_CHILD_STORE_ID", store_id)
+            .env(
+                "RLN_SYNCED_KV_CHILD_SECRET",
+                signing_key.secret_bytes().as_hex().to_string(),
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    fn prepare_synced_kv_fixture(db_path: &Path, store_id: &str, signing_key: SecretKey) {
+        let local = SeaOrmKvStore::from_connection(open_test_sqlite(db_path));
+        local
+            .write(
+                crate::synced_kv_store::RGB_SENDER_FUNDING_NAMESPACE,
+                "",
+                "funding",
+                b"old".to_vec(),
+            )
+            .expect("seed local value");
+        let remote = VssKvStore::new(VSS_URL.to_owned(), store_id.to_owned(), signing_key)
+            .expect("seed VSS store");
+        remote
+            .write(
+                crate::synced_kv_store::RGB_SENDER_FUNDING_NAMESPACE,
+                "",
+                "funding",
+                b"old".to_vec(),
+            )
+            .expect("seed remote value");
+    }
+
+    fn trace_synced_kv_checkpoints(mode: &str) -> Vec<String> {
+        let directory = tempfile::tempdir().expect("trace tempdir");
+        let db_path = directory.path().join("store.sqlite");
+        let trace_path = directory.path().join("trace.txt");
+        let (signing_key, store_id) = generate_test_keys();
+        prepare_synced_kv_fixture(&db_path, &store_id, signing_key);
+        let status = synced_kv_child_command(mode, &db_path, &store_id, &signing_key)
+            .env("RLN_SYNCED_KV_PERSISTENCE_TRACE_PATH", &trace_path)
+            .status()
+            .expect("run synchronized KV trace child");
+        assert!(
+            status.success(),
+            "synchronized KV trace child failed for {mode}"
+        );
+        let prefix = if mode == "write" {
+            "synced-write-"
+        } else {
+            "synced-remove-"
+        };
+        let checkpoints: Vec<_> = std::fs::read_to_string(trace_path)
+            .expect("read synchronized KV trace")
+            .lines()
+            .filter(|line| line.starts_with(prefix))
+            .map(str::to_owned)
+            .collect();
+        assert!(
+            !checkpoints.is_empty(),
+            "no synchronized KV checkpoints for {mode}"
+        );
+        let mut unique = checkpoints.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            checkpoints.len(),
+            unique.len(),
+            "duplicate checkpoints for {mode}"
+        );
+        checkpoints
+    }
+
+    fn kill_synced_kv_at_checkpoint(mode: &str, checkpoint: &str) -> (PathBuf, String, SecretKey) {
+        let directory = tempfile::tempdir().expect("kill tempdir");
+        let root = directory.keep();
+        let db_path = root.join("store.sqlite");
+        let ready_path = root.join("ready");
+        let (signing_key, store_id) = generate_test_keys();
+        prepare_synced_kv_fixture(&db_path, &store_id, signing_key);
+        let mut child = synced_kv_child_command(mode, &db_path, &store_id, &signing_key)
+            .env("RLN_SYNCED_KV_KILL_AT", checkpoint)
+            .env("RLN_SYNCED_KV_KILL_READY_PATH", &ready_path)
+            .spawn()
+            .expect("spawn synchronized KV kill child");
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if ready_path.exists() {
+                break;
+            }
+            if let Some(status) = child.try_wait().expect("poll synchronized KV child") {
+                panic!("synchronized KV child exited before {checkpoint}: {status}");
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("synchronized KV child did not reach {checkpoint}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.kill().expect("kill synchronized KV child");
+        let status = child.wait().expect("wait for synchronized KV child");
+        assert!(
+            !status.success(),
+            "killed synchronized KV child unexpectedly succeeded"
+        );
+        (db_path, store_id, signing_key)
     }
 
     // --- Unit tests ---
@@ -1232,5 +1371,287 @@ mod tests {
         );
         let reopened = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&remote));
         assert_eq!(reopened.pending_remote_writes(), 0);
+    }
+
+    #[test]
+    fn local_mutation_and_replication_intent_are_one_sqlite_transaction() {
+        let connection = create_test_sqlite();
+        let local = SeaOrmKvStore::from_connection(Arc::clone(&connection));
+        local
+            .write("target", "", "write-key", b"old".to_vec())
+            .expect("seed write target");
+        local
+            .write("target", "", "remove-key", b"retained".to_vec())
+            .expect("seed remove target");
+
+        crate::runtime::block_on(connection.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            format!(
+                "CREATE TRIGGER reject_vss_intent BEFORE INSERT ON kv_store \
+                 WHEN NEW.primary_namespace = '{}' \
+                 BEGIN SELECT RAISE(ABORT, 'injected intent failure'); END",
+                crate::synced_kv_store::PENDING_NS
+            ),
+        )))
+        .expect("install failure trigger");
+
+        assert!(local
+            .write_with_replication_intent(
+                KvStoreEntry::new("target", "", "write-key", b"new".to_vec()),
+                KvStoreEntry::new(
+                    crate::synced_kv_store::PENDING_NS,
+                    "",
+                    "target//write-key",
+                    vec![1, 0x01],
+                ),
+            )
+            .is_err());
+        assert_eq!(
+            local
+                .read("target", "", "write-key")
+                .expect("old value survives"),
+            b"old"
+        );
+        assert!(
+            local
+                .read(crate::synced_kv_store::PENDING_NS, "", "target//write-key")
+                .is_err(),
+            "failed intent insertion must roll back the target write"
+        );
+
+        assert!(local
+            .remove_with_replication_intent(
+                KvStoreKey::new("target", "", "remove-key"),
+                KvStoreEntry::new(
+                    crate::synced_kv_store::PENDING_NS,
+                    "",
+                    "target//remove-key",
+                    vec![0],
+                ),
+            )
+            .is_err());
+        assert_eq!(
+            local
+                .read("target", "", "remove-key")
+                .expect("removed value survives rollback"),
+            b"retained"
+        );
+    }
+
+    #[test]
+    fn full_pending_queue_rejects_before_local_mutation_without_eviction() {
+        let (signing_key, store_id) = generate_test_keys();
+        let connection = create_test_sqlite();
+        let local = Arc::new(SeaOrmKvStore::from_connection(connection));
+        let existing_vss_key = vss_key("existing", "", "key");
+        let mut existing_row = vec![1];
+        existing_row.extend_from_slice(b"pending");
+        local
+            .write(
+                crate::synced_kv_store::PENDING_NS,
+                "",
+                &existing_vss_key,
+                existing_row,
+            )
+            .expect("seed pending intent");
+        let unreachable = Arc::new(
+            VssKvStore::new("http://127.0.0.1:5/vss".to_string(), store_id, signing_key)
+                .expect("vss store"),
+        );
+        let synced = SyncedKvStore::with_vss_capacity(Arc::clone(&local), unreachable, 1);
+
+        let error = synced
+            .write("new", "", "key", b"must-not-land".to_vec())
+            .expect_err("a full backlog must apply backpressure");
+        assert_eq!(error.kind(), bitcoin::io::ErrorKind::WouldBlock);
+        assert!(local.read("new", "", "key").is_err());
+        assert_eq!(synced.pending_remote_writes(), 1);
+        assert_eq!(
+            local
+                .read(crate::synced_kv_store::PENDING_NS, "", &existing_vss_key)
+                .expect("existing intent must not be evicted"),
+            [vec![1], b"pending".to_vec()].concat()
+        );
+    }
+
+    #[test]
+    fn funding_journal_write_fails_closed_and_remains_replayable() {
+        let (signing_key, store_id) = generate_test_keys();
+        let connection = create_test_sqlite();
+        let local = Arc::new(SeaOrmKvStore::from_connection(Arc::clone(&connection)));
+        let unreachable = Arc::new(
+            VssKvStore::new("http://127.0.0.1:5/vss".to_string(), store_id, signing_key)
+                .expect("vss store"),
+        );
+        let synced = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&unreachable));
+        let journal = b"funding-journal".to_vec();
+
+        synced
+            .write(
+                crate::synced_kv_store::RGB_PRIMARY_NAMESPACE,
+                crate::synced_kv_store::RGB_FUNDING_ACCEPTANCE_NAMESPACE,
+                "temporary-channel",
+                journal.clone(),
+            )
+            .expect_err("critical funding state must not acknowledge a local-only write");
+        assert_eq!(
+            synced
+                .read(
+                    crate::synced_kv_store::RGB_PRIMARY_NAMESPACE,
+                    crate::synced_kv_store::RGB_FUNDING_ACCEPTANCE_NAMESPACE,
+                    "temporary-channel"
+                )
+                .expect("local recovery state"),
+            journal
+        );
+        assert_eq!(synced.pending_remote_writes(), 1);
+        drop(synced);
+
+        let reopened = SyncedKvStore::with_vss(
+            Arc::new(SeaOrmKvStore::from_connection(connection)),
+            unreachable,
+        );
+        assert_eq!(
+            reopened.pending_remote_writes(),
+            1,
+            "restart must recover the failed critical replication"
+        );
+    }
+
+    #[test]
+    fn explicit_remote_required_write_fails_closed_and_retains_retry_intent() {
+        let (signing_key, store_id) = generate_test_keys();
+        let connection = create_test_sqlite();
+        let local = Arc::new(SeaOrmKvStore::from_connection(Arc::clone(&connection)));
+        let unreachable = Arc::new(
+            VssKvStore::new("http://127.0.0.1:5/vss".to_string(), store_id, signing_key)
+                .expect("vss store"),
+        );
+        let synced = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&unreachable));
+        let channel_info = b"canonical-rgb-channel-info".to_vec();
+
+        synced
+            .write_remote_required(
+                lightning::rgb_utils::RGB_PRIMARY_NS,
+                lightning::rgb_utils::RGB_CHANNEL_INFO_NS,
+                "final-channel",
+                channel_info.clone(),
+            )
+            .expect_err("canonical channel state must not acknowledge a local-only write");
+        assert_eq!(
+            local
+                .read(
+                    lightning::rgb_utils::RGB_PRIMARY_NS,
+                    lightning::rgb_utils::RGB_CHANNEL_INFO_NS,
+                    "final-channel",
+                )
+                .expect("local recovery value"),
+            channel_info,
+        );
+        assert_eq!(synced.pending_remote_writes(), 1);
+        drop(synced);
+
+        let reopened = SyncedKvStore::with_vss(
+            Arc::new(SeaOrmKvStore::from_connection(connection)),
+            unreachable,
+        );
+        assert_eq!(
+            reopened.pending_remote_writes(),
+            1,
+            "restart must recover the failed canonical metadata replication"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess used by synced_kv_os_kill_matrix"]
+    fn synced_kv_os_kill_child() {
+        let mode = std::env::var("RLN_SYNCED_KV_CHILD_MODE").expect("child mode");
+        let db_path =
+            PathBuf::from(std::env::var("RLN_SYNCED_KV_CHILD_DB").expect("child database path"));
+        let store_id = std::env::var("RLN_SYNCED_KV_CHILD_STORE_ID").expect("child VSS store ID");
+        let secret = std::env::var("RLN_SYNCED_KV_CHILD_SECRET").expect("child VSS secret");
+        let signing_key = secret.parse::<SecretKey>().expect("parse child VSS secret");
+        let local = Arc::new(SeaOrmKvStore::from_connection(open_test_sqlite(&db_path)));
+        let remote = Arc::new(
+            VssKvStore::new(VSS_URL.to_owned(), store_id, signing_key).expect("child VSS store"),
+        );
+        let synced = SyncedKvStore::with_vss(local, remote);
+        match mode.as_str() {
+            "write" => synced
+                .write(
+                    crate::synced_kv_store::RGB_SENDER_FUNDING_NAMESPACE,
+                    "",
+                    "funding",
+                    b"new".to_vec(),
+                )
+                .expect("synchronized write"),
+            "remove" => synced
+                .remove(
+                    crate::synced_kv_store::RGB_SENDER_FUNDING_NAMESPACE,
+                    "",
+                    "funding",
+                    false,
+                )
+                .expect("synchronized remove"),
+            _ => panic!("unknown child mode {mode}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the VSS integration service"]
+    fn synced_kv_os_kill_matrix() {
+        assert!(
+            vss_server_available(),
+            "VSS server is required at {VSS_URL}"
+        );
+        for mode in ["write", "remove"] {
+            for checkpoint in trace_synced_kv_checkpoints(mode) {
+                let (db_path, store_id, signing_key) =
+                    kill_synced_kv_at_checkpoint(mode, &checkpoint);
+                let local = Arc::new(SeaOrmKvStore::from_connection(open_test_sqlite(&db_path)));
+                let remote = Arc::new(
+                    VssKvStore::new(VSS_URL.to_owned(), store_id, signing_key)
+                        .expect("reopen VSS store"),
+                );
+                let synced = SyncedKvStore::with_vss(Arc::clone(&local), Arc::clone(&remote));
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while synced.pending_remote_writes() != 0 && Instant::now() < deadline {
+                    synced.drain_pending();
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                assert_eq!(
+                    synced.pending_remote_writes(),
+                    0,
+                    "pending replication did not drain after {checkpoint}"
+                );
+
+                let local_value = local.read(
+                    crate::synced_kv_store::RGB_SENDER_FUNDING_NAMESPACE,
+                    "",
+                    "funding",
+                );
+                let remote_value = remote.read(
+                    crate::synced_kv_store::RGB_SENDER_FUNDING_NAMESPACE,
+                    "",
+                    "funding",
+                );
+                if mode == "write" {
+                    assert_eq!(local_value.expect("local write"), b"new".to_vec());
+                    assert_eq!(remote_value.expect("remote write"), b"new".to_vec());
+                } else {
+                    assert_eq!(
+                        local_value.expect_err("local removal").kind(),
+                        bitcoin::io::ErrorKind::NotFound
+                    );
+                    assert_eq!(
+                        remote_value.expect_err("remote removal").kind(),
+                        bitcoin::io::ErrorKind::NotFound
+                    );
+                }
+                drop(synced);
+                std::fs::remove_dir_all(db_path.parent().expect("database parent"))
+                    .expect("remove synchronized KV fixture");
+            }
+        }
     }
 }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use bitcoin::io;
@@ -21,14 +21,18 @@ use vss_client::util::retry::{
 type VssRetryPolicy =
     MaxTotalDelayRetryPolicy<MaxAttemptsRetryPolicy<ExponentialBackoffRetryPolicy<VssError>>>;
 
-/// Dedicated runtime for driving synchronous VSS calls (see [`VssKvStore::block_on`]).
-static VSS_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_name("vss-runtime")
-        .enable_all()
-        .build()
-        .expect("Failed to create VSS tokio runtime")
+/// Serialized runtime for driving synchronous VSS calls (see [`VssKvStore::block_on`]).
+///
+/// A current-thread runtime is intentional here. Entering a multi-thread Tokio runtime from
+/// short-lived handoff threads races its reactor registration under ThreadSanitizer, while VSS
+/// persistence requires ordered synchronous semantics rather than parallel call execution.
+static VSS_RUNTIME: LazyLock<Mutex<tokio::runtime::Runtime>> = LazyLock::new(|| {
+    Mutex::new(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create VSS tokio runtime"),
+    )
 });
 
 /// Result of a single VSS get-object during a paged `download_all`. `Ok(None)`
@@ -167,12 +171,20 @@ impl VssKvStore {
     {
         if tokio::runtime::Handle::try_current().is_ok() {
             std::thread::scope(|s| {
-                s.spawn(|| VSS_RUNTIME.block_on(future))
-                    .join()
-                    .expect("VSS runtime thread panicked")
+                s.spawn(|| {
+                    VSS_RUNTIME
+                        .lock()
+                        .expect("VSS runtime lock poisoned")
+                        .block_on(future)
+                })
+                .join()
+                .expect("VSS runtime thread panicked")
             })
         } else {
-            VSS_RUNTIME.block_on(future)
+            VSS_RUNTIME
+                .lock()
+                .expect("VSS runtime lock poisoned")
+                .block_on(future)
         }
     }
 
