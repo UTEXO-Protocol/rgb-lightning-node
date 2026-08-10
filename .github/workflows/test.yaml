@@ -144,7 +144,7 @@ jobs:
       - name: Run VSS tests (e2e against regtest + VSS server)
         run: SKIP_INIT=1 cargo test --features vss "test::vss::tests" -- --test-threads=1
       - name: Run VSS unreachable openchannel e2e test
-        run: cargo test --features vss "test::vss_unreachable_openchannel" -- --test-threads=1
+        run: SKIP_INIT=1 cargo test --features vss "test::vss_unreachable_openchannel" -- --test-threads=1
       - name: Run local SQLite process-kill matrix
         run: cargo test --features "uniffi,test-utils,vls,vss" --lib kv_store_os_kill_matrix -- --test-threads=1
       - name: Run VSS process-kill matrix
