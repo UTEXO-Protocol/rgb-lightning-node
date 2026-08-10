@@ -7,7 +7,10 @@
 use crate::helpers::*;
 use crate::vss_manager_lag::{vss_server_available, ManagerFilterProxy};
 use serial_test::serial;
-use std::{fs, time::Duration};
+use std::{
+    fs,
+    time::{Duration, Instant},
+};
 
 const NODE_A_PORT_OFFSET: u16 = 150;
 const NODE_B_PORT_OFFSET: u16 = 150;
@@ -21,7 +24,11 @@ const NODE_A_FINAL_ASSET_AMOUNT: u64 = CHANNEL_ASSET_AMOUNT - ASSET_SEND_A_TO_B 
 const NODE_B_FINAL_ASSET_AMOUNT: u64 = ASSET_SEND_A_TO_B - ASSET_SEND_B_TO_A;
 
 fn spendable_sats(node: &SdkNode) -> u64 {
-    let balance = node.btc_balance(false).expect("btc_balance");
+    let balance = retry_while_node_is_changing_state_until(
+        "btc_balance while waiting for restored funds",
+        Instant::now() + Duration::from_secs(30),
+        || node.btc_balance(false),
+    );
     balance.vanilla.spendable + balance.colored.spendable
 }
 

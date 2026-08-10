@@ -398,7 +398,7 @@ pub(crate) fn asset_balance_spendable(node: &SdkNode, asset_id: &ContractId) -> 
         .spendable
 }
 
-fn retry_while_node_is_changing_state_until<T>(
+pub(crate) fn retry_while_node_is_changing_state_until<T>(
     operation_name: &str,
     deadline: Instant,
     mut operation: impl FnMut() -> Result<T, RlnError>,
