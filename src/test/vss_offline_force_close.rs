@@ -26,7 +26,10 @@ impl VssProxy {
         let online = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let state = VssProxyState {
             online: Arc::clone(&online),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("VSS fault proxy client must be constructible"),
         };
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -119,6 +122,7 @@ async fn forward_vss_request(
     let response = match upstream {
         Ok(response) => response,
         Err(error) => {
+            eprintln!("VSS fault proxy upstream request failed: {error}");
             return (
                 axum::http::StatusCode::BAD_GATEWAY,
                 format!("VSS upstream request failed: {error}"),
