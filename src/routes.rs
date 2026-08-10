@@ -4480,7 +4480,7 @@ pub(crate) async fn open_channel(
 
         let temporary_channel_id = unlocked_state
             .channel_manager
-            .create_channel(
+            .create_rgb_channel(
                 peer_pubkey,
                 payload.capacity_sat,
                 payload.push_msat,

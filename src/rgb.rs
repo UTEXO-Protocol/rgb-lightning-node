@@ -17,22 +17,22 @@ use rgb_lib::{
     bdk_wallet::{KeychainKind, SignOptions},
     bitcoin::psbt::Psbt as BitcoinPsbt,
     wallet::{
-        rust_only::{check_proxy_url, ColoringInfo},
+        rust_only::{check_proxy_url, ColoringInfo, RgbAcceptanceResolution},
         AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance,
-        IfaIssuanceType, Metadata, Online, OperationResult, Outpoint, ReceiveData, Recipient,
-        RefreshFilter, RefreshResult, RgbWalletOpsOffline, RgbWalletOpsOnline, SendBeginResult,
-        SinglesigKeys, SyncOptions, Transaction as RgbLibTransaction, Transfer, TransferKind,
-        TransportEndpoint, Unspent, Wallet as RgbLibWallet,
+        IfaIssuanceType, Metadata, Online, OnlineOptions, OperationResult, Outpoint, ReceiveData,
+        Recipient, RefreshFilter, RefreshResult, RgbWalletOpsOffline, RgbWalletOpsOnline,
+        SendBeginResult, SinglesigKeys, SyncOptions, Transaction as RgbLibTransaction, Transfer,
+        TransferKind, TransportEndpoint, Unspent, Wallet as RgbLibWallet,
     },
-    AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, Fascia, RgbTransfer,
-    RgbTransport, RgbTxid, UpdateRes, WitnessOrd,
+    AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
+    Fascia, RgbTransfer, RgbTransport, RgbTxid, UpdateRes, WitnessOrd,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::{error::APIError, utils::UnlockedAppState};
+use crate::{error::APIError, ldk::RgbFundingRecoveryGuard, utils::UnlockedAppState};
 
 /// When `sign_rgb_psbt` fails, internal mode falls back to the local RGB wallet; external mode does not.
 fn resolve_rgb_psbt_signer_failure(
@@ -148,6 +148,23 @@ impl UnlockedAppState {
         witness_ord: Option<WitnessOrd>,
     ) -> Result<(), RgbLibError> {
         self.rgb_wallet_wrapper.consume_fascia(fascia, witness_ord)
+    }
+
+    pub(crate) fn rgb_prepare_funding_fascia(
+        &self,
+        operation_id: String,
+        fascia: Fascia,
+    ) -> Result<(), RgbLibError> {
+        self.rgb_wallet_wrapper
+            .prepare_funding_fascia(operation_id, fascia)
+    }
+
+    pub(crate) fn rgb_rollback_funding_fascia_if_present(
+        &self,
+        operation_id: &str,
+    ) -> Result<(), RgbLibError> {
+        self.rgb_wallet_wrapper
+            .rollback_funding_fascia_if_present(operation_id)
     }
 
     pub(crate) fn rgb_create_consignments(&self, psbt: String) -> Result<(), RgbLibError> {
@@ -414,15 +431,6 @@ impl UnlockedAppState {
         self.rgb_wallet_wrapper.refresh(asset_id, filter, skip_sync)
     }
 
-    pub(crate) fn rgb_save_new_asset(
-        &self,
-        consignment: RgbTransfer,
-        offchain_txid: String,
-    ) -> Result<(), RgbLibError> {
-        self.rgb_wallet_wrapper
-            .save_new_asset(consignment, offchain_txid)
-    }
-
     pub(crate) fn rgb_send(
         &self,
         recipient_map: HashMap<String, Vec<Recipient>>,
@@ -489,6 +497,13 @@ impl UnlockedAppState {
 
     pub(crate) fn rgb_send_end(&self, signed_psbt: String) -> Result<OperationResult, RgbLibError> {
         self.rgb_wallet_wrapper.send_end(signed_psbt)
+    }
+
+    pub(crate) fn rgb_send_end_preconsumed(
+        &self,
+        signed_psbt: String,
+    ) -> Result<OperationResult, RgbLibError> {
+        self.rgb_wallet_wrapper.send_end_preconsumed(signed_psbt)
     }
 
     pub(crate) fn rgb_sign_psbt(&self, unsigned_psbt: String) -> Result<String, RgbLibError> {
@@ -575,6 +590,26 @@ impl RgbLibWalletWrapper {
         self.wallet.lock().unwrap()
     }
 
+    pub(crate) fn complete_deferred_consistency_check(
+        &self,
+        indexer_url: String,
+        vanilla_sync_lookback: u32,
+    ) -> Result<(), RgbLibError> {
+        let mut wallet = self.get_rgb_wallet();
+        let online = wallet.go_online(OnlineOptions {
+            indexer_url,
+            skip_consistency_check: false,
+            vanilla_sync_lookback,
+        })?;
+        if online != self.online {
+            return Err(RgbLibError::Internal {
+                details: "RGB recovery consistency check replaced the active online session"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Returns the wallet's configured `VssBackupClient`, if any. This is the
     /// client constructed by `configure_vss_backup` in `start_ldk`; callers
     /// (e.g. the manual `/vssbackup` route) reuse it instead of building a
@@ -582,6 +617,27 @@ impl RgbLibWalletWrapper {
     #[cfg(feature = "vss")]
     pub(crate) fn vss_client(&self) -> Option<Arc<rgb_lib::wallet::vss::VssBackupClient>> {
         self.get_rgb_wallet().vss_client()
+    }
+
+    /// Uploads the complete RGB wallet and propagates any VSS failure.
+    ///
+    /// Callers must execute this method on a blocking worker. Protocol commit paths use it before
+    /// deleting recovery journals; best-effort auto-backup is not a durability boundary.
+    pub(crate) fn checked_vss_backup(&self) -> Result<Option<i64>, RgbLibError> {
+        #[cfg(feature = "vss")]
+        {
+            let wallet = self.get_rgb_wallet();
+            let Some(client) = wallet.vss_client() else {
+                return Ok(None);
+            };
+            client
+                .handle()
+                .block_on(wallet.vss_backup(&client))
+                .map(Some)
+        }
+
+        #[cfg(not(feature = "vss"))]
+        Ok(None)
     }
 
     // Upstream API retained through the merge; not yet wired into utexo's flow.
@@ -617,6 +673,154 @@ impl RgbLibWalletWrapper {
         witness_ord: Option<WitnessOrd>,
     ) -> Result<(), RgbLibError> {
         self.get_rgb_wallet().consume_fascia(fascia, witness_ord)
+    }
+
+    pub(crate) fn prepare_funding_fascia(
+        &self,
+        operation_id: String,
+        fascia: Fascia,
+    ) -> Result<(), RgbLibError> {
+        let witness_id = fascia.witness_id().to_string();
+        if witness_id != operation_id {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "funding fascia witness '{witness_id}' does not match operation '{operation_id}'"
+                ),
+            });
+        }
+        self.get_rgb_wallet()
+            .prepare_consume_fascia(operation_id, fascia, Some(WitnessOrd::Tentative))?
+            .promote()?;
+        Ok(())
+    }
+
+    pub(crate) fn rollback_funding_fascia_if_present(
+        &self,
+        operation_id: &str,
+    ) -> Result<(), RgbLibError> {
+        let wallet = self.get_rgb_wallet();
+        let Some(pending) = wallet.pending_rgb_acceptance()? else {
+            return Ok(());
+        };
+        if pending.operation_id() != operation_id {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "pending RGB operation '{}' does not match funding operation '{operation_id}'",
+                    pending.operation_id()
+                ),
+            });
+        }
+        wallet.resolve_pending_rgb_acceptance(operation_id, RgbAcceptanceResolution::Rollback)
+    }
+
+    pub(crate) fn finalize_funding_fascia(&self, operation_id: &str) -> Result<(), RgbLibError> {
+        let wallet = self.get_rgb_wallet();
+        let Some(pending) = wallet.pending_rgb_acceptance()? else {
+            return Ok(());
+        };
+        if pending.operation_id() != operation_id {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "pending RGB operation '{}' does not match funding operation '{operation_id}'",
+                    pending.operation_id()
+                ),
+            });
+        }
+        wallet.resolve_pending_rgb_acceptance(operation_id, RgbAcceptanceResolution::Finalize)
+    }
+
+    pub(crate) fn pending_funding_fascia(&self) -> Result<Option<(String, bool)>, RgbLibError> {
+        Ok(self
+            .get_rgb_wallet()
+            .pending_rgb_acceptance()?
+            .map(|pending| (pending.operation_id().to_owned(), pending.promoted())))
+    }
+
+    /// Repairs a finalized inbound channel transfer from its durable funding journal when the
+    /// restored RGB wallet snapshot predates that transfer.
+    ///
+    /// The persisted consignment is validated through rgb-lib's normal isolated acceptance path.
+    /// Contract identity and received amount are checked before the staged stock is promoted.
+    pub(crate) fn ensure_finalized_funding_transfer(
+        &self,
+        funding_txid: &str,
+        funding_output_index: u32,
+        consignment: Vec<u8>,
+        rgb_info: &RgbInfo,
+        blinding: u64,
+    ) -> Result<bool, RgbLibError> {
+        let mut wallet = self.get_rgb_wallet();
+        if let Some(pending) = wallet.pending_rgb_acceptance()? {
+            if pending.operation_id() != funding_txid {
+                return Err(RgbLibError::Internal {
+                    details: format!(
+                        "finalized funding '{funding_txid}' cannot reconcile RGB operation '{}'",
+                        pending.operation_id()
+                    ),
+                });
+            }
+            let resolution = if pending.promoted() {
+                RgbAcceptanceResolution::Finalize
+            } else {
+                RgbAcceptanceResolution::Rollback
+            };
+            wallet.resolve_pending_rgb_acceptance(funding_txid, resolution)?;
+        }
+
+        let asset_id = rgb_info.contract_id.to_string();
+        if wallet.has_accepted_transfer(asset_id.clone(), funding_txid.to_owned())? {
+            return Ok(false);
+        }
+
+        let prepared = wallet.prepare_accept_transfer_from_consignment(
+            funding_txid.to_owned(),
+            funding_txid.to_owned(),
+            funding_output_index,
+            consignment,
+            blinding,
+        )?;
+        if prepared.consignment().contract_id() != rgb_info.contract_id {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "persisted funding consignment contract '{}' does not match channel contract '{}'",
+                    prepared.consignment().contract_id(),
+                    rgb_info.contract_id
+                ),
+            });
+        }
+        let expected_amount = rgb_info
+            .local_rgb_amount
+            .checked_add(rgb_info.remote_rgb_amount)
+            .ok_or_else(|| RgbLibError::Internal {
+                details: format!("RGB amount overflow for finalized funding '{funding_txid}'"),
+            })?;
+        let assignment_matches = match prepared.assignments() {
+            [Assignment::Fungible(amount)] => *amount == expected_amount,
+            [Assignment::NonFungible] => expected_amount == 1,
+            _ => false,
+        };
+        if !assignment_matches {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "persisted funding consignment assignments do not match channel amount {expected_amount}"
+                ),
+            });
+        }
+
+        prepared.promote()?;
+        wallet.resolve_pending_rgb_acceptance(funding_txid, RgbAcceptanceResolution::Finalize)?;
+        if !wallet.has_accepted_transfer(asset_id, funding_txid.to_owned())? {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "RGB funding '{funding_txid}' is absent after deterministic recovery"
+                ),
+            });
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn is_tx_known(&self, txid: String) -> Result<bool, RgbLibError> {
+        self.get_rgb_wallet().is_tx_known(txid)
     }
 
     pub(crate) fn color_psbt_and_consume(
@@ -918,6 +1122,8 @@ impl RgbLibWalletWrapper {
             .refresh(self.online, asset_id, filter, skip_sync)
     }
 
+    /// Imports legacy channel metadata when restoring a wallet whose RGB stock predates the
+    /// durable funding journal. Normal channel funding uses transactional acceptance instead.
     pub(crate) fn save_new_asset(
         &self,
         consignment: RgbTransfer,
@@ -1008,6 +1214,23 @@ impl RgbLibWalletWrapper {
         self.get_rgb_wallet().send_end(self.online, signed_psbt)
     }
 
+    pub(crate) fn send_end_preconsumed(
+        &self,
+        signed_psbt: String,
+    ) -> Result<OperationResult, RgbLibError> {
+        let mut wallet = self.get_rgb_wallet();
+        wallet.send_end_preconsumed(self.online, signed_psbt)
+    }
+
+    pub(crate) fn send_end_preconsumed_for_operation(
+        &self,
+        operation_id: &str,
+        signed_psbt: String,
+    ) -> Result<OperationResult, RgbLibError> {
+        let mut wallet = self.get_rgb_wallet();
+        wallet.send_end_preconsumed_for_operation(self.online, operation_id, signed_psbt)
+    }
+
     pub(crate) fn sign_psbt(&self, unsigned_psbt: String) -> Result<String, RgbLibError> {
         self.get_rgb_wallet().sign_psbt(unsigned_psbt, None)
     }
@@ -1059,6 +1282,12 @@ pub(crate) struct RgbBumpWalletSource {
     pub(crate) signer: ActiveSignerRef,
     pub(crate) external_signer: Option<Arc<ExternalSigner>>,
     pub(crate) external_signer_mode: bool,
+}
+
+/// Wallet-backed change destination protected from an in-flight RGB funding transition.
+pub(crate) struct RgbChangeDestinationSource {
+    pub(crate) inner: Arc<RgbLibWalletWrapper>,
+    pub(crate) funding_guard: Arc<RgbFundingRecoveryGuard>,
 }
 
 impl WalletSource for RgbBumpWalletSource {
@@ -1123,13 +1352,22 @@ impl WalletSource for RgbBumpWalletSource {
     }
 }
 
-impl ChangeDestinationSource for RgbLibWalletWrapper {
+impl ChangeDestinationSource for RgbChangeDestinationSource {
     fn get_change_destination_script<'a>(&'a self) -> AsyncResult<'a, ScriptBuf, ()> {
         Box::pin(async move {
-            Ok(Address::from_str(&self.get_address().unwrap())
-                .unwrap()
-                .assume_checked()
-                .script_pubkey())
+            let _financial_operation = self
+                .funding_guard
+                .ensure_financial_operations_allowed()
+                .map_err(|error| {
+                    tracing::debug!(%error, "deferring change-address allocation during RGB funding");
+                })?;
+            let address = self.inner.get_address().map_err(|error| {
+                tracing::error!(%error, "failed to allocate a wallet change address");
+            })?;
+            let address = Address::from_str(&address).map_err(|error| {
+                tracing::error!(%error, "wallet returned an invalid change address");
+            })?;
+            Ok(address.assume_checked().script_pubkey())
         })
     }
 }
