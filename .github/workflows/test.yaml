@@ -122,7 +122,7 @@ jobs:
       - name: Start regtest services
         run: ./regtest.sh start
       - name: Run lib_sdk tests
-        run: SKIP_INIT=1 cargo test --features "uniffi,test-utils,vls" --test lib_sdk -- --test-threads=1
+        run: SKIP_INIT=1 cargo test --features "uniffi,test-utils,vls" --test lib_sdk -- --test-threads=1 --nocapture
       - name: Stop regtest services
         if: always()
         run: ./regtest.sh stop
