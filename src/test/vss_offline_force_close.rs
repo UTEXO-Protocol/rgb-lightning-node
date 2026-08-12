@@ -1,25 +1,41 @@
 use super::*;
+use axum::response::IntoResponse;
 
 const TEST_DIR_BASE: &str = "tmp/vss_offline_force_close/";
-const VSS_SERVER_ADDR: &str = "127.0.0.1:8081";
+const VSS_SERVER_URL: &str = "http://127.0.0.1:8081";
 
-/// TCP proxy in front of the VSS server that can go offline and back online,
-/// simulating a VSS outage for a single node without touching the shared
-/// service. Offline: established connections are cut and new ones are closed
-/// on accept.
+#[derive(Clone)]
+struct VssProxyState {
+    online: Arc<std::sync::atomic::AtomicBool>,
+    client: reqwest::Client,
+}
+
+/// Reverse proxy in front of the VSS server that can go offline and back
+/// online for one node without changing the shared test service.
 pub(super) struct VssProxy {
     port: u16,
-    online: tokio::sync::watch::Sender<bool>,
+    online: Arc<std::sync::atomic::AtomicBool>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl VssProxy {
-    // The proxy gets a dedicated thread + runtime: the shared test runtime can
-    // stall for seconds on synchronous KVStore calls and would starve it.
     pub(super) fn start() -> Self {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         std_listener.set_nonblocking(true).unwrap();
         let port = std_listener.local_addr().unwrap().port();
-        let (online, rx) = tokio::sync::watch::channel(true);
+        let online = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let state = VssProxyState {
+            online: Arc::clone(&online),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("VSS fault proxy client must be constructible"),
+        };
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        // Synchronous KVStore calls can stall the shared test runtime, so the
+        // fault proxy owns a dedicated runtime.
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -27,27 +43,27 @@ impl VssProxy {
                 .unwrap();
             rt.block_on(async move {
                 let listener = TcpListener::from_std(std_listener).unwrap();
-                loop {
-                    let Ok((mut inbound, _)) = listener.accept().await else {
-                        break;
-                    };
-                    if !*rx.borrow() {
-                        continue; // offline: drop the connection immediately
-                    }
-                    let mut rx_conn = rx.clone();
-                    tokio::spawn(async move {
-                        let Ok(mut outbound) = TcpStream::connect(VSS_SERVER_ADDR).await else {
-                            return;
-                        };
-                        tokio::select! {
-                            _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound) => {}
-                            _ = rx_conn.wait_for(|online| !online) => {}
-                        }
-                    });
-                }
+                let app = axum::Router::new()
+                    .fallback(axum::routing::any(forward_vss_request))
+                    .with_state(state);
+                ready_tx.send(()).unwrap();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .unwrap();
             });
         });
-        Self { port, online }
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("VSS fault proxy did not become ready");
+
+        Self {
+            port,
+            online,
+            shutdown: Some(shutdown_tx),
+        }
     }
 
     pub(super) fn url(&self) -> String {
@@ -55,11 +71,81 @@ impl VssProxy {
     }
 
     pub(super) fn go_offline(&self) {
-        self.online.send(false).unwrap();
+        self.online
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     pub(super) fn go_online(&self) {
-        self.online.send(true).unwrap();
+        self.online
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for VssProxy {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
+async fn forward_vss_request(
+    axum::extract::State(state): axum::extract::State<VssProxyState>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    mut headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    if !state.online.load(std::sync::atomic::Ordering::Acquire) {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "VSS fault proxy is offline",
+        )
+            .into_response();
+    }
+
+    headers.remove(axum::http::header::HOST);
+    headers.remove(axum::http::header::CONTENT_LENGTH);
+    headers.remove(axum::http::header::CONNECTION);
+    let path_and_query = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let upstream = state
+        .client
+        .request(method, format!("{VSS_SERVER_URL}{path_and_query}"))
+        .headers(headers)
+        .body(body)
+        .send()
+        .await;
+
+    let response = match upstream {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("VSS fault proxy upstream request failed: {error}");
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("VSS upstream request failed: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let status = response.status();
+    let mut response_headers = response.headers().clone();
+    response_headers.remove(axum::http::header::CONTENT_LENGTH);
+    response_headers.remove(axum::http::header::CONNECTION);
+    response_headers.remove(axum::http::header::TRANSFER_ENCODING);
+    match response.bytes().await {
+        Ok(body) => {
+            let mut downstream = (status, body).into_response();
+            downstream.headers_mut().extend(response_headers);
+            downstream
+        }
+        Err(error) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("VSS upstream response failed: {error}"),
+        )
+            .into_response(),
     }
 }
 

@@ -162,7 +162,6 @@ fn handle_conn(
         upstream.write_all(new_head.as_bytes())?;
         upstream.write_all(&body)?;
         std::io::copy(&mut upstream, &mut client)?;
-        return Ok(());
     }
     Ok(())
 }
@@ -178,10 +177,10 @@ fn node_ldk_log_contains(dir: &std::path::Path, needle: &str) -> bool {
             if node_ldk_log_contains(&path, needle) {
                 return true;
             }
-        } else if path.file_name().is_some_and(|n| n == "logs.txt") {
-            if fs::read_to_string(&path).is_ok_and(|c| c.contains(needle)) {
-                return true;
-            }
+        } else if path.file_name().is_some_and(|n| n == "logs.txt")
+            && fs::read_to_string(&path).is_ok_and(|c| c.contains(needle))
+        {
+            return true;
         }
     }
     false
@@ -267,7 +266,7 @@ fn setup_with_open_channel(test_name: &str) -> LagSetup {
             fee_base_msat: None,
             fee_proportional_millionths: None,
             temporary_channel_id: None,
-            asset_id: Some(asset_id.clone()),
+            asset_id: Some(asset_id),
             asset_amount: Some(600),
             push_asset_amount: None,
             virtual_open_mode: None,

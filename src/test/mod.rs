@@ -510,17 +510,36 @@ async fn clear_vss_fence(node_address: SocketAddr, password: &str) {
     let payload = VssClearFenceRequest {
         password: password.to_string(),
     };
-    let res = reqwest::Client::new()
-        .post(format!("http://{node_address}/vssclearfence"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    check_response_is_ok(res)
-        .await
-        .json::<EmptyResponse>()
-        .await
-        .unwrap();
+    let client = reqwest::Client::new();
+    let mut last_error = String::new();
+
+    for attempt in 1..=20 {
+        match client
+            .post(format!("http://{node_address}/vssclearfence"))
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                response.json::<EmptyResponse>().await.unwrap();
+                return;
+            }
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                last_error = format!("HTTP {status}: {body}");
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+
+        if attempt < 20 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    panic!("VSS fence clear did not become ready: {last_error}");
 }
 
 /// Gracefully stop a node and wipe its entire storage dir (DB, channel state,
