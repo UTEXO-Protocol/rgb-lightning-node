@@ -46,10 +46,17 @@ mod tests {
     }
 
     fn unreachable_vss() -> Arc<VssKvStore> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve VSS test port");
+        let port = listener.local_addr().expect("VSS test address").port();
+        drop(listener);
         let (signing_key, store_id) = generate_test_keys();
         Arc::new(
-            VssKvStore::new("http://127.0.0.1:5/vss".to_string(), store_id, signing_key)
-                .expect("vss store"),
+            VssKvStore::new(
+                format!("http://127.0.0.1:{port}/vss"),
+                store_id,
+                signing_key,
+            )
+            .expect("vss store"),
         )
     }
 
@@ -142,6 +149,7 @@ mod tests {
     /// the remote attempt fails, so a kill while the VSS request is in flight
     /// leaves a crash image whose value will never be replicated: a later
     /// device-loss restore is silently stale.
+    #[serial_test::serial]
     #[test]
     fn crash_image_must_retain_replication_intent() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -187,6 +195,7 @@ mod tests {
     /// mutation VSS has not acknowledged needs a durable retry intent. On
     /// `dev` a new distinct mutation at cap evicts an arbitrary queued entry,
     /// so that entry's key silently stops replicating.
+    #[serial_test::serial]
     #[test]
     fn pending_queue_cap_must_not_discard_recovery_evidence() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -239,6 +248,7 @@ mod tests {
     /// only return after the connection is cut; a `stop()` that ignores the
     /// in-flight put acquires the free gate and returns inside the
     /// observation window.
+    #[serial_test::serial]
     #[test]
     fn stop_must_wait_for_inflight_remote_mutation() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -291,6 +301,7 @@ mod tests {
 
     /// A retry drain that passed its initial admission check before shutdown
     /// must not start a remote mutation after `stop()` has returned.
+    #[serial_test::serial]
     #[test]
     fn queued_drain_must_not_run_after_stop() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -363,21 +374,47 @@ mod tests {
         assert_eq!(synced.pending_remote_writes(), 1);
     }
 
-    /// `psbt` and `pending_funding` writers currently unwrap the write result,
-    /// so these namespaces must keep acking during a VSS outage until the
-    /// funding state machine handles the errors.
+    /// The funding state machine handles `psbt` and `pending_funding` write
+    /// errors, so neither record may be acknowledged without remote durability.
+    #[serial_test::serial]
     #[test]
-    fn psbt_and_pending_funding_stay_best_effort_during_outage() {
+    fn psbt_and_pending_funding_fail_closed_during_outage() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
         let local = Arc::new(SeaOrmKvStore::from_connection(open_sqlite(&dir)));
         let synced = SyncedKvStore::with_vss(local, unreachable_vss());
 
         synced
             .write("psbt", "", "funding_txid", b"psbt".to_vec())
-            .expect("psbt write must ack during an outage");
+            .expect_err("psbt write must fail closed during an outage");
         synced
             .write("pending_funding", "", "channel_id", b"txid".to_vec())
-            .expect("pending_funding write must ack during an outage");
+            .expect_err("pending_funding write must fail closed during an outage");
         assert_eq!(synced.pending_remote_writes(), 2);
+        assert_eq!(synced.read("psbt", "", "funding_txid").unwrap(), b"psbt");
+        assert_eq!(
+            synced.read("pending_funding", "", "channel_id").unwrap(),
+            b"txid"
+        );
+    }
+
+    /// A protocol transition may explicitly require remote acknowledgement without making every
+    /// writer in the namespace fail closed. This keeps recovery writes strict while the broader
+    /// RGB channel-info settlement policy remains a separate change.
+    #[serial_test::serial]
+    #[test]
+    fn explicit_remote_required_write_fails_closed_during_outage() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let local = Arc::new(SeaOrmKvStore::from_connection(open_sqlite(&dir)));
+        let synced = SyncedKvStore::with_vss(local, unreachable_vss());
+
+        synced
+            .write_remote_required("rgb", "channel_info", "channel_id", b"metadata".to_vec())
+            .expect_err("protocol state must not advance without remote acknowledgement");
+
+        assert_eq!(synced.pending_remote_writes(), 1);
+        assert_eq!(
+            synced.read("rgb", "channel_info", "channel_id").unwrap(),
+            b"metadata"
+        );
     }
 }

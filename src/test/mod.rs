@@ -2667,7 +2667,7 @@ fn unlock_req(password: &str) -> UnlockRequest {
         password: password.to_string(),
         bitcoind_rpc_username: Some(s!("user")),
         bitcoind_rpc_password: Some(s!("password")),
-        bitcoind_rpc_host: Some(s!("localhost")),
+        bitcoind_rpc_host: Some(s!("127.0.0.1")),
         bitcoind_rpc_port: Some(18443),
         indexer_url: Some(ELECTRUM_URL_REGTEST.to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
@@ -3086,6 +3086,7 @@ mod concurrent_openchannel;
 mod drop_funding_signed;
 mod esplora_indexer_defaults;
 mod fail_transfers;
+mod funding_crash_recovery;
 mod getchannelid;
 mod gossip_p2p;
 mod gossip_rgs;

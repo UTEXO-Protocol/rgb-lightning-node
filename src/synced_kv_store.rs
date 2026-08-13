@@ -310,12 +310,13 @@ impl SyncedKvStore {
     /// not advance the protocol after only a local acknowledgement. Other keys remain locally
     /// authoritative and use the durable retry queue for eventual VSS convergence.
     ///
-    /// `psbt` and `pending_funding` stay best-effort for now: their current writers unwrap the
-    /// result, so failing closed would panic the event handler during a VSS outage. They join
-    /// this set together with the funding state machine that handles the errors.
+    /// The funding state machine handles persistence errors for `psbt` and `pending_funding`, so
+    /// these records can fail closed without panicking the event handler.
     #[cfg(feature = "vss")]
     fn requires_remote_durability(primary_namespace: &str, secondary_namespace: &str) -> bool {
         (primary_namespace == RGB_SENDER_FUNDING_NAMESPACE && secondary_namespace.is_empty())
+            || (primary_namespace == PSBT_NAMESPACE && secondary_namespace.is_empty())
+            || (primary_namespace == PENDING_FUNDING_NAMESPACE && secondary_namespace.is_empty())
             || (primary_namespace == RGB_PRIMARY_NAMESPACE
                 && secondary_namespace == RGB_FUNDING_ACCEPTANCE_NAMESPACE)
     }
@@ -533,12 +534,26 @@ impl SyncedKvStore {
         }
     }
 
+    /// Persists protocol state locally and requires a VSS acknowledgement when remote backup is
+    /// configured. The atomic local mutation and retry intent remain durable if VSS is unavailable,
+    /// but the error is returned so the caller cannot advance its state machine prematurely.
+    pub(crate) fn write_remote_required(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+        buf: Vec<u8>,
+    ) -> Result<(), io::Error> {
+        self.write_with_durability(primary_namespace, secondary_namespace, key, buf, true)
+    }
+
     fn write_with_durability(
         &self,
         primary_namespace: &str,
         secondary_namespace: &str,
         key: &str,
         buf: Vec<u8>,
+        require_remote: bool,
     ) -> Result<(), io::Error> {
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
@@ -550,8 +565,8 @@ impl SyncedKvStore {
                 ));
             }
             let vss_key = crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
-            let remote_required =
-                Self::requires_remote_durability(primary_namespace, secondary_namespace);
+            let remote_required = require_remote
+                || Self::requires_remote_durability(primary_namespace, secondary_namespace);
             let (replicated, remote_error) = {
                 let lock = self.key_lock(&vss_key);
                 let _guard = lock.lock().unwrap();
@@ -612,6 +627,7 @@ impl SyncedKvStore {
             return Ok(());
         }
 
+        let _ = require_remote;
         self.local
             .write(primary_namespace, secondary_namespace, key, buf)
     }
@@ -635,7 +651,7 @@ impl KVStoreSync for SyncedKvStore {
         key: &str,
         buf: Vec<u8>,
     ) -> Result<(), io::Error> {
-        self.write_with_durability(primary_namespace, secondary_namespace, key, buf)
+        self.write_with_durability(primary_namespace, secondary_namespace, key, buf, false)
     }
 
     fn remove(
