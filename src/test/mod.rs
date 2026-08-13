@@ -2589,11 +2589,17 @@ async fn taker(node_address: SocketAddr, swapstring: String) -> EmptyResponse {
 }
 
 fn unlock_req(password: &str) -> UnlockRequest {
+    // `localhost` resolves to `::1` on some hosts (e.g. colima/lima) while the
+    // regtest bitcoind port forward is IPv4-only, which fails the initial RPC
+    // call. Allow overriding the host from the environment so the suite runs
+    // there; defaults to the historical `localhost`.
+    let bitcoind_rpc_host =
+        std::env::var("RLN_TEST_BITCOIND_HOST").unwrap_or_else(|_| s!("localhost"));
     UnlockRequest {
         password: password.to_string(),
         bitcoind_rpc_username: Some(s!("user")),
         bitcoind_rpc_password: Some(s!("password")),
-        bitcoind_rpc_host: Some(s!("localhost")),
+        bitcoind_rpc_host: Some(bitcoind_rpc_host),
         bitcoind_rpc_port: Some(18443),
         indexer_url: Some(ELECTRUM_URL_REGTEST.to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
