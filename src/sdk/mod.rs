@@ -1,7 +1,10 @@
 // NOTE: This module mirrors core behavior from `src/routes.rs` for SDK consumers.
 // If route-level business logic changes, keep SDK equivalents in sync.
 
-use crate::asset_link::create_asset_link;
+use crate::asset_link::{
+    create_asset_link, find_linked_asset_channel, has_sufficient_asset_channel,
+    send_linked_asset_payment,
+};
 use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
     AsyncOrderOutboundInvoiceResultWire,
@@ -3242,6 +3245,45 @@ pub(crate) async fn send_payment(
                 )));
             }
         };
+
+        // If the invoice's asset isn't covered by any of our own channels,
+        // look for a channel funded in a *linked* asset to a peer that also
+        // has a channel to the recipient, and swap in flight across it.
+        // Mirrors routes.rs's `/sendpayment` handler — this SDK path (used
+        // by every binding: uniffi/mobile, c-ffi, and transitively wasm-sdk
+        // where it delegates here) previously had no linked-asset awareness
+        // at all, so a payer whose only route to an invoice's asset was
+        // through a link would fail locally before ever attempting the
+        // payment.
+        if let Some((contract_id, asset_amount)) = rgb_payment {
+            if !has_sufficient_asset_channel(unlocked_state, contract_id, asset_amount, amt_msat) {
+                if let Some((linked_contract_id, host_pubkey)) = find_linked_asset_channel(
+                    unlocked_state,
+                    contract_id,
+                    asset_amount,
+                    amt_msat,
+                    invoice.recover_payee_pub_key(),
+                ) {
+                    let linked_payment = send_linked_asset_payment(
+                        unlocked_state,
+                        &invoice,
+                        contract_id,
+                        linked_contract_id,
+                        asset_amount,
+                        amt_msat,
+                        host_pubkey,
+                    )
+                    .await?;
+
+                    return Ok(SendPaymentData {
+                        payment_id: hex_str(&linked_payment.payment_id.0),
+                        payment_hash: Some(hex_str(&linked_payment.payment_hash.0)),
+                        payment_secret: Some(hex_str(&linked_payment.payment_secret.0)),
+                        status: linked_payment.status,
+                    });
+                }
+            }
+        }
 
         let secret = payment_secret;
         unlocked_state.add_outbound_payment(
