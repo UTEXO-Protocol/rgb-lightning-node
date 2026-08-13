@@ -3246,15 +3246,6 @@ pub(crate) async fn send_payment(
             }
         };
 
-        // If the invoice's asset isn't covered by any of our own channels,
-        // look for a channel funded in a *linked* asset to a peer that also
-        // has a channel to the recipient, and swap in flight across it.
-        // Mirrors routes.rs's `/sendpayment` handler — this SDK path (used
-        // by every binding: uniffi/mobile, c-ffi, and transitively wasm-sdk
-        // where it delegates here) previously had no linked-asset awareness
-        // at all, so a payer whose only route to an invoice's asset was
-        // through a link would fail locally before ever attempting the
-        // payment.
         if let Some((contract_id, asset_amount)) = rgb_payment {
             if !has_sufficient_asset_channel(unlocked_state, contract_id, asset_amount, amt_msat) {
                 if let Some((linked_contract_id, host_pubkey)) = find_linked_asset_channel(
