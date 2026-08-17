@@ -3144,6 +3144,8 @@ mod virtual_channels;
 #[cfg(feature = "vss")]
 mod vss;
 #[cfg(feature = "vss")]
+mod vss_device_loss_gap;
+#[cfg(feature = "vss")]
 mod vss_durability_gaps;
 #[cfg(feature = "vss")]
 mod vss_offline_force_close;
