@@ -1153,6 +1153,13 @@ impl From<RefreshFilter> for RgbLibRefreshFilter {
 }
 
 #[derive(Deserialize, Serialize)]
+pub(crate) struct RefreshRequest {
+    pub(crate) asset_id: Option<String>,
+    pub(crate) filter: Vec<RefreshFilter>,
+    pub(crate) skip_sync: bool,
+}
+
+#[derive(Deserialize, Serialize)]
 pub(crate) enum RefreshTransferStatus {
     WaitingCounterparty,
     WaitingConfirmations,
@@ -1165,13 +1172,6 @@ impl From<RefreshTransferStatus> for RgbLibRefreshTransferStatus {
             RefreshTransferStatus::WaitingConfirmations => Self::WaitingConfirmations,
         }
     }
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct RefreshRequest {
-    pub(crate) asset_id: Option<String>,
-    pub(crate) filter: Vec<RefreshFilter>,
-    pub(crate) skip_sync: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1528,6 +1528,7 @@ pub(crate) struct Utxo {
     pub(crate) outpoint: String,
     pub(crate) btc_amount: u64,
     pub(crate) colorable: bool,
+    pub(crate) exists: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -3573,6 +3574,7 @@ pub(crate) async fn list_unspents(
                 outpoint: unspent.utxo.outpoint.to_string(),
                 btc_amount: unspent.utxo.btc_amount,
                 colorable: unspent.utxo.colorable,
+                exists: unspent.utxo.exists,
             },
             rgb_allocations: unspent
                 .rgb_allocations

@@ -1419,6 +1419,7 @@ impl SdkNode {
                         outpoint: u.utxo.outpoint,
                         btc_amount: u.utxo.btc_amount,
                         colorable: u.utxo.colorable,
+                        exists: u.utxo.exists,
                     },
                     rgb_allocations: u
                         .rgb_allocations

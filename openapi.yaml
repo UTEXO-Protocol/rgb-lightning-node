@@ -4154,6 +4154,7 @@ components:
         - outpoint
         - btc_amount
         - colorable
+        - exists
       properties:
         outpoint:
           type: string
@@ -4162,6 +4163,9 @@ components:
           type: integer
           example: 1000
         colorable:
+          type: boolean
+          example: true
+        exists:
           type: boolean
           example: true
     WitnessData:

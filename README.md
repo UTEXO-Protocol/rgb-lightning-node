@@ -64,10 +64,10 @@ In order to operate, the node will need:
 Once services are running, daemons can be started.
 Each daemon needs to be started in a separate shell with `rgb-lightning-node`,
 specifying:
-- node data directory
-- node listening port
-- LN peer listening port
-- network
+- node data directory (positional argument)
+- node listening port (`--daemon-listening-port`, default: 3001)
+- LN peer listening port (`--ldk-peer-listening-port`, default: 9735)
+- network (`--network`, default: testnet)
 
 Chain-backend credentials are supplied at `/unlock` time, not on the CLI. The
 body must include exactly one of:
@@ -418,6 +418,23 @@ Tests can be executed with:
 cargo test
 ```
 
+### Coverage
+
+Tests can also be run gathering code coverage, using [cargo-llvm-cov].
+
+To run the tests and generate an HTML coverage report:
+```sh
+./coverage.sh
+```
+The report path is output at the end of the run.
+
+To only run some test(s):
+```sh
+./coverage.sh -t <test_name>
+```
+
+See `./coverage.sh --help` for the available options.
+
 ## Projects using RLN
 
 Here is a list of projects using RLN, in alphabetical order:
@@ -516,3 +533,4 @@ Replication guarantees differ per stream. Channel-monitor writes are remote-firs
 [Spectrum]: https://rgbspectrum.pages.dev/
 [Thunderstack]: https://thunderstack.org/
 [Tiramisu Wallet]: https://mainnet.tiramisuwallet.com/
+[cargo-llvm-cov]: https://github.com/taiki-e/cargo-llvm-cov

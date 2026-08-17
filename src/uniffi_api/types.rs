@@ -452,6 +452,7 @@ pub struct Utxo {
     pub outpoint: String,
     pub btc_amount: u64,
     pub colorable: bool,
+    pub exists: bool,
 }
 
 pub struct Unspent {

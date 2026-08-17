@@ -1942,6 +1942,7 @@ pub(crate) struct JsonUtxo {
     pub outpoint: String,
     pub btc_amount: u64,
     pub colorable: bool,
+    pub exists: bool,
 }
 
 impl From<Utxo> for JsonUtxo {
@@ -1950,6 +1951,7 @@ impl From<Utxo> for JsonUtxo {
             outpoint: u.outpoint,
             btc_amount: u.btc_amount,
             colorable: u.colorable,
+            exists: u.exists,
         }
     }
 }

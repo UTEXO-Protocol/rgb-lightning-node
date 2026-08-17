@@ -535,6 +535,7 @@ dictionary Utxo {
     string outpoint;
     u64 btc_amount;
     boolean colorable;
+    boolean exists;
 };
 
 dictionary Unspent {
