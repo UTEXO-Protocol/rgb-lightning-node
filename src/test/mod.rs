@@ -3087,6 +3087,8 @@ mod drop_funding_signed;
 mod esplora_indexer_defaults;
 mod fail_transfers;
 mod funding_crash_recovery;
+#[cfg(debug_assertions)]
+mod funding_crash_sender;
 mod getchannelid;
 mod gossip_p2p;
 mod gossip_rgs;

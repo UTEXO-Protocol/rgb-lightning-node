@@ -3002,6 +3002,25 @@ pub(crate) fn resolve_rgb_funding_recovery(
 }
 
 // Handle an rgb-lib error that happened while preparing a channel funding transaction in
+// Funding checkpoint reached after the RGB stock is promoted (fascia consumed, allocations
+// swept into the batch transfer) but before the funding tx is handed to LDK.
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_AFTER_COLOR: &str = "after-color-before-handoff";
+
+// Test-only crash injection: parks the process at a named funding checkpoint when
+// `RLN_FUNDING_KILL_AT` matches, so a test harness can SIGKILL it there. Debug builds only.
+#[cfg(debug_assertions)]
+fn funding_kill_checkpoint(name: &str) {
+    if std::env::var("RLN_FUNDING_KILL_AT").as_deref() == Ok(name) {
+        if let Ok(path) = std::env::var("RLN_FUNDING_KILL_READY_PATH") {
+            let _ = fs::write(path, name);
+        }
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
 // FundingGenerationReady. Returns the value to propagate from the event handler: `Err(ReplayEvent)`
 // to retry the event (for transient network errors), or `Ok(())` after force-closing the channel
 // (for terminal errors).
@@ -3801,6 +3820,8 @@ async fn handle_ldk_events(
                                 Err(cleanup_error) => Err(cleanup_error),
                             };
                         }
+                        #[cfg(debug_assertions)]
+                        funding_kill_checkpoint(FUNDING_CHECKPOINT_AFTER_COLOR);
                         Ok((res.psbt, Some(batch_transfer_idx), sender_record))
                     },
                 )
