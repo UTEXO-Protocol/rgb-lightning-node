@@ -123,6 +123,10 @@ const VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST: &str = "trusted_no_broadcast";
 /// Expiry applied when the caller does not specify one (rgb-lib no longer accepts "no expiry").
 pub(crate) const DEFAULT_RGB_TRANSFER_EXPIRATION_SECS: u64 = 86400;
 
+fn default_expiration_timestamp() -> u64 {
+    get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct AddressResponse {
     pub(crate) address: String,
@@ -1280,6 +1284,7 @@ pub(crate) struct RgbAllocation {
 pub(crate) struct RgbInvoiceRequest {
     pub(crate) asset_id: Option<String>,
     pub(crate) assignment: Option<Assignment>,
+    #[serde(default = "default_expiration_timestamp")]
     pub(crate) expiration_timestamp: u64,
     pub(crate) min_confirmations: u8,
     pub(crate) witness: bool,
@@ -1335,6 +1340,7 @@ pub(crate) struct SendRgbRequest {
     pub(crate) donation: bool,
     pub(crate) fee_rate: u64,
     pub(crate) min_confirmations: u8,
+    #[serde(default = "default_expiration_timestamp")]
     pub(crate) expiration_timestamp: u64,
     pub(crate) recipient_map: HashMap<String, Vec<Recipient>>,
 }
@@ -5315,11 +5321,9 @@ pub(crate) async fn send_rgb(
                 APIError::from(e)
             })?;
             let unlocked_state_copy = unlocked_state.clone();
-            tokio::task::spawn_blocking(move || {
-                unlocked_state_copy.rgb_send_end_db_update_only(signed_psbt)
-            })
-            .await
-            .unwrap()?
+            tokio::task::spawn_blocking(move || unlocked_state_copy.rgb_send_end(signed_psbt))
+                .await
+                .unwrap()?
         } else {
             let unlocked_state_copy = unlocked_state.clone();
             tokio::task::spawn_blocking(move || {

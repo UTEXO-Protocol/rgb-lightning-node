@@ -1786,11 +1786,9 @@ pub(crate) async fn send_rgb(
             APIError::from(e)
         })?;
         let unlocked_state_copy = unlocked_state.clone();
-        tokio::task::spawn_blocking(move || {
-            unlocked_state_copy.rgb_send_end_db_update_only(signed_psbt)
-        })
-        .await
-        .unwrap()?
+        tokio::task::spawn_blocking(move || unlocked_state_copy.rgb_send_end(signed_psbt))
+            .await
+            .unwrap()?
     } else {
         let unlocked_state_copy = unlocked_state.clone();
         tokio::task::spawn_blocking(move || {
@@ -3415,7 +3413,9 @@ pub(crate) async fn refresh_transfers(
             (
                 idx,
                 RefreshedTransferData {
-                    updated_status: transfer.updated_status.map(|s| format!("{s:?}")),
+                    updated_status: transfer
+                        .updated_status
+                        .map(|s| format!("{:?}", to_transfer_status(s))),
                     failure: transfer.failure.map(|e| RefreshFailureData {
                         name: crate::error::error_name(&e),
                         message: e.to_string(),
@@ -4355,20 +4355,24 @@ fn to_transaction_data(tx: rgb_lib::wallet::Transaction) -> TransactionData {
     }
 }
 
+fn to_transfer_status(status: rgb_lib::TransferStatus) -> TransferStatus {
+    match status {
+        rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
+        rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
+        rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
+        rgb_lib::TransferStatus::WaitingConfirmations => TransferStatus::WaitingConfirmations,
+        rgb_lib::TransferStatus::WaitingBroadcast => TransferStatus::WaitingBroadcast,
+        rgb_lib::TransferStatus::Settled => TransferStatus::Settled,
+        rgb_lib::TransferStatus::Failed => TransferStatus::Failed,
+    }
+}
+
 fn to_transfer_data(transfer: rgb_lib::wallet::Transfer) -> TransferData {
     TransferData {
         idx: transfer.idx,
         created_at: transfer.created_at,
         updated_at: transfer.updated_at,
-        status: match transfer.status {
-            rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
-            rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
-            rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
-            rgb_lib::TransferStatus::WaitingConfirmations => TransferStatus::WaitingConfirmations,
-            rgb_lib::TransferStatus::WaitingBroadcast => TransferStatus::WaitingBroadcast,
-            rgb_lib::TransferStatus::Settled => TransferStatus::Settled,
-            rgb_lib::TransferStatus::Failed => TransferStatus::Failed,
-        },
+        status: to_transfer_status(transfer.status),
         requested_assignment: transfer.requested_assignment,
         assignments: transfer.assignments,
         kind: match transfer.kind {

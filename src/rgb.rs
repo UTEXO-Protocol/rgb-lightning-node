@@ -495,6 +495,12 @@ impl UnlockedAppState {
         self.rgb_wallet_wrapper.send_btc_end(signed_psbt)
     }
 
+    pub(crate) fn rgb_send_end(&self, signed_psbt: String) -> Result<OperationResult, RgbLibError> {
+        self.rgb_wallet_wrapper.send_end(signed_psbt)
+    }
+
+    /// Broadcast + DB bookkeeping only, without generating or posting consignments. Only for
+    /// channel funding, where the consignment has already been sent to the peer over p2p.
     pub(crate) fn rgb_send_end_db_update_only(
         &self,
         signed_psbt: String,
@@ -1020,6 +1026,10 @@ impl RgbLibWalletWrapper {
 
     pub(crate) fn send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {
         self.get_rgb_wallet().send_btc_end(self.online, signed_psbt)
+    }
+
+    pub(crate) fn send_end(&self, signed_psbt: String) -> Result<OperationResult, RgbLibError> {
+        self.get_rgb_wallet().send_end(self.online, signed_psbt)
     }
 
     pub(crate) fn send_end_db_update_only(

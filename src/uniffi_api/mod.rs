@@ -101,6 +101,12 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
         ldk_peer_listening_port: request.ldk_peer_listening_port,
         network,
         max_media_upload_size_mb: request.max_media_upload_size_mb,
+        // `SdkInitRequest` doesn't expose the p2p transfer limits yet; extending the FFI surface
+        // (and the mobile bindings) is a separate change, so embedders get the defaults.
+        max_aggregated_media_size_per_channel_mb:
+            crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+        max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+        max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
         root_public_key: None,
         enable_virtual_channels_v0: request.enable_virtual_channels_v0.unwrap_or(false),
         virtual_peer_pubkeys: request.virtual_peer_pubkeys.unwrap_or_default(),

@@ -1627,4 +1627,6 @@ async fn virtual_open_sends_asset_media_over_p2p() {
     let media_hex = get_asset_media(client_node_address, &digest).await;
     let file_bytes = std::fs::read(file_path).unwrap();
     assert_eq!(hex_str_to_vec(&media_hex).unwrap(), file_bytes);
+
+    shutdown(&[host_node_address, client_node_address]).await;
 }

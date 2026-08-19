@@ -2028,40 +2028,57 @@ async fn handle_ldk_events(
                     }]};
                     let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
                     let unlocked_state_copy = unlocked_state.clone();
-                    let res = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                        let res = unlocked_state_copy
-                            .rgb_send_begin(
-                                recipient_map,
-                                true,
-                                fee_rate_sat_vb,
-                                0,
-                                get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS,
-                                false,
-                                Some(0),
-                            )
-                            .map_err(|e| e.to_string())?;
-                        let fascia_str = fs::read_to_string(&res.details.fascia_path)
-                            .map_err(|e| e.to_string())?;
-                        let fascia: Fascia =
-                            serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
-                        unlocked_state_copy
-                            .rgb_consume_fascia(fascia, None)
-                            .map_err(|e| e.to_string())?;
-                        unlocked_state_copy
-                            .rgb_create_consignments(res.psbt.clone())
-                            .map_err(|e| e.to_string())?;
-                        Ok(res.psbt)
-                    })
+                    let res = tokio::task::spawn_blocking(
+                        move || -> Result<(String, Option<i32>), String> {
+                            let res = unlocked_state_copy
+                                .rgb_send_begin(
+                                    recipient_map,
+                                    true,
+                                    fee_rate_sat_vb,
+                                    0,
+                                    get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS,
+                                    false,
+                                    Some(0),
+                                )
+                                .map_err(|e| e.to_string())?;
+                            let fascia_str = fs::read_to_string(&res.details.fascia_path)
+                                .map_err(|e| e.to_string())?;
+                            let fascia: Fascia =
+                                serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
+                            unlocked_state_copy
+                                .rgb_consume_fascia(fascia, None)
+                                .map_err(|e| e.to_string())?;
+                            unlocked_state_copy
+                                .rgb_create_consignments(res.psbt.clone())
+                                .map_err(|e| e.to_string())?;
+                            Ok((res.psbt, res.batch_transfer_idx))
+                        },
+                    )
                     .await
                     .unwrap();
 
-                    let unsigned_psbt = match res {
-                        Ok(psbt) => psbt,
+                    let (unsigned_psbt, batch_transfer_idx) = match res {
+                        Ok(result) => result,
                         Err(e) => {
                             tracing::error!("cannot prepare virtual funding transfer: {e}");
                             return Err(ReplayEvent());
                         }
                     };
+
+                    // Record the batch transfer index so a failed open can fail the pending
+                    // transfer and release the locked assets (see handle_open_chan_fail).
+                    if let Some(mut rgb_info) = get_rgb_channel_info_optional(
+                        &temporary_channel_id,
+                        true,
+                        unlocked_state.kv_store.as_ref(),
+                    ) {
+                        rgb_info.batch_transfer_idx = batch_transfer_idx;
+                        unlocked_state.kv_store.write_rgb_channel_info(
+                            &temporary_channel_id.0.as_hex().to_string(),
+                            &rgb_info,
+                            true,
+                        );
+                    }
 
                     let signed_psbt = match unlocked_state.rgb_sign_psbt(unsigned_psbt) {
                         Ok(psbt) => psbt,

@@ -31,6 +31,10 @@ pub fn mock_locked_app_state() -> TestAppState {
             ldk_data_dir: path.join(".ldk"),
             logger: Arc::new(FilesystemLogger::new(path)),
             max_media_upload_size_mb: 1,
+            max_aggregated_media_size_per_channel_mb:
+                crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+            max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+            max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
             enable_virtual_channels_v0: false,
             virtual_peer_pubkeys: vec![],
             database: RwLock::new(Arc::new(database)),

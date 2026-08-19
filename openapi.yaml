@@ -3691,7 +3691,6 @@ components:
       required:
         - min_confirmations
         - witness
-        - expiration_timestamp
         - transport_endpoints
       properties:
         min_confirmations:
@@ -3836,7 +3835,6 @@ components:
         - fee_rate
         - min_confirmations
         - recipient_map
-        - expiration_timestamp
       properties:
         donation:
           type: boolean
