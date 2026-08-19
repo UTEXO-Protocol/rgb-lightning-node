@@ -42,7 +42,7 @@ use lightning::rgb_utils::{
     RgbKvStoreExt, RGB_COMMITMENT_FASCIA_NS, RGB_PAYMENT_INFO_INBOUND_NS,
     RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
-use lightning::rgb_utils::{RgbPaymentInfo, STATIC_BLINDING};
+use lightning::rgb_utils::{RgbPaymentInfo, TransferInfo, STATIC_BLINDING};
 use lightning::routing::gossip;
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::DefaultRouter;
@@ -3757,24 +3757,30 @@ impl RgbOutputSpender {
             let txid = outpoint.txid;
             let txid_str = txid.to_string();
 
-            let transfer_info_exists = self
-                .kv_store
-                .read(
-                    RGB_PRIMARY_NS,
-                    lightning::rgb_utils::RGB_TRANSFER_INFO_NS,
-                    &txid_str,
-                )
-                .is_ok();
-            if !transfer_info_exists {
+            let Ok(transfer_info_bytes) = self.kv_store.read(
+                RGB_PRIMARY_NS,
+                lightning::rgb_utils::RGB_TRANSFER_INFO_NS,
+                &txid_str,
+            ) else {
                 continue;
-            }
-            let transfer_info = self.kv_store.read_rgb_transfer_info(&txid_str);
-            // an output missing from the map carries no asset: sweep it as vanilla
-            let amt_rgb = transfer_info
-                .output_map
-                .get(&outpoint.index.into())
-                .copied()
-                .unwrap_or(0);
+            };
+            // decode here rather than via read_rgb_transfer_info: that one panics, and we hold
+            // the txes lock, so a bad record would poison it and brick every later sweep
+            let transfer_info: TransferInfo = bincode::deserialize(&transfer_info_bytes)
+                .map_err(|e| format!("cannot decode transfer info for {txid_str}: {e}"))?;
+            let amt_rgb = match transfer_info.output_map.get(&outpoint.index.into()) {
+                Some(amt) => *amt,
+                // an output missing from the map carries no asset: sweep it as vanilla
+                None if transfer_info.output_map.is_empty() => 0,
+                None => {
+                    tracing::error!(
+                        txid = txid_str,
+                        vout = outpoint.index,
+                        "spendable output absent from a non-empty transfer info map; sweeping as vanilla"
+                    );
+                    0
+                }
+            };
             if amt_rgb == 0 {
                 continue;
             }
