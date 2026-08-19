@@ -3736,7 +3736,7 @@ impl RgbOutputSpender {
         let mut hasher = DefaultHasher::new();
         descriptors.hash(&mut hasher);
         let descriptors_hash = hasher.finish();
-        let mut txes = self.txes.lock().unwrap();
+        let mut txes = self.txes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = txes.get(&descriptors_hash) {
             return Ok(tx.clone());
         }
@@ -3929,7 +3929,9 @@ impl RgbOutputSpender {
             }))
             .map_err(|e| format!("consignment task failed: {e}"))?
             .map_err(|e| format!("cannot provide consignment: {e}"))?;
-            fs::remove_file(&consignment_path).unwrap();
+            if let Err(e) = fs::remove_file(&consignment_path) {
+                tracing::warn!(error = %e, "cannot remove consignment file, leaving it behind");
+            }
         }
 
         txes.insert(descriptors_hash, spending_tx.clone());
