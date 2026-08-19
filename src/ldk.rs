@@ -187,6 +187,8 @@ use crate::utils::{
 };
 
 const RGB_TRANSFER_CHAN_EXPIRATION_SECS: u64 = 86400;
+// don't reuse a cached sweep receive this close to its expiration
+const RGB_RECEIVE_REUSE_MARGIN_SECS: u64 = 3600;
 const VIRTUAL_CHANNEL_DOMAIN_SEPARATOR: &[u8] = b"rln_virtual_channels_v0";
 
 pub(crate) fn virtual_channel_synthetic_outpoint(
@@ -1186,6 +1188,8 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 >;
 
 pub(crate) type OutputSpenderTxes = LdkHashMap<u64, bitcoin::Transaction>;
+// (descriptors hash, contract) -> (recipient id, expiration)
+type SweepRecipients = HashMap<(u64, ContractId), (String, u64)>;
 
 pub(crate) struct RgbOutputSpender {
     static_state: Arc<StaticState>,
@@ -1193,6 +1197,9 @@ pub(crate) struct RgbOutputSpender {
     signer: Arc<dyn RlnKeysInterface<EcdsaSigner = DynRlnChannelSigner>>,
     kv_store: Arc<SyncedKvStore>,
     txes: Arc<Mutex<OutputSpenderTxes>>,
+    // receives issued for an in-flight sweep, reused across retries so a repeatedly failing sweep
+    // does not leave a new receive slot behind on every attempt
+    sweep_recipients: Arc<Mutex<SweepRecipients>>,
 }
 
 // The sweeper store type is shared with the background processor's persister
@@ -3809,17 +3816,33 @@ impl RgbOutputSpender {
                 recipient_id.clone()
             } else {
                 new_asset = true;
-                let receive_data = self
-                    .rgb_wallet_wrapper
-                    .witness_receive(
-                        None,
-                        Assignment::Any,
-                        get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS,
-                        vec![],
-                        0,
-                    )
-                    .map_err(|e| format!("cannot get a witness receive script: {e}"))?;
-                let script_pubkey = script_buf_from_recipient_id(receive_data.recipient_id.clone())
+                let cache_key = (descriptors_hash, contract_id);
+                let cached = self
+                    .sweep_recipients
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&cache_key)
+                    .filter(|(_, expiration)| {
+                        get_current_timestamp() + RGB_RECEIVE_REUSE_MARGIN_SECS < *expiration
+                    })
+                    .map(|(recipient_id, _)| recipient_id.clone());
+                let recipient_id = match cached {
+                    Some(recipient_id) => recipient_id,
+                    None => {
+                        let expiration =
+                            get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS;
+                        let receive_data = self
+                            .rgb_wallet_wrapper
+                            .witness_receive(None, Assignment::Any, expiration, vec![], 0)
+                            .map_err(|e| format!("cannot get a witness receive script: {e}"))?;
+                        self.sweep_recipients
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(cache_key, (receive_data.recipient_id.clone(), expiration));
+                        receive_data.recipient_id
+                    }
+                };
+                let script_pubkey = script_buf_from_recipient_id(recipient_id.clone())
                     .map_err(|e| format!("invalid sweep recipient id: {e}"))?
                     .ok_or_else(|| s!("sweep recipient id has no script"))?;
                 txouts.push(TxOut {
@@ -3828,7 +3851,7 @@ impl RgbOutputSpender {
                     ),
                     script_pubkey,
                 });
-                receive_data.recipient_id
+                recipient_id
             };
 
             asset_info
@@ -3944,6 +3967,10 @@ impl RgbOutputSpender {
             txes.remove(&descriptors_hash);
             return Err(format!("cannot persist output spender txes: {e}"));
         }
+        self.sweep_recipients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(hash, _), _| *hash != descriptors_hash);
 
         Ok(spending_tx)
     }
@@ -5418,6 +5445,7 @@ pub(crate) async fn start_ldk(
         signer: signer_for_output_spender,
         kv_store: kv_store.clone(),
         txes,
+        sweep_recipients: Arc::new(Mutex::new(HashMap::new())),
     });
     let (sweeper_best_block, output_sweeper) = match kv_store.read(
         OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
