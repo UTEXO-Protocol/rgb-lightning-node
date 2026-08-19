@@ -3343,6 +3343,7 @@ mod invoice;
 mod issue;
 mod lock_unlock_changepassword;
 mod missing_acceptor;
+mod mnemonic_crypto;
 mod multi_hop;
 mod multi_open_close;
 mod open_after_double_send;

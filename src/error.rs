@@ -68,6 +68,9 @@ pub enum APIError {
     #[error("Consignment not found")]
     ConsignmentNotFound,
 
+    #[error("The stored mnemonic is corrupted: {0}")]
+    CorruptedMnemonic(String),
+
     #[error("External signer is required for this operation")]
     ExternalSignerRequired,
 
@@ -547,7 +550,8 @@ impl From<RgbLibError> for APIError {
 impl IntoResponse for APIError {
     fn into_response(self) -> Response {
         let (status, error, name) = match self {
-            APIError::FailedClosingChannel(_)
+            APIError::CorruptedMnemonic(_)
+            | APIError::FailedClosingChannel(_)
             | APIError::FailedInvoiceCreation(_)
             | APIError::FailedIssuingAsset(_)
             | APIError::FailedLoadingChannelState(_)

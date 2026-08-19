@@ -14,6 +14,7 @@ mod bitcoind;
 mod chain_backend;
 mod config;
 mod core_types;
+mod crypto;
 mod custom_msg_rpc;
 mod database;
 mod disk;

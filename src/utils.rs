@@ -20,7 +20,6 @@ use lightning::{
     util::ser::{Writeable, Writer},
 };
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
-use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
 use rln_migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
@@ -39,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::asset_link::AssetLinkMessageHandler;
 use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
+use crate::crypto::{decrypt_mnemonic, encrypt_mnemonic};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::rgb_file_transfer::RgbFileTransferHandler;
@@ -457,15 +457,12 @@ pub(crate) fn check_password_validity(
     database: &DatabaseConnection,
 ) -> Result<Mnemonic, APIError> {
     let db = crate::database::RlnDatabase::new(database.clone());
-    if let Some(mnemonic_record) = db.get_mnemonic()? {
-        let mcrypt = new_magic_crypt!(password, 256);
-        let mnemonic_str = mcrypt
-            .decrypt_base64_to_string(mnemonic_record.encrypted_mnemonic)
-            .map_err(|_| APIError::WrongPassword)?;
-        Ok(Mnemonic::from_str(&mnemonic_str).expect("valid mnemonic"))
-    } else {
-        Err(APIError::NotInitialized)
-    }
+    let Some(mnemonic_record) = db.get_mnemonic()? else {
+        return Err(APIError::NotInitialized);
+    };
+    let mnemonic_str = decrypt_mnemonic(password, &mnemonic_record.encrypted_mnemonic)?;
+    Mnemonic::from_str(&mnemonic_str)
+        .map_err(|e| APIError::CorruptedMnemonic(format!("invalid mnemonic: {e}")))
 }
 
 pub(crate) fn check_channel_id(channel_id_str: &str) -> Result<ChannelId, APIError> {
@@ -533,8 +530,7 @@ pub(crate) fn encrypt_and_save_mnemonic(
     mnemonic: String,
     database: &DatabaseConnection,
 ) -> Result<(), APIError> {
-    let mcrypt = new_magic_crypt!(password, 256);
-    let encrypted_mnemonic = mcrypt.encrypt_str_to_base64(mnemonic);
+    let encrypted_mnemonic = encrypt_mnemonic(&password, &mnemonic)?;
     let db = crate::database::RlnDatabase::new(database.clone());
     db.save_mnemonic(encrypted_mnemonic)?;
     tracing::info!("Saved wallet mnemonic");
