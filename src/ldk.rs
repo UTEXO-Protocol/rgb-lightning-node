@@ -3934,10 +3934,16 @@ impl RgbOutputSpender {
             }
         }
 
+        // persist before publishing to the in-memory map: a failed write must leave no cached tx,
+        // or the early return above would hand back a broadcast tx that was never persisted
         txes.insert(descriptors_hash, spending_tx.clone());
-        self.kv_store
+        if let Err(e) = self
+            .kv_store
             .write("", "", OUTPUT_SPENDER_TXES_KEY, txes.encode())
-            .map_err(|e| format!("cannot persist output spender txes: {e}"))?;
+        {
+            txes.remove(&descriptors_hash);
+            return Err(format!("cannot persist output spender txes: {e}"));
+        }
 
         Ok(spending_tx)
     }
