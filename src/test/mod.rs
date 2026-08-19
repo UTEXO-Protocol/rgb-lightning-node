@@ -39,8 +39,9 @@ use crate::disk::LDK_LOGS_FILE;
 use crate::error::{APIError, APIErrorResponse};
 use crate::kv_store::SeaOrmKvStore;
 use crate::ldk::{
-    InboundPaymentInfoStorage, InvoiceType, HELD_PAYMENT_CLAIMABLE_COUNT,
-    HOLD_PAYMENT_CLAIMABLE_ON_NODE, IGNORE_INBOUND_CHANNELS_ON_NODE, INBOUND_PAYMENTS_KEY,
+    InboundPaymentInfoStorage, InvoiceType, FORCE_PUSH_ASSET_AMOUNT_ON_NODE,
+    HELD_PAYMENT_CLAIMABLE_COUNT, HOLD_PAYMENT_CLAIMABLE_ON_NODE, IGNORE_INBOUND_CHANNELS_ON_NODE,
+    INBOUND_PAYMENTS_KEY,
 };
 #[cfg(feature = "vss")]
 use crate::routes::VssClearFenceRequest;
@@ -2028,6 +2029,9 @@ async fn open_channel_with_retry(
     }
 }
 
+/// NOT the upstream helper of the same name: this one waits for the channel to get funded and
+/// returns a retryable FORBIDDEN if it doesn't. Upstream's `open_channel_raw` is our
+/// `open_channel_request_raw`, which is what tests expecting a failed open must use.
 #[allow(clippy::too_many_arguments)]
 async fn open_channel_raw(
     node_address: SocketAddr,
@@ -3316,6 +3320,7 @@ mod openchannel_push_asset_amount;
 mod out_of_band;
 mod pagination_filters;
 mod payment;
+mod push_asset_amount_above_chan_amt;
 mod refuse_high_fees;
 #[cfg(feature = "vss")]
 mod remote_first_kv;
