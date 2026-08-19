@@ -460,6 +460,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetChannelIdResponse'
+  /getconsignment:
+    post:
+      tags:
+        - RGB
+      summary: Get a send consignment
+      description: Get the hex string of the consignment bytes for a send transfer,
+        identified by its asset ID and txid. Useful to hand the consignment to
+        the counterparty out-of-band when the node filesystem is not accessible
+        from the API caller.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GetConsignmentRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetConsignmentResponse'
   /getpayment:
     post:
       tags:
@@ -973,6 +994,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PostAssetMediaResponse'
+  /provideoutofbandack:
+    post:
+      tags:
+        - RGB
+      summary: Provide an out-of-band ACK
+      description: Record the out-of-band ACK received from a recipient of an outgoing transfer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProvideOutOfBandAckRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvideOutOfBandAckResponse'
+  /provideoutofbandconsignment:
+    post:
+      tags:
+        - RGB
+      summary: Provide an out-of-band consignment
+      description: Provide a consignment received out-of-band, as a binary upload,
+        along with any media files it references (one `media` field per file)
+        The consignment is validated and the matching incoming transfer(s) are processed.
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ProvideOutOfBandConsignmentRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvideOutOfBandConsignmentResponse'
   /refreshtransfers:
     post:
       tags:
@@ -990,7 +1049,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/EmptyResponse'
+                $ref: '#/components/schemas/RefreshResponse'
   /restore:
     post:
       tags:
@@ -2247,6 +2306,7 @@ components:
         - assignment
         - network
         - transport_endpoints
+        - unknown_query_params
       properties:
         recipient_id:
           type: string
@@ -2279,6 +2339,11 @@ components:
           items:
             type: string
             example: rpcs://proxy.iriswallet.com/0.2/json-rpc
+        unknown_query_params:
+          type: object
+          additionalProperties:
+            type: string
+          example: {}
     DecodeSwapstringRequest:
       type: object
       required:
@@ -2414,6 +2479,26 @@ components:
         channel_id:
           type: string
           example: 8129afe1b1d7cf60d5e1bf4c04b09bec925ed4df5417ceee0484e24f816a105a
+    GetConsignmentRequest:
+      type: object
+      required:
+        - asset_id
+        - txid
+      properties:
+        asset_id:
+          type: string
+          example: rgb:2dkSTbr-jFhznbPmo-TQafzswCN-av4gTsJjX-ttx6CNou5-M98k8Zt
+        txid:
+          type: string
+          example: 33cf3e42fb1c6faa0d47e6a498a9d4e5c56e8a06ea0d295c6d90e2b6c85f7a1e
+    GetConsignmentResponse:
+      type: object
+      required:
+        - bytes_hex
+      properties:
+        bytes_hex:
+          type: string
+          example: 52474200
     GetPaymentRequest:
       type: object
       required:
@@ -3312,6 +3397,23 @@ components:
         temporary_channel_id:
           type: string
           example: a8b60c8ce3067b5fc881d4831323e24751daec3b64353c8df3205ec5d838f1c5
+    OperationResult:
+      type: object
+      required:
+        - txid
+        - batch_transfer_idx
+        - entropy
+      properties:
+        txid:
+          type: string
+          example: 33cf3e42fb1c6faa0d47e6a498a9d4e5c56e8a06ea0d295c6d90e2b6c85f7a1e
+        batch_transfer_idx:
+          type: integer
+          example: 3
+        entropy:
+          type: integer
+          format: int64
+          example: 12345678901234567890
     PaymentType:
       type: string
       enum:
@@ -3412,6 +3514,43 @@ components:
           items:
             type: integer
           example: [6, 36, 87, 13, 5, 17]
+    ProvideOutOfBandAckRequest:
+      type: object
+      required:
+        - recipient_id
+      properties:
+        recipient_id:
+          type: string
+          example: utxob:2Bwv2Vx-t7VD8XjTh-9EMbpBFKh-J5HDFY4pj-eywu4tKKk-hjTvzJa
+    ProvideOutOfBandAckResponse:
+      type: object
+      properties:
+        operation:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/OperationResult'
+    ProvideOutOfBandConsignmentRequest:
+      type: object
+      required:
+        - file
+      properties:
+        file:
+          type: string
+          format: binary
+        media:
+          type: array
+          items:
+            type: string
+            format: binary
+    ProvideOutOfBandConsignmentResponse:
+      type: object
+      required:
+        - transfers
+      properties:
+        transfers:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/RefreshedTransfer'
     Recipient:
       type: object
       required:
@@ -3438,6 +3577,37 @@ components:
       enum:
         - Blind
         - Witness
+    RefreshedTransfer:
+      type: object
+      properties:
+        updated_status:
+          nullable: true
+          type: string
+          enum:
+            - Initiated
+            - WaitingCounterparty
+            - WaitingSafeHeight
+            - WaitingConfirmations
+            - WaitingBroadcast
+            - Settled
+            - Failed
+          example: WaitingBroadcast
+        failure:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/RefreshFailure'
+    RefreshFailure:
+      type: object
+      required:
+        - name
+        - message
+      properties:
+        name:
+          type: string
+          example: InvalidConsignment
+        message:
+          type: string
+          example: Invalid consignment
     RefreshFilter:
       type: object
       required:
@@ -3466,6 +3636,15 @@ components:
         skip_sync:
           type: boolean
           example: false
+    RefreshResponse:
+      type: object
+      required:
+        - transfers
+      properties:
+        transfers:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/RefreshedTransfer'
     RefreshTransferStatus:
       type: string
       enum:
@@ -3512,6 +3691,8 @@ components:
       required:
         - min_confirmations
         - witness
+        - expiration_timestamp
+        - transport_endpoints
       properties:
         min_confirmations:
           type: integer
@@ -3527,19 +3708,24 @@ components:
             - type: 'null'
           example: null
         expiration_timestamp:
-          type:
-            - integer
-            - 'null'
-          example: null
+          type: integer
+          example: 1695811760
         witness:
           type: boolean
           example: false
+        transport_endpoints:
+          type: array
+          items:
+            type: string
+          example:
+            - rpc://127.0.0.1:3000/json-rpc
     RgbInvoiceResponse:
       type: object
       required:
         - recipient_id
         - invoice
         - batch_transfer_idx
+        - expiration_timestamp
       properties:
         recipient_id:
           type: string
@@ -3548,9 +3734,7 @@ components:
           type: string
           example: rgb:~/~/~/bcrt:utxob:cbgHUJ4e-7QyKY4U-Jsj5AZw-oI0gxZh-7fxQY2_-tFFUAZN-4CgpX?expiry=1695811760&endpoints=rpc://127.0.0.1:3000/json-rpc
         expiration_timestamp:
-          type:
-            - integer
-            - 'null'
+          type: integer
           example: 1695811760
         batch_transfer_idx:
           type: integer
@@ -3652,6 +3836,7 @@ components:
         - fee_rate
         - min_confirmations
         - recipient_map
+        - expiration_timestamp
       properties:
         donation:
           type: boolean
@@ -3663,10 +3848,8 @@ components:
           type: integer
           example: 1
         expiration_timestamp:
-          type:
-            - integer
-            - 'null'
-          example: null
+          type: integer
+          example: 1695811760
         recipient_map:
           type: object
           additionalProperties:
@@ -4028,6 +4211,7 @@ components:
         - WaitingCounterparty
         - WaitingSafeHeight
         - WaitingConfirmations
+        - WaitingBroadcast
         - Settled
         - Failed
     TransferTransportEndpoint:
@@ -4155,6 +4339,7 @@ components:
         - btc_amount
         - colorable
         - exists
+        - derivation_index
       properties:
         outpoint:
           type: string
@@ -4168,6 +4353,11 @@ components:
         exists:
           type: boolean
           example: true
+        derivation_index:
+          type:
+            - integer
+            - 'null'
+          example: 42
     WitnessData:
       type: object
       required:

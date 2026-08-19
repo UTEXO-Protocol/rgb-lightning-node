@@ -23,6 +23,7 @@ use crate::ldk::{
 #[cfg(feature = "vss")]
 use crate::ldk::{derive_vss_identity, derive_vss_identity_from_key_source};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
+use crate::routes::DEFAULT_RGB_TRANSFER_EXPIRATION_SECS;
 use crate::signer::{
     read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
     write_key_source_file, BootstrapData, KeySourceFile, SUPPORTED_SIGNER_API_LEVEL,
@@ -81,7 +82,7 @@ use rgb_lib::wallet::{
 use rgb_lib::{
     bdk_wallet::keys::bip39::Mnemonic,
     keys::{generate_keys, WitnessVersion},
-    ContractId, RgbTransport,
+    ContractId,
 };
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
@@ -447,6 +448,20 @@ pub(crate) struct FailTransfersData {
     pub(crate) transfers_changed: bool,
 }
 
+pub(crate) struct RefreshFailureData {
+    pub(crate) name: String,
+    pub(crate) message: String,
+}
+
+pub(crate) struct RefreshedTransferData {
+    pub(crate) updated_status: Option<String>,
+    pub(crate) failure: Option<RefreshFailureData>,
+}
+
+pub(crate) struct RefreshTransfersData {
+    pub(crate) transfers: HashMap<i32, RefreshedTransferData>,
+}
+
 pub(crate) struct CreateUtxosRequestData {
     pub(crate) up_to: bool,
     pub(crate) num: Option<u8>,
@@ -773,6 +788,7 @@ pub(crate) enum TransferStatus {
     WaitingCounterparty,
     WaitingSafeHeight,
     WaitingConfirmations,
+    WaitingBroadcast,
     Settled,
     Failed,
 }
@@ -1752,7 +1768,7 @@ pub(crate) async fn send_rgb(
                 donation,
                 fee_rate,
                 min_confirmations,
-                None,
+                get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS,
                 false,
                 None,
             )
@@ -1770,13 +1786,21 @@ pub(crate) async fn send_rgb(
             APIError::from(e)
         })?;
         let unlocked_state_copy = unlocked_state.clone();
-        tokio::task::spawn_blocking(move || unlocked_state_copy.rgb_send_end(signed_psbt))
-            .await
-            .unwrap()?
+        tokio::task::spawn_blocking(move || {
+            unlocked_state_copy.rgb_send_end_db_update_only(signed_psbt)
+        })
+        .await
+        .unwrap()?
     } else {
         let unlocked_state_copy = unlocked_state.clone();
         tokio::task::spawn_blocking(move || {
-            unlocked_state_copy.rgb_send(recipient_map, donation, fee_rate, min_confirmations, None)
+            unlocked_state_copy.rgb_send(
+                recipient_map,
+                donation,
+                fee_rate,
+                min_confirmations,
+                get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS,
+            )
         })
         .await
         .unwrap()?
@@ -2735,9 +2759,11 @@ pub(crate) async fn rgb_invoice(
         None => RgbLibAssignment::Any,
     };
 
-    let expiration_timestamp = request
-        .duration_seconds
-        .map(|duration| get_current_timestamp() + u64::from(duration));
+    let expiration_timestamp = get_current_timestamp()
+        + request
+            .duration_seconds
+            .map(u64::from)
+            .unwrap_or(DEFAULT_RGB_TRANSFER_EXPIRATION_SECS);
     let receive_data = if request.witness {
         unlocked_state.rgb_witness_receive(
             request.asset_id,
@@ -2759,7 +2785,7 @@ pub(crate) async fn rgb_invoice(
     Ok(RgbInvoiceData {
         recipient_id: receive_data.recipient_id,
         invoice: receive_data.invoice,
-        expiration_timestamp: receive_data.expiration_timestamp.map(|t| t as i64),
+        expiration_timestamp: Some(receive_data.expiration_timestamp as i64),
         batch_transfer_idx: receive_data.batch_transfer_idx,
     })
 }
@@ -2959,13 +2985,13 @@ pub(crate) async fn open_channel(
         ..Default::default()
     };
 
-    let consignment_endpoint = if let Some((contract_id, asset_amount)) = &colored_info {
+    let rgb_asset = if let Some((contract_id, asset_amount)) = &colored_info {
         let balance = unlocked_state.rgb_get_asset_balance(*contract_id)?;
         let spendable_rgb_amount = balance.spendable;
         if *asset_amount > spendable_rgb_amount {
             return Err(APIError::InsufficientAssets);
         }
-        Some(RgbTransport::from_str(&unlocked_state.proxy_endpoint).unwrap())
+        Some((*contract_id, request.push_asset_amount))
     } else {
         None
     };
@@ -3006,7 +3032,7 @@ pub(crate) async fn open_channel(
                 true,
                 fee_rate_sat_vb,
                 min_channel_confirmations,
-                None,
+                get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS,
                 true,
                 Some(0),
             )
@@ -3045,6 +3071,7 @@ pub(crate) async fn open_channel(
                 local_rgb_amount: *asset_amount - push_amount,
                 remote_rgb_amount: push_amount,
                 batch_transfer_idx: None,
+                counterparty_knows_asset: false,
             };
             unlocked_state
                 .kv_store
@@ -3066,8 +3093,7 @@ pub(crate) async fn open_channel(
             0,
             temporary_channel_id,
             Some(config),
-            consignment_endpoint,
-            request.push_asset_amount,
+            rgb_asset,
             is_virtual_open,
         )
         .map_err(|e| {
@@ -3373,17 +3399,32 @@ pub(crate) async fn fail_transfers(
 pub(crate) async fn refresh_transfers(
     state: Arc<AppState>,
     request: RefreshTransfersRequestData,
-) -> Result<(), APIError> {
+) -> Result<RefreshTransfersData, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
     let unlocked_state_copy = unlocked_state.clone();
 
-    tokio::task::spawn_blocking(move || {
+    let refresh_result = tokio::task::spawn_blocking(move || {
         unlocked_state_copy.rgb_refresh(None, vec![], request.skip_sync)
     })
     .await
     .unwrap()?;
-    Ok(())
+    let transfers = refresh_result
+        .into_iter()
+        .map(|(idx, transfer)| {
+            (
+                idx,
+                RefreshedTransferData {
+                    updated_status: transfer.updated_status.map(|s| format!("{s:?}")),
+                    failure: transfer.failure.map(|e| RefreshFailureData {
+                        name: crate::error::error_name(&e),
+                        message: e.to_string(),
+                    }),
+                },
+            )
+        })
+        .collect();
+    Ok(RefreshTransfersData { transfers })
 }
 
 pub(crate) async fn maker_execute(
@@ -4324,6 +4365,7 @@ fn to_transfer_data(transfer: rgb_lib::wallet::Transfer) -> TransferData {
             rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
             rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
             rgb_lib::TransferStatus::WaitingConfirmations => TransferStatus::WaitingConfirmations,
+            rgb_lib::TransferStatus::WaitingBroadcast => TransferStatus::WaitingBroadcast,
             rgb_lib::TransferStatus::Settled => TransferStatus::Settled,
             rgb_lib::TransferStatus::Failed => TransferStatus::Failed,
         },
@@ -4389,7 +4431,7 @@ pub(crate) async fn list_transfers(
     }
     let filter = match asset_id {
         Some(asset_id) => rgb_lib::wallet::AssetFilter::Id(asset_id),
-        None => rgb_lib::wallet::AssetFilter::Any,
+        None => rgb_lib::wallet::AssetFilter::AnyOrNone,
     };
     Ok(unlocked_state
         .rgb_list_transfers(filter, txid)?
@@ -4537,6 +4579,10 @@ mod tests {
                 ldk_data_dir: storage_dir.join(".ldk"),
                 logger: Arc::new(FilesystemLogger::new(storage_dir)),
                 max_media_upload_size_mb: 1,
+                max_aggregated_media_size_per_channel_mb:
+                    crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+                max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+                max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
                 enable_virtual_channels_v0: false,
                 virtual_peer_pubkeys: vec![],
                 lsp_base_url: None,

@@ -85,7 +85,7 @@ interface SdkNode {
     [Throws=RlnError]
     SdkSendPaymentResponse sendpayment(SdkSendPaymentRequest request);
     [Throws=RlnError]
-    void refreshtransfers(SdkRefreshTransfersRequest request);
+    SdkRefreshTransfersResponse refreshtransfers(SdkRefreshTransfersRequest request);
     [Throws=RlnError]
     SdkFailTransfersResponse failtransfers(SdkFailTransfersRequest request);
     [Throws=RlnError]
@@ -666,6 +666,20 @@ dictionary SdkFailTransfersRequest {
 
 dictionary SdkFailTransfersResponse {
     boolean transfers_changed;
+};
+
+dictionary SdkRefreshFailure {
+    string name;
+    string message;
+};
+
+dictionary SdkRefreshedTransfer {
+    string? updated_status;
+    SdkRefreshFailure? failure;
+};
+
+dictionary SdkRefreshTransfersResponse {
+    record<i32, SdkRefreshedTransfer> transfers;
 };
 
 dictionary SdkCreateUtxosRequest {

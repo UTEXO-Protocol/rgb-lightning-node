@@ -25,6 +25,7 @@ use rgb_lightning_node::{
     RgbAllocation, RgbOutpoint, RgbRecipient, SdkAssetLinkRequest, SdkCloseChannelRequest,
     SdkCreateUtxosRequest, SdkDisconnectPeerRequest, SdkExternalSignerBootstrap,
     SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest, SdkIssueAssetCfaRequest,
+    SdkRefreshTransfersResponse,
     SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest, SdkIssueAssetUdaRequest, SdkKeysendRequest,
     SdkKeysendResponse, SdkMakerExecuteRequest, SdkMakerInitRequest, SdkMakerInitResponse,
     SdkOpenChannelRequest, SdkOpenChannelResponse, SdkPostAssetMediaRequest,
@@ -994,6 +995,46 @@ impl From<JsonRefreshTransfersRequest> for SdkRefreshTransfersRequest {
     fn from(j: JsonRefreshTransfersRequest) -> Self {
         SdkRefreshTransfersRequest {
             skip_sync: j.skip_sync,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshFailure {
+    pub name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshedTransfer {
+    pub updated_status: Option<String>,
+    pub failure: Option<JsonRefreshFailure>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshTransfersResponse {
+    pub transfers: std::collections::HashMap<i32, JsonRefreshedTransfer>,
+}
+
+impl From<SdkRefreshTransfersResponse> for JsonRefreshTransfersResponse {
+    fn from(r: SdkRefreshTransfersResponse) -> Self {
+        JsonRefreshTransfersResponse {
+            transfers: r
+                .transfers
+                .into_iter()
+                .map(|(idx, t)| {
+                    (
+                        idx,
+                        JsonRefreshedTransfer {
+                            updated_status: t.updated_status,
+                            failure: t.failure.map(|f| JsonRefreshFailure {
+                                name: f.name,
+                                message: f.message,
+                            }),
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 }

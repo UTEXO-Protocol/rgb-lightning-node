@@ -135,7 +135,7 @@ impl UniffiCustomTypeConverter for crate::TransportEndpoint {
     type Builtin = String;
 
     fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-        rgb_lib::RgbTransport::from_str(&val).map_err(|e| {
+        rgb_lib::wallet::TransportEndpoint::new(val.clone()).map_err(|e| {
             crate::RlnError::InvalidRequest(format!("invalid transport endpoint: {e}"))
         })?;
         Ok(crate::TransportEndpoint(val))

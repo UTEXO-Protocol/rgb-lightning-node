@@ -51,6 +51,10 @@ impl NodeHandle {
             ldk_peer_listening_port: config.ldk_peer_listening_port,
             network: config.network,
             max_media_upload_size_mb: config.max_media_upload_size_mb,
+            max_aggregated_media_size_per_channel_mb:
+                crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+            max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+            max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
             root_public_key: config.root_public_key,
             enable_virtual_channels_v0: config.enable_virtual_channels_v0,
             virtual_peer_pubkeys: config.virtual_peer_pubkeys,

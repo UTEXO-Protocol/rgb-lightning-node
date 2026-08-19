@@ -580,6 +580,20 @@ pub struct SdkFailTransfersResponse {
     pub transfers_changed: bool,
 }
 
+pub struct SdkRefreshFailure {
+    pub name: String,
+    pub message: String,
+}
+
+pub struct SdkRefreshedTransfer {
+    pub updated_status: Option<String>,
+    pub failure: Option<SdkRefreshFailure>,
+}
+
+pub struct SdkRefreshTransfersResponse {
+    pub transfers: std::collections::HashMap<i32, SdkRefreshedTransfer>,
+}
+
 pub struct SdkCreateUtxosRequest {
     pub up_to: bool,
     pub num: Option<u8>,

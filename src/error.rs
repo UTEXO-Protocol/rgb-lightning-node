@@ -50,8 +50,23 @@ pub enum APIError {
     #[error("Batch transfer cannot be set to failed status")]
     CannotFailBatchTransfer,
 
+    #[error("Cannot provide out-of-band ACK: {0}")]
+    CannotProvideOutOfBandAck(String),
+
+    #[error("Cannot provide out-of-band consignment: {0}")]
+    CannotProvideOutOfBandConsignment(String),
+
     #[error("Cannot call other APIs while node is changing state")]
     ChangingState,
+
+    #[error("Consignment file is empty")]
+    ConsignmentFileEmpty,
+
+    #[error("Consignment file has not been provided")]
+    ConsignmentFileNotProvided,
+
+    #[error("Consignment not found")]
+    ConsignmentNotFound,
 
     #[error("External signer is required for this operation")]
     ExternalSignerRequired,
@@ -170,6 +185,9 @@ pub enum APIError {
     #[error("Invalid channel ID")]
     InvalidChannelID,
 
+    #[error("Invalid consignment")]
+    InvalidConsignment,
+
     #[error("Invalid contract link: {0}")]
     InvalidContractLink(String),
 
@@ -232,9 +250,6 @@ pub enum APIError {
 
     #[error("Invalid precision: {0}")]
     InvalidPrecision(String),
-
-    #[error("Invalid proxy endpoint")]
-    InvalidProxyEndpoint,
 
     #[error("Invalid proxy protocol version: {0}")]
     InvalidProxyProtocol(String),
@@ -393,16 +408,16 @@ pub enum APIError {
     WrongPassword,
 }
 
+pub(crate) fn error_name(e: &impl std::error::Error) -> String {
+    format!("{e:?}")
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
 impl APIError {
-    fn name(&self) -> String {
-        format!("{self:?}")
-            .split('(')
-            .next()
-            .unwrap()
-            .split(" {")
-            .next()
-            .unwrap()
-            .to_string()
+    pub(crate) fn name(&self) -> String {
+        error_name(self)
     }
 }
 
@@ -433,6 +448,12 @@ impl From<RgbLibError> for APIError {
             RgbLibError::BatchTransferNotFound { .. } => APIError::BatchTransferNotFound,
             RgbLibError::CannotEstimateFees => APIError::CannotEstimateFees,
             RgbLibError::CannotFailBatchTransfer => APIError::CannotFailBatchTransfer,
+            RgbLibError::CannotProvideOutOfBandAck { details } => {
+                APIError::CannotProvideOutOfBandAck(details)
+            }
+            RgbLibError::CannotProvideOutOfBandConsignment { details } => {
+                APIError::CannotProvideOutOfBandConsignment(details)
+            }
             RgbLibError::EmptyFile { .. } => APIError::MediaFileEmpty,
             RgbLibError::FailedBdkSync { details } => APIError::FailedBdkSync(details),
             RgbLibError::FailedBroadcast { details } => APIError::FailedBroadcast(details),
@@ -542,6 +563,11 @@ impl IntoResponse for APIError {
                 self.name(),
             ),
             APIError::AnchorsRequired
+            | APIError::CannotProvideOutOfBandAck(_)
+            | APIError::CannotProvideOutOfBandConsignment(_)
+            | APIError::ConsignmentFileEmpty
+            | APIError::ConsignmentFileNotProvided
+            | APIError::ConsignmentNotFound
             | APIError::ExpiredSwapOffer
             | APIError::IncompleteRGBInfo
             | APIError::InvalidAddress(_)
@@ -555,6 +581,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidBackupPath
             | APIError::InvalidBiscuitToken
             | APIError::InvalidChannelID
+            | APIError::InvalidConsignment
             | APIError::InvalidContractLink(_)
             | APIError::InvalidRightOutpoint(_)
             | APIError::InvalidDescription(_)
@@ -619,7 +646,6 @@ impl IntoResponse for APIError {
             | APIError::InsufficientCapacity(_)
             | APIError::InsufficientFunds(_)
             | APIError::InvalidIndexer(_)
-            | APIError::InvalidProxyEndpoint
             | APIError::InvalidProxyProtocol(_)
             | APIError::InvoiceNotHodl
             | APIError::InvoiceSettlingInProgress

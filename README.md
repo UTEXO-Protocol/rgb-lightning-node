@@ -59,7 +59,6 @@ In order to operate, the node will need:
   - a bitcoind node (drives LDK chain sync via RPC), or
   - an esplora server (drives LDK chain sync over HTTP)
 - an indexer instance for RGB (electrum or esplora — forwarded to rgb-lib)
-- an [RGB proxy server] instance
 
 Once services are running, daemons can be started.
 Each daemon needs to be started in a separate shell with `rgb-lightning-node`,
@@ -99,9 +98,12 @@ To easily start the required services on a regtest network, run:
 ```
 
 This command will create the directories needed by the services, start the
-docker containers and mine some blocks. The test environment will always start
-in a clean state, taking down previous running services (if any) and
-re-creating data directories.
+docker containers and mine some blocks. The regtest docker stack also starts
+an RGB proxy on port 3000; it is only needed when using proxy-based
+`transport_endpoints` (see [RGB consignment transport](#rgb-consignment-transport)).
+
+The test environment will always start in a clean state, taking down previous
+running services (if any) and re-creating data directories.
 
 Here's an example of how to start three regtest nodes, each one using the
 shared regtest services provided by docker compose:
@@ -166,7 +168,6 @@ When unlocking regtest nodes use the following local services:
 - bitcoind_rpc_host: localhost
 - bitcoind_rpc_port: 18443
 - indexer_url: 127.0.0.1:50001
-- proxy_endpoint: rpc://127.0.0.1:3000/json-rpc
 
 To unlock a regtest nodes running in docker use the following local services:
 - bitcoind_rpc_username: user
@@ -174,7 +175,6 @@ To unlock a regtest nodes running in docker use the following local services:
 - bitcoind_rpc_host: bitcoind
 - bitcoind_rpc_port: 18443
 - indexer_url: electrs:50001
-- proxy_endpoint: rpc://proxy:3000/json-rpc
 
 ### Testnet
 
@@ -209,7 +209,6 @@ When unlocking testnet3 nodes you can use the following services:
 - bitcoind_rpc_host: electrum.iriswallet.com
 - bitcoind_rpc_port: 18332
 - indexer_url: ssl://electrum.iriswallet.com:50013
-- proxy_endpoint: rpcs://proxy.iriswallet.com/0.2/json-rpc
 
 #### Testnet4
 
@@ -254,6 +253,7 @@ The node currently exposes the following APIs:
 - `/failtransfers` (POST)
 - `/getassetmedia` (POST)
 - `/getchannelid` (POST)
+- `/getconsignment` (POST)
 - `/getpayment` (POST)
 - `/getswap` (POST)
 - `/inflate` (POST)
@@ -280,6 +280,8 @@ The node currently exposes the following APIs:
 - `/nodeinfo` (GET)
 - `/openchannel` (POST)
 - `/postassetmedia` (POST)
+- `/provideoutofbandack` (POST)
+- `/provideoutofbandconsignment` (POST)
 - `/refreshtransfers` (POST)
 - `/restore` (POST)
 - `/revoketoken` (POST)
@@ -406,6 +408,26 @@ token.
 The node exposes a `/revoketoken` endpoint for this purpose.
 Internally, the node extracts the token’s revocation identifiers and adds them
 to its revocation list. Every request checks this list before authenticating.
+
+### RGB consignment transport
+
+RGB consignments can be exchanged in three ways:
+
+- **Lightning P2P**: automatic during channel opening and LN RGB payments.
+- **Out-of-band**: pass empty `transport_endpoints` to `/rgbinvoice` and
+  `/sendrgb`, then exchange the consignment and ACK manually via
+  `/getconsignment`, `/provideoutofbandconsignment`, and
+  `/provideoutofbandack`. No extra service required.
+- **RGB proxy**: pass proxy URLs in `transport_endpoints`; consignments and
+  ACKs are relayed automatically by an [RGB proxy server]. Use
+  `/checkproxyendpoint` to validate a URL.
+
+Example proxy URLs (only when using proxy transport):
+
+| Environment | `transport_endpoints` |
+|-------------|-----------------------|
+| Local | `rpc://127.0.0.1:3000/json-rpc` |
+| Public | `rpcs://proxy.iriswallet.com/0.2/json-rpc` |
 
 ## Test
 

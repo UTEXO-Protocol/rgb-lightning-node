@@ -70,7 +70,7 @@ rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0
     "electrum",
     "esplora",
 ] }
-psrgbt = { package = "rgb-psbt-utils", version = "=0.11.1-rc.10", default-features = false }
+psrgbt = { package = "rgb-psbt-utils", version = "=0.11.1-rc.11", default-features = false }
 rln-migration = { path = "migration" }
 # Pinned fork/branch for RGB compatibility work; CI and clones do not require a sibling checkout.
 signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer.git", branch = "main", default-features = false }

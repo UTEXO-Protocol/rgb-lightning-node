@@ -874,15 +874,35 @@ impl SdkNode {
         })
     }
 
-    pub fn refreshtransfers(&self, request: SdkRefreshTransfersRequest) -> Result<(), RlnError> {
+    pub fn refreshtransfers(
+        &self,
+        request: SdkRefreshTransfersRequest,
+    ) -> Result<SdkRefreshTransfersResponse, RlnError> {
         let state = self.handle.app_state();
-        block_on_sdk(sdk::refresh_transfers(
+        let response = block_on_sdk(sdk::refresh_transfers(
             state,
             sdk::RefreshTransfersRequestData {
                 skip_sync: request.skip_sync,
             },
         ))?;
-        Ok(())
+        Ok(SdkRefreshTransfersResponse {
+            transfers: response
+                .transfers
+                .into_iter()
+                .map(|(idx, t)| {
+                    (
+                        idx,
+                        SdkRefreshedTransfer {
+                            updated_status: t.updated_status,
+                            failure: t.failure.map(|f| SdkRefreshFailure {
+                                name: f.name,
+                                message: f.message,
+                            }),
+                        },
+                    )
+                })
+                .collect(),
+        })
     }
 
     pub fn failtransfers(

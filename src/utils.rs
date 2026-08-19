@@ -41,6 +41,7 @@ use crate::asset_link::AssetLinkMessageHandler;
 use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
+use crate::rgb_file_transfer::RgbFileTransferHandler;
 use crate::signer::{
     read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment,
     RlnEntropySource,
@@ -156,6 +157,9 @@ pub(crate) struct StaticState {
     /// `remote-signer`-gated unlock path, so it is dead code when that feature is off.
     #[cfg_attr(not(feature = "remote-signer"), allow(dead_code))]
     pub(crate) remote_signer_listen_addr: Option<std::net::SocketAddr>,
+    pub(crate) max_aggregated_media_size_per_channel_mb: u16,
+    pub(crate) max_pending_consignments: usize,
+    pub(crate) max_media_files_per_channel: usize,
 }
 
 impl StaticState {
@@ -182,6 +186,7 @@ pub(crate) struct UnlockedAppState {
     pub(crate) kv_store: Arc<SyncedKvStore>,
     #[cfg(feature = "vss")]
     pub(crate) monitor_kv_store: Arc<crate::async_kv_store::RemoteFirstKvStore>,
+    pub(crate) rgb_file_transfer_handler: Arc<RgbFileTransferHandler>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,
@@ -753,6 +758,9 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         vss_allow_empty_restore: args.vss_allow_empty_restore,
         reuse_addresses: args.reuse_addresses,
         remote_signer_listen_addr: args.remote_signer_listen_addr,
+        max_aggregated_media_size_per_channel_mb: args.max_aggregated_media_size_per_channel_mb,
+        max_pending_consignments: args.max_pending_consignments,
+        max_media_files_per_channel: args.max_media_files_per_channel,
     });
 
     let app_state = Arc::new(AppState {

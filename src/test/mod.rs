@@ -52,21 +52,22 @@ use crate::routes::{
     DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse, DecodeSwapstringRequest,
     DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
     FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
-    GetChannelIdResponse, GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse,
-    InflateRequest, InflateResponse, InitRequest, InitResponse, InvoiceStatus,
-    InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse,
-    IssueAssetIFARequest, IssueAssetIFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
-    IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
-    LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
-    ListPaymentsResponse, ListPeersResponse, ListSwapsResponse, ListTransactionsRequest,
-    ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest,
-    ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
-    NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment,
-    PaymentDirection, PaymentType, Peer, PostAssetMediaResponse, Recipient, RefreshRequest,
-    RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest,
-    SendBtcResponse, SendPaymentRequest, SendPaymentResponse, SendRgbRequest, SendRgbResponse,
-    Swap, TakerRequest, Transaction, Transfer, TransferKind, TransferStatus, UnlockRequest,
-    Unspent, WitnessData,
+    GetChannelIdResponse, GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest,
+    GetPaymentResponse, GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse,
+    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
+    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse,
+    IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse,
+    KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest,
+    ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse, ListPeersResponse,
+    ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest,
+    ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
+    MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
+    OpenChannelResponse, Payment, PaymentDirection, PaymentType, Peer, PostAssetMediaResponse,
+    ProvideOutOfBandAckRequest, ProvideOutOfBandAckResponse, ProvideOutOfBandConsignmentResponse,
+    Recipient, RefreshRequest, RefreshResponse, RestoreRequest, RevokeTokenRequest,
+    RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
+    SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest, Transaction,
+    Transfer, TransferKind, TransferStatus, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,
@@ -108,6 +109,9 @@ impl Default for UserArgs {
             daemon_listening_port: 3001,
             ldk_peer_listening_port: 9735,
             max_media_upload_size_mb: 3,
+            max_aggregated_media_size_per_channel_mb: 24,
+            max_pending_consignments: 10,
+            max_media_files_per_channel: 42,
             root_public_key: None,
             enable_virtual_channels_v0: false,
             virtual_peer_pubkeys: vec![],
@@ -961,6 +965,26 @@ async fn get_asset_media(node_address: SocketAddr, digest: &str) -> String {
     check_response_is_ok(res)
         .await
         .json::<GetAssetMediaResponse>()
+        .await
+        .unwrap()
+        .bytes_hex
+}
+
+async fn get_consignment(node_address: SocketAddr, asset_id: &str, txid: &str) -> String {
+    println!("requesting consignment for asset {asset_id} txid {txid} from node {node_address}");
+    let payload = GetConsignmentRequest {
+        asset_id: asset_id.to_string(),
+        txid: txid.to_string(),
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/getconsignment"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<GetConsignmentResponse>()
         .await
         .unwrap()
         .bytes_hex
@@ -2368,7 +2392,59 @@ fn random_preimage_and_hash() -> (String, String) {
     (preimage_hex, payment_hash)
 }
 
-async fn refresh_transfers(node_address: SocketAddr) {
+async fn provide_out_of_band_ack(
+    node_address: SocketAddr,
+    recipient_id: &str,
+) -> ProvideOutOfBandAckResponse {
+    check_response_is_ok(provide_out_of_band_ack_res(node_address, recipient_id).await)
+        .await
+        .json::<ProvideOutOfBandAckResponse>()
+        .await
+        .unwrap()
+}
+
+async fn provide_out_of_band_ack_res(node_address: SocketAddr, recipient_id: &str) -> Response {
+    println!("providing out-of-band ACK for recipient {recipient_id} on node {node_address}");
+    let payload = ProvideOutOfBandAckRequest {
+        recipient_id: recipient_id.to_string(),
+    };
+    reqwest::Client::new()
+        .post(format!("http://{node_address}/provideoutofbandack"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn provide_out_of_band_consignment(
+    node_address: SocketAddr,
+    consignment_bytes: Vec<u8>,
+    media_files_bytes: Vec<Vec<u8>>,
+) -> ProvideOutOfBandConsignmentResponse {
+    println!(
+        "providing out-of-band consignment ({} bytes, {} media files) on node {node_address}",
+        consignment_bytes.len(),
+        media_files_bytes.len(),
+    );
+    let mut form = reqwest::multipart::Form::new()
+        .part("file", reqwest::multipart::Part::bytes(consignment_bytes));
+    for media_bytes in media_files_bytes {
+        form = form.part("media", reqwest::multipart::Part::bytes(media_bytes));
+    }
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/provideoutofbandconsignment"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<ProvideOutOfBandConsignmentResponse>()
+        .await
+        .unwrap()
+}
+
+async fn refresh_transfers(node_address: SocketAddr) -> RefreshResponse {
     println!("refreshing transfers for node {node_address}");
     let payload = RefreshRequest {
         asset_id: None,
@@ -2383,9 +2459,9 @@ async fn refresh_transfers(node_address: SocketAddr) {
         .unwrap();
     check_response_is_ok(res)
         .await
-        .json::<EmptyResponse>()
+        .json::<RefreshResponse>()
         .await
-        .unwrap();
+        .unwrap()
 }
 
 async fn restore(node_address: SocketAddr, backup_path: &str, password: &str) {
@@ -2421,22 +2497,60 @@ async fn rgb_invoice_with_assignment(
     assignment: Option<Assignment>,
     witness: bool,
 ) -> RgbInvoiceResponse {
+    rgb_invoice_raw(
+        node_address,
+        asset_id,
+        assignment,
+        witness,
+        vec![PROXY_ENDPOINT_LOCAL.to_string()],
+    )
+    .await
+}
+
+async fn rgb_invoice_oob(
+    node_address: SocketAddr,
+    asset_id: Option<String>,
+    assignment: Option<Assignment>,
+    witness: bool,
+) -> RgbInvoiceResponse {
+    rgb_invoice_raw(node_address, asset_id, assignment, witness, vec![]).await
+}
+
+async fn rgb_invoice_raw(
+    node_address: SocketAddr,
+    asset_id: Option<String>,
+    assignment: Option<Assignment>,
+    witness: bool,
+    transport_endpoints: Vec<String>,
+) -> RgbInvoiceResponse {
     println!(
-        "generating RGB invoice{} for node {node_address}",
+        "generating RGB invoice{}{}{} for node {node_address}",
         if let Some(id) = asset_id.as_ref() {
             format!(" for asset {id}")
         } else {
             s!("")
+        },
+        if let Some(assignment) = &assignment {
+            format!(" with assignment {assignment:?}")
+        } else {
+            s!("")
+        },
+        if transport_endpoints.is_empty() {
+            s!("")
+        } else {
+            format!(
+                " with transport endpoints {}",
+                transport_endpoints.join(", ")
+            )
         }
     );
     let payload = RgbInvoiceRequest {
         min_confirmations: 1,
         asset_id,
         assignment,
-        expiration_timestamp: Some(
-            OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
-        ),
+        expiration_timestamp: OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
         witness,
+        transport_endpoints,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/rgbinvoice"))
@@ -2477,7 +2591,7 @@ async fn send_assets(
     node_address: SocketAddr,
     recipient_map: HashMap<String, Vec<Recipient>>,
     donation: bool,
-) {
+) -> String {
     println!(
         "batch sending {} asset(s) from node {node_address}",
         recipient_map.len()
@@ -2486,9 +2600,7 @@ async fn send_assets(
         donation,
         fee_rate: FEE_RATE,
         min_confirmations: 1,
-        expiration_timestamp: Some(
-            OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
-        ),
+        expiration_timestamp: OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
         recipient_map,
     };
     let res = reqwest::Client::new()
@@ -2501,7 +2613,8 @@ async fn send_assets(
         .await
         .json::<SendRgbResponse>()
         .await
-        .unwrap();
+        .unwrap()
+        .txid
 }
 
 async fn send_btc(node_address: SocketAddr, amount: u64, address: &str) -> String {
@@ -3104,9 +3217,11 @@ mod multi_hop;
 mod multi_open_close;
 mod open_after_double_send;
 mod openchannel_fail;
+mod openchannel_media;
 mod openchannel_no_indexer;
 mod openchannel_optional_addr;
 mod openchannel_push_asset_amount;
+mod out_of_band;
 mod pagination_filters;
 mod payment;
 mod refuse_high_fees;

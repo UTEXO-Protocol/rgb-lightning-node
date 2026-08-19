@@ -344,8 +344,8 @@ pub(crate) fn refresh_transfers(
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
     let req: JsonRefreshTransfersRequest = parse_req(request_json)?;
-    node.refreshtransfers(req.into())?;
-    ok_void()
+    let resp = node.refreshtransfers(req.into())?;
+    json(JsonRefreshTransfersResponse::from(resp))
 }
 
 pub(crate) fn fail_transfers(
