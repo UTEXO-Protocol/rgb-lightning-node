@@ -6948,5 +6948,13 @@ mod tests {
                 reuse
             ));
         }
+        // pins the reuse margin itself: a receive with a minute of life must never be handed out,
+        // otherwise it can expire mid-sweep. Asserted without reference to the constant, so
+        // shrinking it back towards zero fails here.
+        assert!(!sweep_receive_is_reusable(
+            expiration - 60,
+            expiration,
+            true
+        ));
     }
 }
