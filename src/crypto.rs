@@ -288,6 +288,24 @@ mod tests {
     }
 
     #[test]
+    fn backup_v1_key_is_pinned() {
+        // backup format version 1 records no work factors, so any change to `BACKUP_V1` or to the
+        // scrypt crate would silently make every existing backup undecryptable
+        let backup_v1 = KdfParams {
+            log_n: BACKUP_V1_LOG_N,
+            ..KdfParams::BACKUP_V1
+        };
+        assert_eq!(
+            derive_key(PASSWORD, &[7u8; MNEMONIC_SALT_LEN], backup_v1).unwrap(),
+            [
+                0x90, 0xdb, 0x59, 0xef, 0xba, 0x0f, 0x16, 0x67, 0x43, 0xc9, 0x94, 0xa8, 0x2a, 0x7c,
+                0x2d, 0x35, 0x4d, 0x90, 0x4c, 0x43, 0x3b, 0x7c, 0x42, 0xc2, 0x33, 0xe9, 0xab, 0x42,
+                0x9a, 0xfc, 0xd2, 0x03
+            ]
+        );
+    }
+
+    #[test]
     fn stored_work_factors_are_used() {
         // decrypting data encrypted with work factors other than the current ones can only
         // succeed if the ones stored along with it are being used
