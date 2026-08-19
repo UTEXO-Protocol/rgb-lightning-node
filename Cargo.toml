@@ -66,7 +66,9 @@ magic-crypt = "4.0.1"
 rand = "0.8.5"
 regex = { version = "1.11", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.32", features = [
+# Temporary: rgb-lib PR #91 (upstream sync) is unmerged and untagged. Flip back to a
+# UTEXO-Protocol tag (beta.34+) once it lands, before this PR is merged.
+rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "94b6221ea9bf04562d89c21c9f074f4ecfbddd5d", features = [
     "electrum",
     "esplora",
 ] }
