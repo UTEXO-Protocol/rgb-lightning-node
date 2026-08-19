@@ -189,7 +189,23 @@ use crate::utils::{
 const RGB_TRANSFER_CHAN_EXPIRATION_SECS: u64 = 86400;
 // don't reuse a cached sweep receive this close to its expiration
 const RGB_RECEIVE_REUSE_MARGIN_SECS: u64 = 3600;
+// smaller margin when addresses are reused, where reissuing is harmful: still enough for the
+// receive to outlast the sweep that uses it
+const RGB_RECEIVE_REUSE_MARGIN_ADDR_REUSE_SECS: u64 = 300;
 const VIRTUAL_CHANNEL_DOMAIN_SEPARATOR: &[u8] = b"rln_virtual_channels_v0";
+
+// A reissued receive under address reuse gets the same recipient id as the cached one (rgb-lib
+// rotates only the invoice nonce), so the sweep's provide_out_of_band_consignment later fails with
+// an ambiguous-recipient error. Hold the cached entry longer in that case, keeping enough margin
+// for it to outlast the sweep it is used by.
+fn sweep_receive_is_reusable(now: u64, expiration: u64, reuse_addresses: bool) -> bool {
+    let margin = if reuse_addresses {
+        RGB_RECEIVE_REUSE_MARGIN_ADDR_REUSE_SECS
+    } else {
+        RGB_RECEIVE_REUSE_MARGIN_SECS
+    };
+    now + margin < expiration
+}
 
 pub(crate) fn virtual_channel_synthetic_outpoint(
     network: BitcoinNetwork,
@@ -3817,15 +3833,29 @@ impl RgbOutputSpender {
             } else {
                 new_asset = true;
                 let cache_key = (descriptors_hash, contract_id);
-                let cached = self
-                    .sweep_recipients
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&cache_key)
-                    .filter(|(_, expiration)| {
-                        get_current_timestamp() + RGB_RECEIVE_REUSE_MARGIN_SECS < *expiration
-                    })
-                    .map(|(recipient_id, _)| recipient_id.clone());
+                let cached = {
+                    let mut recipients = self
+                        .sweep_recipients
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    match recipients.get(&cache_key) {
+                        Some((recipient_id, expiration))
+                            if sweep_receive_is_reusable(
+                                get_current_timestamp(),
+                                *expiration,
+                                self.static_state.reuse_addresses,
+                            ) =>
+                        {
+                            Some(recipient_id.clone())
+                        }
+                        // too close to expiry to be used again, don't keep retrying against it
+                        Some(_) => {
+                            recipients.remove(&cache_key);
+                            None
+                        }
+                        None => None,
+                    }
+                };
                 let recipient_id = match cached {
                     Some(recipient_id) => recipient_id,
                     None => {
@@ -3957,8 +3987,8 @@ impl RgbOutputSpender {
             }
         }
 
-        // persist before publishing to the in-memory map: a failed write must leave no cached tx,
-        // or the early return above would hand back a broadcast tx that was never persisted
+        // insert so the encoded write includes this entry; roll back if the write fails, or the
+        // early return above would hand back a broadcast tx that was never persisted
         txes.insert(descriptors_hash, spending_tx.clone());
         if let Err(e) = self
             .kv_store
@@ -6865,6 +6895,52 @@ mod tests {
             assert!(schemas.contains(&AssetSchema::Nia));
             assert!(schemas.contains(&AssetSchema::Cfa));
             assert!(schemas.contains(&AssetSchema::Uda));
+        }
+    }
+
+    #[test]
+    fn sweep_receive_reuse_margin_is_smaller_under_address_reuse() {
+        let now = 1_000_000;
+        let expiration = now + RGB_TRANSFER_CHAN_EXPIRATION_SECS;
+
+        // at t+23h the 1h margin has been reached, but the reuse margin has not
+        let late = expiration - RGB_RECEIVE_REUSE_MARGIN_SECS;
+        assert!(!sweep_receive_is_reusable(late, expiration, false));
+        assert!(sweep_receive_is_reusable(late, expiration, true));
+    }
+
+    #[test]
+    fn sweep_receive_reuse_respects_both_margin_boundaries() {
+        let expiration = 1_000_000;
+
+        for (reuse, margin) in [
+            (false, RGB_RECEIVE_REUSE_MARGIN_SECS),
+            (true, RGB_RECEIVE_REUSE_MARGIN_ADDR_REUSE_SECS),
+        ] {
+            // strictly inside the margin is reusable, the boundary itself is not
+            assert!(sweep_receive_is_reusable(
+                expiration - margin - 1,
+                expiration,
+                reuse
+            ));
+            assert!(!sweep_receive_is_reusable(
+                expiration - margin,
+                expiration,
+                reuse
+            ));
+        }
+    }
+
+    #[test]
+    fn sweep_receive_past_expiry_is_never_reusable() {
+        let expiration = 1_000_000;
+        for reuse in [false, true] {
+            assert!(!sweep_receive_is_reusable(expiration, expiration, reuse));
+            assert!(!sweep_receive_is_reusable(
+                expiration + 1,
+                expiration,
+                reuse
+            ));
         }
     }
 }
