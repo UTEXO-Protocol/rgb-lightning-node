@@ -2140,8 +2140,12 @@ async fn handle_ldk_events(
                     let consignment_bytes = match fs::read(&consignment_path) {
                         Ok(bytes) => bytes,
                         Err(e) => {
-                            tracing::error!("cannot read virtual funding consignment: {e}");
-                            return Err(ReplayEvent());
+                            return abort_funding(
+                                format!("cannot read funding consignment: {e}"),
+                                &unlocked_state.channel_manager,
+                                &temporary_channel_id,
+                                &counterparty_node_id,
+                            );
                         }
                     };
                     if unlocked_state
@@ -2153,11 +2157,73 @@ async fn handle_ldk_events(
                         )
                         .is_err()
                     {
-                        tracing::error!(
-                            "virtual funding consignment is too large to send over p2p"
+                        let _ = fs::remove_file(&consignment_path);
+                        return abort_funding(
+                            s!("consignment is too large to send over p2p"),
+                            &unlocked_state.channel_manager,
+                            &temporary_channel_id,
+                            &counterparty_node_id,
                         );
-                        return Err(ReplayEvent());
                     }
+
+                    // send the asset's media files over the same p2p link
+                    if rgb_info.counterparty_knows_asset {
+                        tracing::info!(
+                            "counterparty already knows asset {asset_id}, not sending its media"
+                        );
+                    } else {
+                        let unlocked_state_copy = unlocked_state.clone();
+                        let medias = match tokio::task::spawn_blocking(move || {
+                            unlocked_state_copy.rgb_list_asset_media(asset_id)
+                        })
+                        .await
+                        .unwrap()
+                        {
+                            Ok(medias) => medias,
+                            Err(e) => {
+                                let _ = fs::remove_file(&consignment_path);
+                                return handle_funding_prepare_err(
+                                    e,
+                                    &unlocked_state.channel_manager,
+                                    &temporary_channel_id,
+                                    &counterparty_node_id,
+                                );
+                            }
+                        };
+                        for media in medias {
+                            let media_bytes = match fs::read(&media.file_path) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    let _ = fs::remove_file(&consignment_path);
+                                    return abort_funding(
+                                        format!("cannot read asset media file: {e}"),
+                                        &unlocked_state.channel_manager,
+                                        &temporary_channel_id,
+                                        &counterparty_node_id,
+                                    );
+                                }
+                            };
+                            if unlocked_state
+                                .rgb_file_transfer_handler
+                                .queue_media(
+                                    counterparty_node_id,
+                                    witness_id.clone(),
+                                    media.digest,
+                                    media_bytes,
+                                )
+                                .is_err()
+                            {
+                                let _ = fs::remove_file(&consignment_path);
+                                return abort_funding(
+                                    s!("asset media is too large to send over p2p"),
+                                    &unlocked_state.channel_manager,
+                                    &temporary_channel_id,
+                                    &counterparty_node_id,
+                                );
+                            }
+                        }
+                    }
+
                     unlocked_state.peer_manager.process_events();
                     let _ = fs::remove_file(&consignment_path);
                 }
@@ -3188,6 +3254,10 @@ async fn handle_ldk_events(
                     "EVENT: virtual channel {} is pending in trusted no-broadcast mode",
                     channel_id,
                 );
+                // reclaim the staged-funding slot now instead of waiting for the sweeper
+                unlocked_state
+                    .rgb_file_transfer_handler
+                    .forget_staged_funding(&funding_txo.txid.to_string());
                 return Ok(());
             }
 
@@ -4359,20 +4429,32 @@ async fn reimport_funding_consignments(
         let wrapper = Arc::clone(rgb_wallet_wrapper);
         let txid_copy = txid.clone();
         let consignment_path = ldk_data_dir.join(format!("reimport_consignment_{txid}"));
-        // Accept our stored copy straight from disk, like the funding-time acceptor
-        // flow does: this consumes the consignment into the RGB runtime, which
-        // save_new_asset requires.
+        // Accept our stored copy straight from disk: this consumes the consignment into
+        // the RGB runtime, which save_new_asset requires. Unlike the funding-time acceptor
+        // flow there is no media staging dir to promote from -- only consignment bytes are
+        // persisted -- so any media the contract declares must already be in the wallet.
         let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
             fs::write(&consignment_path, &data).map_err(|e| e.to_string())?;
-            let (consignment, _, _) = wrapper
-                .accept_transfer_consignment(
-                    consignment_path.clone(),
-                    txid_copy.clone(),
-                    1,
-                    STATIC_BLINDING,
-                )
-                .map_err(|e| e.to_string())?;
+            let accept_res = wrapper.accept_transfer_consignment(
+                consignment_path.clone(),
+                txid_copy.clone(),
+                1,
+                STATIC_BLINDING,
+            );
             let _ = fs::remove_file(&consignment_path);
+            let (consignment, _, media_digests) = accept_res.map_err(|e| e.to_string())?;
+            let media_dir = wrapper.get_media_dir();
+            let missing: Vec<String> = media_digests
+                .into_iter()
+                .filter(|digest| !media_dir.join(digest).exists())
+                .collect();
+            if !missing.is_empty() {
+                tracing::warn!(
+                    "re-imported asset for {txid_copy} is missing {} media file(s) locally: {}",
+                    missing.len(),
+                    missing.join(", "),
+                );
+            }
             match wrapper.save_new_asset(consignment, txid_copy) {
                 Ok(()) => Ok(()),
                 Err(e) if e.to_string().contains("UNIQUE constraint failed") => Ok(()),
