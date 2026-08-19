@@ -87,14 +87,14 @@ use crate::core_types::async_order::{
     AsyncOrderOutboundInvoiceResponse,
 };
 use crate::error::error_name;
-#[cfg(test)]
-use crate::ldk::FORCE_PUSH_ASSET_AMOUNT_ON_NODE;
 use crate::ldk::{
     clear_rgb_payment_pending, peer_has_live_channel, start_ldk, stop_ldk, LdkBackgroundServices,
     VirtualChannelSessionStatus,
 };
 #[cfg(feature = "vss")]
 use crate::ldk::{derive_vss_identity, derive_vss_identity_from_key_source};
+#[cfg(test)]
+use crate::ldk::{node_override_matches, FORCE_PUSH_ASSET_AMOUNT_ON_NODE};
 #[cfg(feature = "vss")]
 use crate::signer::read_key_source_file;
 use crate::swap::{SwapData, SwapInfo, SwapString};
@@ -4550,11 +4550,13 @@ pub(crate) async fn open_channel(
             #[cfg(not(test))]
             let wire_push_asset_amount = payload.push_asset_amount;
             #[cfg(test)]
-            let wire_push_asset_amount = match *FORCE_PUSH_ASSET_AMOUNT_ON_NODE.lock().unwrap() {
-                Some(node) if node == unlocked_state.channel_manager.get_our_node_id() => {
-                    Some(*asset_amount + 1)
-                }
-                _ => payload.push_asset_amount,
+            let wire_push_asset_amount = if node_override_matches(
+                &FORCE_PUSH_ASSET_AMOUNT_ON_NODE,
+                unlocked_state.channel_manager.get_our_node_id(),
+            ) {
+                Some(*asset_amount + 1)
+            } else {
+                payload.push_asset_amount
             };
             (Some((*contract_id, wire_push_asset_amount)), Some(schema))
         } else {

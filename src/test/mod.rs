@@ -39,9 +39,9 @@ use crate::disk::LDK_LOGS_FILE;
 use crate::error::{APIError, APIErrorResponse};
 use crate::kv_store::SeaOrmKvStore;
 use crate::ldk::{
-    InboundPaymentInfoStorage, InvoiceType, FORCE_PUSH_ASSET_AMOUNT_ON_NODE,
-    HELD_PAYMENT_CLAIMABLE_COUNT, HOLD_PAYMENT_CLAIMABLE_ON_NODE, IGNORE_INBOUND_CHANNELS_ON_NODE,
-    INBOUND_PAYMENTS_KEY,
+    InboundPaymentInfoStorage, InvoiceType, DEFER_PAYMENT_CLAIMABLE_ON_NODE,
+    FORCE_PUSH_ASSET_AMOUNT_ON_NODE, HELD_PAYMENT_CLAIMABLE_COUNT, HOLD_PAYMENT_CLAIMABLE_ON_NODE,
+    IGNORE_INBOUND_CHANNELS_ON_NODE, INBOUND_PAYMENTS_KEY, PAYMENT_CLAIMABLE_DEFERRED,
 };
 #[cfg(feature = "vss")]
 use crate::routes::VssClearFenceRequest;
@@ -155,8 +155,9 @@ impl Drop for ElectrsRestartGuard {
             .arg("start")
             .arg("electrs")
             .status()
-            .expect("failed to stop electrs");
-        assert!(status.success(), "failed to stop electrs");
+            .expect("failed to start electrs");
+        assert!(status.success(), "failed to start electrs");
+        wait_electrs_sync();
     }
 }
 
@@ -174,6 +175,31 @@ impl NodeOverrideGuard {
 impl Drop for NodeOverrideGuard {
     fn drop(&mut self) {
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+// Makes the payee defer claiming incoming payments, so the payer's HTLC (and any swap it is part
+// of) stays pending until the returned guard is dropped.
+//
+// Must be set before the payment is sent; call `wait_for_deferred_payment` afterwards to know the
+// HTLC has actually reached the payee.
+fn defer_payment_claimable(payee_pubkey: &str) -> NodeOverrideGuard {
+    PAYMENT_CLAIMABLE_DEFERRED.store(false, Ordering::SeqCst);
+    NodeOverrideGuard::set(&DEFER_PAYMENT_CLAIMABLE_ON_NODE, payee_pubkey)
+}
+
+// Waits for a payment deferred via `defer_payment_claimable` to have reached the payee.
+//
+// Note that only one payment at a time can be deferred on a node, as a node handles its events
+// sequentially. What the gate guarantees is that no payment to that node settles while it is held,
+// not that every in-flight payment has reached it.
+async fn wait_for_deferred_payment() {
+    let t_0 = OffsetDateTime::now_utc();
+    while !PAYMENT_CLAIMABLE_DEFERRED.load(Ordering::SeqCst) {
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 40.0 {
+            panic!("no payment has been deferred");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -1221,6 +1247,7 @@ async fn issue_asset_uda(node_address: SocketAddr, file_path: Option<&str>) -> A
         .asset
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn with_ln_balance_checks(
     node_address: SocketAddr,
     counterparty_node_address: SocketAddr,
@@ -1229,10 +1256,17 @@ async fn with_ln_balance_checks(
     initial_ln_balance_rgb: Option<u64>,
     counterparty_initial_ln_balance_rgb: Option<u64>,
     payment_hash: &str,
+    defer_guard: NodeOverrideGuard,
 ) {
+    // the payee is deferring the claim, so the payment is provably still pending here: without
+    // that gate it could have settled before we get to look at it, making this check racy
+    wait_for_deferred_payment().await;
     check_payment_status(node_address, payment_hash, HTLCStatus::Pending)
         .await
         .unwrap();
+
+    // let the payee claim, so the payment can settle
+    drop(defer_guard);
 
     if let Some(asset_id) = &asset_id {
         let final_ln_balance_rgb = initial_ln_balance_rgb.unwrap() - asset_amount.unwrap();
@@ -1310,6 +1344,7 @@ async fn keysend_with_ln_balance(
     initial_ln_balance_rgb: Option<u64>,
     counterparty_initial_ln_balance_rgb: Option<u64>,
 ) {
+    let defer_guard = defer_payment_claimable(dest_pubkey);
     let res = keysend_raw(node_address, dest_pubkey, amt_msat, asset_id, asset_amount).await;
 
     with_ln_balance_checks(
@@ -1320,6 +1355,7 @@ async fn keysend_with_ln_balance(
         initial_ln_balance_rgb,
         counterparty_initial_ln_balance_rgb,
         &res.payment_hash,
+        defer_guard,
     )
     .await;
 }
@@ -2737,6 +2773,7 @@ async fn send_payment_with_ln_balance(
 ) {
     let bolt11_invoice = Bolt11Invoice::from_str(&invoice).unwrap();
 
+    let defer_guard = defer_payment_claimable(&bolt11_invoice.recover_payee_pub_key().to_string());
     let res = send_payment_raw(node_address, invoice).await;
 
     with_ln_balance_checks(
@@ -2748,6 +2785,7 @@ async fn send_payment_with_ln_balance(
         counterparty_initial_ln_balance_rgb,
         // TODO: remove unwrap once RGB offers are enabled
         &res.payment_hash.unwrap(),
+        defer_guard,
     )
     .await;
 }
@@ -3219,16 +3257,12 @@ fn wait_electrs_sync() {
     let blockcount = get_block_count();
     loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let mut all_synced = true;
-        let electrum =
-            electrum_client::Client::new(ELECTRUM_URL).expect("cannot get electrum client");
-        if electrum.block_header(blockcount as usize).is_err() {
-            all_synced = false;
-        }
-        if all_synced {
+        let synced = electrum_client::Client::new(ELECTRUM_URL)
+            .is_ok_and(|electrum| electrum.block_header(blockcount as usize).is_ok());
+        if synced {
             break;
         };
-        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 10.0 {
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 30.0 {
             panic!("electrs not syncing with bitcoind");
         }
     }
