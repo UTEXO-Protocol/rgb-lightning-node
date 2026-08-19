@@ -113,6 +113,8 @@ use std::net::ToSocketAddrs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, SystemTime};
@@ -267,6 +269,15 @@ fn sync_config_to_kvstore(
 
 #[cfg(test)]
 pub(crate) static IGNORE_INBOUND_CHANNELS_ON_NODE: Mutex<Option<PublicKey>> = Mutex::new(None);
+
+// Test-only: the node with this pubkey holds incoming payments instead of claiming them, keeping
+// their HTLCs pending
+#[cfg(test)]
+pub(crate) static HOLD_PAYMENT_CLAIMABLE_ON_NODE: Mutex<Option<PublicKey>> = Mutex::new(None);
+
+// Test-only: number of payments held via HOLD_PAYMENT_CLAIMABLE_ON_NODE
+#[cfg(test)]
+pub(crate) static HELD_PAYMENT_CLAIMABLE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) struct LdkBackgroundServices {
     stop_processing: Arc<AtomicBool>,
@@ -2643,6 +2654,17 @@ async fn handle_ldk_events(
                 payment_hash,
                 amount_msat,
             );
+            #[cfg(test)]
+            if HOLD_PAYMENT_CLAIMABLE_ON_NODE
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|id| *id == unlocked_state.channel_manager.get_our_node_id())
+            {
+                tracing::info!("TEST: holding PaymentClaimable for {}", payment_hash);
+                HELD_PAYMENT_CLAIMABLE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(());
+            }
 
             // `color_commitment` writes the authoritative per-HTLC record under
             // `chan_id || payment_hash` but never under the bare `<payment_hash>` key — that would
@@ -3701,8 +3723,8 @@ async fn handle_ldk_events(
     Ok(())
 }
 
-impl OutputSpender for RgbOutputSpender {
-    fn spend_spendable_outputs(
+impl RgbOutputSpender {
+    fn try_spend_spendable_outputs(
         &self,
         descriptors: &[&SpendableOutputDescriptor],
         outputs: Vec<TxOut>,
@@ -3710,7 +3732,7 @@ impl OutputSpender for RgbOutputSpender {
         feerate_sat_per_1000_weight: u32,
         locktime: Option<LockTime>,
         secp_ctx: &Secp256k1<All>,
-    ) -> Result<bitcoin::Transaction, ()> {
+    ) -> Result<bitcoin::Transaction, String> {
         let mut hasher = DefaultHasher::new();
         descriptors.hash(&mut hasher);
         let descriptors_hash = hasher.finish();
@@ -3747,7 +3769,13 @@ impl OutputSpender for RgbOutputSpender {
                 continue;
             }
             let transfer_info = self.kv_store.read_rgb_transfer_info(&txid_str);
-            if transfer_info.rgb_amount == 0 {
+            // an output missing from the map carries no asset: sweep it as vanilla
+            let amt_rgb = transfer_info
+                .output_map
+                .get(&outpoint.index.into())
+                .copied()
+                .unwrap_or(0);
+            if amt_rgb == 0 {
                 continue;
             }
 
@@ -3756,22 +3784,16 @@ impl OutputSpender for RgbOutputSpender {
             let closing_height = self
                 .rgb_wallet_wrapper
                 .get_tx_height(txid_str.clone())
-                .map_err(|_| ())?;
-            let Some(closing_height) = closing_height else {
-                tracing::warn!(
-                    txid = txid_str,
-                    "closing tx not confirmed yet; deferring sweep"
-                );
-                return Err(());
-            };
+                .map_err(|e| format!("cannot get height of {txid_str}: {e}"))?
+                .ok_or_else(|| format!("transaction {txid_str} is not confirmed yet"))?;
             let update_res = self
                 .rgb_wallet_wrapper
                 .update_witnesses(closing_height, vec![RgbTxid::from_str(&txid_str).unwrap()])
-                .map_err(|e| {
-                    tracing::error!(error = %e, txid = txid_str, "update_witnesses failed; deferring sweep");
-                })?;
+                .map_err(|e| format!("error while updating witnesses for {txid_str}: {e}"))?;
             if !update_res.failed.is_empty() {
-                return Err(());
+                return Err(format!(
+                    "failed to update witnesses for {txid_str}: {update_res:?}"
+                ));
             }
 
             let contract_id = transfer_info.contract_id;
@@ -3790,16 +3812,10 @@ impl OutputSpender for RgbOutputSpender {
                         vec![],
                         0,
                     )
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "witness_receive failed; deferring sweep");
-                    })?;
+                    .map_err(|e| format!("cannot get a witness receive script: {e}"))?;
                 let script_pubkey = script_buf_from_recipient_id(receive_data.recipient_id.clone())
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "invalid sweep recipient id; deferring sweep");
-                    })?
-                    .ok_or_else(|| {
-                        tracing::error!("sweep recipient id has no script; deferring sweep");
-                    })?;
+                    .map_err(|e| format!("invalid sweep recipient id: {e}"))?
+                    .ok_or_else(|| s!("sweep recipient id has no script"))?;
                 txouts.push(TxOut {
                     value: Amount::from_sat(
                         self.static_state.config.channels.dust_limit_msat / 1000,
@@ -3808,8 +3824,6 @@ impl OutputSpender for RgbOutputSpender {
                 });
                 receive_data.recipient_id
             };
-
-            let amt_rgb = transfer_info.rgb_amount;
 
             asset_info
                 .entry(contract_id)
@@ -3824,14 +3838,17 @@ impl OutputSpender for RgbOutputSpender {
         }
 
         if vanilla_descriptor {
-            return self.signer.spend_spendable_outputs(
-                descriptors.as_ref(),
-                txouts,
-                change_destination_script,
-                feerate_sat_per_1000_weight,
-                locktime,
-                secp_ctx,
-            );
+            return self
+                .signer
+                .spend_spendable_outputs(
+                    descriptors.as_ref(),
+                    txouts,
+                    change_destination_script,
+                    feerate_sat_per_1000_weight,
+                    locktime,
+                    secp_ctx,
+                )
+                .map_err(|()| s!("cannot spend vanilla spendable outputs"));
         }
 
         let feerate_sat_per_1000_weight = self.static_state.config.rgb.fee_rate_sat_vb as u32 * 250; // 1 sat/vB = 250 sat/kw
@@ -3844,9 +3861,7 @@ impl OutputSpender for RgbOutputSpender {
                 feerate_sat_per_1000_weight,
                 locktime,
             )
-            .map_err(|_| {
-                tracing::error!("failed to build sweep PSBT; deferring sweep");
-            })?;
+            .map_err(|()| s!("cannot create the spendable outputs PSBT"))?;
 
         let mut asset_info_map = map![];
         for (contract_id, (vout, amt_rgb, _)) in asset_info.clone() {
@@ -3865,22 +3880,18 @@ impl OutputSpender for RgbOutputSpender {
             nonce: None,
         };
 
-        let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
+        let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).expect("valid PSBT");
         let consignments = self
             .rgb_wallet_wrapper
             .color_psbt_and_consume(&mut psbt, coloring_info)
-            .map_err(|e| {
-                tracing::error!(error = %e, "failed to color sweep PSBT; deferring sweep");
-            })?;
+            .map_err(|e| format!("cannot color the sweep PSBT: {e}"))?;
 
         let mut psbt = Psbt::from_str(&psbt.to_string()).expect("valid transaction");
 
         psbt = self
             .signer
             .sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)
-            .map_err(|e| {
-                tracing::error!(error = ?e, "failed to sign sweep PSBT; deferring sweep");
-            })?;
+            .map_err(|e| format!("cannot sign the sweep PSBT: {e:?}"))?;
 
         let spending_tx = match psbt.extract_tx() {
             Ok(tx) => tx,
@@ -3903,26 +3914,48 @@ impl OutputSpender for RgbOutputSpender {
                 .join(format!("consignment_{closing_txid}_{contract_id}"));
             consignment
                 .save_file(&consignment_path)
-                .expect("successful save");
+                .map_err(|e| format!("cannot save consignment: {e}"))?;
             let consignment_path_str = consignment_path.to_string_lossy().to_string();
             let rgb_wallet_wrapper_copy = self.rgb_wallet_wrapper.clone();
-            let res = futures::executor::block_on(tokio::task::spawn_blocking(move || {
+            futures::executor::block_on(tokio::task::spawn_blocking(move || {
                 rgb_wallet_wrapper_copy
                     .provide_out_of_band_consignment(consignment_path_str, vec![])
-            }));
-            if let Err(e) = res {
-                tracing::error!("cannot provide consignment: {e}");
-                return Err(());
-            }
+            }))
+            .map_err(|e| format!("consignment task failed: {e}"))?
+            .map_err(|e| format!("cannot provide consignment: {e}"))?;
             fs::remove_file(&consignment_path).unwrap();
         }
 
         txes.insert(descriptors_hash, spending_tx.clone());
         self.kv_store
             .write("", "", OUTPUT_SPENDER_TXES_KEY, txes.encode())
-            .unwrap();
+            .map_err(|e| format!("cannot persist output spender txes: {e}"))?;
 
         Ok(spending_tx)
+    }
+}
+
+impl OutputSpender for RgbOutputSpender {
+    fn spend_spendable_outputs(
+        &self,
+        descriptors: &[&SpendableOutputDescriptor],
+        outputs: Vec<TxOut>,
+        change_destination_script: ScriptBuf,
+        feerate_sat_per_1000_weight: u32,
+        locktime: Option<LockTime>,
+        secp_ctx: &Secp256k1<All>,
+    ) -> Result<bitcoin::Transaction, ()> {
+        self.try_spend_spendable_outputs(
+            descriptors,
+            outputs,
+            change_destination_script,
+            feerate_sat_per_1000_weight,
+            locktime,
+            secp_ctx,
+        )
+        .map_err(|e| {
+            tracing::error!("cannot spend spendable outputs, will retry: {e}");
+        })
     }
 }
 
