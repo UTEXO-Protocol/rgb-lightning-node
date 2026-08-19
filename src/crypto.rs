@@ -47,7 +47,7 @@ pub(crate) struct KdfParams {
 impl KdfParams {
     // Work factors used for newly encrypted data.
     pub(crate) const CURRENT: Self = Self {
-        log_n: if cfg!(test) {
+        log_n: if cfg!(test) || cfg!(feature = "test-utils") {
             TEST_LOG_N
         } else {
             CURRENT_LOG_N
@@ -59,7 +59,7 @@ impl KdfParams {
     // Work factors of backup format version 1, which has no field to record them and therefore
     // requires these values to stay unchanged.
     pub(crate) const BACKUP_V1: Self = Self {
-        log_n: if cfg!(test) {
+        log_n: if cfg!(test) || cfg!(feature = "test-utils") {
             TEST_LOG_N
         } else {
             BACKUP_V1_LOG_N
