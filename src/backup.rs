@@ -19,6 +19,7 @@ const BACKUP_BUFFER_LEN_DECRYPT: usize = BACKUP_BUFFER_LEN_ENCRYPT + 16;
 const BACKUP_SALT_LENGTH: usize = 32;
 const BACKUP_NONCE_LENGTH: usize = 19;
 const BACKUP_VERSION: u8 = 1;
+const RESTORE_STAGING_DIR: &str = "restored";
 
 struct BackupPaths {
     encrypted: PathBuf,
@@ -84,18 +85,36 @@ pub(crate) fn do_backup(
     Ok(())
 }
 
-/// Restore a backup from the given file and password to the provided target directory.
-pub(crate) fn restore_backup(
+/// A decrypted backup, extracted to a temporary directory.
+///
+/// Restoring is split in two steps so the caller can check the backup before the target directory
+/// is touched: a backup that turns out to be unusable must not leave the node holding data it
+/// cannot open, since both `init` and `restore` refuse to run on an initialized node.
+pub(crate) struct UnpackedBackup {
+    dir: PathBuf,
+    zip: PathBuf,
+    // extraction happens under this directory, removed when the backup is dropped
+    _tempdir: TempDir,
+}
+
+impl UnpackedBackup {
+    /// The directory holding the extracted backup contents.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+/// Decrypt the backup at the given path with the given password and extract it to a temporary
+/// directory, leaving the node's storage directory untouched.
+pub(crate) fn unpack_backup(
     backup_path: &Path,
     password: &str,
-    target_dir: &Path,
-) -> Result<(), APIError> {
+) -> Result<UnpackedBackup, APIError> {
     // setup
     tracing::info!("starting restore...");
     let backup_file = PathBuf::from(backup_path);
     let tmp_base_path = get_parent_path(&backup_file)?;
     let files = get_backup_paths(&tmp_base_path)?;
-    let target_dir_path = PathBuf::from(&target_dir);
 
     // unpack given zip file and retrieve backup data
     tracing::info!("unzipping {:?}", backup_file);
@@ -114,11 +133,24 @@ pub(crate) fn restore_backup(
         });
     }
 
-    // decrypt backup and restore files
+    // decrypt the backup and extract it out of the way of the target directory
     tracing::info!("decrypting {:?} to {:?}", files.encrypted, files.zip);
     decrypt_file(&files.encrypted, &files.zip, password, &salt, &nonce)?;
-    tracing::info!("unzipping {:?} to {:?}", &files.zip, &target_dir_path);
-    unzip(&files.zip, &target_dir_path)?;
+    let dir = files.tempdir.path().join(RESTORE_STAGING_DIR);
+    tracing::info!("unzipping {:?} to {:?}", &files.zip, &dir);
+    unzip(&files.zip, &dir)?;
+
+    Ok(UnpackedBackup {
+        dir,
+        zip: files.zip,
+        _tempdir: files.tempdir,
+    })
+}
+
+/// Install a previously unpacked backup into the provided target directory.
+pub(crate) fn install_backup(backup: &UnpackedBackup, target_dir: &Path) -> Result<(), APIError> {
+    tracing::info!("unzipping {:?} to {:?}", &backup.zip, target_dir);
+    unzip(&backup.zip, target_dir)?;
 
     tracing::info!("restore completed");
     Ok(())

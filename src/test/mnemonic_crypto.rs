@@ -1,6 +1,7 @@
 use rln_migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 
+use crate::crypto::encrypt_mnemonic;
 use crate::database::RlnDatabase;
 use crate::error::APIError;
 use crate::utils::{check_password_validity, encrypt_and_save_mnemonic};
@@ -45,6 +46,19 @@ fn legacy_record_is_reported_as_corrupted() {
     let (_tmp_dir, db) = setup_db();
     RlnDatabase::new(db.clone())
         .save_mnemonic(LEGACY_RECORD.to_string())
+        .expect("save");
+    assert!(matches!(
+        check_password_validity(PASSWORD, &db),
+        Err(APIError::CorruptedMnemonic(_))
+    ));
+}
+
+#[test]
+fn decryptable_but_invalid_mnemonic_is_reported_as_corrupted() {
+    let (_tmp_dir, db) = setup_db();
+    let encrypted = encrypt_mnemonic(PASSWORD, "not a bip39 mnemonic").expect("encrypt");
+    RlnDatabase::new(db.clone())
+        .save_mnemonic(encrypted)
         .expect("save");
     assert!(matches!(
         check_password_validity(PASSWORD, &db),

@@ -3362,6 +3362,7 @@ mod remote_first_kv;
 #[cfg(feature = "vss")]
 mod remote_first_recovery;
 mod restart;
+mod restore_legacy_backup;
 mod restore_swaps_db_pool;
 mod rgb_payment_htlc_persistence;
 mod send_receive;

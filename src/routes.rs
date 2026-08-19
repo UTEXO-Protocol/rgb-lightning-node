@@ -107,7 +107,7 @@ use crate::utils::{
     validate_and_parse_payment_preimage, UnlockedAppState, UserOnionMessageContents,
 };
 use crate::{
-    backup::{do_backup, restore_backup},
+    backup::{do_backup, install_backup, unpack_backup},
     core_types::{
         HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest, PENDING_SWAP_TIMEOUT_SECS,
     },
@@ -4860,13 +4860,23 @@ pub(crate) async fn restore(
 
         check_already_initialized(&state.db())?;
 
-        restore_backup(
-            Path::new(&payload.backup_path),
-            &payload.password,
-            &state.static_state.storage_dir_path,
-        )?;
+        let unpacked = unpack_backup(Path::new(&payload.backup_path), &payload.password)?;
 
-        // restore_backup overwrote the SQLite file under the pre-restore pool;
+        // Check the backup can be unlocked while the storage dir is still untouched: installing a
+        // backup whose mnemonic cannot be read would initialize the node with data it can never
+        // open, and both init and restore then refuse to run.
+        let staged_db = open_database_pool(unpacked.dir())
+            .await
+            .map_err(|e| APIError::Unexpected(e.to_string()))?;
+        let staged_check = check_password_validity(&payload.password, &staged_db);
+        // drop, never close: the query above ran on the database runtime, so awaiting a close
+        // here would wait on a wakeup that runtime no longer delivers
+        drop(staged_db);
+        staged_check?;
+
+        install_backup(&unpacked, &state.static_state.storage_dir_path)?;
+
+        // install_backup overwrote the SQLite file under the pre-restore pool;
         // reopen so subsequent queries (including unlock) see the restored data.
         let new_pool = open_database_pool(&state.static_state.storage_dir_path)
             .await
