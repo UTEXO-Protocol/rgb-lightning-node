@@ -4610,6 +4610,15 @@ async fn reimport_funding_consignments(
     mark_replay_done();
 }
 
+// The unlock request wins, then the `[chain]` config section. There is no built-in default any
+// more, so an indexer that resolves from neither is a hard error rather than a silent fallback.
+fn resolve_indexer_url<'a>(
+    request: Option<&'a str>,
+    config: Option<&'a str>,
+) -> Result<&'a str, APIError> {
+    request.or(config).ok_or(APIError::MissingIndexerUrl)
+}
+
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     key_source: NodeKeySource,
@@ -4620,9 +4629,6 @@ pub(crate) async fn start_ldk(
 
     // Unlock request params take precedence, the config file provides defaults.
     let file_config = &static_state.config;
-    unlock_request.indexer_url = unlock_request
-        .indexer_url
-        .or_else(|| file_config.chain.indexer_url.clone());
     unlock_request.proxy_endpoint = unlock_request
         .proxy_endpoint
         .or_else(|| file_config.chain.proxy_endpoint.clone());
@@ -4824,10 +4830,10 @@ pub(crate) async fn start_ldk(
     let ldk_peer_listening_port = static_state.ldk_peer_listening_port;
 
     // RGB setup
-    let indexer_url = unlock_request
-        .indexer_url
-        .as_deref()
-        .ok_or(APIError::MissingIndexerUrl)?;
+    let indexer_url = resolve_indexer_url(
+        unlock_request.indexer_url.as_deref(),
+        static_state.config.chain.indexer_url.as_deref(),
+    )?;
     let indexer_protocol = check_indexer_url(indexer_url, bitcoin_network)?;
     tracing::info!(
         "Connected to an indexer with the {} protocol",
@@ -6550,6 +6556,33 @@ pub(crate) fn clear_rgb_payment_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `chain.indexer_url` is the whole reason the unlock request keeps `indexer_url` optional
+    // instead of adopting upstream's mandatory field, so the layering itself is pinned here.
+    #[test]
+    fn indexer_url_falls_back_to_the_config_file() {
+        assert_eq!(
+            resolve_indexer_url(None, Some("127.0.0.1:50001")).unwrap(),
+            "127.0.0.1:50001"
+        );
+    }
+
+    #[test]
+    fn indexer_url_from_the_request_wins_over_the_config_file() {
+        assert_eq!(
+            resolve_indexer_url(Some("from-request:50001"), Some("from-config:50001")).unwrap(),
+            "from-request:50001"
+        );
+    }
+
+    // the per-network default indexer is gone: neither source means the unlock fails outright
+    #[test]
+    fn indexer_url_missing_from_both_sources_errors() {
+        assert!(matches!(
+            resolve_indexer_url(None, None),
+            Err(APIError::MissingIndexerUrl)
+        ));
+    }
     use crate::kv_store::SeaOrmKvStore;
     use lightning::rgb_utils::RgbInfo;
     use rln_migration::{Migrator, MigratorTrait};
