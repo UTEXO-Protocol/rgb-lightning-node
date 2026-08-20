@@ -93,7 +93,7 @@ impl AppState {
     pub(crate) fn get_changing_state(&self) -> MutexGuard<'_, bool> {
         self.changing_state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) // propagate the poison
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) // ignore the poison: a wedged flag must not block shutdown
     }
 
     pub(crate) fn get_ldk_background_services(
@@ -101,7 +101,7 @@ impl AppState {
     ) -> MutexGuard<'_, Option<LdkBackgroundServices>> {
         self.ldk_background_services
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) // propagate the poison
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) // ignore the poison: a wedged flag must not block shutdown
     }
 
     #[allow(dead_code)]
