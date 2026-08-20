@@ -1158,10 +1158,13 @@ impl WalletSource for RgbBumpWalletSource {
 impl ChangeDestinationSource for RgbLibWalletWrapper {
     fn get_change_destination_script<'a>(&'a self) -> AsyncResult<'a, ScriptBuf, ()> {
         Box::pin(async move {
-            Ok(Address::from_str(&self.get_address().unwrap())
-                .unwrap()
-                .assume_checked()
-                .script_pubkey())
+            let address = self.get_address().map_err(|e| {
+                tracing::error!("cannot get a change address to sweep outputs, will retry: {e}");
+            })?;
+            let parsed = Address::from_str(&address).map_err(|e| {
+                tracing::error!(error = %e, "invalid change address to sweep outputs");
+            })?;
+            Ok(parsed.assume_checked().script_pubkey())
         })
     }
 }
