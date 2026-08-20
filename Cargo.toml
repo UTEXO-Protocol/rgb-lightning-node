@@ -52,7 +52,7 @@ electrum-client = "0.20.0"
 esplora-client = { version = "0.12", default-features = false, features = ["blocking-https-rustls"] }
 futures = "0.3"
 hex = { package = "hex-conservative", version = "0.3.0", default-features = false }
-lightning = { version = "0.2.0", features = ["dnssec"] }
+lightning = { version = "0.2.0", features = ["dnssec", "electrum", "esplora"] }
 lightning-background-processor = { version = "0.2.0" }
 lightning-block-sync = { version = "0.2.0", features = ["rpc-client", "tokio"] }
 lightning-dns-resolver = { version = "0.3.0" }
