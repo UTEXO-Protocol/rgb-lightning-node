@@ -6484,9 +6484,11 @@ impl AppState {
         ldk_background_services.gossip_shutdown.notify_one();
         ldk_background_services.peer_manager.disconnect_all_peers();
 
-        // Stop the background processor.
+        // Stop the background processor. Its `bp_exit` receiver lives inside the
+        // `process_events_async` future, so nothing to signal if the background processor is
+        // already gone. Also, send can find no receiver during a panic (racy).
         if !ldk_background_services.bp_exit.is_closed() {
-            ldk_background_services.bp_exit.send(()).unwrap();
+            let _ = ldk_background_services.bp_exit.send(());
             ldk_background_services.background_processor.take()
         } else {
             None
@@ -6497,7 +6499,8 @@ impl AppState {
 #[cfg(feature = "vss")]
 const BP_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[cfg(feature = "vss")]
+// Runs while shutting down, possibly because the background processor itself
+// died, so its outcome is reported instead of unwrapped.
 fn log_bp_shutdown_result(res: Result<Result<(), io::Error>, tokio::task::JoinError>) {
     match res {
         Ok(Ok(())) => {}
@@ -6544,7 +6547,7 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
     }
     #[cfg(not(feature = "vss"))]
     if let Some(join_handle) = app_state.stop_ldk() {
-        join_handle.await.unwrap().unwrap();
+        log_bp_shutdown_result(join_handle.await);
     }
 
     // Graceful teardown (lock, shutdown, signal): release the VSS fence so
@@ -6597,7 +6600,8 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
             break;
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 10.0 {
-            panic!("LDK peer port not being released")
+            tracing::error!("LDK peer port {peer_port} was not released within 10s");
+            break;
         }
     }
 

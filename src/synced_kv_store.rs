@@ -244,7 +244,13 @@ impl SyncedKvStore {
             .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(test)]
         self.run_before_stop_gate_hook();
-        drop(self.drain_gate.lock().unwrap());
+        // A write path can panic (e.g. a broken VSS fence) while holding the gate; teardown must
+        // still reach the fence release instead of panicking on the poison.
+        drop(
+            self.drain_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
     }
 
     #[cfg(feature = "vss")]
@@ -727,5 +733,34 @@ impl KVStoreSync for SyncedKvStore {
     ) -> Result<Vec<String>, io::Error> {
         // Always list from local store
         self.local.list(primary_namespace, secondary_namespace)
+    }
+}
+
+#[cfg(all(test, feature = "vss"))]
+mod stop_tests {
+    use super::*;
+
+    // A write path can panic (broken VSS fence) while holding the drain gate; `stop()` must still
+    // return so teardown reaches the fence release instead of dying on the poison.
+    #[test]
+    fn stop_tolerates_a_poisoned_drain_gate() {
+        let connection = crate::runtime::block_on(sea_orm::Database::connect("sqlite::memory:"))
+            .expect("in-memory database");
+        let store = Arc::new(SyncedKvStore::local_only(Arc::new(
+            SeaOrmKvStore::from_connection(Arc::new(connection)),
+        )));
+
+        let poisoner = Arc::clone(&store);
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _gate = poisoner.drain_gate.lock().unwrap();
+            panic!("poison the gate");
+        })
+        .join();
+        std::panic::set_hook(previous_hook);
+        assert!(store.drain_gate.is_poisoned());
+
+        store.stop();
     }
 }

@@ -1703,6 +1703,26 @@ impl AppState {
     }
 }
 
+/// Marks the node as changing state for as long as it is alive.
+///
+/// The flag has to be cleared on every exit path, including an unwind: shutdown waits for the
+/// state change to complete, so a flag left set by a panic would hang the shutdown instead of
+/// letting the node exit.
+struct ChangingStateGuard(Arc<AppState>);
+
+impl ChangingStateGuard {
+    fn new(app_state: Arc<AppState>) -> Self {
+        app_state.update_changing_state(true);
+        Self(app_state)
+    }
+}
+
+impl Drop for ChangingStateGuard {
+    fn drop(&mut self) {
+        self.0.update_changing_state(false);
+    }
+}
+
 pub(crate) async fn address(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AddressResponse>, APIError> {
@@ -3847,16 +3867,16 @@ pub(crate) async fn lock(
 ) -> Result<Json<EmptyResponse>, APIError> {
     tracing::info!("Lock started");
     no_cancel(async move {
-        match state.check_unlocked().await {
+        let _changing_state = match state.check_unlocked().await {
             Ok(unlocked_state) => {
-                state.update_changing_state(true);
+                let guard = ChangingStateGuard::new(state.clone());
                 drop(unlocked_state);
+                guard
             }
             Err(e) => {
-                state.update_changing_state(false);
                 return Err(e);
             }
-        }
+        };
 
         tracing::debug!("Stopping LDK...");
         stop_ldk(state.clone()).await;
@@ -3865,8 +3885,6 @@ pub(crate) async fn lock(
         state.update_unlocked_app_state(None).await;
 
         state.update_ldk_background_services(None);
-
-        state.update_changing_state(false);
 
         tracing::info!("Lock completed");
         Ok(Json(EmptyResponse {}))
@@ -5490,10 +5508,11 @@ pub(crate) async fn unlock(
             return Err(APIError::ExternalSignerRequiresAuthentication);
         }
 
-        match state.check_locked().await {
+        let _changing_state = match state.check_locked().await {
             Ok(unlocked_state) => {
-                state.update_changing_state(true);
+                let guard = ChangingStateGuard::new(state.clone());
                 drop(unlocked_state);
+                guard
             }
             Err(e) => {
                 return Err(match e {
@@ -5501,14 +5520,7 @@ pub(crate) async fn unlock(
                     _ => e,
                 });
             }
-        }
-
-        // Clear the changing-state flag on any exit — including a panic during
-        // startup — so a failed unlock can't wedge the node in ChangingState.
-        let _changing_state_guard = crate::utils::CallOnDrop::new({
-            let state = state.clone();
-            move || state.update_changing_state(false)
-        });
+        };
 
         let key_source = if external_configured {
             external_signer_key_source(&state).await?
@@ -5776,29 +5788,24 @@ mod request_tests {
     }
 }
 
-/// External-signer mode holds no mnemonic, so `/unlock` never checks a password on that path — the
-/// biscuit token is the only credential guarding it. These tests pin down that both HTTP entry points
-/// that can leave a node running in external-signer mode refuse to do so when authentication is
-/// disabled, rather than silently leaving `/unlock` passwordless.
-#[cfg(all(test, feature = "remote-signer"))]
-mod external_signer_auth_tests {
+#[cfg(test)]
+mod state_mocks {
     use super::*;
     use crate::disk::FilesystemLogger;
     use crate::utils::{open_database_pool, StaticState};
     use rln_migration::{Migrator, MigratorTrait};
     use std::collections::HashSet;
-    use std::marker::PhantomData;
     use std::sync::{Mutex, RwLock};
     use tokio::sync::Mutex as TokioMutex;
     use tokio_util::sync::CancellationToken;
 
-    async fn mock_state_with_auth(
+    pub(super) async fn mock_state_with_auth(
         root_public_key: Option<biscuit_auth::PublicKey>,
     ) -> Arc<AppState> {
         mock_state(root_public_key, None).await
     }
 
-    async fn mock_state(
+    pub(super) async fn mock_state(
         root_public_key: Option<biscuit_auth::PublicKey>,
         remote_signer_listen_addr: Option<std::net::SocketAddr>,
     ) -> Arc<AppState> {
@@ -5818,6 +5825,10 @@ mod external_signer_auth_tests {
                 ldk_data_dir: path.join(".ldk"),
                 logger: Arc::new(FilesystemLogger::new(path)),
                 max_media_upload_size_mb: 1,
+                max_aggregated_media_size_per_channel_mb:
+                    crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+                max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+                max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
                 enable_virtual_channels_v0: false,
                 virtual_peer_pubkeys: vec![],
                 database: RwLock::new(Arc::new(database)),
@@ -5837,6 +5848,50 @@ mod external_signer_auth_tests {
             revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
         })
     }
+}
+
+#[cfg(test)]
+mod changing_state_guard_tests {
+    use super::state_mocks::mock_state_with_auth;
+    use super::ChangingStateGuard;
+
+    #[tokio::test]
+    async fn sets_and_clears_the_flag() {
+        let state = mock_state_with_auth(None).await;
+        assert!(!*state.get_changing_state());
+        {
+            let _guard = ChangingStateGuard::new(state.clone());
+            assert!(*state.get_changing_state());
+        }
+        assert!(!*state.get_changing_state());
+    }
+
+    // A flag left set by a panicking lock/unlock makes `shutdown_signal` wait forever.
+    #[tokio::test]
+    async fn clears_the_flag_on_panic_unwind() {
+        let state = mock_state_with_auth(None).await;
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ChangingStateGuard::new(state.clone());
+            assert!(*state.get_changing_state());
+            panic!("boom");
+        }));
+        assert!(panicked.is_err(), "closure should have panicked");
+        assert!(
+            !*state.get_changing_state(),
+            "the flag must be cleared while unwinding a panic"
+        );
+    }
+}
+
+/// External-signer mode holds no mnemonic, so `/unlock` never checks a password on that path — the
+/// biscuit token is the only credential guarding it. These tests pin down that both HTTP entry points
+/// that can leave a node running in external-signer mode refuse to do so when authentication is
+/// disabled, rather than silently leaving `/unlock` passwordless.
+#[cfg(all(test, feature = "remote-signer"))]
+mod external_signer_auth_tests {
+    use super::state_mocks::{mock_state, mock_state_with_auth};
+    use super::*;
+    use std::marker::PhantomData;
 
     /// A biscuit keypair for tests that need authentication *enabled* (root_public_key = Some).
     fn test_root_public_key() -> biscuit_auth::PublicKey {
