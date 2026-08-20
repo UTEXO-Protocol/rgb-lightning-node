@@ -66,7 +66,7 @@ use crate::ldk::{
 #[cfg(feature = "vss")]
 use crate::routes::VssClearFenceRequest;
 use crate::routes::{
-    AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetIFA,
+    AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetFilter, AssetIFA,
     AssetMetadataRequest, AssetMetadataResponse, AssetNIA, AssetUDA, Assignment, BackupRequest,
     BtcBalanceRequest, BtcBalanceResponse, CancelHodlInvoiceRequest, ChangePasswordRequest,
     Channel, ChannelStatus, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest,
@@ -1699,7 +1699,7 @@ async fn list_transfers_full(
 ) -> ListTransfersResponse {
     println!("listing transfers for asset {asset_id} on node {node_address}");
     let payload = ListTransfersRequest {
-        asset_id: Some(asset_id.to_string()),
+        asset_filter: AssetFilter::Id(asset_id.to_string()),
         txid: None,
         index_offset: filter.index_offset,
         max_transfers: filter.max_transfers,
@@ -1723,8 +1723,33 @@ async fn list_transfers_full(
 async fn list_transfers_by_txid(node_address: SocketAddr, txid: &str) -> Vec<Transfer> {
     println!("listing transfers for txid {txid} on node {node_address}");
     let payload = ListTransfersRequest {
-        asset_id: None,
+        asset_filter: AssetFilter::AnyOrNone,
         txid: Some(txid.to_string()),
+        index_offset: None,
+        max_transfers: None,
+        status: None,
+        created_after: None,
+        created_before: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/listtransfers"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<ListTransfersResponse>()
+        .await
+        .unwrap()
+        .transfers
+}
+
+async fn list_transfers_no_asset(node_address: SocketAddr) -> Vec<Transfer> {
+    println!("listing asset-less transfers on node {node_address}");
+    let payload = ListTransfersRequest {
+        asset_filter: AssetFilter::None,
+        txid: None,
         index_offset: None,
         max_transfers: None,
         status: None,
@@ -1752,7 +1777,7 @@ async fn list_transfers_by_asset_and_txid(
 ) -> Vec<Transfer> {
     println!("listing transfers for asset {asset_id} and txid {txid} on node {node_address}");
     let payload = ListTransfersRequest {
-        asset_id: Some(asset_id.to_string()),
+        asset_filter: AssetFilter::Id(asset_id.to_string()),
         txid: Some(txid.to_string()),
         index_offset: None,
         max_transfers: None,

@@ -46,13 +46,13 @@ use rgb_lib::{
             check_indexer_url as rgb_lib_check_indexer_url,
             IndexerProtocol as RgbLibIndexerProtocol,
         },
-        AssetCFA as RgbLibAssetCFA, AssetIFA as RgbLibAssetIFA, AssetNIA as RgbLibAssetNIA,
-        AssetUDA as RgbLibAssetUDA, Balance as RgbLibBalance, EmbeddedMedia as RgbLibEmbeddedMedia,
-        IfaIssuanceType as RgbLibIfaIssuanceType, Invoice as RgbLibInvoice, Media as RgbLibMedia,
-        OperationResult as RgbLibOperationResult, Outpoint as RgbLibOutpoint,
-        ProofOfReserves as RgbLibProofOfReserves, Recipient as RgbLibRecipient, RecipientInfo,
-        RecipientType as RgbLibRecipientType, RefreshFilter as RgbLibRefreshFilter,
-        RefreshTransferStatus as RgbLibRefreshTransferStatus,
+        AssetCFA as RgbLibAssetCFA, AssetFilter as RgbLibAssetFilter, AssetIFA as RgbLibAssetIFA,
+        AssetNIA as RgbLibAssetNIA, AssetUDA as RgbLibAssetUDA, Balance as RgbLibBalance,
+        EmbeddedMedia as RgbLibEmbeddedMedia, IfaIssuanceType as RgbLibIfaIssuanceType,
+        Invoice as RgbLibInvoice, Media as RgbLibMedia, OperationResult as RgbLibOperationResult,
+        Outpoint as RgbLibOutpoint, ProofOfReserves as RgbLibProofOfReserves,
+        Recipient as RgbLibRecipient, RecipientInfo, RecipientType as RgbLibRecipientType,
+        RefreshFilter as RgbLibRefreshFilter, RefreshTransferStatus as RgbLibRefreshTransferStatus,
         RefreshedTransfer as RgbLibRefreshedTransfer, SyncKeychain as RgbLibSyncKeychain,
         SyncOptions as RgbLibSyncOptions, SyncStrategy as RgbLibSyncStrategy, Token as RgbLibToken,
         TokenLight as RgbLibTokenLight, WitnessData as RgbLibWitnessData,
@@ -186,6 +186,24 @@ impl From<RgbLibAssetCFA> for AssetCFA {
             added_at: value.added_at,
             balance: value.balance.into(),
             media: value.media.map(|m| m.into()),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", content = "value")]
+pub(crate) enum AssetFilter {
+    AnyOrNone,
+    None,
+    Id(String),
+}
+
+impl From<AssetFilter> for RgbLibAssetFilter {
+    fn from(x: AssetFilter) -> Self {
+        match x {
+            AssetFilter::AnyOrNone => Self::AnyOrNone,
+            AssetFilter::None => Self::None,
+            AssetFilter::Id(asset_id) => Self::Id(asset_id),
         }
     }
 }
@@ -915,7 +933,7 @@ pub(crate) struct ListTransactionsResponse {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct ListTransfersRequest {
-    pub(crate) asset_id: Option<String>,
+    pub(crate) asset_filter: AssetFilter,
     pub(crate) txid: Option<String>,
     pub(crate) index_offset: Option<u64>,
     pub(crate) max_transfers: Option<u64>,
@@ -3621,16 +3639,13 @@ pub(crate) async fn list_transfers(
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    if payload.txid.is_none() && payload.asset_id.is_none() {
+    if payload.txid.is_none() && matches!(payload.asset_filter, AssetFilter::AnyOrNone) {
         return Err(APIError::InvalidRequest(s!(
-            "either asset_id or txid must be provided"
+            "either a narrowing asset_filter (Id or None) or a txid must be provided"
         )));
     }
-    let filter = match payload.asset_id {
-        Some(asset_id) => rgb_lib::wallet::AssetFilter::Id(asset_id),
-        None => rgb_lib::wallet::AssetFilter::AnyOrNone,
-    };
-    let raw_transfers = unlocked_state.rgb_list_transfers(filter, payload.txid)?;
+    let raw_transfers =
+        unlocked_state.rgb_list_transfers(payload.asset_filter.into(), payload.txid)?;
 
     let mut transfers = vec![];
     for transfer in raw_transfers {

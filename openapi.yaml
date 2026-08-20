@@ -824,9 +824,10 @@ paths:
         - RGB
       summary: List transfers
       description: >-
-        List the node's RGB transfers for an asset, ordered most-recent first.
-        Supports index-based cursor pagination (idx) and optional filtering by
-        status and creation time interval.
+        List the node's RGB transfers, ordered most-recent first, scoped by an
+        asset filter and optionally by txid. Supports index-based cursor
+        pagination (idx) and optional filtering by status and creation time
+        interval.
       requestBody:
         content:
           application/json:
@@ -1619,6 +1620,48 @@ components:
           oneOf:
             - $ref: '#/components/schemas/Media'
             - type: 'null'
+    AssetFilter:
+      oneOf:
+        - $ref: '#/components/schemas/AssetFilterAnyOrNone'
+        - $ref: '#/components/schemas/AssetFilterNone'
+        - $ref: '#/components/schemas/AssetFilterId'
+      discriminator:
+        propertyName: type
+        mapping:
+          AnyOrNone: '#/components/schemas/AssetFilterAnyOrNone'
+          None: '#/components/schemas/AssetFilterNone'
+          Id: '#/components/schemas/AssetFilterId'
+    AssetFilterAnyOrNone:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [AnyOrNone]
+    AssetFilterId:
+      type: object
+      required:
+        - type
+        - value
+      properties:
+        type:
+          type: string
+          enum: [Id]
+        value:
+          type: string
+          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+      example:
+        type: Id
+        value: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+    AssetFilterNone:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [None]
     AssetIFA:
       type: object
       required:
@@ -3045,22 +3088,25 @@ components:
     ListTransfersRequest:
       type: object
       description: >-
-        Provide asset_id (list that asset's transfers), txid (list the
-        transfers committed by that on-chain transaction, across all assets),
-        or both (their intersection). At least one is required.
+        asset_filter selects the asset scope: Id (that asset's transfers), None
+        (only transfers not tied to an asset) or AnyOrNone (no asset
+        restriction). txid further restricts the result to the transfers
+        committed by that on-chain transaction, across all assets; combined
+        with an Id filter it acts as an intersection. AnyOrNone without a txid
+        is rejected, so narrow by asset_filter, by txid, or by both.
+      required:
+        - asset_filter
       properties:
-        asset_id:
-          type:
-            - string
-            - 'null'
-          example: rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8
+        asset_filter:
+          $ref: '#/components/schemas/AssetFilter'
         txid:
           type:
             - string
             - 'null'
+          example: 47ee0f5b7bd5b0dd7f10ce54a94fee1b5cd54e5241b0f70f9f373d10e7a3c3e2
           description: >-
             Return the transfers committed by the on-chain transaction with this
-            txid. Combined with asset_id it acts as an intersection.
+            txid. Combined with an Id asset_filter it acts as an intersection.
         index_offset:
           type:
             - integer
