@@ -599,12 +599,15 @@ dictionary SdkInitRequest {
     boolean reuse_addresses = false;
 };
 
+[Enum]
+interface SdkLdkChainSync {
+    BlockSync(string bitcoind_rpc_username, string bitcoind_rpc_password, string bitcoind_rpc_host, u16 bitcoind_rpc_port);
+    TransactionSync(string indexer_url);
+};
+
 dictionary SdkUnlockRequest {
     string password;
-    string? bitcoind_rpc_username;
-    string? bitcoind_rpc_password;
-    string? bitcoind_rpc_host;
-    u16? bitcoind_rpc_port;
+    SdkLdkChainSync ldk_chain_sync;
     string? indexer_url;
     string? proxy_endpoint;
     sequence<string> announce_addresses;

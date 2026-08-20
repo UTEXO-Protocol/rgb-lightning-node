@@ -1,3 +1,11 @@
+#[cfg(not(any(feature = "electrum", feature = "esplora")))]
+compile_error!("at least one of the `electrum` and `esplora` features needs to be enabled");
+
+#[cfg(not(any(feature = "block-sync", feature = "transaction-sync")))]
+compile_error!(
+    "at least one of the `block-sync` and `transaction-sync` features needs to be enabled"
+);
+
 mod apay_merkle;
 mod args;
 mod asset_link;
@@ -6,8 +14,6 @@ mod async_kv_store;
 mod async_order;
 mod auth;
 mod backup;
-mod bitcoind;
-mod chain_backend;
 mod config;
 mod core_types;
 mod crypto;
@@ -19,9 +25,9 @@ mod error;
 #[path = "test/fee_mock.rs"]
 mod fee_mock;
 mod gossip;
-mod indexer;
 mod kv_store;
 mod ldk;
+mod ldk_chain_backend;
 mod rgb;
 mod rgb_file_transfer;
 mod routes;
@@ -33,7 +39,9 @@ mod utils;
 #[cfg(feature = "vss")]
 mod vss_kv_store;
 
-#[cfg(test)]
+// the test suite calls into `electrum_client` to wait for electrs to catch up with bitcoind, and
+// that crate is only pulled in by the `electrum` feature
+#[cfg(all(test, feature = "electrum"))]
 mod test;
 
 use anyhow::Result;

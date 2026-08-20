@@ -109,7 +109,8 @@ use crate::utils::{
 use crate::{
     backup::{do_backup, install_backup, unpack_backup},
     core_types::{
-        HTLCStatus, SwapStatus, UnlockRequest as CoreUnlockRequest, PENDING_SWAP_TIMEOUT_SECS,
+        HTLCStatus, LdkChainSync, SwapStatus, UnlockRequest as CoreUnlockRequest,
+        PENDING_SWAP_TIMEOUT_SECS,
     },
     rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional},
 };
@@ -1583,14 +1584,8 @@ pub(crate) enum TransportType {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct UnlockRequest {
     pub(crate) password: String,
-    #[serde(default)]
-    pub(crate) bitcoind_rpc_username: Option<String>,
-    #[serde(default)]
-    pub(crate) bitcoind_rpc_password: Option<String>,
-    #[serde(default)]
-    pub(crate) bitcoind_rpc_host: Option<String>,
-    #[serde(default)]
-    pub(crate) bitcoind_rpc_port: Option<u16>,
+    pub(crate) ldk_chain_sync: LdkChainSync,
+    // both fall back to the `[chain]` config section when omitted
     pub(crate) indexer_url: Option<String>,
     pub(crate) proxy_endpoint: Option<String>,
     pub(crate) announce_addresses: Vec<String>,
@@ -1608,10 +1603,7 @@ pub(crate) struct VssClearFenceRequest {
 impl From<UnlockRequest> for CoreUnlockRequest {
     fn from(value: UnlockRequest) -> Self {
         Self {
-            bitcoind_rpc_username: value.bitcoind_rpc_username,
-            bitcoind_rpc_password: value.bitcoind_rpc_password,
-            bitcoind_rpc_host: value.bitcoind_rpc_host,
-            bitcoind_rpc_port: value.bitcoind_rpc_port,
+            ldk_chain_sync: value.ldk_chain_sync,
             indexer_url: value.indexer_url,
             proxy_endpoint: value.proxy_endpoint,
             announce_addresses: value.announce_addresses,
@@ -5668,10 +5660,15 @@ mod request_tests {
     fn unlock_request_with_gossip_source_deserializes() {
         let json = r#"{
             "password": "x",
-            "bitcoind_rpc_username": "u",
-            "bitcoind_rpc_password": "p",
-            "bitcoind_rpc_host": "127.0.0.1",
-            "bitcoind_rpc_port": 18443,
+            "ldk_chain_sync": {
+                "mode": "BlockSync",
+                "config": {
+                    "bitcoind_rpc_username": "u",
+                    "bitcoind_rpc_password": "p",
+                    "bitcoind_rpc_host": "127.0.0.1",
+                    "bitcoind_rpc_port": 18443
+                }
+            },
             "announce_addresses": [],
             "gossip_source": { "type": "rgs", "server_url": "https://example.invalid" }
         }"#;
@@ -5686,10 +5683,15 @@ mod request_tests {
     fn unlock_request_without_gossip_source_defaults_to_none() {
         let json = r#"{
             "password": "x",
-            "bitcoind_rpc_username": "u",
-            "bitcoind_rpc_password": "p",
-            "bitcoind_rpc_host": "127.0.0.1",
-            "bitcoind_rpc_port": 18443,
+            "ldk_chain_sync": {
+                "mode": "BlockSync",
+                "config": {
+                    "bitcoind_rpc_username": "u",
+                    "bitcoind_rpc_password": "p",
+                    "bitcoind_rpc_host": "127.0.0.1",
+                    "bitcoind_rpc_port": 18443
+                }
+            },
             "announce_addresses": []
         }"#;
         let req: UnlockRequest = serde_json::from_str(json).unwrap();
@@ -5961,6 +5963,15 @@ mod external_signer_auth_tests {
         let payload: UnlockRequest = serde_json::from_str(
             r#"{
                 "password": "whatever",
+                "ldk_chain_sync": {
+                    "mode": "BlockSync",
+                    "config": {
+                        "bitcoind_rpc_username": "u",
+                        "bitcoind_rpc_password": "p",
+                        "bitcoind_rpc_host": "127.0.0.1",
+                        "bitcoind_rpc_port": 18443
+                    }
+                },
                 "announce_addresses": []
             }"#,
         )

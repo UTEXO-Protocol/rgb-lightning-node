@@ -52,12 +52,41 @@ The repository supports AI-assisted pull request reviews.
 Setup details for Claude, Codex, and extendable provider onboarding are documented in
 [`/.github/ai-review-bots.md`](.github/ai-review-bots.md).
 
+### Indexer support
+
+Support for the indexer protocols is behind cargo features, `electrum` and
+`esplora` (both enabled by default). At least one of them needs to be enabled.
+
+To support electrum indexers only:
+```sh
+cargo install --locked --path . --no-default-features --features electrum,block-sync,transaction-sync
+```
+
+To support esplora indexers only:
+```sh
+cargo install --locked --path . --no-default-features --features esplora,block-sync,transaction-sync
+```
+
+### Chain sync support
+
+Support for the chain sync backends is behind cargo features, `block-sync` and
+`transaction-sync` (both enabled by default). At least one of them needs to be
+enabled. See [Sync modes](#sync-modes) for what each backend does.
+
+To support the block-sync backend only:
+```sh
+cargo install --locked --path . --no-default-features --features block-sync,electrum,esplora
+```
+
+To support the transaction-sync backend only:
+```sh
+cargo install --locked --path . --no-default-features --features transaction-sync,electrum,esplora
+```
+
 ## Run
 
 In order to operate, the node will need:
-- a chain backend, either:
-  - a bitcoind node (drives LDK chain sync via RPC), or
-  - an esplora server (drives LDK chain sync over HTTP)
+- a bitcoind node (only for the `BlockSync` [sync mode](#sync-modes))
 - an indexer instance for RGB (electrum or esplora — forwarded to rgb-lib)
 
 Once services are running, daemons can be started.
@@ -69,16 +98,13 @@ specifying:
 - network (`--network`, default: testnet)
 
 Chain-backend credentials are supplied at `/unlock` time, not on the CLI. The
-body must include exactly one of:
-- all four `bitcoind_rpc_*` fields — LDK chain sync runs via bitcoind RPC.
-  An optional electrum `indexer_url` is forwarded to rgb-lib only.
-- esplora `indexer_url` (no `bitcoind_rpc_*` fields) — LDK chain sync runs
-  over esplora, same URL forwarded to rgb-lib.
-- electrum `indexer_url` (no `bitcoind_rpc_*` fields) — LDK chain sync runs
-  over electrum, same URL forwarded to rgb-lib.
-
-`bitcoind + esplora` returns `400 AmbiguousChainBackend`. No credentials at
-all returns `400 MissingChainBackend`.
+body must include `ldk_chain_sync`, which names the [sync mode](#sync-modes) and
+carries that mode's own configuration. The RGB wallet's `indexer_url` is
+independent of it: any indexer can be paired with any sync mode, so `BlockSync`
+against bitcoind with an esplora `indexer_url` is a valid combination.
+`indexer_url` and `proxy_endpoint` may be omitted from the body, in which case
+they come from the `[chain]` section of the config file; if neither supplies an
+indexer URL the unlock fails with `MissingIndexerUrl`.
 
 ### Configuration file
 
@@ -428,6 +454,23 @@ Example proxy URLs (only when using proxy transport):
 |-------------|-----------------------|
 | Local | `rpc://127.0.0.1:3000/json-rpc` |
 | Public | `rpcs://proxy.iriswallet.com/0.2/json-rpc` |
+
+## Sync modes
+
+The node keeps LDK in sync with the chain in one of two ways, selected at unlock
+time via the `ldk_chain_sync` field of the `/unlock` payload (see the
+`UnlockRequest` schema in `openapi.yaml` for the exact shape):
+
+- `BlockSync`: consume full blocks from a trusted/local `bitcoind` over JSON-RPC.
+  The `bitcoind_rpc_*` parameters are provided under this mode's `config`. This
+  is the more trust-minimized option, since the node does not rely on an indexer
+  to tell it which transactions are relevant.
+- `TransactionSync`: sync through an electrum/esplora indexer, so no `bitcoind`
+  is needed. The indexer LDK syncs against is given under this mode's `config`
+  via `indexer_url` and can differ from the one the RGB wallet uses.
+
+Both modes are available in a stock build. See
+[Chain sync support](#chain-sync-support) to build with only one of them.
 
 ## Test
 

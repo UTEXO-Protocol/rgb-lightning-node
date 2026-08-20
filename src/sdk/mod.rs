@@ -364,10 +364,7 @@ pub(crate) struct InitData {
 
 pub(crate) struct UnlockRequest {
     pub(crate) password: String,
-    pub(crate) bitcoind_rpc_username: Option<String>,
-    pub(crate) bitcoind_rpc_password: Option<String>,
-    pub(crate) bitcoind_rpc_host: Option<String>,
-    pub(crate) bitcoind_rpc_port: Option<u16>,
+    pub(crate) ldk_chain_sync: crate::core_types::LdkChainSync,
     pub(crate) indexer_url: Option<String>,
     pub(crate) proxy_endpoint: Option<String>,
     pub(crate) announce_addresses: Vec<String>,
@@ -2031,10 +2028,7 @@ pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Resu
         .gossip_rgs_server_url
         .map(|server_url| crate::gossip::GossipSourceConfig::RapidGossipSync { server_url });
     let unlock_request = crate::core_types::UnlockRequest {
-        bitcoind_rpc_username: request.bitcoind_rpc_username,
-        bitcoind_rpc_password: request.bitcoind_rpc_password,
-        bitcoind_rpc_host: request.bitcoind_rpc_host,
-        bitcoind_rpc_port: request.bitcoind_rpc_port,
+        ldk_chain_sync: request.ldk_chain_sync,
         indexer_url: request.indexer_url,
         proxy_endpoint: request.proxy_endpoint,
         announce_addresses: request.announce_addresses,
@@ -2131,10 +2125,7 @@ pub(crate) async fn unlock_with_attached_external_signer(
         .gossip_rgs_server_url
         .map(|server_url| crate::gossip::GossipSourceConfig::RapidGossipSync { server_url });
     let unlock_request = crate::core_types::UnlockRequest {
-        bitcoind_rpc_username: request.bitcoind_rpc_username,
-        bitcoind_rpc_password: request.bitcoind_rpc_password,
-        bitcoind_rpc_host: request.bitcoind_rpc_host,
-        bitcoind_rpc_port: request.bitcoind_rpc_port,
+        ldk_chain_sync: request.ldk_chain_sync,
         indexer_url: request.indexer_url,
         proxy_endpoint: request.proxy_endpoint,
         announce_addresses: request.announce_addresses,
@@ -4621,13 +4612,24 @@ mod tests {
         }
     }
 
+    fn sample_ldk_chain_sync() -> crate::core_types::LdkChainSync {
+        #[cfg(feature = "block-sync")]
+        return crate::core_types::LdkChainSync::BlockSync {
+            bitcoind_rpc_username: "user".to_string(),
+            bitcoind_rpc_password: "pass".to_string(),
+            bitcoind_rpc_host: "127.0.0.1".to_string(),
+            bitcoind_rpc_port: 18443,
+        };
+        #[cfg(not(feature = "block-sync"))]
+        return crate::core_types::LdkChainSync::TransactionSync {
+            indexer_url: "127.0.0.1:50001".to_string(),
+        };
+    }
+
     fn sample_unlock_request() -> UnlockRequest {
         UnlockRequest {
             password: "unused-in-external-mode".to_string(),
-            bitcoind_rpc_username: Some("user".to_string()),
-            bitcoind_rpc_password: Some("pass".to_string()),
-            bitcoind_rpc_host: Some("127.0.0.1".to_string()),
-            bitcoind_rpc_port: Some(18443),
+            ldk_chain_sync: sample_ldk_chain_sync(),
             indexer_url: Some("127.0.0.1:50001".to_string()),
             proxy_endpoint: Some("rpc://127.0.0.1:3000/json-rpc".to_string()),
             announce_addresses: vec![],

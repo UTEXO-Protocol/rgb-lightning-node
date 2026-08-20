@@ -31,7 +31,7 @@ use rgb_lightning_node::{
     SdkPostAssetMediaResponse, SdkRefreshTransfersRequest, SdkRefreshTransfersResponse,
     SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
     SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
-    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
+    SdkLdkChainSync, SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
     SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
     TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
     VerifyMessageResponse, WitnessData,
@@ -167,17 +167,47 @@ impl TryFrom<JsonSdkInitRequest> for SdkInitRequest {
     }
 }
 
+// How LDK follows the chain. Mirrors `SdkLdkChainSync`, tagged the same way as the daemon's
+// `/unlock` payload.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "mode", content = "config")]
+pub(crate) enum JsonSdkLdkChainSync {
+    BlockSync {
+        bitcoind_rpc_username: String,
+        bitcoind_rpc_password: String,
+        bitcoind_rpc_host: String,
+        bitcoind_rpc_port: u16,
+    },
+    TransactionSync {
+        indexer_url: String,
+    },
+}
+
+impl From<JsonSdkLdkChainSync> for SdkLdkChainSync {
+    fn from(j: JsonSdkLdkChainSync) -> Self {
+        match j {
+            JsonSdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            } => SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            },
+            JsonSdkLdkChainSync::TransactionSync { indexer_url } => {
+                SdkLdkChainSync::TransactionSync { indexer_url }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonSdkUnlockRequest {
     pub password: String,
-    #[serde(default)]
-    pub bitcoind_rpc_username: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_password: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_host: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_port: Option<u16>,
+    pub ldk_chain_sync: JsonSdkLdkChainSync,
     #[serde(default)]
     pub indexer_url: Option<String>,
     #[serde(default)]
@@ -197,10 +227,7 @@ impl From<JsonSdkUnlockRequest> for SdkUnlockRequest {
     fn from(j: JsonSdkUnlockRequest) -> Self {
         SdkUnlockRequest {
             password: j.password,
-            bitcoind_rpc_username: j.bitcoind_rpc_username,
-            bitcoind_rpc_password: j.bitcoind_rpc_password,
-            bitcoind_rpc_host: j.bitcoind_rpc_host,
-            bitcoind_rpc_port: j.bitcoind_rpc_port,
+            ldk_chain_sync: j.ldk_chain_sync.into(),
             indexer_url: j.indexer_url,
             proxy_endpoint: j.proxy_endpoint,
             announce_addresses: j.announce_addresses,
@@ -231,14 +258,7 @@ impl From<JsonVssClearFenceRequest> for SdkVssClearFenceRequest {
 // External-signer mode has no password: the seed never reaches RLN.
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonSdkExternalUnlockRequest {
-    #[serde(default)]
-    pub bitcoind_rpc_username: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_password: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_host: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_port: Option<u16>,
+    pub ldk_chain_sync: JsonSdkLdkChainSync,
     #[serde(default)]
     pub indexer_url: Option<String>,
     #[serde(default)]

@@ -752,10 +752,7 @@ pub(crate) fn sdk_node_unlock_with_native_external_signer(
     let r: JsonSdkExternalUnlockRequest = parse_req(request_json)?;
     node.unlock_with_native_external_signer(
         Arc::clone(signer),
-        r.bitcoind_rpc_username,
-        r.bitcoind_rpc_password,
-        r.bitcoind_rpc_host,
-        r.bitcoind_rpc_port,
+        r.ldk_chain_sync.into(),
         r.indexer_url,
         r.proxy_endpoint,
         r.announce_addresses,
@@ -787,10 +784,7 @@ pub(crate) fn sdk_node_unlock_with_attached_external_signer(
     let node = require_handle(node)?;
     let r: JsonSdkExternalUnlockRequest = parse_req(request_json)?;
     node.unlock_with_attached_external_signer(
-        r.bitcoind_rpc_username,
-        r.bitcoind_rpc_password,
-        r.bitcoind_rpc_host,
-        r.bitcoind_rpc_port,
+        r.ldk_chain_sync.into(),
         r.indexer_url,
         r.proxy_endpoint,
         r.announce_addresses,

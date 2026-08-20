@@ -1,46 +1,6 @@
-use std::process::Command;
-
 use super::*;
 
 const TEST_DIR_BASE: &str = "tmp/init_esplora/";
-
-async fn start_esplora_profile() {
-    // initialize() recreated the network — drop the stale esplora container.
-    let _ = Command::new("docker")
-        .args(["rm", "-f", "optional-bitcoind-esplora-sync-esplora-1"])
-        .status();
-    let status = Command::new("docker")
-        .args(["compose", "--profile", "esplora", "up", "-d", "esplora"])
-        .status()
-        .expect("failed to start esplora service");
-    assert!(status.success(), "docker compose esplora up failed");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap();
-    let t_0 = OffsetDateTime::now_utc();
-    loop {
-        let ready = client
-            .get(format!(
-                "{}/blocks/tip/hash",
-                crate::utils::ESPLORA_URL_REGTEST
-            ))
-            .send()
-            .await
-            .ok();
-        if let Some(resp) = ready {
-            if let Ok(body) = resp.text().await {
-                if body.trim().len() == 64 {
-                    return;
-                }
-            }
-        }
-        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 60.0 {
-            panic!("esplora REST never became ready");
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-}
 
 /// Happy path for the esplora chain-sync mode: unlock without bitcoind creds, fund the wallet, confirm sync via esplora.
 #[serial_test::serial]
@@ -61,10 +21,9 @@ async fn init_esplora_path_unlocks_without_bitcoind() {
 
     let payload = UnlockRequest {
         password: s!("password123"),
-        bitcoind_rpc_username: None,
-        bitcoind_rpc_password: None,
-        bitcoind_rpc_host: None,
-        bitcoind_rpc_port: None,
+        ldk_chain_sync: LdkChainSync::TransactionSync {
+            indexer_url: crate::utils::ESPLORA_URL_REGTEST.to_string(),
+        },
         indexer_url: Some(crate::utils::ESPLORA_URL_REGTEST.to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
         announce_addresses: vec![],

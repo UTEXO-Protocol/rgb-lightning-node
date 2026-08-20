@@ -78,10 +78,12 @@ fn attach_external_signer_host(
 
 fn unlock_with_attached_external_signer(node: &SdkNode, announce_alias: &str) {
     node.unlock_with_attached_external_signer(
-        Some("user".to_string()),
-        Some("password".to_string()),
-        Some("localhost".to_string()),
-        Some(18443),
+        SdkLdkChainSync::BlockSync {
+            bitcoind_rpc_username: "user".to_string(),
+            bitcoind_rpc_password: "password".to_string(),
+            bitcoind_rpc_host: "localhost".to_string(),
+            bitcoind_rpc_port: 18443,
+        },
         Some("127.0.0.1:50001".to_string()),
         Some(PROXY_ENDPOINT_LOCAL.to_string()),
         vec![],
@@ -171,10 +173,12 @@ fn external_init_unlock_and_restart_same_signer() {
             .expect("external init");
         node.unlock_with_native_external_signer(
             signer.clone(),
-            Some("user".to_string()),
-            Some("password".to_string()),
-            Some("localhost".to_string()),
-            Some(18443),
+            SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username: "user".to_string(),
+                bitcoind_rpc_password: "password".to_string(),
+                bitcoind_rpc_host: "localhost".to_string(),
+                bitcoind_rpc_port: 18443,
+            },
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),
             vec![],
@@ -192,10 +196,12 @@ fn external_init_unlock_and_restart_same_signer() {
         restarted
             .unlock_with_native_external_signer(
                 signer.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -234,10 +240,12 @@ fn external_restart_with_mismatched_signer_fails_unlock() {
             .expect("external init");
         node.unlock_with_native_external_signer(
             signer_a.clone(),
-            Some("user".to_string()),
-            Some("password".to_string()),
-            Some("localhost".to_string()),
-            Some(18443),
+            SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username: "user".to_string(),
+                bitcoind_rpc_password: "password".to_string(),
+                bitcoind_rpc_host: "localhost".to_string(),
+                bitcoind_rpc_port: 18443,
+            },
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),
             vec![],
@@ -253,10 +261,12 @@ fn external_restart_with_mismatched_signer_fails_unlock() {
         let err = restarted
             .unlock_with_native_external_signer(
                 signer_b,
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -598,10 +608,12 @@ fn rgb_native_external_signer_mixed_one_hop_payment_quick() {
         node_b
             .unlock_with_native_external_signer(
                 signer_b.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -744,10 +756,12 @@ fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
         node_b
             .unlock_with_native_external_signer(
                 signer_b.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -908,10 +922,12 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
         node_b
             .unlock_with_native_external_signer(
                 signer_b.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -1083,10 +1099,12 @@ fn external_signer_virtual_channel_survives_restart() {
     let unlock_device = |node: &SdkNode, signer: &Arc<rgb_lightning_node::NativeExternalSigner>| {
         node.unlock_with_native_external_signer(
             signer.clone(),
-            Some("user".to_string()),
-            Some("password".to_string()),
-            Some("localhost".to_string()),
-            Some(18443),
+            SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username: "user".to_string(),
+                bitcoind_rpc_password: "password".to_string(),
+                bitcoind_rpc_host: "localhost".to_string(),
+                bitcoind_rpc_port: 18443,
+            },
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),
             vec![],
@@ -1300,10 +1318,12 @@ fn external_signer_send_rgb_delivers_consignment_to_recipient() {
         node_a
             .unlock_with_native_external_signer(
                 signer_a.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],

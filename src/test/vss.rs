@@ -774,10 +774,9 @@ mod tests {
     /// released and the changing-state flag is cleared, so a retry (failed or
     /// successful) is never wedged behind a stranded fence.
     fn select_electrum_backend(payload: &mut crate::routes::UnlockRequest) {
-        payload.bitcoind_rpc_username = None;
-        payload.bitcoind_rpc_password = None;
-        payload.bitcoind_rpc_host = None;
-        payload.bitcoind_rpc_port = None;
+        payload.ldk_chain_sync = crate::core_types::LdkChainSync::TransactionSync {
+            indexer_url: crate::utils::ELECTRUM_URL_REGTEST.to_string(),
+        };
     }
 
     async fn unlock_with_electrum_backend(node_address: std::net::SocketAddr, password: &str) {

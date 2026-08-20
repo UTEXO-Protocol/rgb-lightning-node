@@ -4,7 +4,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use rgb_lib::{BitcoinNetwork, Error as RgbLibError};
+#[cfg(feature = "block-sync")]
+use rgb_lib::BitcoinNetwork;
+use rgb_lib::Error as RgbLibError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -25,9 +27,6 @@ pub enum APIError {
 
     #[error("Node has already been initialized")]
     AlreadyInitialized,
-
-    #[error("Provide either bitcoind RPC credentials (all four fields) or an esplora indexer_url, not both")]
-    AmbiguousChainBackend,
 
     #[error("Anchor outputs are required for RGB channels")]
     AnchorsRequired,
@@ -99,6 +98,7 @@ pub enum APIError {
     #[error("Failed to sync BDK: {0}")]
     FailedBdkSync(String),
 
+    #[cfg(feature = "block-sync")]
     #[error("Failed to connect to bitcoind client: {0}")]
     FailedBitcoindConnection(String),
 
@@ -329,8 +329,8 @@ pub enum APIError {
     #[error("Min fee not met for transfer with TXID: {0}")]
     MinFeeNotMet(String),
 
-    #[error("Provide either bitcoind RPC credentials (all four fields) or an esplora indexer_url; none were supplied")]
-    MissingChainBackend,
+    #[error("No indexer_url was supplied, in the unlock request or in the config file")]
+    MissingIndexerUrl,
 
     #[error("Unable to find payment preimage, be sure you've provided the correct swap info")]
     MissingSwapPaymentPreimage,
@@ -338,6 +338,7 @@ pub enum APIError {
     #[error("Network error: {0}")]
     Network(String),
 
+    #[cfg(feature = "block-sync")]
     #[error("The network of the given bitcoind ({0}) doesn't match the node's chain ({1})")]
     NetworkMismatch(String, BitcoinNetwork),
 
@@ -632,7 +633,6 @@ impl IntoResponse for APIError {
             APIError::AllocationsAlreadyAvailable
             | APIError::AlreadyInitialized
             | APIError::AlreadyUnlocked
-            | APIError::AmbiguousChainBackend
             | APIError::AuthenticationDisabled
             | APIError::BatchTransferNotFound
             | APIError::CannotCloseChannel(_)
@@ -643,7 +643,6 @@ impl IntoResponse for APIError {
             | APIError::ExternalSignerRequiresAuthentication
             | APIError::DuplicatePayment(_)
             | APIError::FailedBdkSync(_)
-            | APIError::FailedBitcoindConnection(_)
             | APIError::FailedBroadcast(_)
             | APIError::FailedPeerConnection
             | APIError::InsufficientAssets
@@ -656,8 +655,7 @@ impl IntoResponse for APIError {
             | APIError::LockedNode
             | APIError::MaxFeeExceeded(_)
             | APIError::MinFeeNotMet(_)
-            | APIError::MissingChainBackend
-            | APIError::NetworkMismatch(_, _)
+            | APIError::MissingIndexerUrl
             | APIError::NoAvailableUtxos
             | APIError::NoRoute
             | APIError::NotInitialized
@@ -675,6 +673,10 @@ impl IntoResponse for APIError {
             | APIError::UnsupportedSchema(_)
             | APIError::UnsupportedTransportType
             | APIError::UnsupportedInExternalSignerMode(_) => {
+                (StatusCode::FORBIDDEN, self.to_string(), self.name())
+            }
+            #[cfg(feature = "block-sync")]
+            APIError::FailedBitcoindConnection(_) | APIError::NetworkMismatch(_, _) => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
             }
             APIError::InvoiceAlreadyClaimed => {
