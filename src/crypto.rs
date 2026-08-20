@@ -57,9 +57,11 @@ impl KdfParams {
     };
 
     // Work factors of backup format version 1, which has no field to record them and therefore
-    // requires these values to stay unchanged.
+    // requires these values to stay unchanged. Only `cfg!(test)` may lower them: cargo features
+    // unify across a build graph, so a non-test build that happened to enable `test-utils` would
+    // write v1 backups a stock build cannot decrypt, with no version field to diagnose it.
     pub(crate) const BACKUP_V1: Self = Self {
-        log_n: if cfg!(test) || cfg!(feature = "test-utils") {
+        log_n: if cfg!(test) {
             TEST_LOG_N
         } else {
             BACKUP_V1_LOG_N
