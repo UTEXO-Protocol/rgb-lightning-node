@@ -118,13 +118,14 @@ use std::str::FromStr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
-#[cfg(test)]
+#[cfg(any(test, feature = "vss"))]
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
 use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::watch::Sender;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "vss")]
 use crate::async_kv_store::RemoteFirstKvStore;
@@ -190,7 +191,7 @@ use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, description_from_invoice,
     description_hash_from_invoice, do_connect_peer, get_current_timestamp,
     get_max_local_rgb_amount, hex_str, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, AppState, StaticState, UnlockedAppState,
+    validate_and_parse_payment_preimage, AppState, StaticState, UnlockedAppState, FATAL_ERROR,
     PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
 };
 
@@ -4358,27 +4359,26 @@ fn supported_asset_schemas(bitcoin_network: BitcoinNetwork) -> Vec<AssetSchema> 
     schemas
 }
 
-// A dead background processor must exit the node, not leave it serving without
-// event processing; only `stop_processing` termination is expected.
+// A dead background processor must take the node down, not leave it serving without event
+// processing; only `stop_processing` termination is expected. The shutdown is requested rather
+// than forced, so the VSS teardown still runs; `main` turns `FATAL_ERROR` into exit code 70.
 async fn supervise_background_processor(
     bp_future: impl std::future::Future<Output = Result<(), io::Error>> + Send,
     stop_flag: Arc<AtomicBool>,
+    cancel_token: CancellationToken,
 ) -> Result<(), io::Error> {
     let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(bp_future)).await;
     let stopping = stop_flag.load(Ordering::Acquire);
     match result {
         Ok(res) => {
             if !stopping {
-                match &res {
-                    Ok(()) => {
-                        tracing::error!("background processor exited unexpectedly; shutting down")
-                    }
-                    Err(e) => tracing::error!(
-                        error = %e,
-                        "background processor failed unexpectedly; shutting down"
-                    ),
-                }
-                std::process::exit(70);
+                let msg = match &res {
+                    Ok(()) => "background processor exited unexpectedly".to_string(),
+                    Err(e) => format!("background processor failed unexpectedly: {e}"),
+                };
+                tracing::error!("{msg}; shutting down");
+                let _ = FATAL_ERROR.set(msg);
+                cancel_token.cancel();
             }
             res
         }
@@ -4393,7 +4393,12 @@ async fn supervise_background_processor(
                 "background processor panicked; shutting down instead of running without \
                  event processing"
             );
-            std::process::exit(70);
+            let _ = FATAL_ERROR.set(format!("background processor panicked: {msg}"));
+            cancel_token.cancel();
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("background processor panicked: {msg}"),
+            ))
         }
     }
 }
@@ -4401,6 +4406,14 @@ async fn supervise_background_processor(
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+
+    // Replicates what `main` does once the server future has returned.
+    fn exit_as_main_would() -> ! {
+        if FATAL_ERROR.get().is_some() {
+            std::process::exit(70);
+        }
+        std::process::exit(0);
+    }
 
     // Child mode re-runs this test in a subprocess so the exit code is observable.
     #[test]
@@ -4411,16 +4424,52 @@ mod watchdog_tests {
                 .build()
                 .unwrap();
             let stop = Arc::new(AtomicBool::new(false));
+            let cancel = CancellationToken::new();
             let _ = rt.block_on(supervise_background_processor(
                 async { panic!("test panic") },
                 stop,
+                cancel.clone(),
             ));
-            std::process::exit(0);
+            // The shutdown has to be requested, not forced: the VSS teardown runs on it.
+            assert!(cancel.is_cancelled());
+            exit_as_main_would();
         }
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "ldk::watchdog_tests::exits_with_code_70_on_bp_panic",
+            ])
+            .env("BP_WATCHDOG_CHILD", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(70));
+    }
+
+    // An unexpected clean return is as fatal as a panic: the node would keep serving without
+    // event processing.
+    #[test]
+    fn exits_with_code_70_on_unexpected_bp_return() {
+        if std::env::var("BP_WATCHDOG_CHILD").is_ok() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let cancel = CancellationToken::new();
+            let _ = rt.block_on(supervise_background_processor(
+                async { Ok(()) },
+                stop,
+                cancel.clone(),
+            ));
+            assert!(cancel.is_cancelled());
+            exit_as_main_would();
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ldk::watchdog_tests::exits_with_code_70_on_unexpected_bp_return",
             ])
             .env("BP_WATCHDOG_CHILD", "1")
             .stdout(std::process::Stdio::null())
@@ -4437,11 +4486,14 @@ mod watchdog_tests {
             .build()
             .unwrap();
         let stop = Arc::new(AtomicBool::new(true));
+        let cancel = CancellationToken::new();
         let res = rt.block_on(supervise_background_processor(
             async { Err(io::Error::new(io::ErrorKind::Other, "aborted at teardown")) },
             stop,
+            cancel.clone(),
         ));
         assert!(res.is_err());
+        assert!(!cancel.is_cancelled());
     }
 }
 
@@ -6118,6 +6170,7 @@ pub(crate) async fn start_ldk(
     let background_processor = tokio::spawn(supervise_background_processor(
         bp_future,
         Arc::clone(&stop_processing),
+        app_state.cancel_token.clone(),
     ));
 
     // Periodically drain queued VSS replications so an idle node still heals
@@ -6135,7 +6188,9 @@ pub(crate) async fn start_ldk(
                     break;
                 }
                 let store = Arc::clone(&drain_store);
-                let _ = tokio::task::spawn_blocking(move || store.drain_pending()).await;
+                if let Err(e) = tokio::task::spawn_blocking(move || store.drain_pending()).await {
+                    tracing::error!(error = %e, "periodic VSS drain task failed");
+                }
             }
         });
     }
@@ -6401,6 +6456,107 @@ impl AppState {
 #[cfg(feature = "vss")]
 const BP_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Budget for draining and stopping the VSS-backed stores at teardown. Same order as the
+/// background-processor join above: it covers the flush window plus a stuck remote request being
+/// given up on, and keeps a shutdown terminating even when VSS never answers.
+#[cfg(feature = "vss")]
+const VSS_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Window for the final drain of queued replications, inside the teardown budget.
+#[cfg(feature = "vss")]
+const VSS_TEARDOWN_FLUSH_WINDOW: Duration = Duration::from_secs(10);
+
+/// Budget for the single VSS round-trip that hands the fence over.
+#[cfg(feature = "vss")]
+const VSS_FENCE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(feature = "vss")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VssTeardown {
+    /// Flush and stops finished: no further remote mutation can begin.
+    Complete,
+    /// A step was abandoned at the deadline: an in-flight write may still land.
+    Abandoned,
+}
+
+/// Drains queued replications and stops both stores, bounding every step by what is left of
+/// `deadline`. `SyncedKvStore::stop` waits on the drain gate, so a hung remote write would
+/// otherwise block the shutdown forever.
+#[cfg(feature = "vss")]
+async fn stop_vss_stores(
+    kv_store: &Arc<SyncedKvStore>,
+    monitor_kv_store: &Arc<RemoteFirstKvStore>,
+    deadline: Instant,
+) -> VssTeardown {
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+
+    let flush_store = Arc::clone(kv_store);
+    let flush_deadline = std::cmp::min(deadline, Instant::now() + VSS_TEARDOWN_FLUSH_WINDOW);
+    let flush =
+        tokio::task::spawn_blocking(move || flush_store.flush_pending_until(flush_deadline));
+    match tokio::time::timeout(remaining(), flush).await {
+        Ok(Ok(0)) => {}
+        Ok(Ok(n)) => tracing::error!(
+            pending = n,
+            "VSS replications still queued at shutdown; they persist locally and \
+             will retry on next unlock"
+        ),
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "pending-queue flush task failed");
+            return VssTeardown::Abandoned;
+        }
+        Err(_) => {
+            tracing::error!("pending-queue flush did not finish within the teardown budget");
+            return VssTeardown::Abandoned;
+        }
+    }
+
+    // Stop drains and abort outage-pending writes: once both stores are stopped no remote
+    // mutation can begin, which is what makes giving up the fence safe.
+    let stop_store = Arc::clone(kv_store);
+    let stop = tokio::task::spawn_blocking(move || stop_store.stop());
+    match tokio::time::timeout(remaining(), stop).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "pending-queue stop task failed");
+            return VssTeardown::Abandoned;
+        }
+        Err(_) => {
+            tracing::error!("pending-queue stop did not finish within the teardown budget");
+            return VssTeardown::Abandoned;
+        }
+    }
+    // Only signals the retry loops to abort, so it cannot block.
+    monitor_kv_store.stop();
+    VssTeardown::Complete
+}
+
+/// Releases the VSS fence, but only after a complete teardown: a write still in flight could
+/// otherwise land on a store another instance has already taken over. Returns whether the
+/// release was attempted.
+#[cfg(feature = "vss")]
+async fn release_vss_fence(kv_store: Arc<SyncedKvStore>, teardown: VssTeardown) -> bool {
+    if teardown != VssTeardown::Complete {
+        tracing::error!(
+            "VSS teardown did not complete within {:?}; keeping the fence, the next \
+             instance needs an explicit fence clear to take over",
+            VSS_TEARDOWN_TIMEOUT
+        );
+        return false;
+    }
+    let release = tokio::task::spawn_blocking(move || kv_store.release_vss_fence_if_owned());
+    match tokio::time::timeout(VSS_FENCE_RELEASE_TIMEOUT, release).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => tracing::warn!(error = %e, "failed to release VSS fence during shutdown"),
+        Ok(Err(e)) => tracing::warn!(error = %e, "VSS fence release task failed"),
+        Err(_) => tracing::warn!(
+            "VSS fence release did not finish within {:?}",
+            VSS_FENCE_RELEASE_TIMEOUT
+        ),
+    }
+    true
+}
+
 // Runs while shutting down, possibly because the background processor itself
 // died, so its outcome is reported instead of unwrapped.
 fn log_bp_shutdown_result(res: Result<Result<(), io::Error>, tokio::task::JoinError>) {
@@ -6410,6 +6566,54 @@ fn log_bp_shutdown_result(res: Result<Result<(), io::Error>, tokio::task::JoinEr
             tracing::error!(error = %e, "background processor exited with error during shutdown")
         }
         Err(e) => tracing::error!(error = %e, "background processor task join failed"),
+    }
+}
+
+#[cfg(all(test, feature = "vss"))]
+mod vss_teardown_tests {
+    use super::*;
+    use crate::kv_store::SeaOrmKvStore;
+
+    fn local_stores() -> (Arc<SyncedKvStore>, Arc<RemoteFirstKvStore>) {
+        let connection = crate::runtime::block_on(sea_orm::Database::connect("sqlite::memory:"))
+            .expect("in-memory database");
+        let local = Arc::new(SeaOrmKvStore::from_connection(Arc::new(connection)));
+        (
+            Arc::new(SyncedKvStore::local_only(Arc::clone(&local))),
+            Arc::new(RemoteFirstKvStore::new(local, None)),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_teardown_releases_the_fence() {
+        let (kv_store, monitor_kv_store) = local_stores();
+
+        let teardown = stop_vss_stores(
+            &kv_store,
+            &monitor_kv_store,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(teardown, VssTeardown::Complete);
+        assert!(release_vss_fence(kv_store, teardown).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abandoned_teardown_keeps_the_fence() {
+        let (kv_store, monitor_kv_store) = local_stores();
+        // `stop` blocks on the drain gate; a hung remote write must not hold the shutdown.
+        kv_store.set_before_stop_gate_hook(Arc::new(|| std::thread::sleep(Duration::from_secs(1))));
+
+        let teardown = stop_vss_stores(
+            &kv_store,
+            &monitor_kv_store,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .await;
+
+        assert_eq!(teardown, VssTeardown::Abandoned);
+        assert!(!release_vss_fence(kv_store, teardown).await);
     }
 }
 
@@ -6452,41 +6656,16 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
         log_bp_shutdown_result(join_handle.await);
     }
 
-    // Graceful teardown (lock, shutdown, signal): release the VSS fence so
-    // the next unlock — a fresh instance id — takes over without an explicit
-    // /vssclearfence. Hard kills still leave the fence behind by design.
+    // Any shutdown that reaches here (lock, /shutdown, signal, fatal panic) hands the VSS fence
+    // over so the next unlock — a fresh instance id — takes over without an explicit
+    // /vssclearfence. The teardown is bounded, and the fence is only released once it provably
+    // completed; a hard kill, or a teardown abandoned at its deadline, leaves the fence behind.
     #[cfg(feature = "vss")]
     {
         if let Some((kv_store, monitor_kv_store)) = stores {
-            // Best-effort flush of queued replications before the fence goes.
-            let flush_store = Arc::clone(&kv_store);
-            let flush = tokio::task::spawn_blocking(move || {
-                flush_store.flush_pending_until(std::time::Instant::now() + Duration::from_secs(10))
-            });
-            match flush.await {
-                Ok(0) => {}
-                Ok(n) => tracing::error!(
-                    pending = n,
-                    "VSS replications still queued at shutdown; they persist locally and \
-                     will retry on next unlock"
-                ),
-                Err(e) => tracing::warn!(error = %e, "pending-queue flush task failed"),
-            }
-            // Stop drains and abort outage-pending monitor writes before
-            // giving up the fence: a write landing after another instance
-            // owns the store would corrupt its state.
-            let stop_store = Arc::clone(&kv_store);
-            if let Err(e) = tokio::task::spawn_blocking(move || stop_store.stop()).await {
-                tracing::warn!(error = %e, "pending-queue stop task failed");
-            }
-            monitor_kv_store.stop();
-            match tokio::task::spawn_blocking(move || kv_store.release_vss_fence_if_owned()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "failed to release VSS fence during shutdown")
-                }
-                Err(e) => tracing::warn!(error = %e, "VSS fence release task failed"),
-            }
+            let deadline = Instant::now() + VSS_TEARDOWN_TIMEOUT;
+            let teardown = stop_vss_stores(&kv_store, &monitor_kv_store, deadline).await;
+            release_vss_fence(kv_store, teardown).await;
         }
     }
 

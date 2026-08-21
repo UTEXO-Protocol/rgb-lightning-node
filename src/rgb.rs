@@ -1183,7 +1183,10 @@ impl WalletSource for RgbLibWalletWrapper {
             Ok(unspents.iter().filter_map(|u| {
                 let script = u.txout.script_pubkey.clone().into_boxed_script();
                 let address = Address::from_script(&script, network).ok()?;
-                let outpoint = OutPoint::from_str(&u.outpoint.to_string()).ok()?;
+                // a format mismatch between rgb-lib and bitcoin would be a bug, not a runtime
+                // condition, and skipping the utxo would hide it
+                let outpoint = OutPoint::from_str(&u.outpoint.to_string())
+                    .expect("rgb-lib formats outpoints as txid:vout");
                 let value = u.txout.value;
                 match address.witness_program() {
                     Some(prog) if prog.is_p2wpkh() => {

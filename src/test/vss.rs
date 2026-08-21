@@ -770,6 +770,41 @@ mod tests {
             .expect_err("fence must still be owned by b");
     }
 
+    /// The "VSS fence broken" panic now takes the node down through the normal shutdown, which
+    /// ends in a fence release. That release must be a no-op: the fence it would delete belongs
+    /// to the instance that took the store over.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vss_broken_fence_shutdown_leaves_the_new_owner_alone() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let (signing_key, store_id) = generate_test_keys();
+
+        // A is the running node.
+        let store_a =
+            VssKvStore::new(VSS_URL.to_string(), store_id.clone(), signing_key).expect("store a");
+        store_a.acquire_fence().expect("a acquires fence");
+
+        // An operator moves the store to B while A is still up: A's next fence check panics.
+        let store_b =
+            VssKvStore::new(VSS_URL.to_string(), store_id.clone(), signing_key).expect("store b");
+        store_b.delete_fence().expect("operator clears the fence");
+        store_b.acquire_fence().expect("b takes over");
+
+        // A's panic-driven shutdown reaches the fence release.
+        store_a
+            .release_fence_if_owned()
+            .expect("dispossessed release must not error");
+
+        // B still owns the store.
+        let store_c = VssKvStore::new(VSS_URL.to_string(), store_id, signing_key).expect("store c");
+        store_c
+            .acquire_fence()
+            .expect_err("fence must still be owned by b");
+    }
+
     /// A failed unlock must roll back what it acquired: the VSS fence is
     /// released and the changing-state flag is cleared, so a retry (failed or
     /// successful) is never wedged behind a stranded fence.

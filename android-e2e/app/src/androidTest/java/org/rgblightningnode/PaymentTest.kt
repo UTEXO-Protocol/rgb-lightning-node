@@ -790,8 +790,9 @@ class PaymentTest {
             assertNotNull(xfer2.recipientId)
             assertNull(xfer2.receiveUtxo)
             assertNotNull(xfer2.changeUtxo)
-            assertNull(xfer2.expiration)
-            assertTrue(xfer2.transportEndpoints.isNotEmpty())
+            assertNotNull(xfer2.expiration)
+            // the channel funding consignment travels over the p2p link, so no proxy is involved
+            assertTrue(xfer2.transportEndpoints.isEmpty())
 
             val xfer3 = transfers.first { it.idx == 3 }
             assertEquals("Settled", xfer3.status)
@@ -801,8 +802,8 @@ class PaymentTest {
             assertNotNull(xfer3.recipientId)
             assertNotNull(xfer3.receiveUtxo)
             assertNull(xfer3.changeUtxo)
-            assertNull(xfer3.expiration)
-            assertTrue(xfer3.transportEndpoints.isNotEmpty())
+            assertNotNull(xfer3.expiration)
+            assertTrue(xfer3.transportEndpoints.isEmpty())
 
             log("SUCCESS: Android payment parity flow completed")
         } finally {

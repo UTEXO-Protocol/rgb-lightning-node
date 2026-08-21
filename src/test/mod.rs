@@ -2361,6 +2361,7 @@ async fn open_channel_raw(
 /// Low-level open-channel helper: POSTs the request and returns the raw response
 /// without waiting for the channel to become ready. Used by tests that assert on
 /// the immediate open result or that deliberately exercise stuck/failed opens.
+#[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
 async fn open_channel_request_raw(
     node_address: SocketAddr,
@@ -2429,6 +2430,7 @@ async fn open_channel_request_raw(
     Ok(res.json::<OpenChannelResponse>().await.unwrap())
 }
 
+#[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
 async fn open_channel_funded_raw(
     node_address: SocketAddr,
