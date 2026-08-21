@@ -6935,5 +6935,11 @@ mod tests {
             expiration,
             true
         ));
+        // same for the non-reuse margin, which must stay far larger than a sweep's duration
+        assert!(!sweep_receive_is_reusable(
+            expiration - 1800,
+            expiration,
+            false
+        ));
     }
 }

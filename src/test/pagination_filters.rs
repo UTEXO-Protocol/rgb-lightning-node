@@ -305,8 +305,13 @@ async fn by_txid() {
         .await
         .is_empty());
 
-    // an asset-less filter returns only transfers not tied to an asset
+    // an asset-less filter returns only transfers not tied to an asset. A blind receive naming no
+    // asset stays untied, so the filter has something to find and the check below is not vacuous
+    let untied = rgb_invoice(node1_addr, None, false).await;
     let no_asset = list_transfers_no_asset(node1_addr).await;
+    assert!(no_asset
+        .iter()
+        .any(|t| t.recipient_id.as_deref() == Some(untied.recipient_id.as_str())));
     assert!(no_asset.iter().all(|t| !all.iter().any(|a| a.idx == t.idx)));
 
     // an unnarrowed filter with no txid is a bad request
