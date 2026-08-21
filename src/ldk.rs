@@ -6151,6 +6151,12 @@ pub(crate) async fn start_ldk(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
+            // checked here and not only per peer: with no channels to reconnect, or once the read
+            // below starts failing, the inner check is unreachable and the task would outlive the
+            // node it belongs to, polling its database by path forever
+            if stop_connect.load(Ordering::Acquire) {
+                return;
+            }
             let db = RlnDatabase::new((*connect_db).clone());
             match db.read_channel_peer_data() {
                 Ok(info) => {
