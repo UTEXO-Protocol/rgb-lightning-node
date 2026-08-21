@@ -135,7 +135,8 @@ fn apay_decode_hex_fixed<const N: usize>(
         )));
     }
     let mut out = [0u8; N];
-    for (slot, pair) in out.iter_mut().zip(s.as_bytes().chunks_exact(2)) {
+    let (pairs, _) = s.as_bytes().as_chunks::<2>();
+    for (slot, pair) in out.iter_mut().zip(pairs) {
         let high = apay_hex_nibble(pair[0]).ok_or_else(|| {
             JsonRpcErrorWire::invalid_params(format!("{field} must be {N}-byte hex"))
         })?;
