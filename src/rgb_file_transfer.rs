@@ -530,22 +530,32 @@ impl RgbFileTransferHandler {
         }
     }
 
-    // Forget the staged funding record, freeing the node-wide cap slot it held.
+    // Forget the staged funding record and delete the consignment file it staged.
     //
     // A staged funding record only needs to count against the node-wide cap while its channel is
     // still being funded; once the funding happens (or the channel goes away) the slot should be
     // freed.  The periodic sweep does this eventually: it drops a record as soon as the funding is
     // observed, but two handlers call this to do it immediately instead of waiting up to a sweep
-    // interval: the acceptor's `ChannelPending` path once the funding locks in, and `ChannelClosed`
-    // (which also removes the staged funding files). The latter is essential rather than just
-    // prompt: a channel that funds and closes within a single sweep interval is never seen as
-    // funded by the sweep, so without this its record would linger for the whole `CONSIGNMENT_TTL`
-    // and refuse the peer's next channel.
+    // interval: the acceptor's `ChannelPending` path once the funding locks in, and `ChannelClosed`.
+    // The latter is essential rather than just prompt: a channel that funds and closes within a
+    // single sweep interval is never seen as funded by the sweep, so without this its record would
+    // linger for the whole `CONSIGNMENT_TTL` and refuse the peer's next channel.
+    //
+    // Both callers run after `handle_funding` has promoted the consignment into the KVStore, so the
+    // staged file is redundant by then. Neither sweep touches a funded channel's file, so without
+    // this removal it would be left in the LDK data dir for the rest of the process' life.
     pub(crate) fn forget_staged_funding(&self, funding_txid: &str) {
         self.staged_fundings
             .lock()
             .unwrap()
             .retain(|key, _| key.funding_txid != funding_txid);
+        match fs::remove_file(self.consignment_path(funding_txid)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                "Failed to remove staged RGB consignment for funding txid {funding_txid}: {e}"
+            ),
+        }
     }
 
     // Delete what abandoned transfers left behind, in memory and on disk.
@@ -1649,6 +1659,8 @@ mod tests {
         // instead
         handler.forget_staged_funding(&txid1);
         assert!(handler.staged_fundings.lock().unwrap().is_empty());
+        // the consignment now lives in the KVStore, so the staged file must not be left behind
+        assert!(!handler.consignment_path(&txid1).exists());
 
         // with the slot freed, the next channel's consignment is accepted rather than refused
         handler
