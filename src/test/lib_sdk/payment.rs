@@ -508,8 +508,9 @@ fn success() {
         assert!(xfer_2.recipient_id.is_some());
         assert!(xfer_2.receive_utxo.is_none());
         assert!(xfer_2.change_utxo.is_some());
-        assert!(xfer_2.expiration.is_none());
-        assert!(!xfer_2.transport_endpoints.is_empty());
+        assert!(xfer_2.expiration.is_some());
+        // the channel funding consignment travels over the p2p link, so no proxy is involved
+        assert!(xfer_2.transport_endpoints.is_empty());
 
         let xfer_3 = transfers
             .iter()
@@ -522,8 +523,8 @@ fn success() {
         assert!(xfer_3.recipient_id.is_some());
         assert!(xfer_3.receive_utxo.is_some());
         assert!(xfer_3.change_utxo.is_none());
-        assert!(xfer_3.expiration.is_none());
-        assert!(!xfer_3.transport_endpoints.is_empty());
+        assert!(xfer_3.expiration.is_some());
+        assert!(xfer_3.transport_endpoints.is_empty());
 
         // txid filters resolve the same on-chain transaction
         let send_txid = xfer_2.txid.as_ref().expect("send txid").to_string();
