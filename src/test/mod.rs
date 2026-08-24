@@ -3540,6 +3540,7 @@ mod swap_roundtrip_multihop_sell;
 mod swap_roundtrip_sell;
 #[cfg(feature = "transaction-sync")]
 mod transaction_sync;
+mod tripwire_legacy_colored_channel;
 #[cfg(feature = "vss")]
 mod unlock_missing_monitor;
 mod unlock_request_ldk_chain_sync;
