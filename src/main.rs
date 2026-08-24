@@ -95,7 +95,7 @@ use crate::routes::{
 };
 #[cfg(feature = "vss")]
 use crate::routes::{vss_backup, vss_backup_info, vss_clear_fence};
-use crate::utils::{start_daemon, AppState, FATAL_ERROR, LOGS_DIR};
+use crate::utils::{fatal_exit_code, start_daemon, AppState, FATAL_ERROR, LOGS_DIR};
 
 // how long a fatal shutdown waits for an in-progress state change (unlock or lock)
 const STATE_CHANGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -146,12 +146,16 @@ async fn main() -> Result<()> {
         .await
         .unwrap();
 
-    if let Some(fatal_error) = FATAL_ERROR.get() {
-        tracing::error!("Shutting down due to fatal error: {fatal_error}");
+    let exit_code = fatal_exit_code();
+    if exit_code != 0 {
+        tracing::error!(
+            "Shutting down due to fatal error: {}",
+            FATAL_ERROR.get().map(String::as_str).unwrap_or_default()
+        );
         // `process::exit` runs no destructors, so the file logger has to be flushed by hand:
         // dropping the guard waits for the appender to write out what is still buffered
         drop(_guard);
-        std::process::exit(70); // sysexits EX_SOFTWARE
+        std::process::exit(exit_code);
     }
 
     Ok(())

@@ -4416,12 +4416,10 @@ async fn supervise_background_processor(
 mod watchdog_tests {
     use super::*;
 
-    // Replicates what `main` does once the server future has returned.
+    // Exits with the same code `main` would once the server future has returned, via the shared
+    // decision so this test cannot drift from the real one.
     fn exit_as_main_would() -> ! {
-        if FATAL_ERROR.get().is_some() {
-            std::process::exit(70);
-        }
-        std::process::exit(0);
+        std::process::exit(crate::utils::fatal_exit_code());
     }
 
     // Child mode re-runs this test in a subprocess so the exit code is observable.

@@ -71,6 +71,17 @@ pub(crate) const PROXY_ENDPOINT_PUBLIC: &str = "rpcs://proxy.iriswallet.com/0.2/
 /// fatal: it stops waiting for an in-progress state change and the process exits non-zero.
 pub(crate) static FATAL_ERROR: OnceLock<String> = OnceLock::new();
 
+/// Process exit code `main` returns once the server future is done: `70` (sysexits
+/// `EX_SOFTWARE`) when a fatal error was recorded, `0` otherwise. Single source of truth so the
+/// watchdog tests exercise the real decision rather than a copy.
+pub(crate) fn fatal_exit_code() -> i32 {
+    if FATAL_ERROR.get().is_some() {
+        70
+    } else {
+        0
+    }
+}
+
 pub(crate) struct AppState {
     pub(crate) static_state: Arc<StaticState>,
     pub(crate) cancel_token: CancellationToken,
