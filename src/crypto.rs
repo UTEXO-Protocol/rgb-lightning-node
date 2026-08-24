@@ -47,7 +47,7 @@ pub(crate) struct KdfParams {
 impl KdfParams {
     // Work factors used for newly encrypted data.
     pub(crate) const CURRENT: Self = Self {
-        log_n: if cfg!(test) || cfg!(feature = "test-utils") {
+        log_n: if cfg!(test) {
             TEST_LOG_N
         } else {
             CURRENT_LOG_N
