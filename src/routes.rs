@@ -2676,10 +2676,20 @@ pub(crate) async fn get_channel_id(
     Ok(Json(GetChannelIdResponse { channel_id }))
 }
 
+// Both fields index a filesystem path (`<transfers>/<txid>/<asset_id>/…`); validate their shapes
+// so a `..`/separator/absolute value cannot traverse out of the consignment dir.
+fn validate_consignment_lookup(asset_id: &str, txid: &str) -> Result<(), APIError> {
+    ContractId::from_str(asset_id).map_err(|_| APIError::InvalidAssetID(asset_id.to_string()))?;
+    bitcoin::Txid::from_str(txid)
+        .map_err(|_| APIError::InvalidRequest(format!("invalid txid: {txid}")))?;
+    Ok(())
+}
+
 pub(crate) async fn get_consignment(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<GetConsignmentRequest>, APIError>,
 ) -> Result<Json<GetConsignmentResponse>, APIError> {
+    validate_consignment_lookup(&payload.asset_id, &payload.txid)?;
     let file_path = state
         .check_unlocked()
         .await?
@@ -5670,6 +5680,30 @@ pub(crate) async fn vss_clear_fence(
 mod request_tests {
     use super::*;
     use crate::gossip::GossipSourceConfig;
+
+    const VALID_ASSET_ID: &str = "rgb:EIkAVQvq-WbAb5JG-CYxbUER-oqDNwne-ZNxBDID-p0cpf9U";
+    const VALID_TXID: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn consignment_lookup_accepts_valid_ids() {
+        assert!(validate_consignment_lookup(VALID_ASSET_ID, VALID_TXID).is_ok());
+    }
+
+    #[test]
+    fn consignment_lookup_rejects_traversal_asset_id() {
+        assert!(validate_consignment_lookup("../../../etc/passwd", VALID_TXID).is_err());
+    }
+
+    #[test]
+    fn consignment_lookup_rejects_traversal_txid() {
+        assert!(validate_consignment_lookup(VALID_ASSET_ID, "../../secret").is_err());
+    }
+
+    #[test]
+    fn consignment_lookup_rejects_separators() {
+        assert!(validate_consignment_lookup(VALID_ASSET_ID, "abc/def").is_err());
+        assert!(validate_consignment_lookup("rgb:a/b", VALID_TXID).is_err());
+    }
 
     #[test]
     fn unlock_request_with_gossip_source_deserializes() {
