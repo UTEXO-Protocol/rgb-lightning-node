@@ -102,9 +102,9 @@ use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
     description_from_invoice, description_hash_from_invoice, encrypt_and_save_mnemonic,
     get_max_local_rgb_amount, get_route, hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec,
-    is_external_signer_mode_configured, new_jsonrpc_request_id, open_database_pool,
-    parse_invoice_description, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, UnlockedAppState, UserOnionMessageContents,
+    invoice_description_from_request, is_external_signer_mode_configured, new_jsonrpc_request_id,
+    open_database_pool, validate_and_parse_payment_hash, validate_and_parse_payment_preimage,
+    UnlockedAppState, UserOnionMessageContents,
 };
 use crate::{
     backup::{do_backup, install_backup, unpack_backup},
@@ -3818,7 +3818,7 @@ pub(crate) async fn ln_invoice(
             }
             None => None,
         };
-        let description = parse_invoice_description(
+        let description = invoice_description_from_request(
             payload.description.as_deref(),
             payload.description_hash.as_deref(),
         )?;

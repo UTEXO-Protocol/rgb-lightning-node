@@ -33,8 +33,8 @@ use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
     connect_peer_if_necessary, description_from_invoice, description_hash_from_invoice,
     encrypt_and_save_mnemonic, get_current_timestamp, get_max_local_rgb_amount, get_route, hex_str,
-    hex_str_to_compressed_pubkey, hex_str_to_vec, is_external_signer_mode_configured,
-    new_jsonrpc_request_id, parse_invoice_description, parse_peer_info,
+    hex_str_to_compressed_pubkey, hex_str_to_vec, invoice_description_from_request,
+    is_external_signer_mode_configured, new_jsonrpc_request_id, parse_peer_info,
     validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState,
     UserOnionMessageContents,
 };
@@ -3899,7 +3899,7 @@ pub(crate) async fn create_ln_invoice(
         None => None,
     };
     let description =
-        parse_invoice_description(description.as_deref(), description_hash.as_deref())?;
+        invoice_description_from_request(description.as_deref(), description_hash.as_deref())?;
 
     let invoice_params = Bolt11InvoiceParameters {
         amount_msats: amt_msat,

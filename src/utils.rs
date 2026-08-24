@@ -887,6 +887,16 @@ pub(crate) fn validate_and_parse_description(
         .map_err(|e| APIError::InvalidDescription(e.to_string()))
 }
 
+// Builds the invoice description from request fields, treating an explicit empty description as
+// "none": a caller may send an empty `description` alongside a `description_hash`, which must
+// mint an h-tag invoice rather than be rejected as "both provided".
+pub(crate) fn invoice_description_from_request(
+    description: Option<&str>,
+    description_hash: Option<&str>,
+) -> Result<Bolt11InvoiceDescription, APIError> {
+    parse_invoice_description(description.filter(|d| !d.is_empty()), description_hash)
+}
+
 pub(crate) fn parse_invoice_description(
     description: Option<&str>,
     description_hash: Option<&str>,
@@ -952,6 +962,21 @@ pub(crate) async fn bind_first_available(
 
 #[cfg(test)]
 mod utils_tests {
+    use super::*;
+
+    const HASH_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn empty_description_with_hash_mints_hash_invoice() {
+        let d = invoice_description_from_request(Some(""), Some(HASH_HEX)).unwrap();
+        assert!(matches!(d, Bolt11InvoiceDescription::Hash(_)));
+    }
+
+    #[test]
+    fn present_description_with_hash_is_rejected() {
+        assert!(invoice_description_from_request(Some("hi"), Some(HASH_HEX)).is_err());
+    }
+
     #[tokio::test]
     async fn bind_first_available_falls_back_when_first_addr_fails() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
