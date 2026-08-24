@@ -390,6 +390,8 @@ pub struct DecodeLnInvoiceResponse {
     pub timestamp: u64,
     pub asset_id: Option<ContractId>,
     pub asset_amount: Option<u64>,
+    pub description: Option<String>,
+    pub description_hash: Option<String>,
     pub payment_hash: PaymentHash,
     pub payment_secret: String,
     pub payee_pubkey: Option<PublicKey>,

@@ -1373,6 +1373,8 @@ impl SdkNode {
             timestamp: resp.timestamp,
             asset_id,
             asset_amount: resp.asset_amount,
+            description: resp.description,
+            description_hash: resp.description_hash,
             payment_hash,
             payment_secret: resp.payment_secret,
             payee_pubkey,

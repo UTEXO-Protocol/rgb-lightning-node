@@ -473,6 +473,8 @@ dictionary DecodeLnInvoiceResponse {
     u64 timestamp;
     ContractId? asset_id;
     u64? asset_amount;
+    string? description;
+    string? description_hash;
     PaymentHash payment_hash;
     string payment_secret;
     PublicKey? payee_pubkey;
