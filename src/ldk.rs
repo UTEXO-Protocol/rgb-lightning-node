@@ -6535,10 +6535,12 @@ async fn stop_vss_stores(
         ),
         Ok(Err(e)) => {
             tracing::error!(error = %e, "pending-queue flush task failed");
+            monitor_kv_store.stop();
             return VssTeardown::Abandoned;
         }
         Err(_) => {
             tracing::error!("pending-queue flush did not finish within the teardown budget");
+            monitor_kv_store.stop();
             return VssTeardown::Abandoned;
         }
     }
@@ -6551,14 +6553,17 @@ async fn stop_vss_stores(
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             tracing::error!(error = %e, "pending-queue stop task failed");
+            monitor_kv_store.stop();
             return VssTeardown::Abandoned;
         }
         Err(_) => {
             tracing::error!("pending-queue stop did not finish within the teardown budget");
+            monitor_kv_store.stop();
             return VssTeardown::Abandoned;
         }
     }
-    // Only signals the retry loops to abort, so it cannot block.
+    // Only signals the retry loops to abort, so it cannot block. Idempotent: the abandoned
+    // paths above may have already called it.
     monitor_kv_store.stop();
     VssTeardown::Complete
 }
@@ -6636,6 +6641,8 @@ mod vss_teardown_tests {
         let (kv_store, monitor_kv_store) = local_stores();
         // `stop` blocks on the drain gate; a hung remote write must not hold the shutdown.
         kv_store.set_before_stop_gate_hook(Arc::new(|| std::thread::sleep(Duration::from_secs(1))));
+        // Stand in for a live retry loop so the shutdown signal has a receiver to observe.
+        let shutdown_rx = monitor_kv_store.subscribe_shutdown();
 
         let teardown = stop_vss_stores(
             &kv_store,
@@ -6645,6 +6652,8 @@ mod vss_teardown_tests {
         .await;
 
         assert_eq!(teardown, VssTeardown::Abandoned);
+        // The abandoned path must still abort the monitor retries before giving up.
+        assert!(*shutdown_rx.borrow());
         assert!(!release_vss_fence(kv_store, teardown).await);
     }
 }
