@@ -3800,6 +3800,23 @@ async fn handle_ldk_events(
     Ok(())
 }
 
+// Resolves the RGB amount a spendable output carries. An empty map is a truly vanilla tx (0);
+// a non-empty map that lacks the output is an invariant violation and must error so the sweep
+// retries rather than paying the colored output out as vanilla BTC, stranding the allocation.
+fn rgb_amount_for_spendable_output(
+    output_map: &HashMap<u32, u64>,
+    vout: u32,
+    txid: &str,
+) -> Result<u64, String> {
+    match output_map.get(&vout) {
+        Some(amt) => Ok(*amt),
+        None if output_map.is_empty() => Ok(0),
+        None => Err(format!(
+            "spendable output {txid}:{vout} absent from a non-empty transfer info map"
+        )),
+    }
+}
+
 impl RgbOutputSpender {
     fn try_spend_spendable_outputs(
         &self,
@@ -3845,19 +3862,11 @@ impl RgbOutputSpender {
             // the txes lock, so a bad record would poison it and brick every later sweep
             let transfer_info: TransferInfo = bincode::deserialize(&transfer_info_bytes)
                 .map_err(|e| format!("cannot decode transfer info for {txid_str}: {e}"))?;
-            let amt_rgb = match transfer_info.output_map.get(&outpoint.index.into()) {
-                Some(amt) => *amt,
-                // an output missing from the map carries no asset: sweep it as vanilla
-                None if transfer_info.output_map.is_empty() => 0,
-                None => {
-                    tracing::error!(
-                        txid = txid_str,
-                        vout = outpoint.index,
-                        "spendable output absent from a non-empty transfer info map; sweeping as vanilla"
-                    );
-                    0
-                }
-            };
+            let amt_rgb = rgb_amount_for_spendable_output(
+                &transfer_info.output_map,
+                outpoint.index.into(),
+                &txid_str,
+            )?;
             if amt_rgb == 0 {
                 continue;
             }
@@ -4494,6 +4503,29 @@ mod watchdog_tests {
         ));
         assert!(res.is_err());
         assert!(!cancel.is_cancelled());
+    }
+}
+
+#[cfg(test)]
+mod sweeper_predicate_tests {
+    use super::*;
+
+    #[test]
+    fn rgb_amount_empty_map_is_vanilla() {
+        let map = HashMap::new();
+        assert_eq!(rgb_amount_for_spendable_output(&map, 0, "tx"), Ok(0));
+    }
+
+    #[test]
+    fn rgb_amount_present_output_returns_amount() {
+        let map = HashMap::from_iter([(1u32, 42u64)]);
+        assert_eq!(rgb_amount_for_spendable_output(&map, 1, "tx"), Ok(42));
+    }
+
+    #[test]
+    fn rgb_amount_missing_from_non_empty_map_errors() {
+        let map = HashMap::from_iter([(1u32, 42u64)]);
+        assert!(rgb_amount_for_spendable_output(&map, 0, "tx").is_err());
     }
 }
 
