@@ -156,6 +156,8 @@ jobs:
         run: cargo build --features vss
       - name: Run deterministic VSS durability regressions
         run: cargo test --features vss "test::vss_durability_gaps" -- --test-threads=1
+      - name: Run VSS teardown headline tests
+        run: cargo test --features "uniffi,test-utils,vls,vss" --bin rgb-lightning-node ldk::vss_teardown_tests -- --test-threads=1
       - name: Start regtest and VSS services
         run: VSS=1 ./regtest.sh start
       - name: Run VSS tests (e2e against regtest + VSS server)
