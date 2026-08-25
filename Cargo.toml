@@ -95,9 +95,7 @@ lightning-transaction-sync = { version = "0.2.0", optional = true }
 rand = "0.8.5"
 regex = { version = "1.11", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
-# Temporary: rgb-lib PR #91 (upstream sync) is unmerged and untagged. Flip back to a
-# UTEXO-Protocol tag (beta.34+) once it lands, before this PR is merged.
-rgb-lib = { git = "https://github.com/dcorral/rgb-lib.git", rev = "c097984fd37ff9767758f1e5e37eca27307934f4", default-features = false }
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.34", default-features = false }
 psrgbt = { package = "rgb-psbt-utils", version = "=0.11.1-rc.11", default-features = false }
 rln-migration = { path = "migration" }
 # Pinned fork/branch for RGB compatibility work; CI and clones do not require a sibling checkout.
