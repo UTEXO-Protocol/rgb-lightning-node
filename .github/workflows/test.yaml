@@ -100,7 +100,7 @@ jobs:
       - name: Upload coverage report
         uses: codecov/codecov-action@v6
         with:
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           file: coverage.lcov
           flags: rust
           token: ${{ secrets.CODECOV_TOKEN }}
