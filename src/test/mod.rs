@@ -3495,6 +3495,7 @@ mod init_electrum;
 #[cfg(all(feature = "transaction-sync", feature = "esplora"))]
 mod init_esplora;
 mod invoice;
+mod interoperability;
 mod issue;
 mod lock_unlock_changepassword;
 mod missing_acceptor;

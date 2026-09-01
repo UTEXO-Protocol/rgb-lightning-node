@@ -19,6 +19,7 @@ exclude = [
     "bindings/c-ffi",
     "src/sdk/contracts",
     "rust-lightning",
+    "src/test/interoperability/ldk-node",
 ]
 
 [workspace.lints.rust]
@@ -32,8 +33,14 @@ default = [
     "transaction-sync",
     "electrum",
     "esplora",
+    "interop-ldk",
+    "interop-lnd",
 ]
 test-utils = []
+# Interop test suites drive a stock Lightning node as an out-of-band counterparty.
+# `INTEROP_BACKEND` (`ldk` or `lnd`, default `ldk`) selects which backend the tests run.
+interop-ldk = []
+interop-lnd = []
 vls = ["signer-external/with-vls", "dep:vls-persist"]
 vss = ["rgb-lib/vss", "dep:vss-client"]
 remote-signer = ["dep:vls-persist", "dep:tokio-rustls", "dep:rustls-pemfile", "vls"]
