@@ -3510,6 +3510,7 @@ mod openchannel_push_asset_amount;
 mod out_of_band;
 mod pagination_filters;
 mod payment;
+mod penalty_tests;
 mod push_asset_amount_above_chan_amt;
 mod refuse_high_fees;
 #[cfg(feature = "vss")]
