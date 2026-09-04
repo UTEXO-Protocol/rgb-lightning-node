@@ -754,7 +754,8 @@ impl KVStoreSync for VssKvStore {
         self.block_on(self.client.put_object(&request))
             .map_err(|e| {
                 tracing::error!(vss_key, error = %e, "VssKvStore write failed");
-                io::Error::new(io::ErrorKind::Other, format!("VSS write failed: {e}"))
+                let msg = format!("VSS write failed: {e}");
+                vss_err_to_io(e, msg)
             })?;
         Ok(())
     }
@@ -788,10 +789,8 @@ impl KVStoreSync for VssKvStore {
             Err(VssError::NoSuchKeyError(_)) => return Ok(()),
             Err(e) => {
                 tracing::error!(vss_key, error = %e, "VssKvStore remove read failed");
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("VSS remove read failed: {e}"),
-                ));
+                let msg = format!("VSS remove read failed: {e}");
+                return Err(vss_err_to_io(e, msg));
             }
         };
 
@@ -810,10 +809,8 @@ impl KVStoreSync for VssKvStore {
             Ok(_) | Err(VssError::NoSuchKeyError(_)) => Ok(()),
             Err(e) => {
                 tracing::error!(vss_key, error = %e, "VssKvStore remove failed");
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("VSS remove failed: {e}"),
-                ))
+                let msg = format!("VSS remove failed: {e}");
+                Err(vss_err_to_io(e, msg))
             }
         }
     }

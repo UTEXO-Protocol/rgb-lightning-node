@@ -10,6 +10,9 @@ use crate::error::APIError;
 use crate::utils::{AppState, StaticState};
 use crate::{NodeHandle, RlnError};
 
+#[cfg(feature = "uniffi")]
+use bitcoin::hex::DisplayHex;
+
 pub struct TestAppState(Arc<AppState>);
 
 pub fn mock_locked_app_state() -> TestAppState {
@@ -31,6 +34,10 @@ pub fn mock_locked_app_state() -> TestAppState {
             ldk_data_dir: path.join(".ldk"),
             logger: Arc::new(FilesystemLogger::new(path)),
             max_media_upload_size_mb: 1,
+            max_aggregated_media_size_per_channel_mb:
+                crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+            max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+            max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
             enable_virtual_channels_v0: false,
             virtual_peer_pubkeys: vec![],
             database: RwLock::new(Arc::new(database)),
@@ -61,6 +68,19 @@ pub fn clear_uniffi_state_for_tests() {
 
 pub fn node_handle_from_mock_state_for_tests(state: &TestAppState) -> NodeHandle {
     NodeHandle::from_app_state(state.0.clone())
+}
+
+#[cfg(feature = "uniffi")]
+pub fn channel_has_inflight_htlcs(
+    node: &crate::SdkNode,
+    channel_id: crate::ChannelId,
+) -> Result<bool, RlnError> {
+    let channel_id = channel_id.0.as_hex().to_string();
+    crate::uniffi_api::channel_has_inflight_htlcs_for_tests(node, &channel_id)
+}
+
+pub fn processed_channel_ready_event_participants(channel_id: crate::ChannelId) -> usize {
+    crate::ldk::processed_channel_ready_event_participants(&channel_id)
 }
 
 pub struct ErrorMappingSnapshot {

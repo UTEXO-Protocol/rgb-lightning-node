@@ -14,7 +14,12 @@ mod tests {
 
     use bitcoin::secp256k1::{rand::rngs::OsRng, Secp256k1, SecretKey};
     use hex::DisplayHex;
-    use lightning::util::persist::KVStoreSync;
+    use lightning::rgb_utils::{RGB_CHANNEL_INFO_NS, RGB_CHANNEL_INFO_PENDING_NS, RGB_PRIMARY_NS};
+    use lightning::util::persist::{
+        KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY,
+        CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+        CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+    };
     use sea_orm::{ConnectOptions, Database};
 
     use crate::kv_store::SeaOrmKvStore;
@@ -46,10 +51,17 @@ mod tests {
     }
 
     fn unreachable_vss() -> Arc<VssKvStore> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve VSS test port");
+        let port = listener.local_addr().expect("VSS test address").port();
+        drop(listener);
         let (signing_key, store_id) = generate_test_keys();
         Arc::new(
-            VssKvStore::new("http://127.0.0.1:5/vss".to_string(), store_id, signing_key)
-                .expect("vss store"),
+            VssKvStore::new(
+                format!("http://127.0.0.1:{port}/vss"),
+                store_id,
+                signing_key,
+            )
+            .expect("vss store"),
         )
     }
 
@@ -142,6 +154,7 @@ mod tests {
     /// the remote attempt fails, so a kill while the VSS request is in flight
     /// leaves a crash image whose value will never be replicated: a later
     /// device-loss restore is silently stale.
+    #[serial_test::serial]
     #[test]
     fn crash_image_must_retain_replication_intent() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -187,6 +200,7 @@ mod tests {
     /// mutation VSS has not acknowledged needs a durable retry intent. On
     /// `dev` a new distinct mutation at cap evicts an arbitrary queued entry,
     /// so that entry's key silently stops replicating.
+    #[serial_test::serial]
     #[test]
     fn pending_queue_cap_must_not_discard_recovery_evidence() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -239,6 +253,7 @@ mod tests {
     /// only return after the connection is cut; a `stop()` that ignores the
     /// in-flight put acquires the free gate and returns inside the
     /// observation window.
+    #[serial_test::serial]
     #[test]
     fn stop_must_wait_for_inflight_remote_mutation() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -291,6 +306,7 @@ mod tests {
 
     /// A retry drain that passed its initial admission check before shutdown
     /// must not start a remote mutation after `stop()` has returned.
+    #[serial_test::serial]
     #[test]
     fn queued_drain_must_not_run_after_stop() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -363,21 +379,229 @@ mod tests {
         assert_eq!(synced.pending_remote_writes(), 1);
     }
 
-    /// `psbt` and `pending_funding` writers currently unwrap the write result,
-    /// so these namespaces must keep acking during a VSS outage until the
-    /// funding state machine handles the errors.
+    /// The funding state machine handles `psbt` and `pending_funding` write
+    /// errors, so neither record may be acknowledged without remote durability.
+    #[serial_test::serial]
     #[test]
-    fn psbt_and_pending_funding_stay_best_effort_during_outage() {
+    fn psbt_and_pending_funding_fail_closed_during_outage() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
         let local = Arc::new(SeaOrmKvStore::from_connection(open_sqlite(&dir)));
         let synced = SyncedKvStore::with_vss(local, unreachable_vss());
 
         synced
             .write("psbt", "", "funding_txid", b"psbt".to_vec())
-            .expect("psbt write must ack during an outage");
+            .expect_err("psbt write must fail closed during an outage");
         synced
             .write("pending_funding", "", "channel_id", b"txid".to_vec())
-            .expect("pending_funding write must ack during an outage");
+            .expect_err("pending_funding write must fail closed during an outage");
         assert_eq!(synced.pending_remote_writes(), 2);
+        assert_eq!(synced.read("psbt", "", "funding_txid").unwrap(), b"psbt");
+        assert_eq!(
+            synced.read("pending_funding", "", "channel_id").unwrap(),
+            b"txid"
+        );
+    }
+
+    /// A protocol transition may explicitly require remote acknowledgement without making every
+    /// writer in the namespace fail closed. This keeps recovery writes strict while the broader
+    /// RGB channel-info settlement policy remains a separate change.
+    #[serial_test::serial]
+    #[test]
+    fn explicit_remote_required_write_fails_closed_during_outage() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let local = Arc::new(SeaOrmKvStore::from_connection(open_sqlite(&dir)));
+        let synced = SyncedKvStore::with_vss(local, unreachable_vss());
+
+        synced
+            .write_remote_required("protocol", "recovery", "operation_id", b"metadata".to_vec())
+            .expect_err("protocol state must not advance without remote acknowledgement");
+
+        assert_eq!(synced.pending_remote_writes(), 1);
+        assert_eq!(
+            synced.read("protocol", "recovery", "operation_id").unwrap(),
+            b"metadata"
+        );
+    }
+
+    /// An acknowledged canonical or pending RGB channel balance must survive loss of the local
+    /// device. Because the legacy LDK persistence interface cannot return a typed retryable error,
+    /// the writer waits for VSS recovery and must never return success while the only current value
+    /// exists in the local retry queue.
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acknowledged_rgb_channel_info_survives_device_loss() {
+        if std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:8081".parse().unwrap(),
+            Duration::from_secs(2),
+        )
+        .is_err()
+        {
+            eprintln!("SKIP: VSS server not available at http://127.0.0.1:8081/vss");
+            return;
+        }
+
+        for secondary_namespace in [RGB_CHANNEL_INFO_NS, RGB_CHANNEL_INFO_PENDING_NS] {
+            let proxy = super::super::vss_offline_force_close::VssProxy::start();
+            let (signing_key, store_id) = generate_test_keys();
+            let local_dir = tempfile::tempdir().expect("local tempdir");
+            let local = Arc::new(SeaOrmKvStore::from_connection(open_sqlite(
+                local_dir.path(),
+            )));
+            let remote = Arc::new(
+                VssKvStore::new(proxy.url(), store_id.clone(), signing_key).expect("vss store"),
+            );
+            let synced = Arc::new(SyncedKvStore::with_vss(local, remote));
+
+            synced
+                .write(
+                    CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+                    CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+                    CHANNEL_MANAGER_PERSISTENCE_KEY,
+                    vec![0xCA; 64],
+                )
+                .expect("baseline manager write");
+            assert_eq!(synced.pending_remote_writes(), 0);
+
+            proxy.go_offline();
+            let (result_tx, result_rx) = mpsc::sync_channel(1);
+            let writer = {
+                let synced = Arc::clone(&synced);
+                std::thread::spawn(move || {
+                    let result = synced.write(
+                        RGB_PRIMARY_NS,
+                        secondary_namespace,
+                        "channel_id",
+                        b"rgb_info".to_vec(),
+                    );
+                    result_tx.send(result).expect("send writer result");
+                })
+            };
+
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_secs(2)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            proxy.go_online();
+            result_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("critical RGB metadata write did not resume after VSS recovery")
+                .expect("critical RGB metadata write failed after VSS recovery");
+            writer.join().expect("writer thread");
+            drop(synced);
+
+            let restored_dir = tempfile::tempdir().expect("restored tempdir");
+            let restored_local = Arc::new(SeaOrmKvStore::from_connection(open_sqlite(
+                restored_dir.path(),
+            )));
+            let restored_remote = Arc::new(
+                VssKvStore::new(
+                    "http://127.0.0.1:8081/vss".to_owned(),
+                    store_id,
+                    signing_key,
+                )
+                .expect("restored vss store"),
+            );
+            let restored = SyncedKvStore::with_vss(restored_local, restored_remote);
+            restored.restore_from_vss(true).expect("restore from VSS");
+
+            assert_eq!(
+                restored
+                    .read(
+                        CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+                        CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+                        CHANNEL_MANAGER_PERSISTENCE_KEY,
+                    )
+                    .expect("manager must be restored"),
+                vec![0xCA; 64]
+            );
+            assert_eq!(
+                restored
+                    .read(RGB_PRIMARY_NS, secondary_namespace, "channel_id")
+                    .expect("acknowledged RGB metadata must survive device loss"),
+                b"rgb_info"
+            );
+        }
+    }
+
+    /// An acknowledged channel-metadata removal must not be undone by a device-loss restore.
+    /// Otherwise a closed channel can reappear with a stale RGB balance split after recovery.
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acknowledged_rgb_channel_info_removal_survives_device_loss() {
+        if std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:8081".parse().unwrap(),
+            Duration::from_secs(2),
+        )
+        .is_err()
+        {
+            eprintln!("SKIP: VSS server not available at http://127.0.0.1:8081/vss");
+            return;
+        }
+
+        for secondary_namespace in [RGB_CHANNEL_INFO_NS, RGB_CHANNEL_INFO_PENDING_NS] {
+            let proxy = super::super::vss_offline_force_close::VssProxy::start();
+            let (signing_key, store_id) = generate_test_keys();
+            let local_dir = tempfile::tempdir().expect("local tempdir");
+            let local = Arc::new(SeaOrmKvStore::from_connection(open_sqlite(
+                local_dir.path(),
+            )));
+            let remote = Arc::new(
+                VssKvStore::new(proxy.url(), store_id.clone(), signing_key).expect("vss store"),
+            );
+            let synced = Arc::new(SyncedKvStore::with_vss(local, remote));
+
+            synced
+                .write(
+                    RGB_PRIMARY_NS,
+                    secondary_namespace,
+                    "channel_id",
+                    b"rgb_info".to_vec(),
+                )
+                .expect("seed RGB metadata");
+            assert_eq!(synced.pending_remote_writes(), 0);
+
+            proxy.go_offline();
+            let (result_tx, result_rx) = mpsc::sync_channel(1);
+            let remover = {
+                let synced = Arc::clone(&synced);
+                std::thread::spawn(move || {
+                    let result =
+                        synced.remove(RGB_PRIMARY_NS, secondary_namespace, "channel_id", false);
+                    result_tx.send(result).expect("send remover result");
+                })
+            };
+
+            assert!(matches!(
+                result_rx.recv_timeout(Duration::from_secs(2)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            proxy.go_online();
+            result_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("critical RGB metadata removal did not resume after VSS recovery")
+                .expect("critical RGB metadata removal failed after VSS recovery");
+            remover.join().expect("remover thread");
+            drop(synced);
+
+            let restored_dir = tempfile::tempdir().expect("restored tempdir");
+            let restored_local = Arc::new(SeaOrmKvStore::from_connection(open_sqlite(
+                restored_dir.path(),
+            )));
+            let restored_remote = Arc::new(
+                VssKvStore::new(
+                    "http://127.0.0.1:8081/vss".to_owned(),
+                    store_id,
+                    signing_key,
+                )
+                .expect("restored vss store"),
+            );
+            let restored = SyncedKvStore::with_vss(restored_local, restored_remote);
+            restored.restore_from_vss(true).expect("restore from VSS");
+
+            assert!(matches!(
+                restored.read(RGB_PRIMARY_NS, secondary_namespace, "channel_id"),
+                Err(error) if error.kind() == bitcoin::io::ErrorKind::NotFound
+            ));
+        }
     }
 }

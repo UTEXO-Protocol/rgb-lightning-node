@@ -50,10 +50,12 @@ final class SwiftExternalSignerSmokeTests: XCTestCase {
         try node.initWithNativeExternalSigner(signer: signer)
         try node.unlockWithNativeExternalSigner(
             signer: signer,
-            bitcoindRpcUsername: bitcoindUser,
-            bitcoindRpcPassword: bitcoindPassword,
-            bitcoindRpcHost: bitcoindHost,
-            bitcoindRpcPort: bitcoindPort,
+            ldkChainSync: .blockSync(
+                bitcoindRpcUsername: bitcoindUser,
+                bitcoindRpcPassword: bitcoindPassword,
+                bitcoindRpcHost: bitcoindHost,
+                bitcoindRpcPort: bitcoindPort
+            ),
             indexerUrl: indexerUrl,
             proxyEndpoint: proxyEndpoint,
             announceAddresses: [],

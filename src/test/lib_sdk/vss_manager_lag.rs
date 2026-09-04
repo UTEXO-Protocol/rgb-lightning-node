@@ -9,6 +9,8 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{fs, time::Duration};
+use vss_client::prost::Message;
+use vss_client::types::{ErrorCode, ErrorResponse};
 
 const VSS_SERVER_ADDR: &str = "127.0.0.1:8081";
 const NODE_A_PORT_OFFSET: u16 = 110;
@@ -22,12 +24,12 @@ pub(crate) fn vss_server_available() -> bool {
         .is_ok()
 }
 
-/// VSS proxy that can reject channel-manager-key and/or RGB-backup writes,
-/// passing all else through.
+/// VSS proxy that can reject channel-manager writes or hide RGB backup reads,
+/// passing all other requests through.
 pub(crate) struct ManagerFilterProxy {
     port: u16,
     filter_manager: Arc<AtomicBool>,
-    filter_rgb_backup: Arc<AtomicBool>,
+    hide_rgb_backup_reads: Arc<AtomicBool>,
     blocked: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -36,31 +38,31 @@ impl ManagerFilterProxy {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let filter_manager = Arc::new(AtomicBool::new(false));
-        let filter_rgb_backup = Arc::new(AtomicBool::new(false));
+        let hide_rgb_backup_reads = Arc::new(AtomicBool::new(false));
         let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let manager_flag = Arc::clone(&filter_manager);
-        let rgb_flag = Arc::clone(&filter_rgb_backup);
+        let rgb_read_flag = Arc::clone(&hide_rgb_backup_reads);
         let hits = Arc::clone(&blocked);
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { break };
                 let manager_flag = Arc::clone(&manager_flag);
-                let rgb_flag = Arc::clone(&rgb_flag);
+                let rgb_read_flag = Arc::clone(&rgb_read_flag);
                 let hits = Arc::clone(&hits);
                 std::thread::spawn(move || {
-                    let _ = handle_conn(stream, manager_flag, rgb_flag, hits);
+                    let _ = handle_conn(stream, manager_flag, rgb_read_flag, hits);
                 });
             }
         });
         Self {
             port,
             filter_manager,
-            filter_rgb_backup,
+            hide_rgb_backup_reads,
             blocked,
         }
     }
 
-    fn blocked_count(&self) -> usize {
+    pub(crate) fn blocked_count(&self) -> usize {
         self.blocked.load(Ordering::SeqCst)
     }
 
@@ -72,13 +74,13 @@ impl ManagerFilterProxy {
         self.filter_manager.store(true, Ordering::SeqCst);
     }
 
-    pub(crate) fn block_rgb_backup_writes(&self) {
-        self.filter_rgb_backup.store(true, Ordering::SeqCst);
+    pub(crate) fn hide_rgb_backup_reads(&self) {
+        self.hide_rgb_backup_reads.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn allow_all(&self) {
         self.filter_manager.store(false, Ordering::SeqCst);
-        self.filter_rgb_backup.store(false, Ordering::SeqCst);
+        self.hide_rgb_backup_reads.store(false, Ordering::SeqCst);
     }
 }
 
@@ -124,7 +126,7 @@ fn body_contains(body: &[u8], needle: &[u8]) -> bool {
 fn handle_conn(
     mut client: std::net::TcpStream,
     filter_manager: Arc<AtomicBool>,
-    filter_rgb_backup: Arc<AtomicBool>,
+    hide_rgb_backup_reads: Arc<AtomicBool>,
     blocked: Arc<std::sync::atomic::AtomicUsize>,
 ) -> std::io::Result<()> {
     while let Some((head, body)) = read_http_request(&mut client)? {
@@ -133,9 +135,32 @@ fn handle_conn(
             .lines()
             .next()
             .is_some_and(|l| l.contains("putObject"));
+        let is_get = head_str
+            .lines()
+            .next()
+            .is_some_and(|l| l.contains("getObject"));
+        let hide_rgb_backup = is_get
+            && hide_rgb_backup_reads.load(Ordering::SeqCst)
+            && body_contains(&body, b"backup/");
+        if hide_rgb_backup {
+            blocked.fetch_add(1, Ordering::SeqCst);
+            let payload = ErrorResponse {
+                error_code: ErrorCode::NoSuchKeyException as i32,
+                message: "RGB backup hidden by legacy-restore fixture".to_string(),
+            }
+            .encode_to_vec();
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                payload.len()
+            );
+            client.write_all(response.as_bytes())?;
+            client.write_all(&payload)?;
+            return Ok(());
+        }
+
         let is_blocked = is_put
-            && ((filter_manager.load(Ordering::SeqCst) && body_contains(&body, MANAGER_VSS_KEY))
-                || (filter_rgb_backup.load(Ordering::SeqCst) && body_contains(&body, b"backup/")));
+            && filter_manager.load(Ordering::SeqCst)
+            && body_contains(&body, MANAGER_VSS_KEY);
         if is_blocked {
             blocked.fetch_add(1, Ordering::SeqCst);
             client.write_all(

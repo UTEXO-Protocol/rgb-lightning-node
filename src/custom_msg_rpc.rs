@@ -17,6 +17,7 @@ use tracing::warn;
 
 use crate::asset_link::{AssetLinkMessage, AssetLinkMessageHandler};
 use crate::async_order::{AsyncOrderMessage, AsyncOrderMessageHandler};
+use crate::rgb_file_transfer::{RgbFileMessage, RgbFileTransferHandler};
 
 pub(crate) const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 pub(crate) const JSONRPC_INVALID_PARAMS: i64 = -32602;
@@ -148,6 +149,7 @@ pub(crate) trait CustomMsgPeerAccessControl: Send + Sync {
 pub(crate) enum NodeCustomMessage {
     AsyncOrder(AsyncOrderMessage),
     AssetLink(AssetLinkMessage),
+    RgbFileTransfer(RgbFileMessage),
 }
 
 impl Type for NodeCustomMessage {
@@ -155,6 +157,7 @@ impl Type for NodeCustomMessage {
         match self {
             NodeCustomMessage::AsyncOrder(msg) => msg.type_id(),
             NodeCustomMessage::AssetLink(msg) => msg.type_id(),
+            NodeCustomMessage::RgbFileTransfer(msg) => msg.type_id(),
         }
     }
 }
@@ -164,6 +167,7 @@ impl Writeable for NodeCustomMessage {
         match self {
             NodeCustomMessage::AsyncOrder(msg) => msg.write(w),
             NodeCustomMessage::AssetLink(msg) => msg.write(w),
+            NodeCustomMessage::RgbFileTransfer(msg) => msg.write(w),
         }
     }
 }
@@ -171,6 +175,7 @@ impl Writeable for NodeCustomMessage {
 pub(crate) struct CustomMessenger {
     pub(crate) async_order: Arc<AsyncOrderMessageHandler>,
     pub(crate) asset_link: Arc<AssetLinkMessageHandler>,
+    pub(crate) rgb_file_transfer: Arc<RgbFileTransferHandler>,
 }
 
 impl CustomMessageReader for CustomMessenger {
@@ -186,6 +191,9 @@ impl CustomMessageReader for CustomMessenger {
         }
         if let Some(msg) = self.asset_link.read(message_type, buffer)? {
             return Ok(Some(NodeCustomMessage::AssetLink(msg)));
+        }
+        if let Some(msg) = self.rgb_file_transfer.read(message_type, buffer)? {
+            return Ok(Some(NodeCustomMessage::RgbFileTransfer(msg)));
         }
         Ok(None)
     }
@@ -204,6 +212,9 @@ impl CustomMessageHandler for CustomMessenger {
             NodeCustomMessage::AssetLink(msg) => {
                 self.asset_link.handle_custom_message(msg, sender_node_id)
             }
+            NodeCustomMessage::RgbFileTransfer(msg) => self
+                .rgb_file_transfer
+                .handle_custom_message(msg, sender_node_id),
         }
     }
 
@@ -215,12 +226,16 @@ impl CustomMessageHandler for CustomMessenger {
         for (peer, msg) in self.asset_link.get_and_clear_pending_msg() {
             pending.push((peer, NodeCustomMessage::AssetLink(msg)));
         }
+        for (peer, msg) in self.rgb_file_transfer.get_and_clear_pending_msg() {
+            pending.push((peer, NodeCustomMessage::RgbFileTransfer(msg)));
+        }
         pending
     }
 
     fn peer_disconnected(&self, their_node_id: PublicKey) {
         self.async_order.peer_disconnected(their_node_id);
         self.asset_link.peer_disconnected(their_node_id);
+        self.rgb_file_transfer.peer_disconnected(their_node_id);
     }
 
     fn peer_connected(
@@ -231,15 +246,21 @@ impl CustomMessageHandler for CustomMessenger {
     ) -> Result<(), ()> {
         self.async_order
             .peer_connected(their_node_id, msg, inbound)?;
-        self.asset_link.peer_connected(their_node_id, msg, inbound)
+        self.asset_link
+            .peer_connected(their_node_id, msg, inbound)?;
+        self.rgb_file_transfer
+            .peer_connected(their_node_id, msg, inbound)
     }
 
     fn provided_node_features(&self) -> NodeFeatures {
-        self.async_order.provided_node_features() | self.asset_link.provided_node_features()
+        self.async_order.provided_node_features()
+            | self.asset_link.provided_node_features()
+            | self.rgb_file_transfer.provided_node_features()
     }
 
     fn provided_init_features(&self, their_node_id: PublicKey) -> InitFeatures {
         self.async_order.provided_init_features(their_node_id)
             | self.asset_link.provided_init_features(their_node_id)
+            | self.rgb_file_transfer.provided_init_features(their_node_id)
     }
 }

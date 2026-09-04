@@ -37,10 +37,12 @@ final class SwiftUniffiE2ESmokeTests: XCTestCase {
         try node.unlock(
             request: SdkUnlockRequest(
                 password: "swift-e2e-pass",
-                bitcoindRpcUsername: bitcoindUser,
-                bitcoindRpcPassword: bitcoindPassword,
-                bitcoindRpcHost: bitcoindHost,
-                bitcoindRpcPort: bitcoindPort,
+                ldkChainSync: .blockSync(
+                    bitcoindRpcUsername: bitcoindUser,
+                    bitcoindRpcPassword: bitcoindPassword,
+                    bitcoindRpcHost: bitcoindHost,
+                    bitcoindRpcPort: bitcoindPort
+                ),
                 indexerUrl: env["INDEXER_URL"],
                 proxyEndpoint: env["PROXY_ENDPOINT"],
                 announceAddresses: [],
@@ -96,10 +98,12 @@ final class SwiftUniffiE2ESmokeTests: XCTestCase {
         try node.unlock(
             request: SdkUnlockRequest(
                 password: "swift-rgs-pass",
-                bitcoindRpcUsername: bitcoindUser,
-                bitcoindRpcPassword: bitcoindPassword,
-                bitcoindRpcHost: bitcoindHost,
-                bitcoindRpcPort: bitcoindPort,
+                ldkChainSync: .blockSync(
+                    bitcoindRpcUsername: bitcoindUser,
+                    bitcoindRpcPassword: bitcoindPassword,
+                    bitcoindRpcHost: bitcoindHost,
+                    bitcoindRpcPort: bitcoindPort
+                ),
                 indexerUrl: env["INDEXER_URL"],
                 proxyEndpoint: env["PROXY_ENDPOINT"],
                 announceAddresses: [],

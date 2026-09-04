@@ -1,20 +1,36 @@
+#[cfg(feature = "esplora")]
+use crate::utils::ESPLORA_URL_REGTEST;
 use amplify::s;
 use biscuit_auth::{builder::date, macros::*, KeyPair};
+#[cfg(all(feature = "transaction-sync", feature = "electrum"))]
+use bitcoin::block::Header;
+#[cfg(all(feature = "transaction-sync", feature = "electrum"))]
+use bitcoin::consensus::encode;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, Denomination};
+#[cfg(all(feature = "transaction-sync", feature = "electrum"))]
+use bitcoin::{BlockHash, ScriptBuf, Transaction as BitcoinTransaction, Txid};
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use http::response::Builder;
+#[cfg(all(feature = "transaction-sync", feature = "electrum"))]
+use lightning::chain::transaction::TransactionData;
+#[cfg(all(feature = "transaction-sync", feature = "electrum"))]
+use lightning::chain::{Confirm, Filter};
 use lightning::ln::channelmanager::DROP_FUNDING_SIGNED_ON_NODE;
 use lightning::rgb_utils::{
-    RgbPaymentInfo, RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
+    read_pending_funding_acceptance, FundingAcceptanceStage, PendingFundingAcceptance,
+    RgbPaymentInfo, RGB_FUNDING_ACCEPTANCE_NS, RGB_PAYMENT_INFO_INBOUND_NS,
+    RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
 use lightning::util::hash_tables::new_hash_map;
 use lightning::util::persist::KVStoreSync;
 use lightning::util::ser::Readable;
 use lightning_invoice::Bolt11Invoice;
+#[cfg(all(feature = "transaction-sync", feature = "electrum"))]
+use lightning_transaction_sync::ElectrumSyncClient;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use reqwest::{Response, StatusCode};
@@ -27,24 +43,32 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, Once, OnceLock, RwLock};
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::{atomic::Ordering, Arc, Mutex, Once, OnceLock, RwLock};
 use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing_test::traced_test;
 
 use crate::core_types::asset_link::{AssetLinkRequest, AssetLinkResponse};
-use crate::core_types::{HTLCStatus, SwapStatus, FEE_RATE, HTLC_MIN_MSAT, VIRTUAL_HTLC_MIN_MSAT};
+use crate::core_types::{
+    HTLCStatus, LdkChainSync, SwapStatus, FEE_RATE, HTLC_MIN_MSAT, VIRTUAL_HTLC_MIN_MSAT,
+};
+#[cfg(all(feature = "transaction-sync", feature = "electrum"))]
+use crate::disk::FilesystemLogger;
 use crate::disk::LDK_LOGS_FILE;
 use crate::error::{APIError, APIErrorResponse};
 use crate::kv_store::SeaOrmKvStore;
 use crate::ldk::{
-    InboundPaymentInfoStorage, InvoiceType, IGNORE_INBOUND_CHANNELS_ON_NODE, INBOUND_PAYMENTS_KEY,
+    InboundPaymentInfoStorage, InvoiceType, DEFER_PAYMENT_CLAIMABLE_ON_NODE,
+    FORCE_PUSH_ASSET_AMOUNT_ON_NODE, HELD_PAYMENT_CLAIMABLE_COUNT, HOLD_PAYMENT_CLAIMABLE_ON_NODE,
+    IGNORE_INBOUND_CHANNELS_ON_NODE, INBOUND_PAYMENTS_KEY, PAYMENT_CLAIMABLE_DEFERRED,
 };
 #[cfg(feature = "vss")]
 use crate::routes::VssClearFenceRequest;
 use crate::routes::{
-    AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetIFA,
+    AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetFilter, AssetIFA,
     AssetMetadataRequest, AssetMetadataResponse, AssetNIA, AssetUDA, Assignment, BackupRequest,
     BtcBalanceRequest, BtcBalanceResponse, CancelHodlInvoiceRequest, ChangePasswordRequest,
     Channel, ChannelStatus, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest,
@@ -52,21 +76,22 @@ use crate::routes::{
     DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse, DecodeSwapstringRequest,
     DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
     FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
-    GetChannelIdResponse, GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse,
-    InflateRequest, InflateResponse, InitRequest, InitResponse, InvoiceStatus,
-    InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse,
-    IssueAssetIFARequest, IssueAssetIFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
-    IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
-    LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
-    ListPaymentsResponse, ListPeersResponse, ListSwapsResponse, ListTransactionsRequest,
-    ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest,
-    ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
-    NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment,
-    PaymentDirection, PaymentType, Peer, PostAssetMediaResponse, Recipient, RefreshRequest,
-    RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest,
-    SendBtcResponse, SendPaymentRequest, SendPaymentResponse, SendRgbRequest, SendRgbResponse,
-    Swap, TakerRequest, Transaction, Transfer, TransferKind, TransferStatus, UnlockRequest,
-    Unspent, WitnessData,
+    GetChannelIdResponse, GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest,
+    GetPaymentResponse, GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse,
+    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
+    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse,
+    IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse,
+    KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest,
+    ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse, ListPeersResponse,
+    ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest,
+    ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
+    MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
+    OpenChannelResponse, Payment, PaymentDirection, PaymentType, Peer, PostAssetMediaResponse,
+    ProvideOutOfBandAckRequest, ProvideOutOfBandAckResponse, ProvideOutOfBandConsignmentResponse,
+    Recipient, RefreshRequest, RefreshResponse, RestoreRequest, RevokeTokenRequest,
+    RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
+    SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest, Transaction,
+    Transfer, TransferKind, TransferStatus, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,
@@ -75,7 +100,6 @@ use crate::utils::{
 
 use super::*;
 
-const ELECTRUM_URL: &str = "127.0.0.1:50001";
 const NODE1_PEER_PORT: u16 = 9801;
 const NODE2_PEER_PORT: u16 = 9802;
 const NODE3_PEER_PORT: u16 = 9803;
@@ -108,6 +132,9 @@ impl Default for UserArgs {
             daemon_listening_port: 3001,
             ldk_peer_listening_port: 9735,
             max_media_upload_size_mb: 3,
+            max_aggregated_media_size_per_channel_mb: 24,
+            max_pending_consignments: 10,
+            max_media_files_per_channel: 42,
             root_public_key: None,
             enable_virtual_channels_v0: false,
             virtual_peer_pubkeys: vec![],
@@ -149,8 +176,114 @@ impl Drop for ElectrsRestartGuard {
             .arg("start")
             .arg("electrs")
             .status()
-            .expect("failed to stop electrs");
-        assert!(status.success(), "failed to stop electrs");
+            .expect("failed to start electrs");
+        assert!(status.success(), "failed to start electrs");
+        wait_electrs_sync();
+    }
+}
+
+// Makes `mine` also wait for esplora to catch up with bitcoind, for the duration of a test that
+// syncs a node through it. Scoped to a guard so the rest of the suite, which only queries electrs,
+// doesn't pay for an indexer it never reads, and so a panicking test cannot leak the setting.
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
+static WAIT_ESPLORA_SYNC: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
+struct EsploraSyncGuard;
+
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
+impl EsploraSyncGuard {
+    fn set() -> Self {
+        WAIT_ESPLORA_SYNC.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
+impl Drop for EsploraSyncGuard {
+    fn drop(&mut self) {
+        WAIT_ESPLORA_SYNC.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
+async fn start_esplora_profile() {
+    // initialize() recreated the network — drop the stale esplora container.
+    let _ = Command::new("docker")
+        .args(["rm", "-f", "optional-bitcoind-esplora-sync-esplora-1"])
+        .status();
+    let status = Command::new("docker")
+        .args(["compose", "--profile", "esplora", "up", "-d", "esplora"])
+        .status()
+        .expect("failed to start esplora service");
+    assert!(status.success(), "docker compose esplora up failed");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let t_0 = OffsetDateTime::now_utc();
+    loop {
+        let ready = client
+            .get(format!(
+                "{}/blocks/tip/hash",
+                crate::utils::ESPLORA_URL_REGTEST
+            ))
+            .send()
+            .await
+            .ok();
+        if let Some(resp) = ready {
+            if let Ok(body) = resp.text().await {
+                if body.trim().len() == 64 {
+                    return;
+                }
+            }
+        }
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 60.0 {
+            panic!("esplora REST never became ready");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+// Sets a test-override static to a node's pubkey and clears it on drop, so a
+// panicking test cannot leak the override into the next one
+struct NodeOverrideGuard(&'static Mutex<Option<PublicKey>>);
+
+impl NodeOverrideGuard {
+    fn set(target: &'static Mutex<Option<PublicKey>>, node_pubkey: &str) -> Self {
+        *target.lock().unwrap() = Some(PublicKey::from_str(node_pubkey).unwrap());
+        Self(target)
+    }
+}
+
+impl Drop for NodeOverrideGuard {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+// Makes the payee defer claiming incoming payments, so the payer's HTLC (and any swap it is part
+// of) stays pending until the returned guard is dropped.
+//
+// Must be set before the payment is sent; call `wait_for_deferred_payment` afterwards to know the
+// HTLC has actually reached the payee.
+fn defer_payment_claimable(payee_pubkey: &str) -> NodeOverrideGuard {
+    PAYMENT_CLAIMABLE_DEFERRED.store(false, Ordering::SeqCst);
+    NodeOverrideGuard::set(&DEFER_PAYMENT_CLAIMABLE_ON_NODE, payee_pubkey)
+}
+
+// Waits for a payment deferred via `defer_payment_claimable` to have reached the payee.
+//
+// Note that only one payment at a time can be deferred on a node, as a node handles its events
+// sequentially. What the gate guarantees is that no payment to that node settles while it is held,
+// not that every in-flight payment has reached it.
+async fn wait_for_deferred_payment() {
+    let t_0 = OffsetDateTime::now_utc();
+    while !PAYMENT_CLAIMABLE_DEFERRED.load(Ordering::SeqCst) {
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 40.0 {
+            panic!("no payment has been deferred");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -164,6 +297,27 @@ fn bitcoin_cli() -> [String; 7] {
         s!("bitcoin-cli"),
         s!("-regtest"),
     ]
+}
+
+// runs a bitcoin-cli command against the regtest bitcoind, returning its trimmed stdout. wallet
+// commands need an explicit `-rpcwallet=<name>` as their first argument
+fn bitcoind(args: &[&str]) -> String {
+    let output = Command::new("docker")
+        .stdin(Stdio::null())
+        .arg("compose")
+        .args(bitcoin_cli())
+        .args(args)
+        .output()
+        .expect("failed to call bitcoin-cli");
+    assert!(
+        output.status.success(),
+        "bitcoin-cli {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("bitcoin-cli output is not valid UTF-8")
+        .trim()
+        .to_string()
 }
 
 fn check_preimage_matches_hash(payment: &Payment, expected_payment_hash: &str) {
@@ -196,36 +350,11 @@ async fn check_response_is_nok(
 fn fund_wallet(address: String, sats: u64) {
     let amt = Amount::from_sat(sats);
     let btc_str = amt.to_string_in(Denomination::Bitcoin);
-    let status = Command::new("docker")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .arg("compose")
-        .args(bitcoin_cli())
-        .arg("-rpcwallet=miner")
-        .arg("sendtoaddress")
-        .arg(address)
-        .arg(btc_str)
-        .status()
-        .expect("failed to fund wallet");
-    assert!(status.success());
+    bitcoind(&["-rpcwallet=miner", "sendtoaddress", &address, &btc_str]);
 }
 
 fn get_txout(txid: &str) -> String {
-    String::from_utf8(
-        Command::new("docker")
-            .stdin(Stdio::null())
-            .arg("compose")
-            .args(bitcoin_cli())
-            .arg("-rpcwallet=miner")
-            .arg("gettxout")
-            .arg(txid)
-            .arg("0")
-            .output()
-            .expect("failed get txout")
-            .stdout,
-    )
-    .unwrap()
+    bitcoind(&["-rpcwallet=miner", "gettxout", txid, "0"])
 }
 
 async fn start_daemon(
@@ -331,6 +460,32 @@ async fn start_node(
 ) -> (SocketAddr, String) {
     start_node_with_virtual_options(node_test_dir, node_peer_port, keep_node_dir, false, vec![])
         .await
+}
+
+async fn start_node_with(
+    node_test_dir: &str,
+    node_peer_port: u16,
+    keep_node_dir: bool,
+    ldk_chain_sync: LdkChainSync,
+) -> (SocketAddr, String) {
+    println!("starting node with peer port {node_peer_port}");
+    let node_address = start_daemon_with_virtual_options(
+        node_test_dir,
+        node_peer_port,
+        None,
+        keep_node_dir,
+        false,
+        vec![],
+    )
+    .await;
+    let password = format!("{node_test_dir}.{node_peer_port}");
+    if !keep_node_dir {
+        init(node_address, &password, None).await;
+    }
+    unlock_with(node_address, &password, ldk_chain_sync).await;
+    wait_for_peer_port_ready(node_peer_port).await;
+    println!("node on peer port {node_peer_port} started with address {node_address:?}");
+    (node_address, password)
 }
 
 async fn start_node_with_virtual_options(
@@ -781,6 +936,28 @@ async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: 
     }
 }
 
+// Waits until the channel's funding output is spent by a confirmed tx
+// (commitment or cooperative close) and returns the spending txid
+async fn wait_for_funding_spend_txid(node_test_dir: &str, channel_id: &str) -> String {
+    let needle = format!("Channel {channel_id} closed by funding output spend in txid ");
+    let t_0 = OffsetDateTime::now_utc();
+    loop {
+        let txid = ldk_log_lines(node_test_dir)
+            .iter()
+            .find_map(|l| l.split_once(&needle).map(|(_, rest)| rest.to_string()));
+        // defensive: a partially-flushed line would be shorter than a txid; retry rather than panic
+        if let Some(txid) = txid {
+            if txid.len() >= 64 {
+                return txid[..64].to_string();
+            }
+        }
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 30.0 {
+            panic!("confirmed commitment for channel {channel_id} not seen in logs");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 async fn connect_peer(node_address: SocketAddr, peer_pubkey: &str, peer_addr: &str) {
     println!("connecting peer {peer_pubkey} from node {node_address}");
     let payload = ConnectPeerRequest {
@@ -961,6 +1138,26 @@ async fn get_asset_media(node_address: SocketAddr, digest: &str) -> String {
     check_response_is_ok(res)
         .await
         .json::<GetAssetMediaResponse>()
+        .await
+        .unwrap()
+        .bytes_hex
+}
+
+async fn get_consignment(node_address: SocketAddr, asset_id: &str, txid: &str) -> String {
+    println!("requesting consignment for asset {asset_id} txid {txid} from node {node_address}");
+    let payload = GetConsignmentRequest {
+        asset_id: asset_id.to_string(),
+        txid: txid.to_string(),
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/getconsignment"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<GetConsignmentResponse>()
         .await
         .unwrap()
         .bytes_hex
@@ -1156,6 +1353,7 @@ async fn issue_asset_uda(node_address: SocketAddr, file_path: Option<&str>) -> A
         .asset
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn with_ln_balance_checks(
     node_address: SocketAddr,
     counterparty_node_address: SocketAddr,
@@ -1164,10 +1362,17 @@ async fn with_ln_balance_checks(
     initial_ln_balance_rgb: Option<u64>,
     counterparty_initial_ln_balance_rgb: Option<u64>,
     payment_hash: &str,
+    defer_guard: NodeOverrideGuard,
 ) {
+    // the payee is deferring the claim, so the payment is provably still pending here: without
+    // that gate it could have settled before we get to look at it, making this check racy
+    wait_for_deferred_payment().await;
     check_payment_status(node_address, payment_hash, HTLCStatus::Pending)
         .await
         .unwrap();
+
+    // let the payee claim, so the payment can settle
+    drop(defer_guard);
 
     if let Some(asset_id) = &asset_id {
         let final_ln_balance_rgb = initial_ln_balance_rgb.unwrap() - asset_amount.unwrap();
@@ -1245,6 +1450,7 @@ async fn keysend_with_ln_balance(
     initial_ln_balance_rgb: Option<u64>,
     counterparty_initial_ln_balance_rgb: Option<u64>,
 ) {
+    let defer_guard = defer_payment_claimable(dest_pubkey);
     let res = keysend_raw(node_address, dest_pubkey, amt_msat, asset_id, asset_amount).await;
 
     with_ln_balance_checks(
@@ -1255,8 +1461,21 @@ async fn keysend_with_ln_balance(
         initial_ln_balance_rgb,
         counterparty_initial_ln_balance_rgb,
         &res.payment_hash,
+        defer_guard,
     )
     .await;
+}
+
+// Lines of a node's LDK log file (empty if the log doesn't exist yet)
+fn ldk_log_lines(node_test_dir: &str) -> Vec<String> {
+    let log_path = PathBuf::from(node_test_dir)
+        .join(LDK_DIR)
+        .join(LOGS_DIR)
+        .join(LDK_LOGS_FILE);
+    let Ok(file) = File::open(log_path) else {
+        return vec![];
+    };
+    BufReader::new(file).lines().map_while(Result::ok).collect()
 }
 
 async fn list_assets(node_address: SocketAddr) -> ListAssetsResponse {
@@ -1482,7 +1701,7 @@ async fn list_transfers_full(
 ) -> ListTransfersResponse {
     println!("listing transfers for asset {asset_id} on node {node_address}");
     let payload = ListTransfersRequest {
-        asset_id: Some(asset_id.to_string()),
+        asset_filter: AssetFilter::Id(asset_id.to_string()),
         txid: None,
         index_offset: filter.index_offset,
         max_transfers: filter.max_transfers,
@@ -1506,8 +1725,33 @@ async fn list_transfers_full(
 async fn list_transfers_by_txid(node_address: SocketAddr, txid: &str) -> Vec<Transfer> {
     println!("listing transfers for txid {txid} on node {node_address}");
     let payload = ListTransfersRequest {
-        asset_id: None,
+        asset_filter: AssetFilter::AnyOrNone,
         txid: Some(txid.to_string()),
+        index_offset: None,
+        max_transfers: None,
+        status: None,
+        created_after: None,
+        created_before: None,
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/listtransfers"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<ListTransfersResponse>()
+        .await
+        .unwrap()
+        .transfers
+}
+
+async fn list_transfers_no_asset(node_address: SocketAddr) -> Vec<Transfer> {
+    println!("listing asset-less transfers on node {node_address}");
+    let payload = ListTransfersRequest {
+        asset_filter: AssetFilter::None,
+        txid: None,
         index_offset: None,
         max_transfers: None,
         status: None,
@@ -1535,7 +1779,7 @@ async fn list_transfers_by_asset_and_txid(
 ) -> Vec<Transfer> {
     println!("listing transfers for asset {asset_id} and txid {txid} on node {node_address}");
     let payload = ListTransfersRequest {
-        asset_id: Some(asset_id.to_string()),
+        asset_filter: AssetFilter::Id(asset_id.to_string()),
         txid: Some(txid.to_string()),
         index_offset: None,
         max_transfers: None,
@@ -1952,6 +2196,9 @@ async fn open_channel_with_retry(
     }
 }
 
+/// NOT the upstream helper of the same name: this one waits for the channel to get funded and
+/// returns a retryable FORBIDDEN if it doesn't. Upstream's `open_channel_raw` is our
+/// `open_channel_request_raw`, which is what tests expecting a failed open must use.
 #[allow(clippy::too_many_arguments)]
 async fn open_channel_raw(
     node_address: SocketAddr,
@@ -2116,6 +2363,7 @@ async fn open_channel_raw(
 /// Low-level open-channel helper: POSTs the request and returns the raw response
 /// without waiting for the channel to become ready. Used by tests that assert on
 /// the immediate open result or that deliberately exercise stuck/failed opens.
+#[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
 async fn open_channel_request_raw(
     node_address: SocketAddr,
@@ -2131,7 +2379,7 @@ async fn open_channel_request_raw(
     temporary_channel_id: Option<&str>,
     with_anchors: bool,
     public: bool,
-) -> Result<OpenChannelResponse, Response> {
+) -> Result<OpenChannelResponse, Box<Response>> {
     println!(
         "opening channel with {asset_amount:?} of asset {asset_id:?} from node {node_address} \
               to {dest_peer_pubkey}"
@@ -2178,12 +2426,13 @@ async fn open_channel_request_raw(
 
     let status = res.status();
     if !status.is_success() {
-        return Err(res);
+        return Err(Box::new(res));
     }
 
     Ok(res.json::<OpenChannelResponse>().await.unwrap())
 }
 
+#[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
 async fn open_channel_funded_raw(
     node_address: SocketAddr,
@@ -2199,7 +2448,7 @@ async fn open_channel_funded_raw(
     temporary_channel_id: Option<&str>,
     with_anchors: bool,
     public: bool,
-) -> Result<Channel, Response> {
+) -> Result<Channel, Box<Response>> {
     open_channel_request_raw(
         node_address,
         dest_peer_pubkey,
@@ -2249,12 +2498,12 @@ async fn open_channel_funded_raw(
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 50.0 {
             println!("cannot find funding TX for channel to {dest_peer_pubkey}");
-            return Err(Response::from(
+            return Err(Box::new(Response::from(
                 Builder::new()
                     .status(reqwest::StatusCode::FORBIDDEN)
                     .body("")
                     .unwrap(),
-            ));
+            )));
         }
     }
     let channel_id = channel_id.unwrap();
@@ -2368,24 +2617,84 @@ fn random_preimage_and_hash() -> (String, String) {
     (preimage_hex, payment_hash)
 }
 
-async fn refresh_transfers(node_address: SocketAddr) {
+async fn provide_out_of_band_ack(
+    node_address: SocketAddr,
+    recipient_id: &str,
+) -> ProvideOutOfBandAckResponse {
+    check_response_is_ok(provide_out_of_band_ack_res(node_address, recipient_id).await)
+        .await
+        .json::<ProvideOutOfBandAckResponse>()
+        .await
+        .unwrap()
+}
+
+async fn provide_out_of_band_ack_res(node_address: SocketAddr, recipient_id: &str) -> Response {
+    println!("providing out-of-band ACK for recipient {recipient_id} on node {node_address}");
+    let payload = ProvideOutOfBandAckRequest {
+        recipient_id: recipient_id.to_string(),
+    };
+    reqwest::Client::new()
+        .post(format!("http://{node_address}/provideoutofbandack"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn provide_out_of_band_consignment(
+    node_address: SocketAddr,
+    consignment_bytes: Vec<u8>,
+    media_files_bytes: Vec<Vec<u8>>,
+) -> ProvideOutOfBandConsignmentResponse {
+    println!(
+        "providing out-of-band consignment ({} bytes, {} media files) on node {node_address}",
+        consignment_bytes.len(),
+        media_files_bytes.len(),
+    );
+    let mut form = reqwest::multipart::Form::new()
+        .part("file", reqwest::multipart::Part::bytes(consignment_bytes));
+    for media_bytes in media_files_bytes {
+        form = form.part("media", reqwest::multipart::Part::bytes(media_bytes));
+    }
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/provideoutofbandconsignment"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<ProvideOutOfBandConsignmentResponse>()
+        .await
+        .unwrap()
+}
+
+async fn refresh_transfers_raw(node_address: SocketAddr) -> Result<Response, reqwest::Error> {
     println!("refreshing transfers for node {node_address}");
     let payload = RefreshRequest {
         asset_id: None,
         filter: vec![],
         skip_sync: false,
     };
-    let res = reqwest::Client::new()
+    reqwest::Client::new()
         .post(format!("http://{node_address}/refreshtransfers"))
         .json(&payload)
         .send()
         .await
-        .unwrap();
+}
+
+async fn refresh_transfers(node_address: SocketAddr) -> RefreshResponse {
+    let res = refresh_transfers_raw(node_address).await.unwrap();
     check_response_is_ok(res)
         .await
-        .json::<EmptyResponse>()
+        .json::<RefreshResponse>()
         .await
-        .unwrap();
+        .unwrap()
+}
+
+// Best-effort refresh for nodes that may not be able to serve it yet
+async fn refresh_transfers_tolerant(node_address: SocketAddr) {
+    let _ = refresh_transfers_raw(node_address).await;
 }
 
 async fn restore(node_address: SocketAddr, backup_path: &str, password: &str) {
@@ -2421,22 +2730,60 @@ async fn rgb_invoice_with_assignment(
     assignment: Option<Assignment>,
     witness: bool,
 ) -> RgbInvoiceResponse {
+    rgb_invoice_raw(
+        node_address,
+        asset_id,
+        assignment,
+        witness,
+        vec![PROXY_ENDPOINT_LOCAL.to_string()],
+    )
+    .await
+}
+
+async fn rgb_invoice_oob(
+    node_address: SocketAddr,
+    asset_id: Option<String>,
+    assignment: Option<Assignment>,
+    witness: bool,
+) -> RgbInvoiceResponse {
+    rgb_invoice_raw(node_address, asset_id, assignment, witness, vec![]).await
+}
+
+async fn rgb_invoice_raw(
+    node_address: SocketAddr,
+    asset_id: Option<String>,
+    assignment: Option<Assignment>,
+    witness: bool,
+    transport_endpoints: Vec<String>,
+) -> RgbInvoiceResponse {
     println!(
-        "generating RGB invoice{} for node {node_address}",
+        "generating RGB invoice{}{}{} for node {node_address}",
         if let Some(id) = asset_id.as_ref() {
             format!(" for asset {id}")
         } else {
             s!("")
+        },
+        if let Some(assignment) = &assignment {
+            format!(" with assignment {assignment:?}")
+        } else {
+            s!("")
+        },
+        if transport_endpoints.is_empty() {
+            s!("")
+        } else {
+            format!(
+                " with transport endpoints {}",
+                transport_endpoints.join(", ")
+            )
         }
     );
     let payload = RgbInvoiceRequest {
         min_confirmations: 1,
         asset_id,
         assignment,
-        expiration_timestamp: Some(
-            OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
-        ),
+        expiration_timestamp: OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
         witness,
+        transport_endpoints,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{node_address}/rgbinvoice"))
@@ -2477,7 +2824,7 @@ async fn send_assets(
     node_address: SocketAddr,
     recipient_map: HashMap<String, Vec<Recipient>>,
     donation: bool,
-) {
+) -> String {
     println!(
         "batch sending {} asset(s) from node {node_address}",
         recipient_map.len()
@@ -2486,9 +2833,7 @@ async fn send_assets(
         donation,
         fee_rate: FEE_RATE,
         min_confirmations: 1,
-        expiration_timestamp: Some(
-            OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
-        ),
+        expiration_timestamp: OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
         recipient_map,
     };
     let res = reqwest::Client::new()
@@ -2501,7 +2846,8 @@ async fn send_assets(
         .await
         .json::<SendRgbResponse>()
         .await
-        .unwrap();
+        .unwrap()
+        .txid
 }
 
 async fn send_btc(node_address: SocketAddr, amount: u64, address: &str) -> String {
@@ -2560,6 +2906,7 @@ async fn send_payment_with_ln_balance(
 ) {
     let bolt11_invoice = Bolt11Invoice::from_str(&invoice).unwrap();
 
+    let defer_guard = defer_payment_claimable(&bolt11_invoice.recover_payee_pub_key().to_string());
     let res = send_payment_raw(node_address, invoice).await;
 
     with_ln_balance_checks(
@@ -2571,6 +2918,7 @@ async fn send_payment_with_ln_balance(
         counterparty_initial_ln_balance_rgb,
         // TODO: remove unwrap once RGB offers are enabled
         &res.payment_hash.unwrap(),
+        defer_guard,
     )
     .await;
 }
@@ -2646,6 +2994,12 @@ async fn shutdown(node_sockets: &[SocketAddr]) {
     }
 }
 
+// Total spendable BTC across the vanilla and colored wallets
+async fn spendable_sats(node_address: SocketAddr) -> u64 {
+    let balance = btc_balance(node_address).await;
+    balance.vanilla.spendable + balance.colored.spendable
+}
+
 async fn taker(node_address: SocketAddr, swapstring: String) -> EmptyResponse {
     println!("taking swap {swapstring} on node {node_address}");
     let payload = TakerRequest { swapstring };
@@ -2662,13 +3016,30 @@ async fn taker(node_address: SocketAddr, swapstring: String) -> EmptyResponse {
         .unwrap()
 }
 
+// the sync mode the suite unlocks its nodes with: block-sync against the local bitcoind when that
+// backend is available, falling back to transaction-sync against the local electrs otherwise
+fn default_ldk_chain_sync() -> LdkChainSync {
+    #[cfg(feature = "block-sync")]
+    return LdkChainSync::BlockSync {
+        bitcoind_rpc_username: s!("user"),
+        bitcoind_rpc_password: s!("password"),
+        bitcoind_rpc_host: s!("127.0.0.1"),
+        bitcoind_rpc_port: 18443,
+    };
+    #[cfg(not(feature = "block-sync"))]
+    return LdkChainSync::TransactionSync {
+        indexer_url: ELECTRUM_URL_REGTEST.to_string(),
+    };
+}
+
 fn unlock_req(password: &str) -> UnlockRequest {
+    unlock_req_with(password, default_ldk_chain_sync())
+}
+
+fn unlock_req_with(password: &str, ldk_chain_sync: LdkChainSync) -> UnlockRequest {
     UnlockRequest {
         password: password.to_string(),
-        bitcoind_rpc_username: Some(s!("user")),
-        bitcoind_rpc_password: Some(s!("password")),
-        bitcoind_rpc_host: Some(s!("localhost")),
-        bitcoind_rpc_port: Some(18443),
+        ldk_chain_sync,
         indexer_url: Some(ELECTRUM_URL_REGTEST.to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
         announce_addresses: vec![],
@@ -2678,8 +3049,16 @@ fn unlock_req(password: &str) -> UnlockRequest {
 }
 
 async fn unlock_res(node_address: SocketAddr, password: &str) -> Response {
+    unlock_res_with(node_address, password, default_ldk_chain_sync()).await
+}
+
+async fn unlock_res_with(
+    node_address: SocketAddr,
+    password: &str,
+    ldk_chain_sync: LdkChainSync,
+) -> Response {
     println!("unlocking node {node_address}");
-    let payload = unlock_req(password);
+    let payload = unlock_req_with(password, ldk_chain_sync);
     reqwest::Client::new()
         .post(format!("http://{node_address}/unlock"))
         .json(&payload)
@@ -2709,9 +3088,29 @@ async fn unlock_with_gossip_source(
         .unwrap();
 }
 
+// Output values (in sats) of an on-chain transaction
+fn tx_output_sats(txid: &str) -> Vec<u64> {
+    let raw_tx = bitcoind(&["getrawtransaction", txid, "true"]);
+    let tx: serde_json::Value = serde_json::from_str(&raw_tx).expect("valid tx JSON");
+    tx["vout"]
+        .as_array()
+        .expect("vout array")
+        .iter()
+        .map(|v| {
+            Amount::from_btc(v["value"].as_f64().expect("output value"))
+                .expect("valid amount")
+                .to_sat()
+        })
+        .collect()
+}
+
 async fn unlock(node_address: SocketAddr, password: &str) {
+    unlock_with(node_address, password, default_ldk_chain_sync()).await
+}
+
+async fn unlock_with(node_address: SocketAddr, password: &str, ldk_chain_sync: LdkChainSync) {
     println!("unlocking node {node_address}");
-    let res = unlock_res(node_address, password).await;
+    let res = unlock_res_with(node_address, password, ldk_chain_sync).await;
     check_response_is_ok(res)
         .await
         .json::<EmptyResponse>()
@@ -2920,18 +3319,7 @@ impl Miner {
         if self.no_mine_count > 0 {
             return false;
         }
-        let status = Command::new("docker")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .arg("compose")
-            .args(bitcoin_cli())
-            .arg("-rpcwallet=miner")
-            .arg("-generate")
-            .arg(num_blocks.to_string())
-            .status()
-            .expect("failed to mine");
-        assert!(status.success());
+        bitcoind(&["-rpcwallet=miner", "-generate", &num_blocks.to_string()]);
         true
     }
 
@@ -2972,6 +3360,10 @@ fn mine_n_blocks(resume: bool, num_blocks: u16) {
         }
     }
     wait_electrs_sync();
+    #[cfg(all(feature = "esplora", feature = "transaction-sync"))]
+    if WAIT_ESPLORA_SYNC.load(Ordering::SeqCst) {
+        wait_esplora_sync();
+    }
 }
 
 fn stop_mining() {
@@ -2989,21 +3381,27 @@ fn resume_mining() {
 }
 
 fn get_block_count() -> u32 {
-    let output = Command::new("docker")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .arg("compose")
-        .args(bitcoin_cli())
-        .arg("getblockcount")
-        .output()
-        .expect("failed to call getblockcount");
-    assert!(output.status.success());
-    let blockcount_str =
-        std::str::from_utf8(&output.stdout).expect("could not parse blockcount output");
-    blockcount_str
-        .trim()
+    bitcoind(&["getblockcount"])
         .parse::<u32>()
         .expect("could not parse blockcount")
+}
+
+// the esplora indexer catches up with bitcoind independently of electrs, so a node syncing
+// through it needs its own wait after mining
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
+fn wait_esplora_sync() {
+    let t_0 = OffsetDateTime::now_utc();
+    let blockcount = get_block_count();
+    let client = esplora_client::Builder::new(ESPLORA_URL_REGTEST).build_blocking();
+    loop {
+        if client.get_height().is_ok_and(|height| height >= blockcount) {
+            break;
+        };
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 30.0 {
+            panic!("esplora not syncing with bitcoind");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn wait_electrs_sync() {
@@ -3011,16 +3409,12 @@ fn wait_electrs_sync() {
     let blockcount = get_block_count();
     loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let mut all_synced = true;
-        let electrum =
-            electrum_client::Client::new(ELECTRUM_URL).expect("cannot get electrum client");
-        if electrum.block_header(blockcount as usize).is_err() {
-            all_synced = false;
-        }
-        if all_synced {
+        let synced = electrum_client::Client::new(ELECTRUM_URL_REGTEST)
+            .is_ok_and(|electrum| electrum.block_header(blockcount as usize).is_ok());
+        if synced {
             break;
         };
-        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 10.0 {
+        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 30.0 {
             panic!("electrs not syncing with bitcoind");
         }
     }
@@ -3071,7 +3465,7 @@ mod asset_link;
 mod auth_db_persistence;
 mod authentication;
 mod backup_and_restore;
-mod chain_backend_bitcoind_dispatch;
+mod chain_backend_dispatch;
 mod close_coop_nobtc_acceptor;
 mod close_coop_other_side;
 mod close_coop_standard;
@@ -3079,13 +3473,20 @@ mod close_coop_vanilla;
 mod close_coop_zero_balance;
 mod close_force_nobtc_acceptor;
 mod close_force_other_side;
+mod close_force_pending_htlc;
 mod close_force_standard;
+#[cfg(feature = "transaction-sync")]
 mod colored_channel_electrum;
 mod concurrent_btc_payments;
 mod concurrent_openchannel;
 mod drop_funding_signed;
+#[cfg(all(feature = "transaction-sync", feature = "electrum"))]
+mod electrum_opret_confirm;
 mod esplora_indexer_defaults;
 mod fail_transfers;
+mod funding_crash_recovery;
+#[cfg(debug_assertions)]
+mod funding_crash_sender;
 mod getchannelid;
 mod gossip_p2p;
 mod gossip_rgs;
@@ -3094,27 +3495,34 @@ mod htlc_amount_checks;
 mod ifa_channel;
 mod inflate;
 mod init;
+#[cfg(feature = "transaction-sync")]
 mod init_electrum;
+#[cfg(all(feature = "transaction-sync", feature = "esplora"))]
 mod init_esplora;
 mod invoice;
 mod issue;
 mod lock_unlock_changepassword;
 mod missing_acceptor;
+mod mnemonic_crypto;
 mod multi_hop;
 mod multi_open_close;
 mod open_after_double_send;
 mod openchannel_fail;
+mod openchannel_media;
 mod openchannel_no_indexer;
 mod openchannel_optional_addr;
 mod openchannel_push_asset_amount;
+mod out_of_band;
 mod pagination_filters;
 mod payment;
+mod push_asset_amount_above_chan_amt;
 mod refuse_high_fees;
 #[cfg(feature = "vss")]
 mod remote_first_kv;
 #[cfg(feature = "vss")]
 mod remote_first_recovery;
 mod restart;
+mod restore_legacy_backup;
 mod restore_swaps_db_pool;
 mod rgb_payment_htlc_persistence;
 mod send_receive;
@@ -3135,9 +3543,12 @@ mod swap_roundtrip_multihop_asset_asset;
 mod swap_roundtrip_multihop_buy;
 mod swap_roundtrip_multihop_sell;
 mod swap_roundtrip_sell;
+#[cfg(feature = "transaction-sync")]
+mod transaction_sync;
+mod tripwire_legacy_colored_channel;
 #[cfg(feature = "vss")]
 mod unlock_missing_monitor;
-mod unlock_request_optional_bitcoind;
+mod unlock_request_ldk_chain_sync;
 mod upload_asset_media;
 mod vanilla_payment_on_rgb_channel;
 mod virtual_channels;
@@ -3147,5 +3558,5 @@ mod vss;
 mod vss_durability_gaps;
 #[cfg(feature = "vss")]
 mod vss_offline_force_close;
-#[cfg(feature = "vss")]
+#[cfg(all(feature = "vss", feature = "transaction-sync"))]
 mod vss_unreachable_openchannel;

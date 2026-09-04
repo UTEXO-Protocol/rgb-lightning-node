@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+#[cfg(feature = "vss")]
+use std::time::Duration;
+
 use bitcoin::io;
 use lightning::util::persist::KVStoreSync;
 
@@ -53,12 +56,30 @@ const PENDING_DRAIN_BATCH: usize = 16;
 
 // Protocol records that must be remotely acknowledged before channel funding may advance.
 // These names are persisted storage contracts and intentionally live with the durability policy.
-#[cfg(feature = "vss")]
 pub(crate) const RGB_SENDER_FUNDING_NAMESPACE: &str = "rgb_sender_funding";
+pub(crate) const PSBT_NAMESPACE: &str = "psbt";
+pub(crate) const PENDING_FUNDING_NAMESPACE: &str = "pending_funding";
 #[cfg(feature = "vss")]
 pub(crate) const RGB_PRIMARY_NAMESPACE: &str = "rgb";
 #[cfg(feature = "vss")]
 pub(crate) const RGB_FUNDING_ACCEPTANCE_NAMESPACE: &str = "funding_acceptance";
+#[cfg(feature = "vss")]
+const RGB_CHANNEL_INFO_NAMESPACE: &str = "channel_info";
+#[cfg(feature = "vss")]
+const RGB_CHANNEL_INFO_PENDING_NAMESPACE: &str = "channel_info_pending";
+
+#[cfg(feature = "vss")]
+const CRITICAL_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+#[cfg(feature = "vss")]
+const CRITICAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+
+#[cfg(feature = "vss")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteDurability {
+    BestEffort,
+    FailClosed,
+    WaitForAcknowledgement,
+}
 
 /// Local-only namespace persisting the pending queue across restarts. Target mutations and rows in
 /// this namespace are committed in one SQLite transaction.
@@ -244,7 +265,13 @@ impl SyncedKvStore {
             .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(test)]
         self.run_before_stop_gate_hook();
-        drop(self.drain_gate.lock().unwrap());
+        // A write path can panic (e.g. a broken VSS fence) while holding the gate; teardown must
+        // still reach the fence release instead of panicking on the poison.
+        drop(
+            self.drain_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
     }
 
     #[cfg(feature = "vss")]
@@ -305,18 +332,84 @@ impl SyncedKvStore {
         Ok(())
     }
 
-    /// These records define channel-funding recovery boundaries. With VSS configured, callers may
-    /// not advance the protocol after only a local acknowledgement. Other keys remain locally
-    /// authoritative and use the durable retry queue for eventual VSS convergence.
+    /// Returns the remote durability contract for a key.
     ///
-    /// `psbt` and `pending_funding` stay best-effort for now: their current writers unwrap the
-    /// result, so failing closed would panic the event handler during a VSS outage. They join
-    /// this set together with the funding state machine that handles the errors.
+    /// Funding records fail immediately when VSS does not acknowledge them because their callers
+    /// can retain the current recovery stage and return a typed error. RGB channel metadata is
+    /// written from LDK paths whose legacy storage API is infallible, so a transient outage must
+    /// pause that transition until VSS recovers. Returning success with only a local copy would let
+    /// a device-loss restore combine durable LDK state with a stale RGB balance split.
     #[cfg(feature = "vss")]
-    fn requires_remote_durability(primary_namespace: &str, secondary_namespace: &str) -> bool {
-        (primary_namespace == RGB_SENDER_FUNDING_NAMESPACE && secondary_namespace.is_empty())
+    fn remote_durability(
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        explicitly_required: bool,
+    ) -> RemoteDurability {
+        if primary_namespace == RGB_PRIMARY_NAMESPACE
+            && matches!(
+                secondary_namespace,
+                RGB_CHANNEL_INFO_NAMESPACE | RGB_CHANNEL_INFO_PENDING_NAMESPACE
+            )
+        {
+            return RemoteDurability::WaitForAcknowledgement;
+        }
+        if explicitly_required
+            || (primary_namespace == RGB_SENDER_FUNDING_NAMESPACE && secondary_namespace.is_empty())
+            || (primary_namespace == PSBT_NAMESPACE && secondary_namespace.is_empty())
+            || (primary_namespace == PENDING_FUNDING_NAMESPACE && secondary_namespace.is_empty())
             || (primary_namespace == RGB_PRIMARY_NAMESPACE
                 && secondary_namespace == RGB_FUNDING_ACCEPTANCE_NAMESPACE)
+        {
+            RemoteDurability::FailClosed
+        } else {
+            RemoteDurability::BestEffort
+        }
+    }
+
+    #[cfg(feature = "vss")]
+    fn retry_critical_remote_mutation<F>(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+        mut operation: F,
+    ) -> Result<(), io::Error>
+    where
+        F: FnMut() -> Result<(), io::Error>,
+    {
+        let mut delay = CRITICAL_RETRY_INITIAL_DELAY;
+        let mut attempts = 0_u64;
+        loop {
+            match operation() {
+                Ok(()) => {
+                    if attempts > 0 {
+                        tracing::info!(
+                            primary_namespace,
+                            secondary_namespace,
+                            key,
+                            attempts,
+                            "VSS acknowledgement recovered for critical RGB metadata"
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(error) if crate::vss_kv_store::is_transient_io_error(&error) => {
+                    attempts += 1;
+                    tracing::warn!(
+                        primary_namespace,
+                        secondary_namespace,
+                        key,
+                        attempts,
+                        retry_in = ?delay,
+                        error = %error,
+                        "VSS unavailable; pausing critical RGB metadata transition"
+                    );
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(CRITICAL_RETRY_MAX_DELAY);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Releases the VSS single-writer fence if this instance owns it. No-op
@@ -532,12 +625,26 @@ impl SyncedKvStore {
         }
     }
 
+    /// Persists protocol state locally and requires a VSS acknowledgement when remote backup is
+    /// configured. The atomic local mutation and retry intent remain durable if VSS is unavailable,
+    /// but the error is returned so the caller cannot advance its state machine prematurely.
+    pub(crate) fn write_remote_required(
+        &self,
+        primary_namespace: &str,
+        secondary_namespace: &str,
+        key: &str,
+        buf: Vec<u8>,
+    ) -> Result<(), io::Error> {
+        self.write_with_durability(primary_namespace, secondary_namespace, key, buf, true)
+    }
+
     fn write_with_durability(
         &self,
         primary_namespace: &str,
         secondary_namespace: &str,
         key: &str,
         buf: Vec<u8>,
+        require_remote: bool,
     ) -> Result<(), io::Error> {
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
@@ -549,8 +656,8 @@ impl SyncedKvStore {
                 ));
             }
             let vss_key = crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
-            let remote_required =
-                Self::requires_remote_durability(primary_namespace, secondary_namespace);
+            let durability =
+                Self::remote_durability(primary_namespace, secondary_namespace, require_remote);
             let (replicated, remote_error) = {
                 let lock = self.key_lock(&vss_key);
                 let _guard = lock.lock().unwrap();
@@ -568,7 +675,17 @@ impl SyncedKvStore {
                 synced_persistence_checkpoint("synced-write-after-local-commit");
 
                 synced_persistence_checkpoint("synced-write-before-remote");
-                match remote.write(primary_namespace, secondary_namespace, key, buf.clone()) {
+                let remote_result = if durability == RemoteDurability::WaitForAcknowledgement {
+                    self.retry_critical_remote_mutation(
+                        primary_namespace,
+                        secondary_namespace,
+                        key,
+                        || remote.write(primary_namespace, secondary_namespace, key, buf.clone()),
+                    )
+                } else {
+                    remote.write(primary_namespace, secondary_namespace, key, buf.clone())
+                };
+                match remote_result {
                     Ok(()) => {
                         synced_persistence_checkpoint("synced-write-after-remote");
                         synced_persistence_checkpoint("synced-write-before-pending-clear");
@@ -592,7 +709,7 @@ impl SyncedKvStore {
                             secondary_namespace,
                             key,
                             error = %error,
-                            remote_required,
+                            ?durability,
                             "VSS replication write failed; durable retry intent retained"
                         );
                         (false, Some(error))
@@ -603,7 +720,7 @@ impl SyncedKvStore {
             if replicated {
                 self.drain_pending();
             }
-            if remote_required {
+            if durability != RemoteDurability::BestEffort {
                 if let Some(error) = remote_error {
                     return Err(error);
                 }
@@ -611,6 +728,7 @@ impl SyncedKvStore {
             return Ok(());
         }
 
+        let _ = require_remote;
         self.local
             .write(primary_namespace, secondary_namespace, key, buf)
     }
@@ -634,7 +752,7 @@ impl KVStoreSync for SyncedKvStore {
         key: &str,
         buf: Vec<u8>,
     ) -> Result<(), io::Error> {
-        self.write_with_durability(primary_namespace, secondary_namespace, key, buf)
+        self.write_with_durability(primary_namespace, secondary_namespace, key, buf, false)
     }
 
     fn remove(
@@ -654,8 +772,7 @@ impl KVStoreSync for SyncedKvStore {
                 ));
             }
             let vss_key = crate::vss_kv_store::vss_key(primary_namespace, secondary_namespace, key);
-            let remote_required =
-                Self::requires_remote_durability(primary_namespace, secondary_namespace);
+            let durability = Self::remote_durability(primary_namespace, secondary_namespace, false);
             let (replicated, remote_error) = {
                 let lock = self.key_lock(&vss_key);
                 let _guard = lock.lock().unwrap();
@@ -673,7 +790,17 @@ impl KVStoreSync for SyncedKvStore {
                 synced_persistence_checkpoint("synced-remove-after-local-commit");
 
                 synced_persistence_checkpoint("synced-remove-before-remote");
-                match remote.remove(primary_namespace, secondary_namespace, key, lazy) {
+                let remote_result = if durability == RemoteDurability::WaitForAcknowledgement {
+                    self.retry_critical_remote_mutation(
+                        primary_namespace,
+                        secondary_namespace,
+                        key,
+                        || remote.remove(primary_namespace, secondary_namespace, key, lazy),
+                    )
+                } else {
+                    remote.remove(primary_namespace, secondary_namespace, key, lazy)
+                };
+                match remote_result {
                     Ok(()) => {
                         synced_persistence_checkpoint("synced-remove-after-remote");
                         synced_persistence_checkpoint("synced-remove-before-pending-clear");
@@ -697,7 +824,7 @@ impl KVStoreSync for SyncedKvStore {
                             secondary_namespace,
                             key,
                             error = %e,
-                            remote_required,
+                            ?durability,
                             "VSS replication remove failed; durable retry intent retained"
                         );
                         (false, Some(e))
@@ -708,7 +835,7 @@ impl KVStoreSync for SyncedKvStore {
             if replicated {
                 self.drain_pending();
             }
-            if remote_required {
+            if durability != RemoteDurability::BestEffort {
                 if let Some(error) = remote_error {
                     return Err(error);
                 }
@@ -727,5 +854,34 @@ impl KVStoreSync for SyncedKvStore {
     ) -> Result<Vec<String>, io::Error> {
         // Always list from local store
         self.local.list(primary_namespace, secondary_namespace)
+    }
+}
+
+#[cfg(all(test, feature = "vss"))]
+mod stop_tests {
+    use super::*;
+
+    // A write path can panic (broken VSS fence) while holding the drain gate; `stop()` must still
+    // return so teardown reaches the fence release instead of dying on the poison.
+    #[test]
+    fn stop_tolerates_a_poisoned_drain_gate() {
+        let connection = crate::runtime::block_on(sea_orm::Database::connect("sqlite::memory:"))
+            .expect("in-memory database");
+        let store = Arc::new(SyncedKvStore::local_only(Arc::new(
+            SeaOrmKvStore::from_connection(Arc::new(connection)),
+        )));
+
+        let poisoner = Arc::clone(&store);
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _gate = poisoner.drain_gate.lock().unwrap();
+            panic!("poison the gate");
+        })
+        .join();
+        std::panic::set_hook(previous_hook);
+        assert!(store.drain_gate.is_poisoned());
+
+        store.stop();
     }
 }

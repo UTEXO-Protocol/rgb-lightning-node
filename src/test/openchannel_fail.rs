@@ -74,7 +74,7 @@ async fn openchannel_fail() {
     )
     .await;
     check_response_is_nok(
-        res.unwrap_err(),
+        *res.unwrap_err(),
         reqwest::StatusCode::FORBIDDEN,
         "Not enough funds",
         "InsufficientFunds",
@@ -105,7 +105,7 @@ async fn openchannel_fail() {
     )
     .await;
     check_response_is_nok(
-        res.unwrap_err(),
+        *res.unwrap_err(),
         reqwest::StatusCode::FORBIDDEN,
         "Not enough assets",
         "InsufficientAssets",
@@ -480,7 +480,7 @@ async fn openchannel_fail() {
     check_response_is_nok(
         res,
         reqwest::StatusCode::FORBIDDEN,
-        "Insufficient capacity to cover the commitment transaction fees (9920 sat)",
+        "Insufficient capacity to cover the commitment transaction fees",
         "InsufficientCapacity",
     )
     .await;

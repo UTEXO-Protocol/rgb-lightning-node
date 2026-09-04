@@ -26,15 +26,15 @@ use rgb_lightning_node::{
     SdkCreateUtxosRequest, SdkDisconnectPeerRequest, SdkExternalSignerBootstrap,
     SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest, SdkIssueAssetCfaRequest,
     SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest, SdkIssueAssetUdaRequest, SdkKeysendRequest,
-    SdkKeysendResponse, SdkMakerExecuteRequest, SdkMakerInitRequest, SdkMakerInitResponse,
-    SdkOpenChannelRequest, SdkOpenChannelResponse, SdkPostAssetMediaRequest,
-    SdkPostAssetMediaResponse, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest,
-    SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse, SdkSendOnionMessageRequest,
-    SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest, SdkUnlockRequest,
-    SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse, SignMessageResponse, Swap, SwapList,
-    SwapStatus, Token, TokenLight, Transaction, TransactionType, Transfer,
-    TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo, VerifyMessageResponse,
-    WitnessData,
+    SdkKeysendResponse, SdkLdkChainSync, SdkMakerExecuteRequest, SdkMakerInitRequest,
+    SdkMakerInitResponse, SdkOpenChannelRequest, SdkOpenChannelResponse, SdkPostAssetMediaRequest,
+    SdkPostAssetMediaResponse, SdkRefreshTransfersRequest, SdkRefreshTransfersResponse,
+    SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
+    SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
+    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
+    SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
+    TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
+    VerifyMessageResponse, WitnessData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -167,17 +167,47 @@ impl TryFrom<JsonSdkInitRequest> for SdkInitRequest {
     }
 }
 
+// How LDK follows the chain. Mirrors `SdkLdkChainSync`, tagged the same way as the daemon's
+// `/unlock` payload.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "mode", content = "config")]
+pub(crate) enum JsonSdkLdkChainSync {
+    BlockSync {
+        bitcoind_rpc_username: String,
+        bitcoind_rpc_password: String,
+        bitcoind_rpc_host: String,
+        bitcoind_rpc_port: u16,
+    },
+    TransactionSync {
+        indexer_url: String,
+    },
+}
+
+impl From<JsonSdkLdkChainSync> for SdkLdkChainSync {
+    fn from(j: JsonSdkLdkChainSync) -> Self {
+        match j {
+            JsonSdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            } => SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            },
+            JsonSdkLdkChainSync::TransactionSync { indexer_url } => {
+                SdkLdkChainSync::TransactionSync { indexer_url }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonSdkUnlockRequest {
     pub password: String,
-    #[serde(default)]
-    pub bitcoind_rpc_username: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_password: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_host: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_port: Option<u16>,
+    pub ldk_chain_sync: JsonSdkLdkChainSync,
     #[serde(default)]
     pub indexer_url: Option<String>,
     #[serde(default)]
@@ -197,10 +227,7 @@ impl From<JsonSdkUnlockRequest> for SdkUnlockRequest {
     fn from(j: JsonSdkUnlockRequest) -> Self {
         SdkUnlockRequest {
             password: j.password,
-            bitcoind_rpc_username: j.bitcoind_rpc_username,
-            bitcoind_rpc_password: j.bitcoind_rpc_password,
-            bitcoind_rpc_host: j.bitcoind_rpc_host,
-            bitcoind_rpc_port: j.bitcoind_rpc_port,
+            ldk_chain_sync: j.ldk_chain_sync.into(),
             indexer_url: j.indexer_url,
             proxy_endpoint: j.proxy_endpoint,
             announce_addresses: j.announce_addresses,
@@ -231,14 +258,7 @@ impl From<JsonVssClearFenceRequest> for SdkVssClearFenceRequest {
 // External-signer mode has no password: the seed never reaches RLN.
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonSdkExternalUnlockRequest {
-    #[serde(default)]
-    pub bitcoind_rpc_username: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_password: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_host: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_port: Option<u16>,
+    pub ldk_chain_sync: JsonSdkLdkChainSync,
     #[serde(default)]
     pub indexer_url: Option<String>,
     #[serde(default)]
@@ -769,6 +789,8 @@ pub(crate) struct JsonDecodeLnInvoiceResponse {
     pub timestamp: u64,
     pub asset_id: Option<String>,
     pub asset_amount: Option<u64>,
+    pub description: Option<String>,
+    pub description_hash: Option<String>,
     pub payment_hash: String,
     pub payment_secret: String,
     pub payee_pubkey: Option<String>,
@@ -783,6 +805,8 @@ impl From<DecodeLnInvoiceResponse> for JsonDecodeLnInvoiceResponse {
             timestamp: r.timestamp,
             asset_id: r.asset_id.as_ref().map(fmt_contract_id),
             asset_amount: r.asset_amount,
+            description: r.description,
+            description_hash: r.description_hash,
             payment_hash: fmt_payment_hash(&r.payment_hash),
             payment_secret: r.payment_secret,
             payee_pubkey: r.payee_pubkey.as_ref().map(fmt_pubkey),
@@ -994,6 +1018,46 @@ impl From<JsonRefreshTransfersRequest> for SdkRefreshTransfersRequest {
     fn from(j: JsonRefreshTransfersRequest) -> Self {
         SdkRefreshTransfersRequest {
             skip_sync: j.skip_sync,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshFailure {
+    pub name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshedTransfer {
+    pub updated_status: Option<String>,
+    pub failure: Option<JsonRefreshFailure>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshTransfersResponse {
+    pub transfers: std::collections::HashMap<i32, JsonRefreshedTransfer>,
+}
+
+impl From<SdkRefreshTransfersResponse> for JsonRefreshTransfersResponse {
+    fn from(r: SdkRefreshTransfersResponse) -> Self {
+        JsonRefreshTransfersResponse {
+            transfers: r
+                .transfers
+                .into_iter()
+                .map(|(idx, t)| {
+                    (
+                        idx,
+                        JsonRefreshedTransfer {
+                            updated_status: t.updated_status,
+                            failure: t.failure.map(|f| JsonRefreshFailure {
+                                name: f.name,
+                                message: f.message,
+                            }),
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -1942,6 +2006,7 @@ pub(crate) struct JsonUtxo {
     pub outpoint: String,
     pub btc_amount: u64,
     pub colorable: bool,
+    pub exists: bool,
 }
 
 impl From<Utxo> for JsonUtxo {
@@ -1950,6 +2015,7 @@ impl From<Utxo> for JsonUtxo {
             outpoint: u.outpoint,
             btc_amount: u.btc_amount,
             colorable: u.colorable,
+            exists: u.exists,
         }
     }
 }

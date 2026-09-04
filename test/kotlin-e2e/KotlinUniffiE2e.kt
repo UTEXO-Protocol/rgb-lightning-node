@@ -14,6 +14,7 @@ import org.utexo.rgblightningnode.SdkCreateUtxosRequest
 import org.utexo.rgblightningnode.SdkInitRequest
 import org.utexo.rgblightningnode.SdkIssueAssetNiaRequest
 import org.utexo.rgblightningnode.SdkKeysendRequest
+import org.utexo.rgblightningnode.SdkLdkChainSync
 import org.utexo.rgblightningnode.SdkNode
 import org.utexo.rgblightningnode.SdkOpenChannelRequest
 import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
@@ -114,10 +115,12 @@ private fun makeNode(storageDir: Path, daemonPort: UShort, peerPort: UShort): Sd
 private fun unlockRequest(password: String): SdkUnlockRequest {
     return SdkUnlockRequest(
         password = password,
-        bitcoindRpcUsername = "user",
-        bitcoindRpcPassword = "password",
-        bitcoindRpcHost = "localhost",
-        bitcoindRpcPort = 18443u,
+        ldkChainSync = SdkLdkChainSync.BlockSync(
+            bitcoindRpcUsername = "user",
+            bitcoindRpcPassword = "password",
+            bitcoindRpcHost = "localhost",
+            bitcoindRpcPort = 18443u,
+        ),
         indexerUrl = "127.0.0.1:50001",
         proxyEndpoint = PROXY_ENDPOINT_LOCAL,
         announceAddresses = emptyList(),
@@ -224,6 +227,18 @@ private fun assetBalanceSpendable(node: SdkNode, assetId: ContractId): ULong =
 
 private fun assetBalanceOffchainOutbound(node: SdkNode, assetId: ContractId): ULong =
     node.assetBalance(assetId).offchainOutbound
+
+private const val CHANGING_STATE_MESSAGE = "Cannot call other APIs while node is changing state"
+
+private inline fun <T> pollWhileNodeStable(label: String, operation: () -> T): Result<T> {
+    return try {
+        Result.success(operation())
+    } catch (error: RlnException.Conflict) {
+        if (error.message != CHANGING_STATE_MESSAGE) throw error
+        println("$label deferred while node is changing state")
+        Result.failure(error)
+    }
+}
 
 private fun channelMatchesAsset(channelAssetId: ContractId?, expectedAssetId: ContractId?): Boolean {
     return if (expectedAssetId != null) {
@@ -356,12 +371,22 @@ private fun waitForBalance(node: SdkNode, assetId: ContractId, expected: ULong, 
     val deadline = System.currentTimeMillis() + timeoutSec * 1000L
     var lastBalance = 0uL
     while (System.currentTimeMillis() < deadline) {
-        val balance = assetBalanceSpendable(node, assetId)
+        val attempt = pollWhileNodeStable("on-chain balance poll") {
+            val balance = assetBalanceSpendable(node, assetId)
+            if (balance != expected) {
+                node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
+            }
+            balance
+        }
+        if (attempt.isFailure) {
+            Thread.sleep(250L)
+            continue
+        }
+        val balance = attempt.getOrThrow()
         lastBalance = balance
         if (balance == expected) {
             return
         }
-        node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
         Thread.sleep(1000L)
     }
     error("spendable balance did not become expected=$expected actual=$lastBalance assetId=$assetId after ${timeoutSec}s")

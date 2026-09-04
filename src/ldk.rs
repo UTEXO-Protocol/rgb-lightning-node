@@ -16,12 +16,14 @@ use bitcoin::hashes::{sha256, Hash as BitcoinHash};
 use bitcoin::psbt::{ExtractTxError, Psbt};
 use bitcoin::secp256k1::{All, PublicKey, Secp256k1};
 use bitcoin::Sequence;
-use bitcoin::{io, Amount, Network};
+use bitcoin::{io, Amount, Network, Txid};
 use bitcoin::{BlockHash, TxOut};
 use bitcoin_bech32::WitnessProgram;
 use hex::DisplayHex;
+#[cfg(feature = "transaction-sync")]
+use lightning::chain::Confirm;
 use lightning::chain::{chainmonitor, transaction::OutPoint, ChannelMonitorUpdateStatus};
-use lightning::chain::{BestBlock, Confirm, Filter};
+use lightning::chain::{BestBlock, Filter};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose, ReplayEvent};
 use lightning::ln::channel_state::ChannelDetails;
@@ -38,17 +40,23 @@ use lightning::onion_message::messenger::{
     DefaultMessageRouter, OnionMessenger as LdkOnionMessenger,
 };
 use lightning::rgb_utils::{
-    deserialize_fascia, get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount,
-    RgbKvStoreExt, RGB_COMMITMENT_FASCIA_NS, RGB_PAYMENT_INFO_INBOUND_NS,
+    deserialize_fascia, get_rgb_channel_info_pending, is_channel_rgb,
+    read_pending_funding_acceptance, remove_pending_funding_acceptance, update_rgb_channel_amount,
+    write_pending_funding_acceptance, FundingAcceptanceStage, PendingFundingAcceptance,
+    RgbKvStoreExt, RGB_CHANNEL_INFO_NS, RGB_CHANNEL_INFO_PENDING_NS, RGB_COMMITMENT_FASCIA_NS,
+    RGB_CONSIGNMENT_NS, RGB_FUNDING_ACCEPTANCE_NS, RGB_PAYMENT_INFO_INBOUND_NS,
     RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
-use lightning::rgb_utils::{RgbPaymentInfo, STATIC_BLINDING};
+use lightning::rgb_utils::{RgbInfo, RgbPaymentInfo, TransferInfo, STATIC_BLINDING};
 use lightning::routing::gossip;
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
+use lightning::routing::utxo::UtxoLookup;
 use lightning::sign::{KeysManager, OutputSpender, SpendableOutputDescriptor};
 // Used by the non-VSS ChainMonitor encryptor closure and the signer unit tests.
+#[cfg(feature = "block-sync")]
+use lightning::chain;
 #[cfg(feature = "vss")]
 use lightning::chain::chainmonitor::AsyncPersister;
 #[cfg(any(not(feature = "vss"), test))]
@@ -74,17 +82,13 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning::util::sweep as ldk_sweep;
-use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
+use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, NO_LIQUIDITY_MANAGER};
-use lightning_block_sync::gossip::TokioSpawner;
-use lightning_block_sync::init;
-use lightning_block_sync::poll;
-use lightning_block_sync::SpvClient;
-use lightning_block_sync::UnboundedCache;
+#[cfg(feature = "block-sync")]
+use lightning_block_sync::{init, poll, SpvClient, UnboundedCache};
 use lightning_dns_resolver::OMDomainResolver;
 use lightning_invoice::{Bolt11InvoiceDescription, PaymentSecret};
 use lightning_net_tokio::SocketDescriptor;
-use lightning_transaction_sync::{ElectrumSyncClient, EsploraSyncClient};
 use rand::RngCore;
 use rgb_lib::{
     bdk_wallet::keys::{DerivableKey, ExtendedKey},
@@ -98,14 +102,14 @@ use rgb_lib::{
     utils::{get_account_data, recipient_id_from_script_buf, script_buf_from_recipient_id},
     wallet::{
         rust_only::{check_indexer_url, AssetColoringInfo, ColoringInfo},
-        DatabaseType, OnlineOptions, Recipient, SinglesigKeys, TransportEndpoint,
-        Wallet as RgbLibWallet, WalletData, WitnessData,
+        DatabaseType, OnlineOptions, Recipient, SinglesigKeys, Wallet as RgbLibWallet, WalletData,
+        WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
     Fascia, FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,
 };
-use std::collections::HashMap;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -113,25 +117,29 @@ use std::net::ToSocketAddrs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "test-utils")]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+#[cfg(any(test, feature = "vss"))]
+use std::time::Instant;
 use std::time::{Duration, SystemTime};
 use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::watch::Sender;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "vss")]
 use crate::async_kv_store::RemoteFirstKvStore;
-use crate::bitcoind::BitcoindClient;
-use crate::chain_backend::ChainBackend;
 use crate::core_types::{
-    HTLCStatus, NodeKeySource, SwapStatus, UnlockRequest, PENDING_SWAP_TIMEOUT_SECS,
+    HTLCStatus, LdkChainSync, NodeKeySource, SwapStatus, UnlockRequest, PENDING_SWAP_TIMEOUT_SECS,
 };
 use crate::database::RlnDatabase;
 use crate::disk::{self, FilesystemLogger};
 use crate::gossip::{GossipSource, GossipSourceConfig};
-use crate::indexer::{ElectrumIndexerClient, EsploraIndexerClient};
 
 pub(crate) const INBOUND_PAYMENTS_KEY: &str = "inbound_payments";
 const OUTBOUND_PAYMENTS_KEY: &str = "outbound_payments";
@@ -140,8 +148,10 @@ const MAKER_SWAPS_KEY: &str = "maker_swaps";
 const TAKER_SWAPS_KEY: &str = "taker_swaps";
 const ASSET_LINK_SWAP_AUTHORIZATION_MAX_EXPIRY_SECS: u64 = 24 * 60 * 60;
 const OUTPUT_SPENDER_TXES_KEY: &str = "output_spender_txes";
-const PSBT_NAMESPACE: &str = "psbt";
-const PENDING_FUNDING_NAMESPACE: &str = "pending_funding";
+const OUTPUT_SWEEPER_WALLET_OPERATION_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const PSBT_NAMESPACE: &str = crate::synced_kv_store::PSBT_NAMESPACE;
+pub(crate) const PENDING_FUNDING_NAMESPACE: &str =
+    crate::synced_kv_store::PENDING_FUNDING_NAMESPACE;
 /// Funding consignments keyed by funding txid, kept for wallet re-seeding
 /// after a restore without an RGB backup (issue #111).
 const FUNDING_CONSIGNMENT_NAMESPACE: &str = "funding_consignment";
@@ -149,6 +159,8 @@ const FUNDING_CONSIGNMENT_NAMESPACE: &str = "funding_consignment";
 /// replay reruns until it completes once.
 const REIMPORT_MARKER_NAMESPACE: &str = "reimport_marker";
 const REIMPORT_MARKER_KEY: &str = "fascia_replay";
+pub(crate) const RGB_SENDER_FUNDING_NAMESPACE: &str =
+    crate::synced_kv_store::RGB_SENDER_FUNDING_NAMESPACE;
 const CONFIG_INDEXER_URL: &str = "indexer_url";
 const CONFIG_BITCOIN_NETWORK: &str = "bitcoin_network";
 const CONFIG_WALLET_FINGERPRINT: &str = "wallet_fingerprint";
@@ -157,10 +169,531 @@ const CONFIG_WALLET_ACCOUNT_XPUB_COLORED: &str = "wallet_account_xpub_colored";
 const CONFIG_WALLET_MASTER_FINGERPRINT: &str = "wallet_master_fingerprint";
 const VIRTUAL_CHANNEL_DRAFTS_KEY: &str = "virtual_channel_drafts";
 const VIRTUAL_CHANNEL_SESSIONS_KEY: &str = "virtual_channel_sessions";
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RgbSenderFundingStage {
+    Preparing,
+    StockPromoted,
+    HandoffReady,
+    HandedToLdk,
+    BroadcastSafeObserved,
+    Broadcasting,
+    BroadcastCommitted,
+    Finalized,
+    DurablyCompleted,
+    RollingBack,
+    RetryRequired,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RgbSenderConsignmentDelivery {
+    #[default]
+    Proxy,
+    P2p,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct RgbSenderFundingRecord {
+    version: u8,
+    #[serde(default)]
+    manual_broadcast: bool,
+    temporary_channel_id: String,
+    final_channel_id: Option<String>,
+    funding_txid: String,
+    batch_transfer_idx: i32,
+    #[serde(default)]
+    rgb_info: Option<RgbInfo>,
+    #[serde(default)]
+    consignment_delivery: RgbSenderConsignmentDelivery,
+    stage: RgbSenderFundingStage,
+}
+
+impl RgbSenderFundingRecord {
+    const LEGACY_VERSION: u8 = 1;
+    const MANUAL_BROADCAST_VERSION: u8 = 2;
+    const RGB_INFO_VERSION: u8 = 3;
+    const VERSION: u8 = 4;
+
+    fn validate(&self) -> Result<(), RgbLibError> {
+        let is_fixed_hex = |value: &str, byte_len: usize| {
+            value.len() == byte_len * 2
+                && value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
+        };
+        if !matches!(
+            self.version,
+            Self::LEGACY_VERSION
+                | Self::MANUAL_BROADCAST_VERSION
+                | Self::RGB_INFO_VERSION
+                | Self::VERSION
+        ) || (self.version == Self::LEGACY_VERSION && self.manual_broadcast)
+            || (self.version != Self::LEGACY_VERSION && !self.manual_broadcast)
+            || !is_fixed_hex(&self.temporary_channel_id, 32)
+            || !is_fixed_hex(&self.funding_txid, 32)
+            || self
+                .final_channel_id
+                .as_ref()
+                .is_some_and(|channel_id| !is_fixed_hex(channel_id, 32))
+            || self.batch_transfer_idx < 0
+            || (self.version >= Self::RGB_INFO_VERSION && self.rgb_info.is_none())
+            || (self.version < Self::VERSION
+                && self.consignment_delivery != RgbSenderConsignmentDelivery::Proxy)
+            || (self.version == Self::VERSION
+                && self.consignment_delivery != RgbSenderConsignmentDelivery::P2p)
+        {
+            return Err(RgbLibError::Internal {
+                details: "invalid RGB sender funding journal".to_owned(),
+            });
+        }
+        if matches!(
+            self.stage,
+            RgbSenderFundingStage::HandoffReady
+                | RgbSenderFundingStage::HandedToLdk
+                | RgbSenderFundingStage::BroadcastSafeObserved
+                | RgbSenderFundingStage::Broadcasting
+                | RgbSenderFundingStage::BroadcastCommitted
+                | RgbSenderFundingStage::Finalized
+                | RgbSenderFundingStage::DurablyCompleted
+        ) && self.final_channel_id.is_none()
+        {
+            return Err(RgbLibError::Internal {
+                details: "RGB sender funding journal stage requires a final channel ID".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RgbSenderRecoveryAction {
+    Finalize,
+    ResumeBroadcast,
+    Rollback,
+    FailClosed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RgbFundingRecoveryState {
+    pub(crate) funding_txid: String,
+    pub(crate) temporary_channel_id: String,
+    pub(crate) final_channel_id: Option<String>,
+    pub(crate) stage: RgbFundingRecoveryStage,
+    pub(crate) channel_is_durable: bool,
+    pub(crate) transaction_is_known: Option<bool>,
+    pub(crate) error: Option<String>,
+    pub(crate) action: RgbFundingRecoveryAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RgbFundingRecoveryStage {
+    Sender(RgbSenderFundingStage),
+    Receiver(FundingAcceptanceStage),
+}
+
+impl RgbFundingRecoveryStage {
+    const fn sort_key(self) -> (u8, u8) {
+        match self {
+            Self::Sender(stage) => (
+                0,
+                match stage {
+                    RgbSenderFundingStage::Preparing => 0,
+                    RgbSenderFundingStage::StockPromoted => 1,
+                    RgbSenderFundingStage::HandoffReady => 2,
+                    RgbSenderFundingStage::HandedToLdk => 3,
+                    RgbSenderFundingStage::BroadcastSafeObserved => 4,
+                    RgbSenderFundingStage::Broadcasting => 5,
+                    RgbSenderFundingStage::BroadcastCommitted => 6,
+                    RgbSenderFundingStage::Finalized => 7,
+                    RgbSenderFundingStage::DurablyCompleted => 8,
+                    RgbSenderFundingStage::RollingBack => 9,
+                    RgbSenderFundingStage::RetryRequired => 10,
+                },
+            ),
+            Self::Receiver(stage) => (
+                1,
+                match stage {
+                    FundingAcceptanceStage::Validating => 0,
+                    FundingAcceptanceStage::Prepared => 1,
+                    FundingAcceptanceStage::Promoted => 2,
+                    FundingAcceptanceStage::Finalizing => 3,
+                    FundingAcceptanceStage::Finalized => 4,
+                    FundingAcceptanceStage::RollingBack => 5,
+                    FundingAcceptanceStage::RetryRequired => 6,
+                },
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RgbFundingRecoveryAction {
+    RetryReconciliation,
+    ResumeBroadcast,
+    RetryChainObservation,
+    ManualChannelStateRecovery,
+}
+
+impl RgbFundingRecoveryAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::RetryReconciliation => "retry_reconciliation",
+            Self::ResumeBroadcast => "resume_broadcast",
+            Self::RetryChainObservation => "retry_chain_observation",
+            Self::ManualChannelStateRecovery => "manual_channel_state_recovery",
+        }
+    }
+}
+
+/// Fail-closed admission state for interrupted RGB channel funding.
+///
+/// An unresolved sender or receiver journal can represent a transaction whose broadcast outcome
+/// or matching LDK channel state is not yet known. Read-only inspection and recovery remain
+/// available, but new RGB-wallet mutations must not be admitted until every record is reconciled.
+///
+/// The operation lease is intentionally wallet-wide. rgb-lib currently persists one pending RGB
+/// acceptance and one rollback snapshot for the wallet, not one per funding allocation. Allowing
+/// another stock mutation under a per-txid lock could overwrite the only rollback owner. This can
+/// be narrowed only after the underlying stock journal identifies and isolates every allocation
+/// touched by each concurrent operation.
+#[derive(Debug, Default)]
+pub(crate) struct RgbFundingRecoveryGuard {
+    funding_txids: RwLock<BTreeSet<String>>,
+    operation_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+pub(crate) struct RgbFundingOperationLease {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    acquired_at: std::time::Instant,
+    owner: &'static str,
+}
+
+impl RgbFundingOperationLease {
+    fn new(guard: tokio::sync::OwnedMutexGuard<()>, owner: &'static str) -> Self {
+        Self {
+            _guard: guard,
+            acquired_at: std::time::Instant::now(),
+            owner,
+        }
+    }
+}
+
+impl Drop for RgbFundingOperationLease {
+    fn drop(&mut self) {
+        let held_for = self.acquired_at.elapsed();
+        if held_for >= Duration::from_millis(250) {
+            tracing::warn!(
+                owner = self.owner,
+                held_ms = held_for.as_millis(),
+                "RGB wallet operation lease exceeded the latency budget"
+            );
+        }
+    }
+}
+
+impl RgbFundingRecoveryGuard {
+    pub(crate) async fn lock_operation(&self) -> RgbFundingOperationLease {
+        RgbFundingOperationLease::new(
+            Arc::clone(&self.operation_lock).lock_owned().await,
+            "funding-event",
+        )
+    }
+
+    pub(crate) fn blocking_lock_operation(&self) -> RgbFundingOperationLease {
+        RgbFundingOperationLease::new(
+            Arc::clone(&self.operation_lock).blocking_lock_owned(),
+            "startup-reconciliation",
+        )
+    }
+
+    pub(crate) fn replace(&self, recoveries: &[RgbFundingRecoveryState]) {
+        let mut funding_txids = self.funding_txids.write().unwrap_or_else(|poisoned| {
+            tracing::error!("RGB funding recovery guard was poisoned; preserving quarantine");
+            poisoned.into_inner()
+        });
+        *funding_txids = recoveries
+            .iter()
+            .map(|recovery| recovery.funding_txid.clone())
+            .collect();
+    }
+
+    fn clear(&self, funding_txid: &str) {
+        self.funding_txids
+            .write()
+            .unwrap_or_else(|poisoned| {
+                tracing::error!("RGB funding recovery guard was poisoned; preserving quarantine");
+                poisoned.into_inner()
+            })
+            .remove(funding_txid);
+    }
+
+    fn quarantine(&self, funding_txid: &str) {
+        self.funding_txids
+            .write()
+            .unwrap_or_else(|poisoned| {
+                tracing::error!("RGB funding recovery guard was poisoned; preserving quarantine");
+                poisoned.into_inner()
+            })
+            .insert(funding_txid.to_owned());
+    }
+
+    pub(crate) fn lock_rgb_wallet_mutation(&self) -> Result<RgbFundingOperationLease, APIError> {
+        // Admission and execution must be one atomic lease. A check-only gate permits a funding
+        // transition to start immediately after the check, allowing its rollback snapshot to
+        // overwrite a concurrent wallet mutation.
+        let operation = Arc::clone(&self.operation_lock)
+            .try_lock_owned()
+            .map_err(|_| APIError::ChangingState)?;
+        self.ensure_wallet_mutation_is_admitted()?;
+        Ok(RgbFundingOperationLease::new(operation, "rgb-wallet-api"))
+    }
+
+    async fn lock_rgb_wallet_mutation_for(
+        &self,
+        wait: Duration,
+        owner: &'static str,
+    ) -> Result<RgbFundingOperationLease, APIError> {
+        self.ensure_wallet_mutation_is_admitted()?;
+        let operation = tokio::time::timeout(wait, Arc::clone(&self.operation_lock).lock_owned())
+            .await
+            .map_err(|_| APIError::ChangingState)?;
+        self.ensure_wallet_mutation_is_admitted()?;
+        Ok(RgbFundingOperationLease::new(operation, owner))
+    }
+
+    /// Give LDK's infrequent output sweep a bounded, fair chance to follow a short wallet API
+    /// mutation. The bound keeps the background processor responsive during long funding work.
+    pub(crate) async fn lock_output_sweeper_wallet_mutation(
+        &self,
+    ) -> Result<RgbFundingOperationLease, APIError> {
+        self.lock_rgb_wallet_mutation_for(OUTPUT_SWEEPER_WALLET_OPERATION_WAIT, "output-sweeper")
+            .await
+    }
+
+    fn ensure_wallet_mutation_is_admitted(&self) -> Result<(), APIError> {
+        let funding_txids = self.funding_txids.read().unwrap_or_else(|poisoned| {
+            tracing::error!("RGB funding recovery guard was poisoned; preserving quarantine");
+            poisoned.into_inner()
+        });
+        if funding_txids.is_empty() {
+            return Ok(());
+        }
+        Err(APIError::RgbFundingRecoveryRequired(
+            funding_txids.iter().cloned().collect::<Vec<_>>().join(","),
+        ))
+    }
+
+    /// Existing BTC-only Lightning traffic does not touch rgb-lib's stock or rollback snapshot and
+    /// must remain available while an unrelated RGB funding record is quarantined. RGB channel
+    /// payments retain the wallet-wide lease until rgb-lib can isolate concurrent stock journals
+    /// by allocation.
+    pub(crate) fn lock_channel_payment(
+        &self,
+        carries_rgb: bool,
+    ) -> Result<Option<RgbFundingOperationLease>, APIError> {
+        carries_rgb
+            .then(|| self.lock_rgb_wallet_mutation())
+            .transpose()
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> Vec<String> {
+        self.funding_txids
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+fn rgb_funding_recovery_view(
+    record: &RgbSenderFundingRecord,
+    channel_is_durable: bool,
+    transaction_observation: Result<Option<bool>, &RgbLibError>,
+    reconciliation_error: Option<&RgbLibError>,
+) -> RgbFundingRecoveryState {
+    let (transaction_is_known, observation_error, mut action) = match transaction_observation {
+        Err(error) => {
+            let action = if matches!(
+                record.stage,
+                RgbSenderFundingStage::Finalized | RgbSenderFundingStage::DurablyCompleted
+            ) {
+                if channel_is_durable {
+                    RgbFundingRecoveryAction::RetryReconciliation
+                } else {
+                    RgbFundingRecoveryAction::ManualChannelStateRecovery
+                }
+            } else {
+                RgbFundingRecoveryAction::RetryChainObservation
+            };
+            (None, Some(error.to_string()), action)
+        }
+        Ok(transaction_is_known) => {
+            let recovery_action = rgb_sender_recovery_action(
+                record,
+                channel_is_durable,
+                transaction_is_known.unwrap_or(false),
+            );
+            let action = match recovery_action {
+                RgbSenderRecoveryAction::Finalize | RgbSenderRecoveryAction::Rollback => {
+                    RgbFundingRecoveryAction::RetryReconciliation
+                }
+                RgbSenderRecoveryAction::ResumeBroadcast => {
+                    RgbFundingRecoveryAction::ResumeBroadcast
+                }
+                RgbSenderRecoveryAction::FailClosed => {
+                    RgbFundingRecoveryAction::ManualChannelStateRecovery
+                }
+            };
+            (transaction_is_known, None, action)
+        }
+    };
+    if reconciliation_error.is_some()
+        && action != RgbFundingRecoveryAction::ManualChannelStateRecovery
+    {
+        action = RgbFundingRecoveryAction::RetryReconciliation;
+    }
+    RgbFundingRecoveryState {
+        funding_txid: record.funding_txid.clone(),
+        temporary_channel_id: record.temporary_channel_id.clone(),
+        final_channel_id: record.final_channel_id.clone(),
+        stage: RgbFundingRecoveryStage::Sender(record.stage),
+        channel_is_durable,
+        transaction_is_known,
+        error: reconciliation_error
+            .map(ToString::to_string)
+            .or(observation_error),
+        action,
+    }
+}
+
+fn rgb_receiver_funding_recovery_view(
+    record: &PendingFundingAcceptance,
+    channel_is_durable: bool,
+    error: Option<String>,
+) -> Result<RgbFundingRecoveryState, RgbLibError> {
+    let action = match rgb_receiver_recovery_action(record.stage, channel_is_durable) {
+        RgbReceiverRecoveryAction::Quarantine => {
+            RgbFundingRecoveryAction::ManualChannelStateRecovery
+        }
+        RgbReceiverRecoveryAction::Rollback
+        | RgbReceiverRecoveryAction::Finalize
+        | RgbReceiverRecoveryAction::Complete => RgbFundingRecoveryAction::RetryReconciliation,
+    };
+    Ok(RgbFundingRecoveryState {
+        funding_txid: record.funding_txid.clone(),
+        temporary_channel_id: record.temporary_channel_id.clone(),
+        final_channel_id: Some(receiver_final_channel_id(record)?),
+        stage: RgbFundingRecoveryStage::Receiver(record.stage),
+        channel_is_durable,
+        transaction_is_known: None,
+        error,
+        action,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RgbReceiverRecoveryAction {
+    Rollback,
+    Finalize,
+    Complete,
+    Quarantine,
+}
+
+fn rgb_receiver_recovery_action(
+    stage: FundingAcceptanceStage,
+    channel_is_durable: bool,
+) -> RgbReceiverRecoveryAction {
+    match (stage, channel_is_durable) {
+        (
+            FundingAcceptanceStage::Validating
+            | FundingAcceptanceStage::Prepared
+            | FundingAcceptanceStage::RollingBack
+            | FundingAcceptanceStage::RetryRequired,
+            false,
+        ) => RgbReceiverRecoveryAction::Rollback,
+        (FundingAcceptanceStage::Promoted | FundingAcceptanceStage::Finalizing, true) => {
+            RgbReceiverRecoveryAction::Finalize
+        }
+        (FundingAcceptanceStage::Finalized, true) => RgbReceiverRecoveryAction::Complete,
+        _ => RgbReceiverRecoveryAction::Quarantine,
+    }
+}
+
+fn rgb_sender_recovery_action(
+    record: &RgbSenderFundingRecord,
+    channel_is_durable: bool,
+    transaction_is_known: bool,
+) -> RgbSenderRecoveryAction {
+    if matches!(
+        record.stage,
+        RgbSenderFundingStage::Finalized | RgbSenderFundingStage::DurablyCompleted
+    ) {
+        return if channel_is_durable {
+            RgbSenderRecoveryAction::Finalize
+        } else {
+            RgbSenderRecoveryAction::FailClosed
+        };
+    }
+    if transaction_is_known {
+        return if channel_is_durable {
+            RgbSenderRecoveryAction::Finalize
+        } else {
+            RgbSenderRecoveryAction::FailClosed
+        };
+    }
+    if channel_is_durable {
+        return if matches!(
+            record.stage,
+            RgbSenderFundingStage::Broadcasting | RgbSenderFundingStage::BroadcastCommitted
+        ) {
+            RgbSenderRecoveryAction::Finalize
+        } else {
+            RgbSenderRecoveryAction::ResumeBroadcast
+        };
+    }
+    match record.stage {
+        RgbSenderFundingStage::Preparing | RgbSenderFundingStage::StockPromoted => {
+            RgbSenderRecoveryAction::Rollback
+        }
+        RgbSenderFundingStage::HandoffReady
+        | RgbSenderFundingStage::HandedToLdk
+        | RgbSenderFundingStage::BroadcastSafeObserved
+            if record.manual_broadcast =>
+        {
+            RgbSenderRecoveryAction::Rollback
+        }
+        RgbSenderFundingStage::RollingBack | RgbSenderFundingStage::RetryRequired => {
+            RgbSenderRecoveryAction::Rollback
+        }
+        // Version-one journals used LDK's automatic broadcast path. Once handoff may have begun,
+        // absence from one indexer is not proof that the transaction was never broadcast.
+        RgbSenderFundingStage::HandoffReady
+        | RgbSenderFundingStage::HandedToLdk
+        | RgbSenderFundingStage::BroadcastSafeObserved
+        | RgbSenderFundingStage::Broadcasting
+        | RgbSenderFundingStage::BroadcastCommitted
+        | RgbSenderFundingStage::Finalized
+        | RgbSenderFundingStage::DurablyCompleted => RgbSenderRecoveryAction::FailClosed,
+    }
+}
 use crate::error::APIError;
+#[cfg(feature = "block-sync")]
+use crate::ldk_chain_backend::block_sync::{BitcoindClient, BlockSyncGossipVerifier};
+#[cfg(feature = "transaction-sync")]
+use crate::ldk_chain_backend::sync_chain_data;
+#[cfg(feature = "transaction-sync")]
+use crate::ldk_chain_backend::transaction_sync::{
+    IndexerClient, IndexerGossipVerifier, IndexerSyncClient,
+};
+use crate::ldk_chain_backend::{ChainBackend, ChainSetup, DynBroadcaster, DynFeeEstimator};
 use crate::rgb::{
     check_rgb_proxy_endpoint, get_rgb_channel_info_optional, RgbBumpWalletSource,
-    RgbLibWalletWrapper,
+    RgbChangeDestinationSource, RgbLibWalletWrapper,
+};
+use crate::rgb_file_transfer::{
+    PeerChannelGate, RgbFileTransferHandler, REASSEMBLY_SWEEP_INTERVAL,
 };
 use crate::signer::vls_adapter::{ExternalSignerBackend, VlsSignerAdapter};
 use crate::signer::{
@@ -176,12 +709,30 @@ use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, description_from_invoice,
     description_hash_from_invoice, do_connect_peer, get_current_timestamp,
     get_max_local_rgb_amount, hex_str, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, AppState, StaticState, UnlockedAppState,
-    ELECTRUM_URL_MAINNET, ELECTRUM_URL_REGTEST, ELECTRUM_URL_SIGNET, ELECTRUM_URL_TESTNET,
-    ELECTRUM_URL_TESTNET4, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
+    validate_and_parse_payment_preimage, AppState, StaticState, UnlockedAppState, FATAL_ERROR,
+    PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
 };
 
+const RGB_TRANSFER_CHAN_EXPIRATION_SECS: u64 = 86400;
+// don't reuse a cached sweep receive this close to its expiration
+const RGB_RECEIVE_REUSE_MARGIN_SECS: u64 = 3600;
+// smaller margin when addresses are reused, where reissuing is harmful: still enough for the
+// receive to outlast the sweep that uses it
+const RGB_RECEIVE_REUSE_MARGIN_ADDR_REUSE_SECS: u64 = 300;
 const VIRTUAL_CHANNEL_DOMAIN_SEPARATOR: &[u8] = b"rln_virtual_channels_v0";
+
+// A reissued receive under address reuse gets the same recipient id as the cached one (rgb-lib
+// rotates only the invoice nonce), so the sweep's provide_out_of_band_consignment later fails with
+// an ambiguous-recipient error. Hold the cached entry longer in that case, keeping enough margin
+// for it to outlast the sweep it is used by.
+fn sweep_receive_is_reusable(now: u64, expiration: u64, reuse_addresses: bool) -> bool {
+    let margin = if reuse_addresses {
+        RGB_RECEIVE_REUSE_MARGIN_ADDR_REUSE_SECS
+    } else {
+        RGB_RECEIVE_REUSE_MARGIN_SECS
+    };
+    now + margin < expiration
+}
 
 pub(crate) fn virtual_channel_synthetic_outpoint(
     network: BitcoinNetwork,
@@ -261,8 +812,79 @@ fn sync_config_to_kvstore(
     Ok(())
 }
 
+// Test-only: while set, the node with this pubkey defers claiming incoming payments; handling of
+// the PaymentClaimable event is suspended until the gate is cleared
+#[cfg(test)]
+pub(crate) static DEFER_PAYMENT_CLAIMABLE_ON_NODE: Mutex<Option<PublicKey>> = Mutex::new(None);
+
+// Test-only: whether a payment has been deferred via DEFER_PAYMENT_CLAIMABLE_ON_NODE since the
+// gate was set. This is a flag rather than a count because a node handles its events sequentially:
+// while a PaymentClaimable is being deferred no further event is handled, so at most one payment
+// can be deferred at a time
+#[cfg(test)]
+pub(crate) static PAYMENT_CLAIMABLE_DEFERRED: AtomicBool = AtomicBool::new(false);
+
+// Test-only: a payment is never deferred for longer than this, so that a test failing to release
+// the gate fails on its own assertions instead of hanging the node's event handling
+#[cfg(test)]
+const MAX_PAYMENT_DEFERRAL: Duration = Duration::from_secs(60);
+
 #[cfg(test)]
 pub(crate) static IGNORE_INBOUND_CHANNELS_ON_NODE: Mutex<Option<PublicKey>> = Mutex::new(None);
+
+// Test-only: the node with this pubkey holds incoming payments instead of claiming them, keeping
+// their HTLCs pending
+#[cfg(test)]
+pub(crate) static HOLD_PAYMENT_CLAIMABLE_ON_NODE: Mutex<Option<PublicKey>> = Mutex::new(None);
+
+// Test-only: number of payments held via HOLD_PAYMENT_CLAIMABLE_ON_NODE
+#[cfg(test)]
+pub(crate) static HELD_PAYMENT_CLAIMABLE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+// Test-only: the node with this pubkey emits a `push_asset_amount` greater than the channel asset
+// amount on the wire in `open_channel`, regardless of the value validated by its REST layer. Used
+// to model a channel counterparty whose wire client is not bound by the sender-side clamp.
+#[cfg(test)]
+pub(crate) static FORCE_PUSH_ASSET_AMOUNT_ON_NODE: Mutex<Option<PublicKey>> = Mutex::new(None);
+
+// Test-only: whether the given override targets the node we are running as
+#[cfg(test)]
+pub(crate) fn node_override_matches(
+    target: &Mutex<Option<PublicKey>>,
+    our_node_id: PublicKey,
+) -> bool {
+    target
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|id| *id == our_node_id)
+}
+
+#[cfg(feature = "test-utils")]
+fn processed_channel_ready_events() -> &'static Mutex<HashSet<(String, String)>> {
+    static EVENTS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    EVENTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(feature = "test-utils")]
+fn record_processed_channel_ready_event(channel_id: &ChannelId, node_id: PublicKey) {
+    processed_channel_ready_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((channel_id.to_string(), node_id.to_string()));
+}
+
+#[cfg(feature = "test-utils")]
+#[allow(dead_code)]
+pub(crate) fn processed_channel_ready_event_participants(channel_id: &ChannelId) -> usize {
+    let channel_id = channel_id.to_string();
+    processed_channel_ready_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|(processed_channel_id, _)| processed_channel_id == &channel_id)
+        .count()
+}
 
 pub(crate) struct LdkBackgroundServices {
     stop_processing: Arc<AtomicBool>,
@@ -439,6 +1061,25 @@ fn persist_staged_inbound_payment(
     Ok(())
 }
 
+fn effective_inbound_payment_status(
+    status: HTLCStatus,
+    expires_at: Option<u64>,
+    claim_deadline_height: Option<u32>,
+    now: u64,
+    height: u32,
+) -> HTLCStatus {
+    match status {
+        HTLCStatus::Pending if expires_at.is_some_and(|expiry| now > expiry) => HTLCStatus::Failed,
+        HTLCStatus::Claimable
+            if claim_deadline_height.is_some_and(|deadline| height >= deadline)
+                || expires_at.is_some_and(|expiry| now >= expiry) =>
+        {
+            HTLCStatus::Failed
+        }
+        _ => status,
+    }
+}
+
 impl UnlockedAppState {
     pub(crate) fn add_maker_swap(&self, payment_hash: PaymentHash, swap: SwapData) {
         let mut maker_swaps = self.get_maker_swaps();
@@ -605,39 +1246,59 @@ impl UnlockedAppState {
     pub(crate) fn list_updated_inbound_payments(&self) -> LdkHashMap<PaymentHash, PaymentInfo> {
         let now = get_current_timestamp();
         let height = self.channel_manager.current_best_block().height;
+
+        let _rgb_wallet_operation = match self.lock_rgb_wallet_mutation() {
+            Ok(operation) => operation,
+            Err(error) => {
+                let mut payments = self.inbound_payments();
+                for payment_info in payments.values_mut() {
+                    let effective_status = effective_inbound_payment_status(
+                        payment_info.status,
+                        payment_info.expires_at,
+                        payment_info.claim_deadline_height,
+                        now,
+                        height,
+                    );
+                    if effective_status != payment_info.status {
+                        payment_info.status = effective_status;
+                        payment_info.updated_at = now;
+                    }
+                }
+                tracing::debug!(
+                    %error,
+                    "returning effective inbound payment statuses without persisting them"
+                );
+                return payments;
+            }
+        };
+
         let mut inbound = self.get_inbound_payments();
         let mut failed = false;
         let mut claimables_to_fail = vec![];
         for (payment_hash, payment_info) in inbound.payments.iter_mut() {
+            let effective_status = effective_inbound_payment_status(
+                payment_info.status,
+                payment_info.expires_at,
+                payment_info.claim_deadline_height,
+                now,
+                height,
+            );
+            if effective_status == payment_info.status {
+                continue;
+            }
+
             match payment_info.status {
                 HTLCStatus::Pending => {
-                    if let Some(expires_at) = payment_info.expires_at {
-                        if now > expires_at {
-                            payment_info.status = HTLCStatus::Failed;
-                            payment_info.updated_at = now;
-                            failed = true;
-                        }
-                    }
+                    payment_info.status = effective_status;
+                    payment_info.updated_at = now;
+                    failed = true;
                 }
-                HTLCStatus::Claimable => {
-                    let deadline_passed = payment_info
-                        .claim_deadline_height
-                        .map(|h| height >= h)
-                        .unwrap_or(false);
-                    let invoice_expired = payment_info
-                        .expires_at
-                        .map(|expires_at| now >= expires_at)
-                        .unwrap_or(false);
-
-                    if deadline_passed || invoice_expired {
-                        claimables_to_fail.push((
-                            *payment_hash,
-                            payment_info.claim_deadline_height,
-                            payment_info.expires_at,
-                        ));
-                    }
-                }
-                _ => {}
+                HTLCStatus::Claimable => claimables_to_fail.push((
+                    *payment_hash,
+                    payment_info.claim_deadline_height,
+                    payment_info.expires_at,
+                )),
+                _ => unreachable!("only pending and claimable payments can expire"),
             }
         }
 
@@ -1045,8 +1706,8 @@ pub(crate) type MonitorPersister = AsyncPersister<
     Arc<FilesystemLogger>,
     ActiveSignerRef,
     ActiveSignerRef,
-    Arc<ChainBackend>,
-    Arc<ChainBackend>,
+    Arc<DynBroadcaster>,
+    Arc<DynFeeEstimator>,
 >;
 
 #[cfg(not(feature = "vss"))]
@@ -1056,25 +1717,19 @@ pub(crate) type MonitorPersister = Arc<
         Arc<FilesystemLogger>,
         ActiveSignerRef,
         ActiveSignerRef,
-        Arc<ChainBackend>,
-        Arc<ChainBackend>,
+        Arc<DynBroadcaster>,
+        Arc<DynFeeEstimator>,
     >,
 >;
 
 pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
     DynRlnChannelSigner,
     Arc<dyn Filter + Send + Sync>,
-    Arc<ChainBackend>,
-    Arc<ChainBackend>,
+    Arc<DynBroadcaster>,
+    Arc<DynFeeEstimator>,
     Arc<FilesystemLogger>,
     MonitorPersister,
     ActiveSignerRef,
->;
-
-pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
-    TokioSpawner,
-    Arc<lightning_block_sync::rpc::RpcClient>,
-    Arc<FilesystemLogger>,
 >;
 
 pub(crate) type RoutingMessageHandler =
@@ -1104,11 +1759,11 @@ pub(crate) type Router = DefaultRouter<
 
 pub(crate) type ChannelManager = channelmanager::ChannelManager<
     Arc<ChainMonitor>,
-    Arc<ChainBackend>,
+    Arc<DynBroadcaster>,
     Arc<LightningEntropySource>,
     ActiveSignerRef,
     ActiveSignerRef,
-    Arc<ChainBackend>,
+    Arc<DynFeeEstimator>,
     Arc<Router>,
     Arc<
         DefaultMessageRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>, Arc<LightningEntropySource>>,
@@ -1116,11 +1771,26 @@ pub(crate) type ChannelManager = channelmanager::ChannelManager<
     Arc<FilesystemLogger>,
 >;
 
+impl PeerChannelGate for ChannelManager {
+    fn channel_count_with(&self, peer: &PublicKey) -> usize {
+        // unlike list_channels, this doesn't filter out unfunded channels
+        self.list_channels_with_counterparty(peer).len()
+    }
+
+    fn has_channel_funded_by(&self, funding_txid: &str) -> bool {
+        self.list_channels().iter().any(|chan| {
+            chan.funding_txo
+                .is_some_and(|txo| txo.txid.to_string() == funding_txid)
+        })
+    }
+}
+
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
+// the UTXO lookup is a trait object so a single gossip type serves both sync backends
 pub(crate) type P2PGossipSync = lightning::routing::gossip::P2PGossipSync<
     Arc<NetworkGraph>,
-    Arc<GossipVerifier>,
+    Arc<dyn UtxoLookup + Send + Sync>,
     Arc<FilesystemLogger>,
 >;
 
@@ -1131,7 +1801,7 @@ pub(crate) type GossipSync = lightning_background_processor::GossipSync<
     Arc<P2PGossipSync>,
     Arc<RapidGossipSync>,
     Arc<NetworkGraph>,
-    Arc<GossipVerifier>,
+    Arc<dyn UtxoLookup + Send + Sync>,
     Arc<FilesystemLogger>,
 >;
 
@@ -1150,13 +1820,15 @@ pub(crate) type OnionMessenger = LdkOnionMessenger<
 >;
 
 pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
-    Arc<ChainBackend>,
+    Arc<DynBroadcaster>,
     Arc<Wallet<Arc<RgbBumpWalletSource>, Arc<FilesystemLogger>>>,
     ActiveSignerRef,
     Arc<FilesystemLogger>,
 >;
 
 pub(crate) type OutputSpenderTxes = LdkHashMap<u64, bitcoin::Transaction>;
+// (descriptors hash, contract) -> (recipient id, expiration)
+type SweepRecipients = HashMap<(u64, ContractId), (String, u64)>;
 
 pub(crate) struct RgbOutputSpender {
     static_state: Arc<StaticState>,
@@ -1164,7 +1836,10 @@ pub(crate) struct RgbOutputSpender {
     signer: Arc<dyn RlnKeysInterface<EcdsaSigner = DynRlnChannelSigner>>,
     kv_store: Arc<SyncedKvStore>,
     txes: Arc<Mutex<OutputSpenderTxes>>,
-    proxy_endpoint: String,
+    // receives issued for an in-flight sweep, reused across retries so a repeatedly failing sweep
+    // does not leave a new receive slot behind on every attempt
+    sweep_recipients: Arc<Mutex<SweepRecipients>>,
+    rgb_funding_recovery_guard: Arc<RgbFundingRecoveryGuard>,
 }
 
 // The sweeper store type is shared with the background processor's persister
@@ -1175,9 +1850,9 @@ pub(crate) type BpKvStore = Arc<crate::async_kv_store::BpKvStoreRouter>;
 pub(crate) type BpKvStore = KVStoreSyncWrapper<Arc<SyncedKvStore>>;
 
 pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
-    Arc<ChainBackend>,
-    Arc<RgbLibWalletWrapper>,
-    Arc<ChainBackend>,
+    Arc<DynBroadcaster>,
+    Arc<RgbChangeDestinationSource>,
+    Arc<DynFeeEstimator>,
     Arc<dyn Filter + Send + Sync>,
     BpKvStore,
     Arc<FilesystemLogger>,
@@ -1743,6 +2418,1130 @@ fn normalize_funding_psbt_locktime(
     Ok(psbt.to_string())
 }
 
+// Funding checkpoint reached after the RGB stock is promoted (fascia consumed, allocations
+// swept into the batch transfer) but before the funding tx is handed to LDK.
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_AFTER_COLOR: &str = "after-color-before-handoff";
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_HANDOFF_READY: &str = "handoff-ready";
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_HANDED_TO_LDK: &str = "handed-to-ldk";
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_BROADCAST_SAFE: &str = "broadcast-safe-before-broadcast";
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_BROADCASTING: &str = "broadcasting-before-send-end";
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_BROADCAST_COMMITTED: &str = "broadcast-committed";
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_FINALIZED: &str = "finalized-before-cleanup";
+#[cfg(debug_assertions)]
+pub(crate) const FUNDING_CHECKPOINT_DURABLY_COMPLETED: &str = "durably-completed-before-ack";
+
+// Test-only crash injection: parks the process at a named funding checkpoint when
+// `RLN_FUNDING_KILL_AT` matches, so a test harness can SIGKILL it there. Debug builds only.
+#[cfg(debug_assertions)]
+fn funding_kill_checkpoint(name: &str) {
+    if std::env::var("RLN_FUNDING_KILL_AT").as_deref() == Ok(name) {
+        if let Ok(path) = std::env::var("RLN_FUNDING_KILL_READY_PATH") {
+            let _ = fs::write(path, name);
+        }
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+fn rgb_sender_funding_error(context: &str, error: impl std::fmt::Display) -> RgbLibError {
+    RgbLibError::Internal {
+        details: format!("{context}: {error}"),
+    }
+}
+
+fn write_rgb_sender_funding_record(
+    record: &RgbSenderFundingRecord,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    record.validate()?;
+    let bytes = serde_json::to_vec(record).map_err(|error| {
+        rgb_sender_funding_error("cannot serialize sender funding journal", error)
+    })?;
+    kv_store
+        .write(
+            RGB_SENDER_FUNDING_NAMESPACE,
+            "",
+            &record.funding_txid,
+            bytes,
+        )
+        .map_err(|error| rgb_sender_funding_error("cannot persist sender funding journal", error))
+}
+
+fn read_rgb_sender_funding_record(
+    funding_txid: &str,
+    kv_store: &dyn KVStoreSync,
+) -> Result<RgbSenderFundingRecord, RgbLibError> {
+    let bytes = kv_store
+        .read(RGB_SENDER_FUNDING_NAMESPACE, "", funding_txid)
+        .map_err(|error| rgb_sender_funding_error("cannot read sender funding journal", error))?;
+    let record: RgbSenderFundingRecord = serde_json::from_slice(&bytes)
+        .map_err(|error| rgb_sender_funding_error("cannot decode sender funding journal", error))?;
+    record.validate()?;
+    if record.funding_txid != funding_txid {
+        return Err(RgbLibError::Internal {
+            details: "sender funding journal key does not match its transaction ID".to_owned(),
+        });
+    }
+    Ok(record)
+}
+
+fn read_rgb_sender_funding_record_optional(
+    funding_txid: &str,
+    kv_store: &dyn KVStoreSync,
+) -> Result<Option<RgbSenderFundingRecord>, RgbLibError> {
+    match kv_store.read(RGB_SENDER_FUNDING_NAMESPACE, "", funding_txid) {
+        Ok(bytes) => {
+            let record: RgbSenderFundingRecord =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    rgb_sender_funding_error("cannot decode sender funding journal", error)
+                })?;
+            record.validate()?;
+            if record.funding_txid != funding_txid {
+                return Err(RgbLibError::Internal {
+                    details: "sender funding journal key does not match its transaction ID"
+                        .to_owned(),
+                });
+            }
+            Ok(Some(record))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(rgb_sender_funding_error(
+            "cannot read sender funding journal",
+            error,
+        )),
+    }
+}
+
+fn remove_rgb_sender_funding_record(
+    funding_txid: &str,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    kv_store
+        .remove(RGB_SENDER_FUNDING_NAMESPACE, "", funding_txid, false)
+        .map_err(|error| rgb_sender_funding_error("cannot remove sender funding journal", error))
+}
+
+fn remove_rgb_sender_funding_entry(
+    namespace: &str,
+    key: &str,
+    context: &str,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    match kv_store.remove(namespace, "", key, false) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(rgb_sender_funding_error(context, error)),
+    }
+}
+
+fn sender_transfer_status(
+    wallet: &RgbLibWalletWrapper,
+    funding_txid: &str,
+) -> Result<Option<TransferStatus>, RgbLibError> {
+    let transfers = wallet.list_transfers(
+        rgb_lib::wallet::AssetFilter::AnyOrNone,
+        Some(funding_txid.to_owned()),
+    )?;
+    let mut statuses = transfers.iter().map(|transfer| transfer.status);
+    let Some(status) = statuses.next() else {
+        return Ok(None);
+    };
+    if statuses.any(|candidate| candidate != status) {
+        return Err(RgbLibError::Internal {
+            details: format!(
+                "RGB funding transfer '{funding_txid}' has inconsistent transfer statuses"
+            ),
+        });
+    }
+    Ok(Some(status))
+}
+
+fn read_rgb_sender_signed_psbt(
+    record: &RgbSenderFundingRecord,
+    kv_store: &dyn KVStoreSync,
+) -> Result<String, RgbLibError> {
+    let bytes = kv_store
+        .read(PSBT_NAMESPACE, "", &record.funding_txid)
+        .map_err(|error| rgb_sender_funding_error("cannot recover signed funding PSBT", error))?;
+    let encoded = String::from_utf8(bytes)
+        .map_err(|error| rgb_sender_funding_error("signed funding PSBT is not UTF-8", error))?;
+    let psbt = Psbt::from_str(&encoded)
+        .map_err(|error| rgb_sender_funding_error("signed funding PSBT is invalid", error))?;
+    let actual_txid = psbt.unsigned_tx.compute_txid().to_string();
+    if actual_txid != record.funding_txid {
+        return Err(RgbLibError::Internal {
+            details: format!(
+                "signed funding PSBT transaction '{}' does not match recovery journal '{}'",
+                actual_txid, record.funding_txid
+            ),
+        });
+    }
+    psbt.extract_tx().map_err(|error| {
+        rgb_sender_funding_error("signed funding PSBT cannot be extracted", error)
+    })?;
+    Ok(encoded)
+}
+
+fn rollback_rgb_sender_funding(
+    mut record: RgbSenderFundingRecord,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    record.stage = RgbSenderFundingStage::RollingBack;
+    write_rgb_sender_funding_record(&record, kv_store)?;
+
+    if let Some((operation_id, _)) = wallet.pending_funding_fascia()? {
+        if operation_id != record.funding_txid {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "sender funding '{}' cannot roll back RGB operation '{operation_id}'",
+                    record.funding_txid
+                ),
+            });
+        }
+        wallet.rollback_funding_fascia_if_present(&record.funding_txid)?;
+    }
+
+    match sender_transfer_status(wallet, &record.funding_txid)? {
+        Some(TransferStatus::Initiated) => {
+            if !wallet.fail_transfers(Some(record.batch_transfer_idx), false, true)? {
+                return Err(RgbLibError::Internal {
+                    details: format!(
+                        "RGB funding transfer '{}' remained initiated during rollback",
+                        record.funding_txid
+                    ),
+                });
+            }
+        }
+        Some(TransferStatus::Failed) => {}
+        Some(status) => {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "refusing to roll back RGB funding '{}' in transfer status {status:?}",
+                    record.funding_txid
+                ),
+            });
+        }
+        None => {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "RGB funding transfer '{}' is missing during rollback",
+                    record.funding_txid
+                ),
+            });
+        }
+    }
+
+    // A pre-handoff backup may contain the promoted stock and rollback journal. Do not remove the
+    // sender recovery record until VSS contains the clean rolled-back wallet state.
+    wallet.checked_vss_backup()?;
+    for channel_id in
+        std::iter::once(&record.temporary_channel_id).chain(record.final_channel_id.iter())
+    {
+        for pending in [false, true] {
+            if let Err(error) = kv_store.remove_rgb_channel_info(channel_id, pending) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    return Err(rgb_sender_funding_error(
+                        "cannot remove abandoned RGB channel metadata",
+                        error,
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(final_channel_id) = record.final_channel_id.as_ref() {
+        remove_rgb_sender_funding_entry(
+            PENDING_FUNDING_NAMESPACE,
+            final_channel_id,
+            "cannot remove abandoned pending-funding mapping",
+            kv_store,
+        )?;
+    }
+    remove_rgb_sender_funding_entry(
+        PSBT_NAMESPACE,
+        &record.funding_txid,
+        "cannot remove abandoned signed funding PSBT",
+        kv_store,
+    )?;
+
+    record.stage = RgbSenderFundingStage::RetryRequired;
+    write_rgb_sender_funding_record(&record, kv_store)?;
+    remove_rgb_sender_funding_record(&record.funding_txid, kv_store)
+}
+
+fn commit_rgb_sender_broadcast(
+    mut record: RgbSenderFundingRecord,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &dyn KVStoreSync,
+) -> Result<RgbSenderFundingRecord, RgbLibError> {
+    if sender_transfer_status(wallet, &record.funding_txid)? == Some(TransferStatus::Initiated) {
+        let signed_psbt = read_rgb_sender_signed_psbt(&record, kv_store)?;
+        let result = match record.consignment_delivery {
+            RgbSenderConsignmentDelivery::Proxy => {
+                wallet.send_end_preconsumed_for_operation(&record.funding_txid, signed_psbt)?
+            }
+            RgbSenderConsignmentDelivery::P2p => {
+                wallet.send_end_db_update_only_for_operation(&record.funding_txid, signed_psbt)?
+            }
+        };
+        if result.txid != record.funding_txid {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "RGB funding broadcast returned transaction '{}' instead of '{}'",
+                    result.txid, record.funding_txid
+                ),
+            });
+        }
+    }
+
+    match sender_transfer_status(wallet, &record.funding_txid)? {
+        Some(
+            TransferStatus::WaitingConfirmations
+            | TransferStatus::WaitingSafeHeight
+            | TransferStatus::Settled,
+        ) => {}
+        status => {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "cannot commit RGB funding '{}' from transfer status {status:?}",
+                    record.funding_txid
+                ),
+            });
+        }
+    }
+
+    record.stage = RgbSenderFundingStage::BroadcastCommitted;
+    write_rgb_sender_funding_record(&record, kv_store)?;
+    #[cfg(debug_assertions)]
+    funding_kill_checkpoint(FUNDING_CHECKPOINT_BROADCAST_COMMITTED);
+    Ok(record)
+}
+
+fn rgb_sender_channel_is_durable(
+    record: &RgbSenderFundingRecord,
+    channel_manager: &ChannelManager,
+) -> bool {
+    let Some(final_channel_id) = record.final_channel_id.as_deref() else {
+        return false;
+    };
+    channel_manager
+        .list_funded_channels()
+        .into_iter()
+        .any(|channel| {
+            channel.channel_id.to_string() == final_channel_id
+                && channel
+                    .funding_txo
+                    .is_some_and(|outpoint| outpoint.txid.to_string() == record.funding_txid)
+        })
+}
+
+fn resume_rgb_sender_broadcast(
+    mut record: RgbSenderFundingRecord,
+    channel_manager: &ChannelManager,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    if !rgb_sender_channel_is_durable(&record, channel_manager) {
+        return Err(RgbLibError::Internal {
+            details: format!(
+                "cannot resume RGB funding '{}': matching durable channel state is unavailable",
+                record.funding_txid
+            ),
+        });
+    }
+    if matches!(
+        record.stage,
+        RgbSenderFundingStage::Finalized | RgbSenderFundingStage::DurablyCompleted
+    ) {
+        return Ok(());
+    }
+    if !matches!(
+        record.stage,
+        RgbSenderFundingStage::HandoffReady
+            | RgbSenderFundingStage::HandedToLdk
+            | RgbSenderFundingStage::BroadcastSafeObserved
+            | RgbSenderFundingStage::Broadcasting
+            | RgbSenderFundingStage::BroadcastCommitted
+    ) {
+        return Err(RgbLibError::Internal {
+            details: format!(
+                "cannot resume RGB funding '{}' from stage {:?}",
+                record.funding_txid, record.stage
+            ),
+        });
+    }
+
+    // Validate the complete signed transaction before advancing the durable broadcast intent.
+    read_rgb_sender_signed_psbt(&record, kv_store)?;
+    if matches!(
+        record.stage,
+        RgbSenderFundingStage::HandoffReady
+            | RgbSenderFundingStage::HandedToLdk
+            | RgbSenderFundingStage::BroadcastSafeObserved
+    ) {
+        record.stage = RgbSenderFundingStage::Broadcasting;
+        write_rgb_sender_funding_record(&record, kv_store)?;
+    }
+    commit_and_finalize_rgb_sender_funding(record, wallet, kv_store)
+}
+
+fn finalize_rgb_sender_funding(
+    mut record: RgbSenderFundingRecord,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    match sender_transfer_status(wallet, &record.funding_txid)? {
+        Some(
+            TransferStatus::WaitingConfirmations
+            | TransferStatus::WaitingSafeHeight
+            | TransferStatus::Settled,
+        ) => {}
+        status => {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "cannot finalize RGB funding '{}' from transfer status {status:?}",
+                    record.funding_txid
+                ),
+            });
+        }
+    }
+
+    // Persist the broadcast transfer together with the promoted acceptance journal first. If the
+    // process or device disappears during finalization, this snapshot can deterministically replay
+    // the exact operation instead of depending on the transport endpoint.
+    wallet.checked_vss_backup()?;
+
+    if let Some((operation_id, _)) = wallet.pending_funding_fascia()? {
+        if operation_id != record.funding_txid {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "sender funding '{}' cannot finalize RGB operation '{operation_id}'",
+                    record.funding_txid
+                ),
+            });
+        }
+        wallet.finalize_funding_fascia(&record.funding_txid)?;
+    }
+
+    // Finalization deletes the stock rollback snapshot. Confirm that the resulting wallet is
+    // remotely durable before deleting the signed PSBT or advancing the sender tombstone.
+    wallet.checked_vss_backup()?;
+
+    if let Some(final_channel_id) = record.final_channel_id.as_ref() {
+        remove_rgb_sender_funding_entry(
+            PENDING_FUNDING_NAMESPACE,
+            final_channel_id,
+            "cannot remove finalized pending-funding mapping",
+            kv_store,
+        )?;
+    }
+    remove_rgb_sender_funding_entry(
+        PSBT_NAMESPACE,
+        &record.funding_txid,
+        "cannot remove finalized signed funding PSBT",
+        kv_store,
+    )?;
+
+    record.stage = RgbSenderFundingStage::Finalized;
+    write_rgb_sender_funding_record(&record, kv_store)?;
+    #[cfg(debug_assertions)]
+    funding_kill_checkpoint(FUNDING_CHECKPOINT_FINALIZED);
+    Ok(())
+}
+
+fn commit_and_finalize_rgb_sender_funding(
+    record: RgbSenderFundingRecord,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    if matches!(
+        record.stage,
+        RgbSenderFundingStage::Finalized | RgbSenderFundingStage::DurablyCompleted
+    ) {
+        return Ok(());
+    }
+    // Always reconcile the wallet's transfer status. A device restored from the last pre-handoff
+    // RGB backup can have an Initiated transfer while the independently durable sender journal is
+    // already BroadcastCommitted; replaying the exact signed PSBT is safe and idempotent.
+    let record = commit_rgb_sender_broadcast(record, wallet, kv_store)?;
+    finalize_rgb_sender_funding(record, wallet, kv_store)
+}
+
+fn remove_rgb_recovery_entry_if_present(
+    primary_namespace: &str,
+    secondary_namespace: &str,
+    key: &str,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    match kv_store.remove(primary_namespace, secondary_namespace, key, false) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(rgb_sender_funding_error(
+            "cannot clean finalized RGB receiver recovery artifact",
+            error,
+        )),
+    }
+}
+
+fn persist_canonical_rgb_channel_info(
+    channel_id: &str,
+    expected: &RgbInfo,
+    kv_store: &SyncedKvStore,
+) -> Result<(), RgbLibError> {
+    let total_amount = |info: &RgbInfo| {
+        info.local_rgb_amount
+            .checked_add(info.remote_rgb_amount)
+            .ok_or_else(|| RgbLibError::Internal {
+                details: format!("RGB allocation overflows for channel '{channel_id}'"),
+            })
+    };
+    let expected_total = total_amount(expected)?;
+    let canonical = match kv_store.read_rgb_channel_info(channel_id, false) {
+        Ok(existing) => {
+            let same_allocation = existing.contract_id == expected.contract_id
+                && existing.schema == expected.schema
+                && total_amount(&existing)? == expected_total;
+            if !same_allocation {
+                return Err(RgbLibError::Internal {
+                    details: format!(
+                        "refusing to overwrite conflicting RGB metadata for channel '{channel_id}'"
+                    ),
+                });
+            }
+            // LDK's canonical record is authoritative for the current local/remote balance split.
+            // The sender journal contains the opening allocation and a transient batch index.
+            existing
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut reconstructed = expected.clone();
+            reconstructed.batch_transfer_idx = None;
+            reconstructed
+        }
+        Err(error) => {
+            return Err(rgb_sender_funding_error(
+                "cannot inspect canonical RGB channel metadata",
+                error,
+            ));
+        }
+    };
+
+    let bytes = bincode::serialize(&canonical).map_err(|error| {
+        rgb_sender_funding_error("cannot serialize canonical RGB channel metadata", error)
+    })?;
+    kv_store
+        .write_remote_required(RGB_PRIMARY_NS, RGB_CHANNEL_INFO_NS, channel_id, bytes)
+        .map_err(|error| {
+            rgb_sender_funding_error(
+                "canonical RGB channel metadata was not acknowledged by VSS",
+                error,
+            )
+        })
+}
+
+fn complete_finalized_sender_funding(
+    record: &RgbSenderFundingRecord,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &SyncedKvStore,
+) -> Result<(), RgbLibError> {
+    if record.stage == RgbSenderFundingStage::DurablyCompleted {
+        return Ok(());
+    }
+    if record.stage != RgbSenderFundingStage::Finalized {
+        return Err(RgbLibError::Internal {
+            details: format!(
+                "sender funding '{}' cannot complete from stage {:?}",
+                record.funding_txid, record.stage
+            ),
+        });
+    }
+    let final_channel_id =
+        record
+            .final_channel_id
+            .as_deref()
+            .ok_or_else(|| RgbLibError::Internal {
+                details: format!(
+                    "finalized sender funding '{}' is missing its channel ID",
+                    record.funding_txid
+                ),
+            })?;
+
+    match sender_transfer_status(wallet, &record.funding_txid)? {
+        Some(
+            TransferStatus::WaitingConfirmations
+            | TransferStatus::WaitingSafeHeight
+            | TransferStatus::Settled,
+        ) => {}
+        status => {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "finalized sender funding '{}' has unexpected transfer status {status:?}",
+                    record.funding_txid
+                ),
+            });
+        }
+    }
+    if wallet.pending_funding_fascia()?.is_some() {
+        return Err(RgbLibError::Internal {
+            details: format!(
+                "finalized sender funding '{}' still has a pending stock journal",
+                record.funding_txid
+            ),
+        });
+    }
+
+    let rgb_info = match record.rgb_info.as_ref() {
+        Some(rgb_info) => rgb_info.clone(),
+        None => kv_store
+            .read_rgb_channel_info(final_channel_id, false)
+            .map_err(|error| {
+                rgb_sender_funding_error(
+                    "legacy finalized sender funding has no recoverable channel metadata",
+                    error,
+                )
+            })?,
+    };
+
+    // The stock backup and canonical metadata must both be remotely durable before the pending
+    // marker is removed. Keep the finalized sender journal as an acknowledgement tombstone: after
+    // a restart, LDK may still replay FundingTxBroadcastSafe even though startup reconciliation
+    // has already finalized the exact transaction. Removing the journal here would make that
+    // replay fail forever. ChannelClosed prunes the tombstone after LDK event ordering proves the
+    // funding event has been acknowledged.
+    wallet.checked_vss_backup()?;
+    persist_canonical_rgb_channel_info(final_channel_id, &rgb_info, kv_store)?;
+    remove_rgb_sender_funding_entry(
+        PENDING_FUNDING_NAMESPACE,
+        final_channel_id,
+        "cannot remove finalized RGB pending-funding marker",
+        kv_store,
+    )?;
+
+    let mut completed = record.clone();
+    completed.stage = RgbSenderFundingStage::DurablyCompleted;
+    write_rgb_sender_funding_record(&completed, kv_store)?;
+    #[cfg(debug_assertions)]
+    funding_kill_checkpoint(FUNDING_CHECKPOINT_DURABLY_COMPLETED);
+    Ok(())
+}
+
+fn remove_finalized_sender_tombstone_for_channel(
+    channel_id: &ChannelId,
+    kv_store: &dyn KVStoreSync,
+) {
+    let channel_id = channel_id.0.as_hex().to_string();
+    let keys = match kv_store.list(RGB_SENDER_FUNDING_NAMESPACE, "") {
+        Ok(keys) => keys,
+        Err(error) => {
+            tracing::warn!(
+                channel_id,
+                error = %error,
+                "cannot list finalized RGB funding tombstones after channel close"
+            );
+            return;
+        }
+    };
+    for key in keys {
+        let record = match read_rgb_sender_funding_record(&key, kv_store) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(
+                    funding_txid = key,
+                    error = %error,
+                    "cannot inspect RGB funding tombstone after channel close"
+                );
+                continue;
+            }
+        };
+        if record.stage != RgbSenderFundingStage::DurablyCompleted
+            || record.final_channel_id.as_deref() != Some(channel_id.as_str())
+        {
+            continue;
+        }
+        if let Err(error) = remove_rgb_sender_funding_record(&record.funding_txid, kv_store) {
+            tracing::warn!(
+                funding_txid = %record.funding_txid,
+                channel_id,
+                error = %error,
+                "cannot remove finalized RGB funding tombstone after channel close"
+            );
+        }
+    }
+}
+
+fn receiver_final_channel_id(record: &PendingFundingAcceptance) -> Result<String, RgbLibError> {
+    let funding_txid = Txid::from_str(&record.funding_txid).map_err(|error| {
+        rgb_sender_funding_error("invalid finalized receiver funding transaction ID", error)
+    })?;
+    Ok(
+        ChannelId::v1_from_funding_txid(funding_txid.as_byte_array(), record.funding_output_index)
+            .0
+            .as_hex()
+            .to_string(),
+    )
+}
+
+fn complete_finalized_receiver_funding(
+    record: &PendingFundingAcceptance,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &SyncedKvStore,
+) -> Result<(), RgbLibError> {
+    if record.stage != FundingAcceptanceStage::Finalized {
+        return Err(RgbLibError::Internal {
+            details: format!(
+                "receiver funding '{}' cannot complete from stage {:?}",
+                record.funding_txid, record.stage
+            ),
+        });
+    }
+    let consignment = record
+        .consignment
+        .clone()
+        .ok_or_else(|| RgbLibError::Internal {
+            details: format!(
+                "finalized receiver funding '{}' is missing its consignment",
+                record.funding_txid
+            ),
+        })?;
+    let rgb_info = record
+        .rgb_info
+        .as_ref()
+        .ok_or_else(|| RgbLibError::Internal {
+            details: format!(
+                "finalized receiver funding '{}' is missing channel metadata",
+                record.funding_txid
+            ),
+        })?;
+
+    kv_store
+        .write(
+            FUNDING_CONSIGNMENT_NAMESPACE,
+            "",
+            &record.funding_txid,
+            consignment.clone(),
+        )
+        .map_err(|error| {
+            rgb_sender_funding_error(
+                "cannot retain finalized receiver consignment for wallet recovery",
+                error,
+            )
+        })?;
+
+    wallet.ensure_finalized_funding_transfer(
+        &record.funding_txid,
+        record.funding_output_index as u32,
+        consignment,
+        rgb_info,
+        STATIC_BLINDING,
+    )?;
+    wallet.checked_vss_backup()?;
+
+    let final_channel_id = receiver_final_channel_id(record)?;
+    persist_canonical_rgb_channel_info(&final_channel_id, rgb_info, kv_store)?;
+
+    for (namespace, key) in [
+        (RGB_CHANNEL_INFO_NS, record.temporary_channel_id.as_str()),
+        (
+            RGB_CHANNEL_INFO_PENDING_NS,
+            record.temporary_channel_id.as_str(),
+        ),
+        (RGB_CONSIGNMENT_NS, record.temporary_channel_id.as_str()),
+        (RGB_CONSIGNMENT_NS, record.funding_txid.as_str()),
+        (RGB_CONSIGNMENT_NS, final_channel_id.as_str()),
+    ] {
+        remove_rgb_recovery_entry_if_present(RGB_PRIMARY_NS, namespace, key, kv_store)?;
+    }
+    remove_pending_funding_acceptance(&record.temporary_channel_id, kv_store).map_err(|error| {
+        rgb_sender_funding_error("cannot remove finalized RGB receiver journal", error)
+    })
+}
+
+fn write_receiver_funding_stage(
+    record: &PendingFundingAcceptance,
+    stage: FundingAcceptanceStage,
+    kv_store: &dyn KVStoreSync,
+) -> Result<PendingFundingAcceptance, RgbLibError> {
+    let mut updated = record.clone();
+    updated.stage = stage;
+    write_pending_funding_acceptance(&updated, kv_store).map_err(|error| {
+        rgb_sender_funding_error("cannot persist RGB receiver funding stage", error)
+    })?;
+    Ok(updated)
+}
+
+fn remove_receiver_funding_journal(
+    temporary_channel_id: &str,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    match remove_pending_funding_acceptance(temporary_channel_id, kv_store) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(rgb_sender_funding_error(
+            "cannot remove resolved RGB receiver journal",
+            error,
+        )),
+    }
+}
+
+fn remove_rolled_back_receiver_artifacts(
+    record: &PendingFundingAcceptance,
+    kv_store: &dyn KVStoreSync,
+) -> Result<(), RgbLibError> {
+    let final_channel_id = receiver_final_channel_id(record)?;
+    for (namespace, key) in [
+        (RGB_CHANNEL_INFO_NS, record.temporary_channel_id.as_str()),
+        (
+            RGB_CHANNEL_INFO_PENDING_NS,
+            record.temporary_channel_id.as_str(),
+        ),
+        (RGB_CHANNEL_INFO_NS, final_channel_id.as_str()),
+        (RGB_CHANNEL_INFO_PENDING_NS, final_channel_id.as_str()),
+        (RGB_CONSIGNMENT_NS, record.temporary_channel_id.as_str()),
+        (RGB_CONSIGNMENT_NS, record.funding_txid.as_str()),
+        (RGB_CONSIGNMENT_NS, final_channel_id.as_str()),
+    ] {
+        remove_rgb_recovery_entry_if_present(RGB_PRIMARY_NS, namespace, key, kv_store)?;
+    }
+    Ok(())
+}
+
+fn rollback_receiver_funding(
+    record: &PendingFundingAcceptance,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &SyncedKvStore,
+) -> Result<(), RgbLibError> {
+    let rolling_back = if record.stage == FundingAcceptanceStage::RollingBack {
+        record.clone()
+    } else {
+        write_receiver_funding_stage(record, FundingAcceptanceStage::RollingBack, kv_store)?
+    };
+
+    if let Some((operation_id, _)) = wallet.pending_funding_fascia()? {
+        if operation_id != rolling_back.funding_txid {
+            return Err(RgbLibError::Internal {
+                details: format!(
+                    "receiver funding '{}' cannot roll back RGB operation '{operation_id}'",
+                    rolling_back.funding_txid
+                ),
+            });
+        }
+        wallet.rollback_funding_fascia_if_present(&rolling_back.funding_txid)?;
+    }
+
+    // A backup may have captured the staged or promoted stock. Keep the recovery journal until
+    // the restored stock is remotely durable, then remove all temporary and derived artifacts.
+    wallet.checked_vss_backup()?;
+    remove_rolled_back_receiver_artifacts(&rolling_back, kv_store)?;
+    let retry_required = write_receiver_funding_stage(
+        &rolling_back,
+        FundingAcceptanceStage::RetryRequired,
+        kv_store,
+    )?;
+    remove_receiver_funding_journal(&retry_required.temporary_channel_id, kv_store)
+}
+
+fn finalize_receiver_funding(
+    record: &PendingFundingAcceptance,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &SyncedKvStore,
+) -> Result<(), RgbLibError> {
+    let finalizing = if record.stage == FundingAcceptanceStage::Finalizing {
+        record.clone()
+    } else {
+        write_receiver_funding_stage(record, FundingAcceptanceStage::Finalizing, kv_store)?
+    };
+    let consignment = finalizing
+        .consignment
+        .clone()
+        .ok_or_else(|| RgbLibError::Internal {
+            details: format!(
+                "receiver funding '{}' is missing its durable consignment",
+                finalizing.funding_txid
+            ),
+        })?;
+    let rgb_info = finalizing
+        .rgb_info
+        .as_ref()
+        .ok_or_else(|| RgbLibError::Internal {
+            details: format!(
+                "receiver funding '{}' is missing durable channel metadata",
+                finalizing.funding_txid
+            ),
+        })?;
+
+    wallet.ensure_finalized_funding_transfer(
+        &finalizing.funding_txid,
+        finalizing.funding_output_index as u32,
+        consignment,
+        rgb_info,
+        STATIC_BLINDING,
+    )?;
+    let finalized =
+        write_receiver_funding_stage(&finalizing, FundingAcceptanceStage::Finalized, kv_store)?;
+    complete_finalized_receiver_funding(&finalized, wallet, kv_store)
+}
+
+fn reconcile_receiver_funding_record(
+    record: &PendingFundingAcceptance,
+    funded_channel_ids: &BTreeSet<String>,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &SyncedKvStore,
+) -> Result<Option<RgbFundingRecoveryState>, RgbLibError> {
+    let final_channel_id = receiver_final_channel_id(record)?;
+    let channel_is_durable = funded_channel_ids.contains(&final_channel_id);
+
+    match rgb_receiver_recovery_action(record.stage, channel_is_durable) {
+        RgbReceiverRecoveryAction::Rollback => {
+            rollback_receiver_funding(record, wallet, kv_store)?;
+            Ok(None)
+        }
+        RgbReceiverRecoveryAction::Finalize => {
+            finalize_receiver_funding(record, wallet, kv_store)?;
+            Ok(None)
+        }
+        RgbReceiverRecoveryAction::Complete => {
+            complete_finalized_receiver_funding(record, wallet, kv_store)?;
+            Ok(None)
+        }
+        RgbReceiverRecoveryAction::Quarantine => {
+            rgb_receiver_funding_recovery_view(record, channel_is_durable, None).map(Some)
+        }
+    }
+}
+
+fn funded_channel_ids(channel_manager: &ChannelManager) -> BTreeSet<String> {
+    channel_manager
+        .list_funded_channels()
+        .into_iter()
+        .map(|channel| channel.channel_id.0.as_hex().to_string())
+        .collect()
+}
+
+fn reconcile_rgb_receiver_funding(
+    channel_manager: &ChannelManager,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &SyncedKvStore,
+) -> Result<(usize, Vec<RgbFundingRecoveryState>), RgbLibError> {
+    let keys = kv_store
+        .list(RGB_PRIMARY_NS, RGB_FUNDING_ACCEPTANCE_NS)
+        .map_err(|error| {
+            rgb_sender_funding_error("cannot list RGB receiver funding journals", error)
+        })?;
+    let funded_channel_ids = funded_channel_ids(channel_manager);
+    let mut completed = 0;
+    let mut unresolved = Vec::new();
+    for key in keys {
+        let record = read_pending_funding_acceptance(&key, kv_store).map_err(|error| {
+            rgb_sender_funding_error("cannot read RGB receiver funding journal", error)
+        })?;
+        match reconcile_receiver_funding_record(&record, &funded_channel_ids, wallet, kv_store) {
+            Ok(None) => completed += 1,
+            Ok(Some(recovery)) => {
+                tracing::warn!(
+                    funding_txid = %record.funding_txid,
+                    temporary_channel_id = %record.temporary_channel_id,
+                    final_channel_id = ?recovery.final_channel_id,
+                    stage = ?record.stage,
+                    "quarantining RGB receiver funding until matching LDK channel state is durable"
+                );
+                unresolved.push(recovery);
+            }
+            Err(error) => {
+                let final_channel_id = receiver_final_channel_id(&record)?;
+                let channel_is_durable = funded_channel_ids.contains(&final_channel_id);
+                tracing::error!(
+                    funding_txid = %record.funding_txid,
+                    temporary_channel_id = %record.temporary_channel_id,
+                    stage = ?record.stage,
+                    error = %error,
+                    "RGB receiver funding reconciliation failed; preserving recovery evidence"
+                );
+                unresolved.push(rgb_receiver_funding_recovery_view(
+                    &record,
+                    channel_is_durable,
+                    Some(error.to_string()),
+                )?);
+            }
+        }
+    }
+    Ok((completed, unresolved))
+}
+
+pub(crate) fn reconcile_rgb_sender_funding(
+    channel_manager: &ChannelManager,
+    wallet: &RgbLibWalletWrapper,
+    kv_store: &SyncedKvStore,
+) -> Result<Vec<RgbFundingRecoveryState>, RgbLibError> {
+    let keys = kv_store
+        .list(RGB_SENDER_FUNDING_NAMESPACE, "")
+        .map_err(|error| rgb_sender_funding_error("cannot list sender funding journals", error))?;
+
+    let mut unresolved = Vec::new();
+    for key in keys {
+        let record = read_rgb_sender_funding_record(&key, kv_store)?;
+        if record.stage == RgbSenderFundingStage::RetryRequired {
+            if let Err(error) = remove_rgb_sender_funding_record(&record.funding_txid, kv_store) {
+                tracing::error!(
+                    funding_txid = %record.funding_txid,
+                    error = %error,
+                    "cannot remove completed RGB sender recovery evidence; continuing startup in quarantine"
+                );
+                unresolved.push(rgb_funding_recovery_view(
+                    &record,
+                    false,
+                    Ok(None),
+                    Some(&error),
+                ));
+            }
+            continue;
+        }
+        let channel_is_durable = rgb_sender_channel_is_durable(&record, channel_manager);
+        if record.stage == RgbSenderFundingStage::DurablyCompleted && channel_is_durable {
+            continue;
+        }
+        if record.stage == RgbSenderFundingStage::Finalized && channel_is_durable {
+            if let Err(error) = complete_finalized_sender_funding(&record, wallet, kv_store) {
+                tracing::error!(
+                    funding_txid = %record.funding_txid,
+                    error = %error,
+                    "retaining finalized RGB sender journal after recovery completion failed"
+                );
+                unresolved.push(rgb_funding_recovery_view(
+                    &record,
+                    true,
+                    Ok(None),
+                    Some(&error),
+                ));
+            }
+            continue;
+        }
+
+        let deterministic_action = rgb_sender_recovery_action(&record, channel_is_durable, false);
+        let must_check_chain = deterministic_action == RgbSenderRecoveryAction::FailClosed;
+        let transaction_observation = if must_check_chain {
+            wallet.is_tx_known(record.funding_txid.clone()).map(Some)
+        } else {
+            Ok(None)
+        };
+        let transaction_is_known = match transaction_observation.as_ref() {
+            Ok(value) => *value,
+            Err(error) => {
+                tracing::warn!(
+                    funding_txid = %record.funding_txid,
+                    error = %error,
+                    "deferring RGB sender recovery until chain evidence is available"
+                );
+                unresolved.push(rgb_funding_recovery_view(
+                    &record,
+                    channel_is_durable,
+                    Err(error),
+                    None,
+                ));
+                continue;
+            }
+        };
+
+        let recovery_action = rgb_sender_recovery_action(
+            &record,
+            channel_is_durable,
+            transaction_is_known.unwrap_or(false),
+        );
+        let recovery_record = record.clone();
+        let recovery_result = match recovery_action {
+            RgbSenderRecoveryAction::Finalize => {
+                let funding_txid = record.funding_txid.clone();
+                commit_and_finalize_rgb_sender_funding(record, wallet, kv_store)
+                    .and_then(|()| read_rgb_sender_funding_record(&funding_txid, kv_store))
+                    .and_then(|finalized| {
+                        complete_finalized_sender_funding(&finalized, wallet, kv_store)
+                    })
+            }
+            RgbSenderRecoveryAction::ResumeBroadcast => {
+                let funding_txid = record.funding_txid.clone();
+                tracing::info!(
+                    funding_txid,
+                    stage = ?record.stage,
+                    "resuming exact RGB funding transaction from durable LDK state"
+                );
+                resume_rgb_sender_broadcast(record, channel_manager, wallet, kv_store)
+                    .and_then(|()| read_rgb_sender_funding_record(&funding_txid, kv_store))
+                    .and_then(|finalized| {
+                        complete_finalized_sender_funding(&finalized, wallet, kv_store)
+                    })
+            }
+            RgbSenderRecoveryAction::Rollback => {
+                rollback_rgb_sender_funding(record, wallet, kv_store)
+            }
+            RgbSenderRecoveryAction::FailClosed => {
+                let recovery = rgb_funding_recovery_view(
+                    &record,
+                    channel_is_durable,
+                    Ok(transaction_is_known),
+                    None,
+                );
+                tracing::error!(
+                    funding_txid = %record.funding_txid,
+                    required_action = recovery.action.as_str(),
+                    "RGB funding requires explicit recovery; automatic mutation is disabled"
+                );
+                unresolved.push(recovery);
+                Ok(())
+            }
+        };
+        if let Err(error) = recovery_result {
+            tracing::error!(
+                funding_txid = %recovery_record.funding_txid,
+                stage = ?recovery_record.stage,
+                action = ?recovery_action,
+                error = %error,
+                "RGB sender reconciliation failed; preserving recovery evidence and continuing startup"
+            );
+            unresolved.push(rgb_funding_recovery_view(
+                &recovery_record,
+                channel_is_durable,
+                Ok(transaction_is_known),
+                Some(&error),
+            ));
+        }
+    }
+    Ok(unresolved)
+}
+
+fn should_complete_deferred_rgb_consistency_check(
+    was_deferred: bool,
+    pending_stock_operation: Option<&str>,
+    unresolved: &[RgbFundingRecoveryState],
+) -> Result<bool, RgbLibError> {
+    match (was_deferred, pending_stock_operation) {
+        (false, None) => Ok(false),
+        (true, None) => Ok(true),
+        (true, Some(operation_id))
+            if unresolved
+                .iter()
+                .any(|recovery| recovery.funding_txid == operation_id) =>
+        {
+            Ok(false)
+        }
+        (true, Some(operation_id)) => Err(RgbLibError::Internal {
+            details: format!(
+                "RGB stock operation '{operation_id}' has no matching durable funding recovery record"
+            ),
+        }),
+        (false, Some(operation_id)) => Err(RgbLibError::Internal {
+            details: format!(
+                "RGB stock operation '{operation_id}' appeared after the startup consistency check"
+            ),
+        }),
+    }
+}
+
 // Handle an rgb-lib error that happened while preparing a channel funding transaction in
 // FundingGenerationReady. Returns the value to propagate from the event handler: `Err(ReplayEvent)`
 // to retry the event (for transient network errors), or `Ok(())` after force-closing the channel
@@ -1760,20 +3559,34 @@ fn handle_funding_prepare_err(
             tracing::error!("Network error during channel opening: {details}");
             Err(ReplayEvent())
         }
-        e => {
-            tracing::error!("Cannot open channel: {e}");
-            if let Err(close_err) = channel_manager.force_close_broadcasting_latest_txn(
-                temporary_channel_id,
-                counterparty_node_id,
-                e.to_string(),
-            ) {
-                tracing::error!(
-                    "Failed to force-close channel {temporary_channel_id} after error: {close_err:?}"
-                );
-            }
-            Ok(())
-        }
+        e => abort_funding(
+            e.to_string(),
+            channel_manager,
+            temporary_channel_id,
+            counterparty_node_id,
+        ),
     }
+}
+
+// Give up on a channel funding for a reason retrying cannot fix, closing the channel rather than
+// leaving the peer waiting on a funding that will never come.
+fn abort_funding(
+    reason: String,
+    channel_manager: &ChannelManager,
+    temporary_channel_id: &ChannelId,
+    counterparty_node_id: &PublicKey,
+) -> Result<(), ReplayEvent> {
+    tracing::error!("Cannot open channel: {reason}");
+    if let Err(close_err) = channel_manager.force_close_broadcasting_latest_txn(
+        temporary_channel_id,
+        counterparty_node_id,
+        reason,
+    ) {
+        tracing::error!(
+            "Failed to abort funding by force-closing the channel {temporary_channel_id} after error: {close_err:?}"
+        );
+    }
+    Ok(())
 }
 
 /// Release the funds locked for a channel open that failed before the funding
@@ -1782,20 +3595,177 @@ fn handle_funding_prepare_err(
 /// was created (and locked the UTXOs) during `FundingGenerationReady`.
 async fn handle_open_chan_fail(channel_id: &ChannelId, unlocked_state: Arc<UnlockedAppState>) {
     let channel_id_hex = channel_id.0.as_hex().to_string();
-    if let Some(rgb_info) =
+    if let Some(mut rgb_info) =
         get_rgb_channel_info_optional(channel_id, true, unlocked_state.kv_store.as_ref())
     {
+        let _rgb_funding_operation = unlocked_state
+            .rgb_funding_recovery_guard
+            .lock_operation()
+            .await;
+        let funding_txid_bytes =
+            match unlocked_state
+                .kv_store
+                .read(PENDING_FUNDING_NAMESPACE, "", &channel_id_hex)
+            {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    tracing::debug!(
+                        channel_id = %channel_id,
+                        "channel has no pending funding marker; skipping pre-broadcast RGB cleanup"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        channel_id = %channel_id,
+                        error = %error,
+                        "cannot determine whether RGB channel funding is still pending"
+                    );
+                    return;
+                }
+            };
+        let funding_txid = match String::from_utf8(funding_txid_bytes) {
+            Ok(txid) => txid,
+            Err(error) => {
+                tracing::error!(
+                    channel_id = %channel_id,
+                    error = %error,
+                    "pending RGB funding marker is not valid UTF-8"
+                );
+                return;
+            }
+        };
+        match read_rgb_sender_funding_record_optional(
+            &funding_txid,
+            unlocked_state.kv_store.as_ref(),
+        ) {
+            Ok(Some(record)) => {
+                let unlocked_state_copy = unlocked_state.clone();
+                let resolved = match tokio::task::spawn_blocking(move || {
+                        match record.stage {
+                            RgbSenderFundingStage::Broadcasting
+                            | RgbSenderFundingStage::BroadcastCommitted
+                            | RgbSenderFundingStage::Finalized
+                            | RgbSenderFundingStage::DurablyCompleted => {
+                                commit_and_finalize_rgb_sender_funding(
+                                    record,
+                                    unlocked_state_copy.rgb_wallet_wrapper.as_ref(),
+                                    unlocked_state_copy.kv_store.as_ref(),
+                                )
+                            }
+                            RgbSenderFundingStage::Preparing
+                            | RgbSenderFundingStage::StockPromoted => rollback_rgb_sender_funding(
+                                record,
+                                unlocked_state_copy.rgb_wallet_wrapper.as_ref(),
+                                unlocked_state_copy.kv_store.as_ref(),
+                            ),
+                            RgbSenderFundingStage::HandoffReady
+                            | RgbSenderFundingStage::HandedToLdk
+                            | RgbSenderFundingStage::BroadcastSafeObserved
+                                if record.manual_broadcast =>
+                            {
+                                rollback_rgb_sender_funding(
+                                    record,
+                                    unlocked_state_copy.rgb_wallet_wrapper.as_ref(),
+                                    unlocked_state_copy.kv_store.as_ref(),
+                                )
+                            }
+                            _ => Err(RgbLibError::Internal {
+                                details: "legacy RGB funding crossed the automatic-broadcast handoff; retaining its recovery journal"
+                                    .to_owned(),
+                            }),
+                        }
+                    })
+                    .await
+                {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        tracing::error!(
+                            channel_id = %channel_id,
+                            error = %error,
+                            "RGB channel cleanup worker failed; retaining recovery state"
+                        );
+                        return;
+                    }
+                };
+                if let Err(error) = resolved {
+                    tracing::error!(
+                            "Refusing to release RGB transfer state for channel {channel_id}: {error:?}"
+                        );
+                    return;
+                }
+                let _ = unlocked_state.kv_store.remove(
+                    PENDING_FUNDING_NAMESPACE,
+                    "",
+                    &channel_id_hex,
+                    false,
+                );
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(
+                    "Cannot inspect RGB sender funding journal for channel {channel_id}: {error:?}"
+                );
+                return;
+            }
+        }
+        let unlocked_state_copy = unlocked_state.clone();
+        let rollback_funding_txid = funding_txid.clone();
+        let rollback = match tokio::task::spawn_blocking(move || {
+            unlocked_state_copy.rgb_rollback_funding_fascia_if_present(&rollback_funding_txid)
+        })
+        .await
+        {
+            Ok(rollback) => rollback,
+            Err(error) => {
+                tracing::error!(
+                    channel_id = %channel_id,
+                    error = %error,
+                    "RGB stock rollback worker failed; retaining recovery state"
+                );
+                return;
+            }
+        };
+        if let Err(error) = rollback {
+            tracing::error!(
+                "Refusing to release RGB transfer state for channel {channel_id} after stock rollback failed: {error:?}"
+            );
+            return;
+        }
         if let Some(batch_transfer_idx) = rgb_info.batch_transfer_idx {
             let unlocked_state_copy = unlocked_state.clone();
-            let failed = tokio::task::spawn_blocking(move || {
+            let failed = match tokio::task::spawn_blocking(move || {
                 unlocked_state_copy.rgb_fail_transfers(Some(batch_transfer_idx), false, true)
             })
             .await
-            .unwrap();
-            if let Err(e) = failed {
-                tracing::error!(
-                    "Error failing RGB transfer batch_transfer_idx={batch_transfer_idx} for channel {channel_id}: {e:?}"
-                );
+            {
+                Ok(failed) => failed,
+                Err(error) => {
+                    tracing::error!(
+                        channel_id = %channel_id,
+                        batch_transfer_idx,
+                        error = %error,
+                        "RGB transfer cleanup worker failed; retaining recovery state"
+                    );
+                    return;
+                }
+            };
+            match failed {
+                Ok(_) => {
+                    rgb_info.batch_transfer_idx = None;
+                    unlocked_state.kv_store.write_rgb_channel_info(
+                        &channel_id_hex,
+                        &rgb_info,
+                        true,
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Error failing RGB transfer batch_transfer_idx={batch_transfer_idx} for channel {channel_id}: {e:?}"
+                    );
+                    return;
+                }
             }
         }
     } else if let Ok(funding_txid_bytes) =
@@ -1803,21 +3773,44 @@ async fn handle_open_chan_fail(channel_id: &ChannelId, unlocked_state: Arc<Unloc
             .kv_store
             .read(PENDING_FUNDING_NAMESPACE, "", &channel_id_hex)
     {
-        let funding_txid = String::from_utf8(funding_txid_bytes).unwrap();
+        let funding_txid = match String::from_utf8(funding_txid_bytes) {
+            Ok(funding_txid) => funding_txid,
+            Err(error) => {
+                tracing::error!(
+                    channel_id = %channel_id,
+                    error = %error,
+                    "pending vanilla funding marker is not valid UTF-8"
+                );
+                return;
+            }
+        };
         let unlocked_state_copy = unlocked_state.clone();
         let txid_copy = funding_txid.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = match tokio::task::spawn_blocking(move || {
             unlocked_state_copy.rgb_abort_pending_vanilla_tx(txid_copy)
         })
         .await
-        .unwrap();
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(
+                    channel_id = %channel_id,
+                    error = %error,
+                    "vanilla funding cleanup worker failed; retaining recovery state"
+                );
+                return;
+            }
+        };
         match result {
             Ok(()) => {
                 tracing::info!("Aborted pending vanilla tx {funding_txid} for channel {channel_id}")
             }
-            Err(e) => tracing::error!(
-                "Error aborting pending vanilla tx {funding_txid} for channel {channel_id}: {e:?}"
-            ),
+            Err(e) => {
+                tracing::error!(
+                    "Error aborting pending vanilla tx {funding_txid} for channel {channel_id}: {e:?}"
+                );
+                return;
+            }
         }
     }
     let _ = unlocked_state
@@ -1831,15 +3824,45 @@ async fn handle_open_chan_fail(channel_id: &ChannelId, unlocked_state: Arc<Unloc
 /// for a colored channel fail the pending RGB batch transfer (releasing the reserved allocation),
 /// for a vanilla channel abort the pending vanilla tx (releasing the locked UTXOs). This runs
 /// *before* the `PENDING_FUNDING_NAMESPACE` mapping exists, so `handle_open_chan_fail` could not do
-/// the vanilla cleanup later — the staged tx would be unabortable. Best-effort: errors are logged
-/// and the caller still replays the event.
+/// the vanilla cleanup later — the staged tx would be unabortable. Cleanup failure is terminal:
+/// replay is unsafe until the staged stock and transfer reservation are both released.
 async fn abort_staged_standard_funding(
     unlocked_state: Arc<UnlockedAppState>,
     temporary_channel_id: &ChannelId,
     unsigned_psbt: &str,
     is_colored: bool,
-) {
+) -> Result<(), RgbLibError> {
     if is_colored {
+        let psbt = RgbLibPsbt::from_str(unsigned_psbt).map_err(|error| RgbLibError::Internal {
+            details: format!("cannot parse staged RGB funding PSBT: {error}"),
+        })?;
+        let funding_txid = psbt.unsigned_tx.compute_txid().to_string();
+        if let Some(record) = read_rgb_sender_funding_record_optional(
+            &funding_txid,
+            unlocked_state.kv_store.as_ref(),
+        )? {
+            let unlocked_state_copy = unlocked_state.clone();
+            return tokio::task::spawn_blocking(move || {
+                rollback_rgb_sender_funding(
+                    record,
+                    unlocked_state_copy.rgb_wallet_wrapper.as_ref(),
+                    unlocked_state_copy.kv_store.as_ref(),
+                )
+            })
+            .await
+            .map_err(|error| {
+                rgb_sender_funding_error("RGB sender rollback worker failed", error)
+            })?;
+        }
+
+        // Legacy fallback for an in-flight open created before sender journals were introduced.
+        let unlocked_state_copy = unlocked_state.clone();
+        tokio::task::spawn_blocking(move || {
+            unlocked_state_copy.rgb_rollback_funding_fascia_if_present(&funding_txid)
+        })
+        .await
+        .map_err(|error| rgb_sender_funding_error("RGB stock rollback worker failed", error))??;
+
         if let Some(mut rgb_info) = get_rgb_channel_info_optional(
             temporary_channel_id,
             true,
@@ -1847,27 +3870,21 @@ async fn abort_staged_standard_funding(
         ) {
             if let Some(batch_transfer_idx) = rgb_info.batch_transfer_idx {
                 let unlocked_state_copy = unlocked_state.clone();
-                let failed = tokio::task::spawn_blocking(move || {
+                tokio::task::spawn_blocking(move || {
                     unlocked_state_copy.rgb_fail_transfers(Some(batch_transfer_idx), false, true)
                 })
                 .await
-                .unwrap();
-                match failed {
-                    Ok(_) => {
-                        // Clear the recorded idx: the transfer is already failed, and the replayed
-                        // event will stage a fresh transfer and record its own idx.
-                        rgb_info.batch_transfer_idx = None;
-                        unlocked_state.kv_store.write_rgb_channel_info(
-                            &temporary_channel_id.0.as_hex().to_string(),
-                            &rgb_info,
-                            true,
-                        );
-                    }
-                    Err(e) => tracing::error!(
-                        "Error failing staged RGB transfer batch_transfer_idx={batch_transfer_idx} \
-                         for channel {temporary_channel_id}: {e:?}"
-                    ),
-                }
+                .map_err(|error| {
+                    rgb_sender_funding_error("RGB transfer cleanup worker failed", error)
+                })??;
+                // Clear the recorded idx: the transfer is already failed, and the replayed event
+                // will stage a fresh transfer and record its own idx.
+                rgb_info.batch_transfer_idx = None;
+                unlocked_state.kv_store.write_rgb_channel_info(
+                    &temporary_channel_id.0.as_hex().to_string(),
+                    &rgb_info,
+                    true,
+                );
             }
         }
     } else {
@@ -1882,23 +3899,26 @@ async fn abort_staged_standard_funding(
                     unlocked_state_copy.rgb_abort_pending_vanilla_tx(txid_copy)
                 })
                 .await
-                .unwrap();
+                .map_err(|error| {
+                    rgb_sender_funding_error("vanilla funding cleanup worker failed", error)
+                })?;
                 match result {
                     Ok(()) => tracing::info!(
                         "Aborted staged vanilla funding tx {txid} for channel {temporary_channel_id}"
                     ),
-                    Err(e) => tracing::error!(
-                        "Error aborting staged vanilla funding tx {txid} for channel \
-                         {temporary_channel_id}: {e:?}"
-                    ),
+                    Err(e) => return Err(e),
                 }
             }
-            Err(e) => tracing::error!(
-                "cannot parse staged funding PSBT while cleaning up channel \
-                 {temporary_channel_id}: {e}"
-            ),
+            Err(e) => {
+                return Err(RgbLibError::Internal {
+                    details: format!(
+                        "cannot parse staged funding PSBT for channel {temporary_channel_id}: {e}"
+                    ),
+                });
+            }
         }
     }
+    Ok(())
 }
 
 async fn handle_ldk_events(
@@ -1916,6 +3936,16 @@ async fn handle_ldk_events(
         } => {
             let is_colored =
                 is_channel_rgb(&temporary_channel_id, unlocked_state.kv_store.as_ref());
+            let _rgb_funding_operation = if is_colored {
+                Some(
+                    unlocked_state
+                        .rgb_funding_recovery_guard
+                        .lock_operation()
+                        .await,
+                )
+            } else {
+                None
+            };
 
             let addr = WitnessProgram::from_scriptpubkey(
                 output_script.as_bytes(),
@@ -1997,40 +4027,57 @@ async fn handle_ldk_events(
                     }]};
                     let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
                     let unlocked_state_copy = unlocked_state.clone();
-                    let res = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                        let res = unlocked_state_copy
-                            .rgb_send_begin(
-                                recipient_map,
-                                true,
-                                fee_rate_sat_vb,
-                                0,
-                                None,
-                                false,
-                                Some(0),
-                            )
-                            .map_err(|e| e.to_string())?;
-                        let fascia_str = fs::read_to_string(&res.details.fascia_path)
-                            .map_err(|e| e.to_string())?;
-                        let fascia: Fascia =
-                            serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
-                        unlocked_state_copy
-                            .rgb_consume_fascia(fascia, None)
-                            .map_err(|e| e.to_string())?;
-                        unlocked_state_copy
-                            .rgb_create_consignments(res.psbt.clone())
-                            .map_err(|e| e.to_string())?;
-                        Ok(res.psbt)
-                    })
+                    let res = tokio::task::spawn_blocking(
+                        move || -> Result<(String, Option<i32>), String> {
+                            let res = unlocked_state_copy
+                                .rgb_send_begin(
+                                    recipient_map,
+                                    true,
+                                    fee_rate_sat_vb,
+                                    0,
+                                    get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS,
+                                    false,
+                                    Some(0),
+                                )
+                                .map_err(|e| e.to_string())?;
+                            let fascia_str = fs::read_to_string(&res.details.fascia_path)
+                                .map_err(|e| e.to_string())?;
+                            let fascia: Fascia =
+                                serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
+                            unlocked_state_copy
+                                .rgb_consume_fascia(fascia, None)
+                                .map_err(|e| e.to_string())?;
+                            unlocked_state_copy
+                                .rgb_create_consignments(res.psbt.clone())
+                                .map_err(|e| e.to_string())?;
+                            Ok((res.psbt, res.batch_transfer_idx))
+                        },
+                    )
                     .await
                     .unwrap();
 
-                    let unsigned_psbt = match res {
-                        Ok(psbt) => psbt,
+                    let (unsigned_psbt, batch_transfer_idx) = match res {
+                        Ok(result) => result,
                         Err(e) => {
                             tracing::error!("cannot prepare virtual funding transfer: {e}");
                             return Err(ReplayEvent());
                         }
                     };
+
+                    // Record the batch transfer index so a failed open can fail the pending
+                    // transfer and release the locked assets (see handle_open_chan_fail).
+                    if let Some(mut rgb_info) = get_rgb_channel_info_optional(
+                        &temporary_channel_id,
+                        true,
+                        unlocked_state.kv_store.as_ref(),
+                    ) {
+                        rgb_info.batch_transfer_idx = batch_transfer_idx;
+                        unlocked_state.kv_store.write_rgb_channel_info(
+                            &temporary_channel_id.0.as_hex().to_string(),
+                            &rgb_info,
+                            true,
+                        );
+                    }
 
                     let signed_psbt = match unlocked_state.rgb_sign_psbt(unsigned_psbt) {
                         Ok(psbt) => psbt,
@@ -2106,27 +4153,94 @@ async fn handle_ldk_events(
 
                     let consignment_path =
                         unlocked_state.rgb_get_send_consignment_path(&asset_id, &witness_id);
-                    let proxy_url = TransportEndpoint::new(unlocked_state.proxy_endpoint.clone())
-                        .unwrap()
-                        .endpoint;
-                    let consignment_path_copy = consignment_path.clone();
-                    let unlocked_state_copy = unlocked_state.clone();
-                    let res = tokio::task::spawn_blocking(move || {
-                        unlocked_state_copy.rgb_post_consignment(
-                            &proxy_url,
+                    let consignment_bytes = match fs::read(&consignment_path) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            return abort_funding(
+                                format!("cannot read funding consignment: {e}"),
+                                &unlocked_state.channel_manager,
+                                &temporary_channel_id,
+                                &counterparty_node_id,
+                            );
+                        }
+                    };
+                    if unlocked_state
+                        .rgb_file_transfer_handler
+                        .queue_consignment(
+                            counterparty_node_id,
                             witness_id.clone(),
-                            &consignment_path_copy,
-                            witness_id,
-                            None,
+                            consignment_bytes,
                         )
-                    })
-                    .await
-                    .unwrap();
-
-                    if let Err(e) = res {
-                        tracing::error!("cannot post virtual funding consignment: {e}");
-                        return Err(ReplayEvent());
+                        .is_err()
+                    {
+                        let _ = fs::remove_file(&consignment_path);
+                        return abort_funding(
+                            s!("consignment is too large to send over p2p"),
+                            &unlocked_state.channel_manager,
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                        );
                     }
+
+                    // send the asset's media files over the same p2p link
+                    if rgb_info.counterparty_knows_asset {
+                        tracing::info!(
+                            "counterparty already knows asset {asset_id}, not sending its media"
+                        );
+                    } else {
+                        let unlocked_state_copy = unlocked_state.clone();
+                        let medias = match tokio::task::spawn_blocking(move || {
+                            unlocked_state_copy.rgb_list_asset_media(asset_id)
+                        })
+                        .await
+                        .unwrap()
+                        {
+                            Ok(medias) => medias,
+                            Err(e) => {
+                                let _ = fs::remove_file(&consignment_path);
+                                return handle_funding_prepare_err(
+                                    e,
+                                    &unlocked_state.channel_manager,
+                                    &temporary_channel_id,
+                                    &counterparty_node_id,
+                                );
+                            }
+                        };
+                        for media in medias {
+                            let media_bytes = match fs::read(&media.file_path) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    let _ = fs::remove_file(&consignment_path);
+                                    return abort_funding(
+                                        format!("cannot read asset media file: {e}"),
+                                        &unlocked_state.channel_manager,
+                                        &temporary_channel_id,
+                                        &counterparty_node_id,
+                                    );
+                                }
+                            };
+                            if unlocked_state
+                                .rgb_file_transfer_handler
+                                .queue_media(
+                                    counterparty_node_id,
+                                    witness_id.clone(),
+                                    media.digest,
+                                    media_bytes,
+                                )
+                                .is_err()
+                            {
+                                let _ = fs::remove_file(&consignment_path);
+                                return abort_funding(
+                                    s!("asset media is too large to send over p2p"),
+                                    &unlocked_state.channel_manager,
+                                    &temporary_channel_id,
+                                    &counterparty_node_id,
+                                );
+                            }
+                        }
+                    }
+
+                    unlocked_state.peer_manager.process_events();
                     let _ = fs::remove_file(&consignment_path);
                 }
 
@@ -2182,7 +4296,7 @@ async fn handle_ldk_events(
                 return Ok(());
             }
 
-            let (unsigned_psbt, asset_id) = if is_colored {
+            let (unsigned_psbt, asset_id, mut sender_record) = if is_colored {
                 let rgb_info = get_rgb_channel_info_pending(
                     &temporary_channel_id,
                     unlocked_state.kv_store.as_ref(),
@@ -2208,34 +4322,146 @@ async fn handle_ldk_events(
                             blinding: Some(STATIC_BLINDING),
                         }),
                         assignment,
-                        transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
+                        transport_endpoints: vec![]
                 }]};
 
                 let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
                 let min_channel_confirmations = unlocked_state.config.rgb.min_channel_confirmations;
                 let unlocked_state_copy = unlocked_state.clone();
-                let res = tokio::task::spawn_blocking(
-                    move || -> Result<(String, Option<i32>), RgbLibError> {
+                let temporary_channel_id_hex = temporary_channel_id.0.as_hex().to_string();
+                let res = match tokio::task::spawn_blocking(
+                    move || -> Result<(String, Option<i32>, RgbSenderFundingRecord), RgbLibError> {
                         let res = unlocked_state_copy.rgb_send_begin(
                             recipient_map,
                             true,
                             fee_rate_sat_vb,
                             min_channel_confirmations,
-                            None,
+                            get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS,
                             false,
                             // Final locktime: this colored tx funds an LN channel.
                             Some(0),
                         )?;
-                        let fascia_str = fs::read_to_string(&res.details.fascia_path).unwrap();
-                        let fascia: Fascia = serde_json::from_str(&fascia_str).unwrap();
-                        unlocked_state_copy.rgb_consume_fascia(fascia, None)?;
+                        let fascia_str = fs::read_to_string(&res.details.fascia_path)?;
+                        let fascia: Fascia =
+                            serde_json::from_str(&fascia_str).map_err(|error| {
+                                RgbLibError::Internal {
+                                    details: format!("invalid funding fascia: {error}"),
+                                }
+                            })?;
                         unlocked_state_copy.rgb_create_consignments(res.psbt.clone())?;
-                        Ok((res.psbt, res.batch_transfer_idx))
+                        let funding_psbt = RgbLibPsbt::from_str(&res.psbt).map_err(|error| {
+                            RgbLibError::Internal {
+                                details: format!("invalid funding PSBT: {error}"),
+                            }
+                        })?;
+                        let funding_txid = funding_psbt.unsigned_tx.compute_txid().to_string();
+                        let batch_transfer_idx = res.batch_transfer_idx.ok_or_else(|| {
+                            RgbLibError::Internal {
+                                details: "RGB funding transfer has no batch transfer ID".to_owned(),
+                            }
+                        })?;
+                        let mut journal_rgb_info = rgb_info.clone();
+                        journal_rgb_info.batch_transfer_idx = Some(batch_transfer_idx);
+                        let mut sender_record = RgbSenderFundingRecord {
+                            version: RgbSenderFundingRecord::VERSION,
+                            manual_broadcast: true,
+                            temporary_channel_id: temporary_channel_id_hex,
+                            final_channel_id: None,
+                            funding_txid: funding_txid.clone(),
+                            batch_transfer_idx,
+                            rgb_info: Some(journal_rgb_info),
+                            consignment_delivery: RgbSenderConsignmentDelivery::P2p,
+                            stage: RgbSenderFundingStage::Preparing,
+                        };
+                        if let Err(error) = write_rgb_sender_funding_record(
+                            &sender_record,
+                            unlocked_state_copy.kv_store.as_ref(),
+                        ) {
+                            let cleanup = unlocked_state_copy.rgb_fail_transfers(
+                                Some(batch_transfer_idx),
+                                false,
+                                true,
+                            );
+                            return match cleanup {
+                                Ok(true) => Err(error),
+                                Ok(false) => Err(RgbLibError::Internal {
+                                    details: format!(
+                                        "cannot persist RGB sender funding journal ({error}); the newly created transfer could not be released"
+                                    ),
+                                }),
+                                Err(cleanup_error) => Err(RgbLibError::Internal {
+                                    details: format!(
+                                        "cannot persist RGB sender funding journal ({error}); transfer cleanup also failed: {cleanup_error}"
+                                    ),
+                                }),
+                            };
+                        }
+                        if let Err(error) = unlocked_state_copy
+                            .rgb_prepare_funding_fascia(funding_txid, fascia)
+                        {
+                            let cleanup = rollback_rgb_sender_funding(
+                                sender_record,
+                                unlocked_state_copy.rgb_wallet_wrapper.as_ref(),
+                                unlocked_state_copy.kv_store.as_ref(),
+                            );
+                            return match cleanup {
+                                Ok(()) => Err(error),
+                                Err(cleanup_error) => Err(cleanup_error),
+                            };
+                        }
+                        sender_record.stage = RgbSenderFundingStage::StockPromoted;
+                        if let Err(error) = write_rgb_sender_funding_record(
+                            &sender_record,
+                            unlocked_state_copy.kv_store.as_ref(),
+                        ) {
+                            let cleanup = rollback_rgb_sender_funding(
+                                sender_record.clone(),
+                                unlocked_state_copy.rgb_wallet_wrapper.as_ref(),
+                                unlocked_state_copy.kv_store.as_ref(),
+                            );
+                            return match cleanup {
+                                Ok(()) => Err(error),
+                                Err(cleanup_error) => Err(RgbLibError::Internal {
+                                    details: format!(
+                                        "cannot persist promoted RGB sender funding state ({error}); rollback also failed: {cleanup_error}"
+                                    ),
+                                }),
+                            };
+                        }
+                        if let Err(error) = unlocked_state_copy
+                            .rgb_wallet_wrapper
+                            .checked_vss_backup()
+                        {
+                            let cleanup = rollback_rgb_sender_funding(
+                                sender_record,
+                                unlocked_state_copy.rgb_wallet_wrapper.as_ref(),
+                                unlocked_state_copy.kv_store.as_ref(),
+                            );
+                            return match cleanup {
+                                Ok(()) => Err(error),
+                                Err(cleanup_error) => Err(cleanup_error),
+                            };
+                        }
+                        Ok((res.psbt, Some(batch_transfer_idx), sender_record))
                     },
                 )
                 .await
-                .unwrap();
-                let (unsigned_psbt, batch_transfer_idx) = match res {
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        return handle_funding_prepare_err(
+                            RgbLibError::Internal {
+                                details: format!(
+                                    "RGB channel funding preparation worker failed: {error}"
+                                ),
+                            },
+                            &unlocked_state.channel_manager,
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                        );
+                    }
+                };
+                let (unsigned_psbt, batch_transfer_idx, sender_record) = match res {
                     Ok(result) => result,
                     // A failed funding preparation (e.g. the asset allocation is
                     // momentarily reserved by a concurrent open) must fail the
@@ -2266,7 +4492,7 @@ async fn handle_ldk_events(
                         true,
                     );
                 }
-                (unsigned_psbt, Some(asset_id))
+                (unsigned_psbt, Some(asset_id), Some(sender_record))
             } else {
                 // Mirror the colored path: a failed funding preparation must fail
                 // the channel (so the caller can retry) rather than panic the event
@@ -2299,8 +4525,10 @@ async fn handle_ldk_events(
                             return Err(ReplayEvent());
                         }
                     };
-                (unsigned_psbt, None)
+                (unsigned_psbt, None, None)
             };
+            #[cfg(debug_assertions)]
+            funding_kill_checkpoint(FUNDING_CHECKPOINT_AFTER_COLOR);
 
             // With a remote external signer this call crosses the network: a transient transport
             // failure or a malformed reply must not panic the event task. Take the same
@@ -2324,13 +4552,24 @@ async fn handle_ldk_events(
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!("cannot sign channel funding transaction: {e}");
-                    abort_staged_standard_funding(
+                    if let Err(cleanup_error) = abort_staged_standard_funding(
                         unlocked_state.clone(),
                         &temporary_channel_id,
                         &unsigned_psbt,
                         asset_id.is_some(),
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::error!(
+                            "cannot safely retry channel funding after cleanup failed: {cleanup_error}"
+                        );
+                        return handle_funding_prepare_err(
+                            cleanup_error,
+                            &unlocked_state.channel_manager,
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                        );
+                    }
                     return Err(ReplayEvent());
                 }
             };
@@ -2340,108 +4579,465 @@ async fn handle_ldk_events(
 
             // persist the funding TXID keyed by the final channel ID so handle_open_chan_fail can
             // find it
-            let funding_output_index = funding_tx
+            let funding_output_index = match funding_tx
                 .output
                 .iter()
                 .position(|o| o.script_pubkey == script_buf)
-                .expect("funding TX must contain the expected output script")
-                as u16;
+                .and_then(|index| u16::try_from(index).ok())
+            {
+                Some(index) => index,
+                None => {
+                    let error = RgbLibError::Internal {
+                        details:
+                            "signed funding transaction does not contain a valid expected output"
+                                .to_owned(),
+                    };
+                    let cleanup_error = abort_staged_standard_funding(
+                        unlocked_state.clone(),
+                        &temporary_channel_id,
+                        &unsigned_psbt,
+                        is_colored,
+                    )
+                    .await
+                    .err();
+                    return handle_funding_prepare_err(
+                        cleanup_error.unwrap_or(error),
+                        &unlocked_state.channel_manager,
+                        &temporary_channel_id,
+                        &counterparty_node_id,
+                    );
+                }
+            };
             let final_channel_id = ChannelId::v1_from_funding_txid(
                 bitcoin::hashes::Hash::as_byte_array(&funding_txid),
                 funding_output_index,
             );
-            // Persist the channel -> funding txid mapping so a failed open can
-            // release the locked funds (see handle_open_chan_fail).
-            unlocked_state
+            let final_channel_id_hex = final_channel_id.0.as_hex().to_string();
+            if let Some(record) = sender_record.as_mut() {
+                if record.funding_txid != funding_txid_str {
+                    let error = RgbLibError::Internal {
+                        details: "signed RGB funding transaction ID changed after preparation"
+                            .to_owned(),
+                    };
+                    let cleanup_error = abort_staged_standard_funding(
+                        unlocked_state.clone(),
+                        &temporary_channel_id,
+                        &unsigned_psbt,
+                        true,
+                    )
+                    .await
+                    .err();
+                    return handle_funding_prepare_err(
+                        cleanup_error.unwrap_or(error),
+                        &unlocked_state.channel_manager,
+                        &temporary_channel_id,
+                        &counterparty_node_id,
+                    );
+                }
+                record.final_channel_id = Some(final_channel_id_hex.clone());
+                record.stage = RgbSenderFundingStage::HandoffReady;
+                if let Err(error) =
+                    write_rgb_sender_funding_record(record, unlocked_state.kv_store.as_ref())
+                {
+                    let cleanup = abort_staged_standard_funding(
+                        unlocked_state.clone(),
+                        &temporary_channel_id,
+                        &unsigned_psbt,
+                        true,
+                    )
+                    .await;
+                    return handle_funding_prepare_err(
+                        cleanup.err().unwrap_or(error),
+                        &unlocked_state.channel_manager,
+                        &temporary_channel_id,
+                        &counterparty_node_id,
+                    );
+                }
+                #[cfg(debug_assertions)]
+                funding_kill_checkpoint(FUNDING_CHECKPOINT_HANDOFF_READY);
+            }
+
+            let persistence_result = unlocked_state
                 .kv_store
                 .write(
                     PENDING_FUNDING_NAMESPACE,
                     "",
-                    &final_channel_id.0.as_hex().to_string(),
+                    &final_channel_id_hex,
                     funding_txid_str.clone().into_bytes(),
                 )
-                .unwrap();
-
-            // Store PSBT in database for later use when channel is funded
-            unlocked_state
-                .kv_store
-                .write(
-                    PSBT_NAMESPACE,
-                    "",
-                    &funding_txid_str,
-                    psbt.to_string().into_bytes(),
+                .and_then(|_| {
+                    unlocked_state.kv_store.write(
+                        PSBT_NAMESPACE,
+                        "",
+                        &funding_txid_str,
+                        psbt.to_string().into_bytes(),
+                    )
+                });
+            if let Err(error) = persistence_result {
+                let error = rgb_sender_funding_error(
+                    "cannot persist prepared channel funding transaction",
+                    error,
+                );
+                let cleanup = abort_staged_standard_funding(
+                    unlocked_state.clone(),
+                    &temporary_channel_id,
+                    &unsigned_psbt,
+                    is_colored,
                 )
-                .unwrap();
+                .await;
+                return handle_funding_prepare_err(
+                    cleanup.err().unwrap_or(error),
+                    &unlocked_state.channel_manager,
+                    &temporary_channel_id,
+                    &counterparty_node_id,
+                );
+            }
 
             if let Some(asset_id) = asset_id {
-                let unlocked_state_copy = unlocked_state.clone();
-                let witness_id = funding_txid_str.clone();
-                tokio::task::spawn_blocking(move || {
-                    unlocked_state_copy
-                        .rgb_upsert_witness(
-                            RgbTxid::from_str(&witness_id).unwrap(),
-                            WitnessOrd::Tentative,
-                        )
-                        .unwrap()
-                })
-                .await
-                .unwrap();
+                let witness_result = match RgbTxid::from_str(&funding_txid_str) {
+                    Ok(witness_id) => {
+                        let unlocked_state_copy = unlocked_state.clone();
+                        let operation_id = funding_txid_str.clone();
+                        tokio::task::spawn_blocking(move || {
+                            unlocked_state_copy.rgb_upsert_witness_for_operation(
+                                &operation_id,
+                                witness_id,
+                                WitnessOrd::Tentative,
+                            )
+                        })
+                        .await
+                        .map_err(|error| {
+                            rgb_sender_funding_error("RGB witness worker failed", error)
+                        })
+                        .and_then(|result| result)
+                    }
+                    Err(error) => Err(rgb_sender_funding_error(
+                        "cannot parse RGB funding witness transaction ID",
+                        error,
+                    )),
+                };
+                if let Err(error) = witness_result {
+                    let cleanup = abort_staged_standard_funding(
+                        unlocked_state.clone(),
+                        &temporary_channel_id,
+                        &unsigned_psbt,
+                        true,
+                    )
+                    .await;
+                    return handle_funding_prepare_err(
+                        cleanup.err().unwrap_or(error),
+                        &unlocked_state.channel_manager,
+                        &temporary_channel_id,
+                        &counterparty_node_id,
+                    );
+                }
 
+                // send the consignment to the channel counterparty over the encrypted p2p link
                 let consignment_path =
                     unlocked_state.rgb_get_send_consignment_path(&asset_id, &funding_txid_str);
-                match fs::read(&consignment_path) {
-                    Ok(data) => unlocked_state
-                        .kv_store
-                        .write(FUNDING_CONSIGNMENT_NAMESPACE, "", &funding_txid_str, data)
-                        .unwrap(),
-                    Err(e) => tracing::error!("cannot store funding consignment: {e}"),
+                let consignment_bytes = match fs::read(&consignment_path) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        return abort_funding(
+                            format!("cannot read funding consignment: {e}"),
+                            &unlocked_state.channel_manager,
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                        );
+                    }
+                };
+                if let Err(e) = unlocked_state.kv_store.write(
+                    FUNDING_CONSIGNMENT_NAMESPACE,
+                    "",
+                    &funding_txid_str,
+                    consignment_bytes.clone(),
+                ) {
+                    tracing::error!("cannot store funding consignment: {e}");
                 }
-                let proxy_url = TransportEndpoint::new(unlocked_state.proxy_endpoint.clone())
-                    .unwrap()
-                    .endpoint;
-                let consignment_path_copy = consignment_path.clone();
-                let unlocked_state_copy = unlocked_state.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    unlocked_state_copy.rgb_post_consignment(
-                        &proxy_url,
+                if unlocked_state
+                    .rgb_file_transfer_handler
+                    .queue_consignment(
+                        counterparty_node_id,
                         funding_txid_str.clone(),
-                        &consignment_path_copy,
-                        funding_txid_str,
-                        None,
+                        consignment_bytes,
                     )
-                })
-                .await
-                .unwrap();
-
-                if let Err(e) = res {
-                    tracing::error!("cannot post consignment: {e}");
-                    return Err(ReplayEvent());
+                    .is_err()
+                {
+                    return abort_funding(
+                        s!("consignment is too large to send over p2p"),
+                        &unlocked_state.channel_manager,
+                        &temporary_channel_id,
+                        &counterparty_node_id,
+                    );
                 }
                 tracing::debug!(
                     asset_id,
                     consignment_path = %consignment_path.display(),
                     "Preserving consignment_out for rgb_send_end"
                 );
+
+                // send the asset's media files over the same p2p link
+                let rgb_info = get_rgb_channel_info_pending(
+                    &temporary_channel_id,
+                    unlocked_state.kv_store.as_ref(),
+                );
+                if rgb_info.counterparty_knows_asset {
+                    tracing::info!(
+                        "counterparty already knows asset {asset_id}, not sending its media"
+                    );
+                } else {
+                    let unlocked_state_copy = unlocked_state.clone();
+                    let medias = match tokio::task::spawn_blocking(move || {
+                        unlocked_state_copy.rgb_list_asset_media(asset_id)
+                    })
+                    .await
+                    .unwrap()
+                    {
+                        Ok(medias) => medias,
+                        Err(e) => {
+                            return handle_funding_prepare_err(
+                                e,
+                                &unlocked_state.channel_manager,
+                                &temporary_channel_id,
+                                &counterparty_node_id,
+                            );
+                        }
+                    };
+                    for media in medias {
+                        let media_bytes = match fs::read(&media.file_path) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                return abort_funding(
+                                    format!("cannot read asset media file: {e}"),
+                                    &unlocked_state.channel_manager,
+                                    &temporary_channel_id,
+                                    &counterparty_node_id,
+                                );
+                            }
+                        };
+                        if unlocked_state
+                            .rgb_file_transfer_handler
+                            .queue_media(
+                                counterparty_node_id,
+                                funding_txid_str.clone(),
+                                media.digest,
+                                media_bytes,
+                            )
+                            .is_err()
+                        {
+                            return abort_funding(
+                                s!("asset media is too large to send over p2p"),
+                                &unlocked_state.channel_manager,
+                                &temporary_channel_id,
+                                &counterparty_node_id,
+                            );
+                        }
+                    }
+                }
+
+                unlocked_state.peer_manager.process_events();
             }
 
             let channel_manager_copy = unlocked_state.channel_manager.clone();
 
-            // Give the funding transaction back to LDK for opening the channel.
-            if channel_manager_copy
-                .funding_transaction_generated(
+            // Colored funding is handed to LDK in checked manual-broadcast mode. LDK first
+            // persists the counterparty signature and channel monitor, then emits the replayable
+            // FundingTxBroadcastSafe event. The RGB transaction is never broadcast before that
+            // durable recovery boundary. Vanilla channels retain LDK's automatic broadcaster.
+            let handoff_result = if is_colored {
+                channel_manager_copy.funding_transaction_generated_manual_broadcast(
                     temporary_channel_id,
                     counterparty_node_id,
                     funding_tx,
                 )
-                .is_err()
-            {
+            } else {
+                channel_manager_copy.funding_transaction_generated(
+                    temporary_channel_id,
+                    counterparty_node_id,
+                    funding_tx,
+                )
+            };
+            if handoff_result.is_err() {
                 tracing::error!(
                     "ERROR: Channel went away before we could fund it. The peer disconnected or refused the channel.",
                 );
+                if let Err(cleanup_error) = abort_staged_standard_funding(
+                    unlocked_state.clone(),
+                    &temporary_channel_id,
+                    &unsigned_psbt,
+                    is_colored,
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to roll back rejected channel funding: {cleanup_error}"
+                    );
+                }
+            } else if let Some(record) = sender_record.as_mut() {
+                record.stage = RgbSenderFundingStage::HandedToLdk;
+                if let Err(error) =
+                    write_rgb_sender_funding_record(record, unlocked_state.kv_store.as_ref())
+                {
+                    // HandoffReady was persisted before the LDK call. Do not replay or roll back
+                    // after LDK accepted the transaction; startup reconciliation uses the durable
+                    // channel state to resolve this boundary.
+                    tracing::error!(
+                        funding_txid = %record.funding_txid,
+                        error = %error,
+                        "failed to advance RGB sender journal after LDK handoff"
+                    );
+                }
+                #[cfg(debug_assertions)]
+                funding_kill_checkpoint(FUNDING_CHECKPOINT_HANDED_TO_LDK);
             }
         }
-        Event::FundingTxBroadcastSafe { .. } => {
-            // We don't use the manual broadcasting feature, so this event should never be seen.
+        Event::FundingTxBroadcastSafe {
+            channel_id,
+            funding_txo,
+            former_temporary_channel_id,
+            ..
+        } => {
+            let _rgb_funding_operation = unlocked_state
+                .rgb_funding_recovery_guard
+                .lock_operation()
+                .await;
+            let funding_txid = funding_txo.txid.to_string();
+            let mut record =
+                read_rgb_sender_funding_record(&funding_txid, unlocked_state.kv_store.as_ref())
+                    .map_err(|error| {
+                        tracing::error!(
+                            funding_txid,
+                            error = %error,
+                            "cannot load RGB sender journal at the broadcast-safe boundary"
+                        );
+                        ReplayEvent()
+                    })?;
+            let expected_temporary_channel_id = former_temporary_channel_id.0.as_hex().to_string();
+            let expected_final_channel_id = channel_id.0.as_hex().to_string();
+            if !record.manual_broadcast
+                || record.temporary_channel_id != expected_temporary_channel_id
+                || record.final_channel_id.as_deref() != Some(expected_final_channel_id.as_str())
+            {
+                tracing::error!(
+                    funding_txid,
+                    channel_id = %channel_id,
+                    former_temporary_channel_id = %former_temporary_channel_id,
+                    "RGB sender journal does not match the manual-broadcast event"
+                );
+                return Err(ReplayEvent());
+            }
+
+            unlocked_state.add_channel_id(former_temporary_channel_id, channel_id);
+            match record.stage {
+                RgbSenderFundingStage::HandoffReady | RgbSenderFundingStage::HandedToLdk => {
+                    // Keep the event pending for one complete background-processor cycle. That
+                    // cycle persists the funded ChannelManager state before a subsequent replay is
+                    // allowed to publish the transaction. If persistence fails, the event remains
+                    // pending and the exact PSBT is never broadcast.
+                    record.stage = RgbSenderFundingStage::BroadcastSafeObserved;
+                    write_rgb_sender_funding_record(&record, unlocked_state.kv_store.as_ref())
+                        .map_err(|error| {
+                            tracing::error!(
+                                funding_txid,
+                                error = %error,
+                                "cannot persist RGB sender broadcast-safe observation"
+                            );
+                            ReplayEvent()
+                        })?;
+                    return Err(ReplayEvent());
+                }
+                RgbSenderFundingStage::BroadcastSafeObserved => {
+                    #[cfg(debug_assertions)]
+                    funding_kill_checkpoint(FUNDING_CHECKPOINT_BROADCAST_SAFE);
+                    // This intent is durable before the first call that may publish the exact PSBT.
+                    // A crash from this point onward always retries the same transaction and never
+                    // releases its RGB allocation as though it had not been broadcast.
+                    record.stage = RgbSenderFundingStage::Broadcasting;
+                    write_rgb_sender_funding_record(&record, unlocked_state.kv_store.as_ref())
+                        .map_err(|error| {
+                            tracing::error!(
+                                funding_txid,
+                                error = %error,
+                                "cannot persist RGB sender broadcast intent"
+                            );
+                            ReplayEvent()
+                        })?;
+                    #[cfg(debug_assertions)]
+                    funding_kill_checkpoint(FUNDING_CHECKPOINT_BROADCASTING);
+                }
+                RgbSenderFundingStage::Broadcasting | RgbSenderFundingStage::BroadcastCommitted => {
+                }
+                RgbSenderFundingStage::Finalized | RgbSenderFundingStage::DurablyCompleted => {
+                    let wallet = Arc::clone(&unlocked_state.rgb_wallet_wrapper);
+                    let kv_store = Arc::clone(&unlocked_state.kv_store);
+                    let finalized = record.clone();
+                    tokio::task::spawn_blocking(move || {
+                        complete_finalized_sender_funding(
+                            &finalized,
+                            wallet.as_ref(),
+                            kv_store.as_ref(),
+                        )
+                    })
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(
+                            funding_txid,
+                            error = %error,
+                            "RGB sender completion task failed during event replay"
+                        );
+                        ReplayEvent()
+                    })?
+                    .map_err(|error| {
+                        tracing::error!(
+                            funding_txid,
+                            error = %error,
+                            "finalized RGB sender funding is not durably complete"
+                        );
+                        ReplayEvent()
+                    })?;
+                    unlocked_state
+                        .rgb_funding_recovery_guard
+                        .clear(&funding_txid);
+                    return Ok(());
+                }
+                stage => {
+                    tracing::error!(
+                        funding_txid,
+                        ?stage,
+                        "RGB sender journal reached broadcast-safe in an invalid stage"
+                    );
+                    return Err(ReplayEvent());
+                }
+            }
+
+            let wallet = Arc::clone(&unlocked_state.rgb_wallet_wrapper);
+            let kv_store = Arc::clone(&unlocked_state.kv_store);
+            tokio::task::spawn_blocking(move || {
+                let funding_txid = record.funding_txid.clone();
+                commit_and_finalize_rgb_sender_funding(record, wallet.as_ref(), kv_store.as_ref())?;
+                let finalized = read_rgb_sender_funding_record(&funding_txid, kv_store.as_ref())?;
+                complete_finalized_sender_funding(&finalized, wallet.as_ref(), kv_store.as_ref())
+            })
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    funding_txid,
+                    error = %error,
+                    "RGB sender broadcast task failed"
+                );
+                ReplayEvent()
+            })?
+            .map_err(|error| {
+                tracing::error!(
+                    funding_txid,
+                    error = %error,
+                    "RGB sender broadcast could not be committed"
+                );
+                ReplayEvent()
+            })?;
+            unlocked_state
+                .rgb_funding_recovery_guard
+                .clear(&funding_txid);
         }
         Event::PaymentClaimable {
             payment_hash,
@@ -2459,6 +5055,33 @@ async fn handle_ldk_events(
                 payment_hash,
                 amount_msat,
             );
+            #[cfg(test)]
+            if node_override_matches(
+                &HOLD_PAYMENT_CLAIMABLE_ON_NODE,
+                unlocked_state.channel_manager.get_our_node_id(),
+            ) {
+                tracing::info!("TEST: holding PaymentClaimable for {}", payment_hash);
+                HELD_PAYMENT_CLAIMABLE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(());
+            }
+            #[cfg(test)]
+            {
+                let our_node_id = unlocked_state.channel_manager.get_our_node_id();
+                if node_override_matches(&DEFER_PAYMENT_CLAIMABLE_ON_NODE, our_node_id) {
+                    tracing::info!("TEST: deferring PaymentClaimable for {}", payment_hash);
+                    PAYMENT_CLAIMABLE_DEFERRED.store(true, Ordering::SeqCst);
+                    let deferred_at = Instant::now();
+                    while node_override_matches(&DEFER_PAYMENT_CLAIMABLE_ON_NODE, our_node_id) {
+                        if deferred_at.elapsed() > MAX_PAYMENT_DEFERRAL {
+                            panic!(
+                                "TEST: PaymentClaimable for {payment_hash} deferred for too long"
+                            )
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    tracing::info!("TEST: resuming PaymentClaimable for {}", payment_hash);
+                }
+            }
 
             // `color_commitment` writes the authoritative per-HTLC record under
             // `chan_id || payment_hash` but never under the bare `<payment_hash>` key — that would
@@ -2782,12 +5405,10 @@ async fn handle_ldk_events(
             ..
         } => {
             #[cfg(test)]
-            if IGNORE_INBOUND_CHANNELS_ON_NODE
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|id| *id == unlocked_state.channel_manager.get_our_node_id())
-            {
+            if node_override_matches(
+                &IGNORE_INBOUND_CHANNELS_ON_NODE,
+                unlocked_state.channel_manager.get_our_node_id(),
+            ) {
                 tracing::info!(
                     "TEST: ignoring inbound channel {} from {}",
                     temporary_channel_id,
@@ -3071,13 +5692,19 @@ async fn handle_ldk_events(
             former_temporary_channel_id,
             ..
         } => {
+            let _rgb_funding_operation = unlocked_state
+                .rgb_funding_recovery_guard
+                .lock_operation()
+                .await;
             tracing::info!(
                 "EVENT: Channel {} with peer {} is pending awaiting funding lock-in!",
                 channel_id,
                 hex_str(&counterparty_node_id.serialize()),
             );
 
-            unlocked_state.add_channel_id(former_temporary_channel_id.unwrap(), channel_id);
+            if let Some(temporary_channel_id) = former_temporary_channel_id {
+                unlocked_state.add_channel_id(temporary_channel_id, channel_id);
+            }
 
             if unlocked_state
                 .virtual_channel_session_store()
@@ -3087,10 +5714,86 @@ async fn handle_ldk_events(
                     "EVENT: virtual channel {} is pending in trusted no-broadcast mode",
                     channel_id,
                 );
+                // reclaim the staged-funding slot now instead of waiting for the sweeper
+                unlocked_state
+                    .rgb_file_transfer_handler
+                    .forget_staged_funding(&funding_txo.txid.to_string());
                 return Ok(());
             }
 
             let funding_txid = funding_txo.txid.to_string();
+            let channel_pending_sender_record = read_rgb_sender_funding_record_optional(
+                &funding_txid,
+                unlocked_state.kv_store.as_ref(),
+            )
+            .map_err(|error| {
+                tracing::error!(
+                    funding_txid,
+                    error = %error,
+                    "cannot inspect RGB sender journal at ChannelPending"
+                );
+                ReplayEvent()
+            })?;
+            if let Some(record) = channel_pending_sender_record.as_ref() {
+                let expected_channel_id = channel_id.to_string();
+                if record.final_channel_id.as_deref() != Some(expected_channel_id.as_str()) {
+                    tracing::error!(
+                        funding_txid,
+                        channel_id = %channel_id,
+                        journal_channel_id = ?record.final_channel_id,
+                        "RGB sender journal does not match ChannelPending"
+                    );
+                    return Err(ReplayEvent());
+                }
+                if matches!(
+                    record.stage,
+                    RgbSenderFundingStage::Finalized | RgbSenderFundingStage::DurablyCompleted
+                ) {
+                    let finalized_record = record.clone();
+                    let backup_wallet = Arc::clone(&unlocked_state.rgb_wallet_wrapper);
+                    let recovery_kv_store = Arc::clone(&unlocked_state.kv_store);
+                    tokio::task::spawn_blocking(move || {
+                        complete_finalized_sender_funding(
+                            &finalized_record,
+                            backup_wallet.as_ref(),
+                            recovery_kv_store.as_ref(),
+                        )
+                    })
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(
+                            funding_txid,
+                            error = %error,
+                            "finalized RGB sender backup task failed"
+                        );
+                        ReplayEvent()
+                    })?
+                    .map_err(|error| {
+                        tracing::error!(
+                            funding_txid,
+                            error = %error,
+                            "cannot complete finalized RGB sender funding"
+                        );
+                        ReplayEvent()
+                    })?;
+                    unlocked_state
+                        .rgb_funding_recovery_guard
+                        .clear(&funding_txid);
+                    return Ok(());
+                }
+                if record.manual_broadcast {
+                    // The FundingTxBroadcastSafe event and sender journal exclusively own the
+                    // manual-broadcast transaction. ChannelPending may be delivered first or may
+                    // survive an interrupted broadcast event; acknowledging it here avoids a hot
+                    // replay loop without mutating or discarding the recovery state.
+                    tracing::info!(
+                        funding_txid,
+                        stage = ?record.stage,
+                        "deferring RGB ChannelPending finalization to the manual-broadcast journal"
+                    );
+                    return Ok(());
+                }
+            }
 
             // Check if we have a stored PSBT (initiator case)
             match unlocked_state
@@ -3098,7 +5801,14 @@ async fn handle_ldk_events(
                 .read(PSBT_NAMESPACE, "", &funding_txid)
             {
                 Ok(psbt_bytes) => {
-                    let psbt_str = String::from_utf8(psbt_bytes).unwrap();
+                    let psbt_str = String::from_utf8(psbt_bytes).map_err(|error| {
+                        tracing::error!(
+                            funding_txid,
+                            error = %error,
+                            "persisted channel funding PSBT is not valid UTF-8"
+                        );
+                        ReplayEvent()
+                    })?;
 
                     let state_copy = unlocked_state.clone();
                     let psbt_str_copy = psbt_str.clone();
@@ -3107,67 +5817,197 @@ async fn handle_ldk_events(
                         is_channel_rgb(&channel_id, unlocked_state.kv_store.as_ref());
                     tracing::info!("Initiator of the channel (colored: {})", is_chan_colored);
 
-                    let join_result = tokio::task::spawn_blocking(move || {
-                        if is_chan_colored {
-                            state_copy.rgb_send_end(psbt_str_copy).map(|r| r.txid)
-                        } else {
-                            state_copy.rgb_send_btc_end(psbt_str_copy)
+                    let mut sender_record = if is_chan_colored {
+                        channel_pending_sender_record
+                    } else {
+                        None
+                    };
+                    if let Some(record) = sender_record.as_mut() {
+                        record.stage = RgbSenderFundingStage::Broadcasting;
+                        if let Err(error) = write_rgb_sender_funding_record(
+                            record,
+                            unlocked_state.kv_store.as_ref(),
+                        ) {
+                            tracing::error!("Cannot persist RGB sender broadcast intent: {error}");
+                            return Err(ReplayEvent());
                         }
-                    })
-                    .await;
+                    }
 
-                    let finalize_result = join_result.map_err(|join_err| {
-                        tracing::error!("Channel opening finalization task failed: {join_err:?}");
-                        ReplayEvent()
-                    })?;
+                    if let Some(record) = sender_record {
+                        let recovery_wallet = Arc::clone(&unlocked_state.rgb_wallet_wrapper);
+                        let recovery_kv_store = Arc::clone(&unlocked_state.kv_store);
+                        let legacy_funding_txid = funding_txid.clone();
+                        tokio::task::spawn_blocking(move || {
+                            commit_and_finalize_rgb_sender_funding(
+                                record,
+                                recovery_wallet.as_ref(),
+                                recovery_kv_store.as_ref(),
+                            )?;
+                            let finalized = read_rgb_sender_funding_record(
+                                &legacy_funding_txid,
+                                recovery_kv_store.as_ref(),
+                            )?;
+                            complete_finalized_sender_funding(
+                                &finalized,
+                                recovery_wallet.as_ref(),
+                                recovery_kv_store.as_ref(),
+                            )
+                        })
+                        .await
+                        .map_err(|error| {
+                            tracing::error!("Legacy RGB sender finalization task failed: {error}");
+                            ReplayEvent()
+                        })?
+                        .map_err(|error| {
+                            tracing::error!("Legacy RGB sender finalization failed: {error}");
+                            ReplayEvent()
+                        })?;
+                        unlocked_state
+                            .rgb_funding_recovery_guard
+                            .clear(&funding_txid);
+                    } else {
+                        let join_result = tokio::task::spawn_blocking(move || {
+                            if is_chan_colored {
+                                // The consignment already went to the peer over P2P at funding
+                                // time, so only local broadcast and DB bookkeeping remain.
+                                state_copy
+                                    .rgb_send_end_db_update_only(psbt_str_copy)
+                                    .map(|result| result.txid)
+                            } else {
+                                state_copy.rgb_send_btc_end(psbt_str_copy)
+                            }
+                        })
+                        .await;
 
-                    let _txid = finalize_result.map_err(|e| {
-                        tracing::error!("Error completing channel opening: {e:?}");
-                        ReplayEvent()
-                    })?;
+                        let finalize_result = join_result.map_err(|join_err| {
+                            tracing::error!(
+                                "Channel opening finalization task failed: {join_err:?}"
+                            );
+                            ReplayEvent()
+                        })?;
 
-                    // Channel funded successfully; drop the pending-funding marker so a
-                    // later close does not attempt to abort the already-broadcast tx.
-                    let _ = unlocked_state.kv_store.remove(
+                        let _txid = finalize_result.map_err(|error| {
+                            tracing::error!("Error completing channel opening: {error:?}");
+                            ReplayEvent()
+                        })?;
+                    }
+
+                    // RGB finalization removes this marker before its recovery tombstone. This
+                    // idempotent removal also covers vanilla funding and legacy records.
+                    remove_rgb_sender_funding_entry(
                         PENDING_FUNDING_NAMESPACE,
-                        "",
                         &channel_id.0.as_hex().to_string(),
-                        false,
-                    );
+                        "cannot remove finalized pending-funding marker",
+                        unlocked_state.kv_store.as_ref(),
+                    )
+                    .map_err(|error| {
+                        tracing::error!(
+                            channel_id = %channel_id,
+                            error = %error,
+                            "cannot remove finalized pending-funding marker"
+                        );
+                        ReplayEvent()
+                    })?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    // acceptor — read consignment from KVStore
-                    let consignment_data =
-                        match unlocked_state.kv_store.read_rgb_consignment(&funding_txid) {
-                            Ok(data) => data,
-                            Err(_) => {
-                                // vanilla channel — no consignment
-                                return Ok(());
-                            }
-                        };
-                    unlocked_state
+                    // The receiver's validated asset metadata is committed with the durable RGB
+                    // funding acceptance. This event only releases the consignment copy retained
+                    // for LDK event replay; validating it again here would repeat the full history
+                    // walk and can take minutes for mature contracts.
+                    if unlocked_state
                         .kv_store
-                        .write(
-                            FUNDING_CONSIGNMENT_NAMESPACE,
-                            "",
-                            &funding_txid,
-                            consignment_data.clone(),
-                        )
-                        .unwrap();
-                    let consignment =
-                        RgbTransfer::load(&mut std::io::Cursor::new(consignment_data))
-                            .expect("successful consignment load");
-                    unlocked_state
-                        .kv_store
-                        .remove_rgb_consignment(&funding_txid);
-
-                    match unlocked_state.rgb_save_new_asset(consignment, funding_txid) {
-                        Ok(_) => {}
-                        Err(e) if e.to_string().contains("UNIQUE constraint failed") => {}
-                        Err(e) => panic!("Failed saving asset: {e}"),
+                        .read_rgb_consignment(&funding_txid)
+                        .is_ok()
+                    {
+                        unlocked_state
+                            .kv_store
+                            .remove_rgb_consignment(&funding_txid);
                     }
                 }
-                Err(e) => panic!("Failed to read PSBT from KVStore: {e}"),
+                Err(error) => {
+                    tracing::error!(
+                        funding_txid,
+                        error = %error,
+                        "cannot read persisted channel funding PSBT"
+                    );
+                    return Err(ReplayEvent());
+                }
+            }
+
+            if let Some(temporary_channel_id) = former_temporary_channel_id {
+                let temporary_channel_id = temporary_channel_id.0.as_hex().to_string();
+                match read_pending_funding_acceptance(
+                    &temporary_channel_id,
+                    unlocked_state.kv_store.as_ref(),
+                ) {
+                    Ok(record) => {
+                        let recovery_channel_manager = Arc::clone(&unlocked_state.channel_manager);
+                        let recovery_wallet = Arc::clone(&unlocked_state.rgb_wallet_wrapper);
+                        let recovery_kv_store = Arc::clone(&unlocked_state.kv_store);
+                        let recovery_funding_txid = record.funding_txid.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let funded_channel_ids =
+                                funded_channel_ids(recovery_channel_manager.as_ref());
+                            match reconcile_receiver_funding_record(
+                                &record,
+                                &funded_channel_ids,
+                                recovery_wallet.as_ref(),
+                                recovery_kv_store.as_ref(),
+                            )? {
+                                None => Ok(()),
+                                Some(recovery) => Err(RgbLibError::Internal {
+                                    details: format!(
+                                        "receiver funding '{}' remains quarantined in {:?}",
+                                        recovery.funding_txid, record.stage
+                                    ),
+                                }),
+                            }
+                        })
+                        .await
+                        .map_err(|error| {
+                            unlocked_state
+                                .rgb_funding_recovery_guard
+                                .quarantine(&recovery_funding_txid);
+                            tracing::error!(
+                                temporary_channel_id,
+                                error = %error,
+                                "RGB receiver reconciliation task failed"
+                            );
+                            ReplayEvent()
+                        })?
+                        .map_err(|error| {
+                            unlocked_state
+                                .rgb_funding_recovery_guard
+                                .quarantine(&recovery_funding_txid);
+                            tracing::error!(
+                                temporary_channel_id,
+                                error = %error,
+                                "cannot reconcile RGB receiver funding at ChannelPending"
+                            );
+                            ReplayEvent()
+                        })?;
+                        unlocked_state
+                            .rgb_funding_recovery_guard
+                            .clear(&recovery_funding_txid);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        unlocked_state
+                            .rgb_funding_recovery_guard
+                            .quarantine(&funding_txid);
+                        tracing::error!(
+                            temporary_channel_id,
+                            error = %error,
+                            "cannot inspect RGB receiver funding journal at ChannelPending"
+                        );
+                        return Err(ReplayEvent());
+                    }
+                }
+
+                // The consignment record can stop counting against the node-wide cap.
+                unlocked_state
+                    .rgb_file_transfer_handler
+                    .forget_staged_funding(&funding_txid);
             }
         }
         Event::ChannelReady {
@@ -3183,12 +6023,38 @@ async fn handle_ldk_events(
                 hex_str(&counterparty_node_id.serialize()),
             );
 
-            tokio::task::spawn_blocking(move || {
-                unlocked_state.rgb_refresh(None, vec![], false).unwrap();
-                unlocked_state.rgb_refresh(None, vec![], true).unwrap()
+            #[cfg(feature = "test-utils")]
+            let our_node_id = unlocked_state.channel_manager.get_our_node_id();
+
+            let _rgb_wallet_operation = unlocked_state
+                .rgb_funding_recovery_guard
+                .lock_operation()
+                .await;
+            match tokio::task::spawn_blocking(move || {
+                unlocked_state.rgb_refresh(None, vec![], false)?;
+                unlocked_state.rgb_refresh(None, vec![], true).map(|_| ())
             })
             .await
-            .unwrap();
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        channel_id = %channel_id,
+                        error = %error,
+                        "channel became ready but wallet refresh did not complete"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        channel_id = %channel_id,
+                        error = %error,
+                        "channel-ready refresh worker failed"
+                    );
+                }
+            }
+
+            #[cfg(feature = "test-utils")]
+            record_processed_channel_ready_event(channel_id, our_node_id);
         }
         Event::ChannelClosed {
             channel_id,
@@ -3196,7 +6062,7 @@ async fn handle_ldk_events(
             user_channel_id: _,
             counterparty_node_id,
             channel_capacity_sats: _,
-            channel_funding_txo: _,
+            channel_funding_txo,
             last_local_balance_msat: _,
         } => {
             tracing::info!(
@@ -3208,8 +6074,24 @@ async fn handle_ldk_events(
                 reason
             );
 
+            // we can drop the funding consignment now that the channel has been closed
+            if let Some(funding_txo) = channel_funding_txo {
+                let funding_txid = funding_txo.txid.to_string();
+                unlocked_state
+                    .kv_store
+                    .remove_rgb_consignment(&funding_txid);
+                // drop the in-memory record too, so it stops counting against the node-wide cap
+                unlocked_state
+                    .rgb_file_transfer_handler
+                    .forget_staged_funding(&funding_txid);
+            }
+
             // Release any funds locked for a funding tx that was never broadcast.
             handle_open_chan_fail(&channel_id, unlocked_state.clone()).await;
+            remove_finalized_sender_tombstone_for_channel(
+                &channel_id,
+                unlocked_state.kv_store.as_ref(),
+            );
 
             let former_temporary_channel_id = unlocked_state.delete_channel_id(channel_id);
             let virtual_draft_temporary_channel_id = if unlocked_state
@@ -3454,6 +6336,10 @@ async fn handle_ldk_events(
             // event.
         }
         Event::BumpTransaction(event) => {
+            let _rgb_wallet_operation = unlocked_state
+                .rgb_funding_recovery_guard
+                .lock_operation()
+                .await;
             unlocked_state
                 .bump_tx_event_handler
                 .handle_event(&event)
@@ -3492,8 +6378,25 @@ async fn handle_ldk_events(
     Ok(())
 }
 
-impl OutputSpender for RgbOutputSpender {
-    fn spend_spendable_outputs(
+// Resolves the RGB amount a spendable output carries. An empty map is a truly vanilla tx (0);
+// a non-empty map that lacks the output is an invariant violation and must error so the sweep
+// retries rather than paying the colored output out as vanilla BTC, stranding the allocation.
+fn rgb_amount_for_spendable_output(
+    output_map: &HashMap<u32, u64>,
+    vout: u32,
+    txid: &str,
+) -> Result<u64, String> {
+    match output_map.get(&vout) {
+        Some(amt) => Ok(*amt),
+        None if output_map.is_empty() => Ok(0),
+        None => Err(format!(
+            "spendable output {txid}:{vout} absent from a non-empty transfer info map"
+        )),
+    }
+}
+
+impl RgbOutputSpender {
+    fn try_spend_spendable_outputs(
         &self,
         descriptors: &[&SpendableOutputDescriptor],
         outputs: Vec<TxOut>,
@@ -3501,11 +6404,18 @@ impl OutputSpender for RgbOutputSpender {
         feerate_sat_per_1000_weight: u32,
         locktime: Option<LockTime>,
         secp_ctx: &Secp256k1<All>,
-    ) -> Result<bitcoin::Transaction, ()> {
+    ) -> Result<bitcoin::Transaction, String> {
+        let _rgb_wallet_operation = self
+            .rgb_funding_recovery_guard
+            .lock_rgb_wallet_mutation()
+            .map_err(|error| {
+                tracing::debug!(%error, "deferring RGB output sweep during funding transition");
+                error.to_string()
+            })?;
         let mut hasher = DefaultHasher::new();
         descriptors.hash(&mut hasher);
         let descriptors_hash = hasher.finish();
-        let mut txes = self.txes.lock().unwrap();
+        let mut txes = self.txes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = txes.get(&descriptors_hash) {
             return Ok(tx.clone());
         }
@@ -3526,19 +6436,23 @@ impl OutputSpender for RgbOutputSpender {
             let txid = outpoint.txid;
             let txid_str = txid.to_string();
 
-            let transfer_info_exists = self
-                .kv_store
-                .read(
-                    RGB_PRIMARY_NS,
-                    lightning::rgb_utils::RGB_TRANSFER_INFO_NS,
-                    &txid_str,
-                )
-                .is_ok();
-            if !transfer_info_exists {
+            let Ok(transfer_info_bytes) = self.kv_store.read(
+                RGB_PRIMARY_NS,
+                lightning::rgb_utils::RGB_TRANSFER_INFO_NS,
+                &txid_str,
+            ) else {
                 continue;
-            }
-            let transfer_info = self.kv_store.read_rgb_transfer_info(&txid_str);
-            if transfer_info.rgb_amount == 0 {
+            };
+            // decode here rather than via read_rgb_transfer_info: that one panics, and we hold
+            // the txes lock, so a bad record would poison it and brick every later sweep
+            let transfer_info: TransferInfo = bincode::deserialize(&transfer_info_bytes)
+                .map_err(|e| format!("cannot decode transfer info for {txid_str}: {e}"))?;
+            let amt_rgb = rgb_amount_for_spendable_output(
+                &transfer_info.output_map,
+                outpoint.index.into(),
+                &txid_str,
+            )?;
+            if amt_rgb == 0 {
                 continue;
             }
 
@@ -3547,22 +6461,18 @@ impl OutputSpender for RgbOutputSpender {
             let closing_height = self
                 .rgb_wallet_wrapper
                 .get_tx_height(txid_str.clone())
-                .map_err(|_| ())?;
-            let Some(closing_height) = closing_height else {
-                tracing::warn!(
-                    txid = txid_str,
-                    "closing tx not confirmed yet; deferring sweep"
-                );
-                return Err(());
-            };
+                .map_err(|e| format!("cannot get height of {txid_str}: {e}"))?
+                .ok_or_else(|| format!("transaction {txid_str} is not confirmed yet"))?;
+            let witness_id = RgbTxid::from_str(&txid_str)
+                .map_err(|error| format!("invalid sweep witness transaction ID: {error}"))?;
             let update_res = self
                 .rgb_wallet_wrapper
-                .update_witnesses(closing_height, vec![RgbTxid::from_str(&txid_str).unwrap()])
-                .map_err(|e| {
-                    tracing::error!(error = %e, txid = txid_str, "update_witnesses failed; deferring sweep");
-                })?;
+                .update_witnesses(closing_height, vec![witness_id])
+                .map_err(|e| format!("error while updating witnesses for {txid_str}: {e}"))?;
             if !update_res.failed.is_empty() {
-                return Err(());
+                return Err(format!(
+                    "failed to update witnesses for {txid_str}: {update_res:?}"
+                ));
             }
 
             let contract_id = transfer_info.contract_id;
@@ -3572,35 +6482,57 @@ impl OutputSpender for RgbOutputSpender {
                 recipient_id.clone()
             } else {
                 new_asset = true;
-                let receive_data = self
-                    .rgb_wallet_wrapper
-                    .witness_receive(
-                        None,
-                        Assignment::Any,
-                        None,
-                        vec![self.proxy_endpoint.clone()],
-                        0,
-                    )
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "witness_receive failed; deferring sweep");
-                    })?;
-                let script_pubkey = script_buf_from_recipient_id(receive_data.recipient_id.clone())
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "invalid sweep recipient id; deferring sweep");
-                    })?
-                    .ok_or_else(|| {
-                        tracing::error!("sweep recipient id has no script; deferring sweep");
-                    })?;
+                let cache_key = (descriptors_hash, contract_id);
+                let cached = {
+                    let mut recipients = self
+                        .sweep_recipients
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    match recipients.get(&cache_key) {
+                        Some((recipient_id, expiration))
+                            if sweep_receive_is_reusable(
+                                get_current_timestamp(),
+                                *expiration,
+                                self.static_state.reuse_addresses,
+                            ) =>
+                        {
+                            Some(recipient_id.clone())
+                        }
+                        // too close to expiry to be used again, don't keep retrying against it
+                        Some(_) => {
+                            recipients.remove(&cache_key);
+                            None
+                        }
+                        None => None,
+                    }
+                };
+                let recipient_id = match cached {
+                    Some(recipient_id) => recipient_id,
+                    None => {
+                        let expiration =
+                            get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS;
+                        let receive_data = self
+                            .rgb_wallet_wrapper
+                            .witness_receive(None, Assignment::Any, expiration, vec![], 0)
+                            .map_err(|e| format!("cannot get a witness receive script: {e}"))?;
+                        self.sweep_recipients
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(cache_key, (receive_data.recipient_id.clone(), expiration));
+                        receive_data.recipient_id
+                    }
+                };
+                let script_pubkey = script_buf_from_recipient_id(recipient_id.clone())
+                    .map_err(|e| format!("invalid sweep recipient id: {e}"))?
+                    .ok_or_else(|| s!("sweep recipient id has no script"))?;
                 txouts.push(TxOut {
                     value: Amount::from_sat(
                         self.static_state.config.channels.dust_limit_msat / 1000,
                     ),
                     script_pubkey,
                 });
-                receive_data.recipient_id
+                recipient_id
             };
-
-            let amt_rgb = transfer_info.rgb_amount;
 
             asset_info
                 .entry(contract_id)
@@ -3615,14 +6547,17 @@ impl OutputSpender for RgbOutputSpender {
         }
 
         if vanilla_descriptor {
-            return self.signer.spend_spendable_outputs(
-                descriptors.as_ref(),
-                txouts,
-                change_destination_script,
-                feerate_sat_per_1000_weight,
-                locktime,
-                secp_ctx,
-            );
+            return self
+                .signer
+                .spend_spendable_outputs(
+                    descriptors.as_ref(),
+                    txouts,
+                    change_destination_script,
+                    feerate_sat_per_1000_weight,
+                    locktime,
+                    secp_ctx,
+                )
+                .map_err(|()| s!("cannot spend vanilla spendable outputs"));
         }
 
         let feerate_sat_per_1000_weight = self.static_state.config.rgb.fee_rate_sat_vb as u32 * 250; // 1 sat/vB = 250 sat/kw
@@ -3635,9 +6570,7 @@ impl OutputSpender for RgbOutputSpender {
                 feerate_sat_per_1000_weight,
                 locktime,
             )
-            .map_err(|_| {
-                tracing::error!("failed to build sweep PSBT; deferring sweep");
-            })?;
+            .map_err(|()| s!("cannot create the spendable outputs PSBT"))?;
 
         let mut asset_info_map = map![];
         for (contract_id, (vout, amt_rgb, _)) in asset_info.clone() {
@@ -3656,82 +6589,103 @@ impl OutputSpender for RgbOutputSpender {
             nonce: None,
         };
 
-        let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).unwrap();
+        let mut psbt = RgbLibPsbt::from_str(&psbt.to_string())
+            .map_err(|error| format!("failed to convert sweep PSBT for RGB coloring: {error}"))?;
         let consignments = self
             .rgb_wallet_wrapper
             .color_psbt_and_consume(&mut psbt, coloring_info)
-            .map_err(|e| {
-                tracing::error!(error = %e, "failed to color sweep PSBT; deferring sweep");
-            })?;
+            .map_err(|e| format!("cannot color the sweep PSBT: {e}"))?;
 
-        let mut psbt = Psbt::from_str(&psbt.to_string()).expect("valid transaction");
+        let mut psbt = Psbt::from_str(&psbt.to_string()).map_err(|error| {
+            format!("failed to convert colored sweep PSBT for signing: {error}")
+        })?;
 
         psbt = self
             .signer
             .sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)
-            .map_err(|e| {
-                tracing::error!(error = ?e, "failed to sign sweep PSBT; deferring sweep");
-            })?;
+            .map_err(|e| format!("cannot sign the sweep PSBT: {e:?}"))?;
 
         let spending_tx = match psbt.extract_tx() {
             Ok(tx) => tx,
             Err(ExtractTxError::MissingInputValue { tx }) => tx,
-            Err(e) => panic!("should never happen: {e}"),
+            Err(error) => {
+                tracing::error!(%error, "failed to extract signed sweep transaction");
+                return Err(format!(
+                    "failed to extract signed sweep transaction: {error}"
+                ));
+            }
         };
 
         let closing_txid = spending_tx.compute_txid().to_string();
 
-        let handle = Handle::current();
+        let handle = Handle::try_current()
+            .map_err(|error| format!("RGB output sweep has no Tokio runtime: {error}"))?;
         let _ = handle.enter();
 
         for consignment in consignments {
             let contract_id = consignment.contract_id();
 
-            let (mut vout, _, recipient_id) = asset_info[&contract_id].clone();
-            vout += 1;
-
+            // persist consignment and hand it to rgb-lib (out-of-band)
             let consignment_path = self
                 .static_state
                 .ldk_data_dir
-                .join(format!("consignment_{}", closing_txid.clone()));
+                .join(format!("consignment_{closing_txid}_{contract_id}"));
             consignment
                 .save_file(&consignment_path)
-                .expect("successful save");
-            let proxy_url = TransportEndpoint::new(self.proxy_endpoint.clone())
-                .unwrap()
-                .endpoint;
+                .map_err(|e| format!("cannot save consignment: {e}"))?;
+            let consignment_path_str = consignment_path.to_string_lossy().to_string();
             let rgb_wallet_wrapper_copy = self.rgb_wallet_wrapper.clone();
-            let closing_txid_copy = closing_txid.clone();
-            let consignment_path_copy = consignment_path.clone();
-            let res = crate::runtime::block_on(tokio::task::spawn_blocking(move || {
-                rgb_wallet_wrapper_copy.post_consignment(
-                    &proxy_url,
-                    recipient_id,
-                    &consignment_path_copy,
-                    closing_txid_copy,
-                    Some(vout),
-                )
-            }));
-            match res {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::error!("cannot post consignment: {e}");
-                    return Err(());
-                }
-                Err(e) => {
-                    tracing::error!("cannot post consignment task: {e}");
-                    return Err(());
-                }
+            futures::executor::block_on(tokio::task::spawn_blocking(move || {
+                rgb_wallet_wrapper_copy
+                    .provide_out_of_band_consignment(consignment_path_str, vec![])
+            }))
+            .map_err(|e| format!("consignment task failed: {e}"))?
+            .map_err(|e| format!("cannot provide consignment: {e}"))?;
+            if let Err(e) = fs::remove_file(&consignment_path) {
+                tracing::warn!(error = %e, "cannot remove consignment file, leaving it behind");
             }
-            fs::remove_file(&consignment_path).unwrap();
         }
 
+        // insert so the encoded write includes this entry; roll back if the write fails, or the
+        // early return above would hand back a broadcast tx that was never persisted
         txes.insert(descriptors_hash, spending_tx.clone());
-        self.kv_store
+        if let Err(e) = self
+            .kv_store
             .write("", "", OUTPUT_SPENDER_TXES_KEY, txes.encode())
-            .unwrap();
+        {
+            txes.remove(&descriptors_hash);
+            return Err(format!("cannot persist output spender txes: {e}"));
+        }
+        self.sweep_recipients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(hash, _), _| *hash != descriptors_hash);
 
         Ok(spending_tx)
+    }
+}
+
+impl OutputSpender for RgbOutputSpender {
+    fn spend_spendable_outputs(
+        &self,
+        descriptors: &[&SpendableOutputDescriptor],
+        outputs: Vec<TxOut>,
+        change_destination_script: ScriptBuf,
+        feerate_sat_per_1000_weight: u32,
+        locktime: Option<LockTime>,
+        secp_ctx: &Secp256k1<All>,
+    ) -> Result<bitcoin::Transaction, ()> {
+        self.try_spend_spendable_outputs(
+            descriptors,
+            outputs,
+            change_destination_script,
+            feerate_sat_per_1000_weight,
+            locktime,
+            secp_ctx,
+        )
+        .map_err(|e| {
+            tracing::error!("cannot spend spendable outputs, will retry: {e}");
+        })
     }
 }
 
@@ -4001,83 +6955,6 @@ pub(crate) async fn maybe_restore_rgb_from_vss(
     }
 }
 
-pub(crate) enum ChainBackendSelection {
-    Bitcoind {
-        username: String,
-        password: String,
-        host: String,
-        port: u16,
-    },
-    Esplora {
-        url: String,
-    },
-    Electrum {
-        url: String,
-    },
-}
-
-pub(crate) fn select_chain_backend(
-    unlock_request: &UnlockRequest,
-    bitcoin_network: BitcoinNetwork,
-) -> Result<ChainBackendSelection, APIError> {
-    let bitcoind_all_set = unlock_request.bitcoind_rpc_username.is_some()
-        && unlock_request.bitcoind_rpc_password.is_some()
-        && unlock_request.bitcoind_rpc_host.is_some()
-        && unlock_request.bitcoind_rpc_port.is_some();
-    let bitcoind_any_set = unlock_request.bitcoind_rpc_username.is_some()
-        || unlock_request.bitcoind_rpc_password.is_some()
-        || unlock_request.bitcoind_rpc_host.is_some()
-        || unlock_request.bitcoind_rpc_port.is_some();
-    if bitcoind_any_set && !bitcoind_all_set {
-        return Err(APIError::InvalidIndexer(s!(
-            "bitcoind_rpc_* fields must all be set or all be omitted"
-        )));
-    }
-    let indexer_url = unlock_request.indexer_url.as_deref();
-    match (bitcoind_all_set, indexer_url) {
-        (true, Some(url)) => {
-            let proto = check_indexer_url(url, bitcoin_network)
-                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
-            match proto {
-                rgb_lib::wallet::rust_only::IndexerProtocol::Esplora => {
-                    Err(APIError::AmbiguousChainBackend)
-                }
-                rgb_lib::wallet::rust_only::IndexerProtocol::Electrum => {
-                    Ok(ChainBackendSelection::Bitcoind {
-                        username: unlock_request.bitcoind_rpc_username.clone().unwrap(),
-                        password: unlock_request.bitcoind_rpc_password.clone().unwrap(),
-                        host: unlock_request.bitcoind_rpc_host.clone().unwrap(),
-                        port: unlock_request.bitcoind_rpc_port.unwrap(),
-                    })
-                }
-            }
-        }
-        (true, None) => Ok(ChainBackendSelection::Bitcoind {
-            username: unlock_request.bitcoind_rpc_username.clone().unwrap(),
-            password: unlock_request.bitcoind_rpc_password.clone().unwrap(),
-            host: unlock_request.bitcoind_rpc_host.clone().unwrap(),
-            port: unlock_request.bitcoind_rpc_port.unwrap(),
-        }),
-        (false, Some(url)) => {
-            let proto = check_indexer_url(url, bitcoin_network)
-                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
-            match proto {
-                rgb_lib::wallet::rust_only::IndexerProtocol::Esplora => {
-                    Ok(ChainBackendSelection::Esplora {
-                        url: url.to_string(),
-                    })
-                }
-                rgb_lib::wallet::rust_only::IndexerProtocol::Electrum => {
-                    Ok(ChainBackendSelection::Electrum {
-                        url: url.to_string(),
-                    })
-                }
-            }
-        }
-        (false, None) => Err(APIError::MissingChainBackend),
-    }
-}
-
 // rgb-lib rejects wallets supporting IFA on mainnet
 fn supported_asset_schemas(bitcoin_network: BitcoinNetwork) -> Vec<AssetSchema> {
     let mut schemas = vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda];
@@ -4087,27 +6964,26 @@ fn supported_asset_schemas(bitcoin_network: BitcoinNetwork) -> Vec<AssetSchema> 
     schemas
 }
 
-// A dead background processor must exit the node, not leave it serving without
-// event processing; only `stop_processing` termination is expected.
+// A dead background processor must take the node down, not leave it serving without event
+// processing; only `stop_processing` termination is expected. The shutdown is requested rather
+// than forced, so the VSS teardown still runs; `main` turns `FATAL_ERROR` into exit code 70.
 async fn supervise_background_processor(
     bp_future: impl std::future::Future<Output = Result<(), io::Error>> + Send,
     stop_flag: Arc<AtomicBool>,
+    cancel_token: CancellationToken,
 ) -> Result<(), io::Error> {
     let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(bp_future)).await;
     let stopping = stop_flag.load(Ordering::Acquire);
     match result {
         Ok(res) => {
             if !stopping {
-                match &res {
-                    Ok(()) => {
-                        tracing::error!("background processor exited unexpectedly; shutting down")
-                    }
-                    Err(e) => tracing::error!(
-                        error = %e,
-                        "background processor failed unexpectedly; shutting down"
-                    ),
-                }
-                std::process::exit(70);
+                let msg = match &res {
+                    Ok(()) => "background processor exited unexpectedly".to_string(),
+                    Err(e) => format!("background processor failed unexpectedly: {e}"),
+                };
+                tracing::error!("{msg}; shutting down");
+                let _ = FATAL_ERROR.set(msg);
+                cancel_token.cancel();
             }
             res
         }
@@ -4122,7 +6998,12 @@ async fn supervise_background_processor(
                 "background processor panicked; shutting down instead of running without \
                  event processing"
             );
-            std::process::exit(70);
+            let _ = FATAL_ERROR.set(format!("background processor panicked: {msg}"));
+            cancel_token.cancel();
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("background processor panicked: {msg}"),
+            ))
         }
     }
 }
@@ -4130,6 +7011,12 @@ async fn supervise_background_processor(
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+
+    // Exits with the same code `main` would once the server future has returned, via the shared
+    // decision so this test cannot drift from the real one.
+    fn exit_as_main_would() -> ! {
+        std::process::exit(crate::utils::fatal_exit_code());
+    }
 
     // Child mode re-runs this test in a subprocess so the exit code is observable.
     #[test]
@@ -4140,16 +7027,52 @@ mod watchdog_tests {
                 .build()
                 .unwrap();
             let stop = Arc::new(AtomicBool::new(false));
+            let cancel = CancellationToken::new();
             let _ = rt.block_on(supervise_background_processor(
                 async { panic!("test panic") },
                 stop,
+                cancel.clone(),
             ));
-            std::process::exit(0);
+            // The shutdown has to be requested, not forced: the VSS teardown runs on it.
+            assert!(cancel.is_cancelled());
+            exit_as_main_would();
         }
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "ldk::watchdog_tests::exits_with_code_70_on_bp_panic",
+            ])
+            .env("BP_WATCHDOG_CHILD", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(70));
+    }
+
+    // An unexpected clean return is as fatal as a panic: the node would keep serving without
+    // event processing.
+    #[test]
+    fn exits_with_code_70_on_unexpected_bp_return() {
+        if std::env::var("BP_WATCHDOG_CHILD").is_ok() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let cancel = CancellationToken::new();
+            let _ = rt.block_on(supervise_background_processor(
+                async { Ok(()) },
+                stop,
+                cancel.clone(),
+            ));
+            assert!(cancel.is_cancelled());
+            exit_as_main_would();
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ldk::watchdog_tests::exits_with_code_70_on_unexpected_bp_return",
             ])
             .env("BP_WATCHDOG_CHILD", "1")
             .stdout(std::process::Stdio::null())
@@ -4166,11 +7089,37 @@ mod watchdog_tests {
             .build()
             .unwrap();
         let stop = Arc::new(AtomicBool::new(true));
+        let cancel = CancellationToken::new();
         let res = rt.block_on(supervise_background_processor(
             async { Err(io::Error::new(io::ErrorKind::Other, "aborted at teardown")) },
             stop,
+            cancel.clone(),
         ));
         assert!(res.is_err());
+        assert!(!cancel.is_cancelled());
+    }
+}
+
+#[cfg(test)]
+mod sweeper_predicate_tests {
+    use super::*;
+
+    #[test]
+    fn rgb_amount_empty_map_is_vanilla() {
+        let map = HashMap::new();
+        assert_eq!(rgb_amount_for_spendable_output(&map, 0, "tx"), Ok(0));
+    }
+
+    #[test]
+    fn rgb_amount_present_output_returns_amount() {
+        let map = HashMap::from_iter([(1u32, 42u64)]);
+        assert_eq!(rgb_amount_for_spendable_output(&map, 1, "tx"), Ok(42));
+    }
+
+    #[test]
+    fn rgb_amount_missing_from_non_empty_map_errors() {
+        let map = HashMap::from_iter([(1u32, 42u64)]);
+        assert!(rgb_amount_for_spendable_output(&map, 0, "tx").is_err());
     }
 }
 
@@ -4180,7 +7129,6 @@ mod watchdog_tests {
 async fn reimport_funding_consignments(
     rgb_wallet_wrapper: &Arc<RgbLibWalletWrapper>,
     kv_store: &Arc<SyncedKvStore>,
-    proxy_endpoint: &str,
     ldk_data_dir: &Path,
 ) {
     let mark_replay_done = || {
@@ -4255,29 +7203,33 @@ async fn reimport_funding_consignments(
         }
         let wrapper = Arc::clone(rgb_wallet_wrapper);
         let txid_copy = txid.clone();
-        let proxy_endpoint = proxy_endpoint.to_string();
         let consignment_path = ldk_data_dir.join(format!("reimport_consignment_{txid}"));
-        // Re-post our stored copy so the proxy can serve it, then accept it
-        // like the funding-time acceptor flow does: this consumes the
-        // consignment into the RGB runtime, which save_new_asset requires.
+        // Accept our stored copy straight from disk: this consumes the consignment into
+        // the RGB runtime, which save_new_asset requires. Unlike the funding-time acceptor
+        // flow there is no media staging dir to promote from -- only consignment bytes are
+        // persisted -- so any media the contract declares must already be in the wallet.
         let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
             fs::write(&consignment_path, &data).map_err(|e| e.to_string())?;
-            let proxy_url = TransportEndpoint::new(proxy_endpoint.clone())
-                .map_err(|e| e.to_string())?
-                .endpoint;
-            if let Err(e) = wrapper.post_consignment(
-                &proxy_url,
+            let accept_res = wrapper.accept_transfer_consignment(
+                consignment_path.clone(),
                 txid_copy.clone(),
-                &consignment_path,
-                txid_copy.clone(),
-                None,
-            ) {
-                tracing::debug!("re-posting funding consignment for {txid_copy}: {e}");
-            }
+                1,
+                STATIC_BLINDING,
+            );
             let _ = fs::remove_file(&consignment_path);
-            let (consignment, _) = wrapper
-                .accept_transfer(txid_copy.clone(), 1, &proxy_endpoint, STATIC_BLINDING)
-                .map_err(|e| e.to_string())?;
+            let (consignment, _, media_digests) = accept_res.map_err(|e| e.to_string())?;
+            let media_dir = wrapper.get_media_dir();
+            let missing: Vec<String> = media_digests
+                .into_iter()
+                .filter(|digest| !media_dir.join(digest).exists())
+                .collect();
+            if !missing.is_empty() {
+                tracing::warn!(
+                    "re-imported asset for {txid_copy} is missing {} media file(s) locally: {}",
+                    missing.len(),
+                    missing.join(", "),
+                );
+            }
             match wrapper.save_new_asset(consignment, txid_copy) {
                 Ok(()) => Ok(()),
                 Err(e) if e.to_string().contains("UNIQUE constraint failed") => Ok(()),
@@ -4336,6 +7288,15 @@ async fn reimport_funding_consignments(
     mark_replay_done();
 }
 
+// The unlock request wins, then the `[chain]` config section. There is no built-in default any
+// more, so an indexer that resolves from neither is a hard error rather than a silent fallback.
+fn resolve_indexer_url<'a>(
+    request: Option<&'a str>,
+    config: Option<&'a str>,
+) -> Result<&'a str, APIError> {
+    request.or(config).ok_or(APIError::MissingIndexerUrl)
+}
+
 pub(crate) async fn start_ldk(
     app_state: Arc<AppState>,
     key_source: NodeKeySource,
@@ -4346,9 +7307,6 @@ pub(crate) async fn start_ldk(
 
     // Unlock request params take precedence, the config file provides defaults.
     let file_config = &static_state.config;
-    unlock_request.indexer_url = unlock_request
-        .indexer_url
-        .or_else(|| file_config.chain.indexer_url.clone());
     unlock_request.proxy_endpoint = unlock_request
         .proxy_endpoint
         .or_else(|| file_config.chain.proxy_endpoint.clone());
@@ -4549,146 +7507,16 @@ pub(crate) async fn start_ldk(
     let network: Network = bitcoin_network.into();
     let ldk_peer_listening_port = static_state.ldk_peer_listening_port;
 
-    // Pick the chain backend from caller-provided inputs.
-    let chain_selection = select_chain_backend(&unlock_request, bitcoin_network)?;
-
-    // Bitcoind path retains the SpvClient/Listen flow; esplora path uses the
-    // EsploraSyncClient/Confirm flow. We populate the same locals from either
-    // branch so the rest of start_ldk is shared.
-    let bitcoind_client_opt: Option<Arc<BitcoindClient>>;
-    let tx_sync_opt: Option<Arc<EsploraSyncClient<Arc<FilesystemLogger>>>>;
-    let electrum_tx_sync_opt: Option<Arc<ElectrumSyncClient<Arc<FilesystemLogger>>>>;
-    let chain_source: Option<Arc<dyn Filter + Send + Sync>>;
-    let chain_backend: Arc<ChainBackend>;
-    let seed_best_block: BestBlock;
-    let polled_chain_tip_opt: Option<lightning_block_sync::poll::ValidatedBlockHeader>;
-
-    match chain_selection {
-        ChainBackendSelection::Bitcoind {
-            username,
-            password,
-            host,
-            port,
-        } => {
-            let client = match BitcoindClient::new(
-                host,
-                port,
-                username,
-                password,
-                tokio::runtime::Handle::current(),
-                Arc::clone(&logger),
-                static_state.config.chain.fee_refresh_interval_secs,
-            )
-            .await
-            {
-                Ok(c) => Arc::new(c),
-                Err(e) => return Err(APIError::FailedBitcoindConnection(e.to_string())),
-            };
-            let bitcoind_chain = client.get_blockchain_info().await.chain;
-            if bitcoind_chain
-                != match bitcoin_network {
-                    BitcoinNetwork::Mainnet => "main",
-                    BitcoinNetwork::Testnet => "test",
-                    BitcoinNetwork::Testnet4 => "testnet4",
-                    BitcoinNetwork::Regtest => "regtest",
-                    BitcoinNetwork::Signet | BitcoinNetwork::SignetCustom => "signet",
-                }
-            {
-                return Err(APIError::NetworkMismatch(bitcoind_chain, bitcoin_network));
-            }
-            let polled = init::validate_best_block_header(client.as_ref())
-                .await
-                .expect("Failed to fetch best block header and best block");
-            seed_best_block = polled.to_best_block();
-            chain_backend = Arc::new(ChainBackend::Bitcoind(client.clone()));
-            bitcoind_client_opt = Some(client);
-            tx_sync_opt = None;
-            electrum_tx_sync_opt = None;
-            chain_source = None;
-            polled_chain_tip_opt = Some(polled);
-        }
-        ChainBackendSelection::Esplora { url } => {
-            let esplora = Arc::new(
-                EsploraIndexerClient::new(
-                    url.clone(),
-                    network,
-                    tokio::runtime::Handle::current(),
-                    Arc::clone(&logger),
-                    static_state.config.chain.indexer_timeout_secs,
-                    static_state.config.chain.fee_refresh_interval_secs,
-                )
-                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
-            );
-            let tip_hash = esplora
-                .client
-                .get_tip_hash()
-                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
-            let tip_height = esplora
-                .client
-                .get_height()
-                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
-            let tx_sync = Arc::new(EsploraSyncClient::new(url, Arc::clone(&logger)));
-            seed_best_block = BestBlock::new(tip_hash, tip_height);
-            chain_backend = Arc::new(ChainBackend::Esplora(esplora));
-            chain_source = Some(Arc::clone(&tx_sync) as Arc<dyn Filter + Send + Sync>);
-            tx_sync_opt = Some(tx_sync);
-            electrum_tx_sync_opt = None;
-            bitcoind_client_opt = None;
-            polled_chain_tip_opt = None;
-        }
-        ChainBackendSelection::Electrum { url } => {
-            use electrum_client::ElectrumApi;
-            let electrum = Arc::new(
-                ElectrumIndexerClient::new(
-                    url.clone(),
-                    network,
-                    tokio::runtime::Handle::current(),
-                    Arc::clone(&logger),
-                    static_state.config.chain.fee_refresh_interval_secs,
-                )
-                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
-            );
-            let tip = electrum
-                .client
-                .block_headers_subscribe()
-                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
-            let tx_sync = Arc::new(
-                ElectrumSyncClient::new(url, Arc::clone(&logger))
-                    .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
-            );
-            seed_best_block = BestBlock::new(tip.header.block_hash(), tip.height as u32);
-            chain_backend = Arc::new(ChainBackend::Electrum(electrum));
-            chain_source = Some(Arc::clone(&tx_sync) as Arc<dyn Filter + Send + Sync>);
-            electrum_tx_sync_opt = Some(tx_sync);
-            tx_sync_opt = None;
-            bitcoind_client_opt = None;
-            polled_chain_tip_opt = None;
-        }
-    }
-
     // RGB setup
-    let indexer_url = if let Some(indexer_url) = &unlock_request.indexer_url {
-        let indexer_protocol = check_indexer_url(indexer_url, bitcoin_network)?;
-        tracing::info!(
-            "Connected to an indexer with the {} protocol",
-            indexer_protocol
-        );
-        indexer_url
-    } else {
-        tracing::info!("Using the default indexer");
-        match bitcoin_network {
-            BitcoinNetwork::Regtest => ELECTRUM_URL_REGTEST,
-            BitcoinNetwork::Signet => ELECTRUM_URL_SIGNET,
-            BitcoinNetwork::Testnet => ELECTRUM_URL_TESTNET,
-            BitcoinNetwork::Testnet4 => ELECTRUM_URL_TESTNET4,
-            BitcoinNetwork::Mainnet => ELECTRUM_URL_MAINNET,
-            BitcoinNetwork::SignetCustom => {
-                return Err(APIError::InvalidIndexer(s!(
-                    "with custom signet indexer must be provided"
-                )))
-            }
-        }
-    };
+    let indexer_url = resolve_indexer_url(
+        unlock_request.indexer_url.as_deref(),
+        static_state.config.chain.indexer_url.as_deref(),
+    )?;
+    let indexer_protocol = check_indexer_url(indexer_url, bitcoin_network)?;
+    tracing::info!(
+        "Connected to an indexer with the {} protocol",
+        indexer_protocol
+    );
     let proxy_endpoint = if let Some(proxy_endpoint) = &unlock_request.proxy_endpoint {
         check_rgb_proxy_endpoint(proxy_endpoint).await?;
         tracing::info!("Using a custom proxy");
@@ -4717,8 +7545,115 @@ pub(crate) async fn start_ldk(
         &bitcoin_network.to_string(),
     )?;
 
-    let fee_estimator = chain_backend.clone();
-    let broadcaster = chain_backend.clone();
+    // Initialize the chain backend for the requested sync mode
+    let handle = tokio::runtime::Handle::current();
+    let ChainSetup {
+        backend,
+        fee_estimator,
+        broadcaster,
+        chain_filter,
+        initial_best_block,
+    } = match &unlock_request.ldk_chain_sync {
+        #[cfg(feature = "block-sync")]
+        LdkChainSync::BlockSync {
+            bitcoind_rpc_username,
+            bitcoind_rpc_password,
+            bitcoind_rpc_host,
+            bitcoind_rpc_port,
+        } => {
+            let bitcoind_client = match BitcoindClient::new(
+                bitcoind_rpc_host.clone(),
+                *bitcoind_rpc_port,
+                bitcoind_rpc_username.clone(),
+                bitcoind_rpc_password.clone(),
+                handle.clone(),
+                Arc::clone(&logger),
+                static_state.config.chain.fee_refresh_interval_secs,
+            )
+            .await
+            {
+                Ok(client) => Arc::new(client),
+                Err(e) => return Err(APIError::FailedBitcoindConnection(e.to_string())),
+            };
+
+            // Check that the bitcoind we've connected to is running the network we expect
+            let bitcoind_chain = bitcoind_client.get_blockchain_info().await.chain;
+            if bitcoind_chain
+                != match bitcoin_network {
+                    BitcoinNetwork::Mainnet => "main",
+                    BitcoinNetwork::Testnet => "test",
+                    BitcoinNetwork::Testnet4 => "testnet4",
+                    BitcoinNetwork::Regtest => "regtest",
+                    BitcoinNetwork::Signet | BitcoinNetwork::SignetCustom => "signet",
+                }
+            {
+                return Err(APIError::NetworkMismatch(bitcoind_chain, bitcoin_network));
+            }
+
+            // Poll for the best chain tip, used by the channel manager & spv client
+            let polled_chain_tip = init::validate_best_block_header(bitcoind_client.as_ref())
+                .await
+                .expect("Failed to fetch best block header and best block");
+            let initial_best_block = polled_chain_tip.to_best_block();
+
+            ChainSetup {
+                fee_estimator: bitcoind_client.clone(),
+                broadcaster: bitcoind_client.clone(),
+                backend: ChainBackend::BlockSync {
+                    client: bitcoind_client,
+                    polled_chain_tip,
+                },
+                chain_filter: None,
+                initial_best_block,
+            }
+        }
+        #[cfg(feature = "transaction-sync")]
+        LdkChainSync::TransactionSync {
+            indexer_url: ln_indexer_url,
+        } => {
+            // LDK can sync against a different indexer than the RGB wallet, but when the two
+            // match the URL has already been checked above
+            let ln_indexer_protocol = if ln_indexer_url == indexer_url {
+                indexer_protocol.clone()
+            } else {
+                check_indexer_url(ln_indexer_url, bitcoin_network)?
+            };
+            let indexer_client = Arc::new(
+                IndexerClient::new(
+                    ln_indexer_url.to_string(),
+                    ln_indexer_protocol.clone(),
+                    handle.clone(),
+                    Arc::clone(&logger),
+                    static_state.config.chain.indexer_timeout_secs,
+                    static_state.config.chain.fee_refresh_interval_secs,
+                )
+                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
+            );
+            let tx_sync = Arc::new(
+                IndexerSyncClient::new(
+                    ln_indexer_url.to_string(),
+                    ln_indexer_protocol,
+                    Arc::clone(&logger),
+                )
+                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?,
+            );
+            let initial_best_block = indexer_client
+                .get_best_block()
+                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
+
+            let chain_filter: Arc<dyn Filter + Send + Sync> = tx_sync.clone();
+            ChainSetup {
+                fee_estimator: indexer_client.clone(),
+                broadcaster: indexer_client.clone(),
+                backend: ChainBackend::TransactionSync {
+                    client: indexer_client,
+                    tx_sync,
+                },
+                chain_filter: Some(chain_filter),
+                initial_best_block,
+            }
+        }
+    };
 
     // LDK signing: internal mode uses `KeysManager` from the mnemonic-derived LDK seed (BIP32 child
     // 535 of the master xpriv). External mode uses `ExternalSigner` only; inbound / peer_storage /
@@ -4776,8 +7711,8 @@ pub(crate) async fn start_ldk(
             1000,
             Arc::clone(&keys_manager),
             Arc::clone(&keys_manager),
-            Arc::clone(&chain_backend),
-            Arc::clone(&chain_backend),
+            Arc::clone(&broadcaster),
+            Arc::clone(&fee_estimator),
         );
         // Read before moving the persister into the ChainMonitor.
         let channelmonitors = persister
@@ -4785,7 +7720,7 @@ pub(crate) async fn start_ldk(
             .await
             .unwrap();
         let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new_async_beta(
-            chain_source.clone(),
+            chain_filter.clone(),
             Arc::clone(&broadcaster),
             Arc::clone(&logger),
             Arc::clone(&fee_estimator),
@@ -4807,12 +7742,12 @@ pub(crate) async fn start_ldk(
             1000,
             Arc::clone(&keys_manager),
             Arc::clone(&keys_manager),
-            Arc::clone(&chain_backend),
-            Arc::clone(&chain_backend),
+            Arc::clone(&broadcaster),
+            Arc::clone(&fee_estimator),
         ));
         let peer_storage_signer = Arc::clone(&keys_manager);
         let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new_with_peer_storage_encryptor(
-            chain_source.clone(),
+            chain_filter.clone(),
             Arc::clone(&broadcaster),
             Arc::clone(&logger),
             Arc::clone(&fee_estimator),
@@ -4878,13 +7813,18 @@ pub(crate) async fn start_ldk(
     user_config.accept_forwards_to_priv_channels =
         channels_config.accept_forwards_to_priv_channels || static_state.enable_virtual_channels_v0;
     user_config.manually_accept_inbound_channels = true;
-    let mut restarting_node = true;
+    let persisted_manager = kv_store.read(
+        CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+        CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+        CHANNEL_MANAGER_PERSISTENCE_KEY,
+    );
+    // `restarting_node` and `channel_manager_blockhash` are only consumed by the block-sync
+    // restart path
+    #[cfg_attr(not(feature = "block-sync"), allow(unused_variables))]
+    let restarting_node = persisted_manager.is_ok();
+    #[cfg_attr(not(feature = "block-sync"), allow(unused_variables))]
     let (channel_manager_blockhash, channel_manager) = {
-        match kv_store.read(
-            CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-            CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-            CHANNEL_MANAGER_PERSISTENCE_KEY,
-        ) {
+        match persisted_manager {
             Ok(bytes) => {
                 let mut channel_monitor_references = Vec::new();
                 for (_, channel_monitor) in channelmonitors.iter() {
@@ -4918,9 +7858,7 @@ pub(crate) async fn start_ldk(
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // We're starting a fresh node.
-                restarting_node = false;
-
-                let polled_best_block = seed_best_block;
+                let polled_best_block = initial_best_block;
                 let polled_best_block_hash = polled_best_block.block_hash;
                 let chain_params = ChainParameters {
                     network,
@@ -4956,6 +7894,7 @@ pub(crate) async fn start_ldk(
     #[cfg(feature = "vss")]
     if vss_restored_keys > 0 {
         use lightning::chain::channelmonitor::Balance;
+        use std::collections::HashSet;
         let manager_channel_ids: HashSet<ChannelId> = channel_manager
             .list_channels()
             .iter()
@@ -5087,43 +8026,50 @@ pub(crate) async fn start_ldk(
     };
     // go_online and configure_vss_backup drive blocking rgb-lib HTTP clients;
     // run them off the async runtime so they don't fail on a single-vCPU host.
-    let (rgb_wallet, rgb_online) = tokio::task::spawn_blocking(move || {
-        let mut rgb_wallet = RgbLibWallet::new(
-            WalletData {
-                data_dir,
-                bitcoin_network,
-                database_type: DatabaseType::Sqlite,
-                max_allocations_per_utxo: 1,
-                supported_schemas: supported_asset_schemas(bitcoin_network),
-                reuse_addresses,
-            },
-            keys,
-        )
-        .expect("valid rgb-lib wallet");
-        let rgb_online = rgb_wallet.go_online(OnlineOptions {
-            indexer_url: indexer_url_owned,
-            skip_consistency_check: false,
-            vanilla_sync_lookback: 20,
-        })?;
-        #[cfg(feature = "vss")]
-        if let Some((vss_url, rgb_store_id, signing_key)) = rgb_vss_backup {
-            let vss_config =
-                rgb_lib::wallet::vss::VssBackupConfig::new(vss_url, rgb_store_id, signing_key)
-                    .with_encryption(true)
-                    .with_auto_backup(true)
-                    .with_backup_mode(rgb_lib::wallet::vss::VssBackupMode::Blocking);
-            // Fail closed: a misconfigured backup must not silently run local-only.
-            rgb_wallet.configure_vss_backup(vss_config).map_err(|e| {
-                APIError::FailedVssInit(format!(
-                    "Failed to configure VSS backup for RGB wallet: {e}"
-                ))
+    let (rgb_wallet, rgb_online, deferred_rgb_consistency_check) =
+        tokio::task::spawn_blocking(move || {
+            let mut rgb_wallet = RgbLibWallet::new(
+                WalletData {
+                    data_dir,
+                    bitcoin_network,
+                    database_type: DatabaseType::Sqlite,
+                    max_allocations_per_utxo: 1,
+                    supported_schemas: supported_asset_schemas(bitcoin_network),
+                    reuse_addresses,
+                },
+                keys,
+            )
+            .expect("valid rgb-lib wallet");
+            let deferred_rgb_consistency_check = rgb_wallet.pending_rgb_acceptance()?.is_some();
+            let rgb_online = rgb_wallet.go_online(OnlineOptions {
+                indexer_url: indexer_url_owned,
+                skip_consistency_check: deferred_rgb_consistency_check,
+                vanilla_sync_lookback: 20,
             })?;
-            tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
-        }
-        Ok::<_, APIError>((rgb_wallet, rgb_online))
-    })
-    .await
-    .map_err(|e| APIError::Unexpected(format!("rgb-lib wallet setup task failed: {e}")))??;
+            if deferred_rgb_consistency_check {
+                tracing::info!(
+                    "deferred RGB consistency check until durable funding recovery completes"
+                );
+            }
+            #[cfg(feature = "vss")]
+            if let Some((vss_url, rgb_store_id, signing_key)) = rgb_vss_backup {
+                let vss_config =
+                    rgb_lib::wallet::vss::VssBackupConfig::new(vss_url, rgb_store_id, signing_key)
+                        .with_encryption(true)
+                        .with_auto_backup(true)
+                        .with_backup_mode(rgb_lib::wallet::vss::VssBackupMode::Blocking);
+                // Fail closed: a misconfigured backup must not silently run local-only.
+                rgb_wallet.configure_vss_backup(vss_config).map_err(|e| {
+                    APIError::FailedVssInit(format!(
+                        "Failed to configure VSS backup for RGB wallet: {e}"
+                    ))
+                })?;
+                tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
+            }
+            Ok::<_, APIError>((rgb_wallet, rgb_online, deferred_rgb_consistency_check))
+        })
+        .await
+        .map_err(|e| APIError::Unexpected(format!("rgb-lib wallet setup task failed: {e}")))??;
     save_config(
         &static_state.db(),
         kv_store.as_ref(),
@@ -5159,14 +8105,13 @@ pub(crate) async fn start_ldk(
         Arc::new(Mutex::new(rgb_wallet)),
         rgb_online,
     ));
+    let rgb_funding_recovery_guard = Arc::new(RgbFundingRecoveryGuard::default());
+    let rgb_change_destination_source = Arc::new(RgbChangeDestinationSource {
+        inner: Arc::clone(&rgb_wallet_wrapper),
+        funding_guard: Arc::clone(&rgb_funding_recovery_guard),
+    });
 
-    reimport_funding_consignments(
-        &rgb_wallet_wrapper,
-        &kv_store,
-        proxy_endpoint,
-        &ldk_data_dir,
-    )
-    .await;
+    reimport_funding_consignments(&rgb_wallet_wrapper, &kv_store, &ldk_data_dir).await;
 
     // Initialize the OutputSweeper.
     let txes: OutputSpenderTxes = match kv_store.read("", "", OUTPUT_SPENDER_TXES_KEY) {
@@ -5183,8 +8128,11 @@ pub(crate) async fn start_ldk(
         signer: signer_for_output_spender,
         kv_store: kv_store.clone(),
         txes,
-        proxy_endpoint: proxy_endpoint.to_string(),
+        sweep_recipients: Arc::new(Mutex::new(HashMap::new())),
+        rgb_funding_recovery_guard: Arc::clone(&rgb_funding_recovery_guard),
     });
+    // `sweeper_best_block` is only used by the block-sync restart path.
+    #[cfg_attr(not(feature = "block-sync"), allow(unused_variables))]
     let (sweeper_best_block, output_sweeper) = match kv_store.read(
         OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
         OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -5195,9 +8143,9 @@ pub(crate) async fn start_ldk(
                 channel_manager.current_best_block(),
                 broadcaster.clone(),
                 fee_estimator.clone(),
-                chain_source.clone(),
+                chain_filter.clone(),
                 rgb_output_spender,
-                rgb_wallet_wrapper.clone(),
+                Arc::clone(&rgb_change_destination_source),
                 Clone::clone(&bp_kv_store),
                 logger.clone(),
             );
@@ -5207,9 +8155,9 @@ pub(crate) async fn start_ldk(
             let read_args = (
                 broadcaster.clone(),
                 fee_estimator.clone(),
-                chain_source.clone(),
+                chain_filter.clone(),
                 rgb_output_spender.clone(),
-                rgb_wallet_wrapper.clone(),
+                Arc::clone(&rgb_change_destination_source),
                 Clone::clone(&bp_kv_store),
                 logger.clone(),
             );
@@ -5221,10 +8169,16 @@ pub(crate) async fn start_ldk(
     };
 
     // Sync ChannelMonitors, ChannelManager and OutputSweeper to chain tip.
-    // For bitcoind we drive Listen via synchronize_listeners + SpvClient. For
-    // esplora we'll drive Confirm via EsploraSyncClient::sync below.
+    // block-sync replays blocks from bitcoind before the SPV client takes over, while
+    // transaction-sync relies on the indexer via the `Confirm` interface.
     let mut chain_listener_channel_monitors = Vec::new();
-    let mut cache = UnboundedCache::new();
+    #[cfg(feature = "block-sync")]
+    let mut block_sync_cache = UnboundedCache::new();
+    // with only block-sync built this is always set below, hence the allow
+    #[cfg(feature = "block-sync")]
+    #[cfg_attr(not(feature = "transaction-sync"), allow(unused_assignments))]
+    let mut block_sync_chain_tip: Option<lightning_block_sync::poll::ValidatedBlockHeader> = None;
+
     for (blockhash, channel_monitor) in channelmonitors.drain(..) {
         let outpoint = channel_monitor.get_funding_txo();
         chain_listener_channel_monitors.push((
@@ -5238,10 +8192,13 @@ pub(crate) async fn start_ldk(
             outpoint,
         ));
     }
-    let chain_tip_opt: Option<lightning_block_sync::poll::ValidatedBlockHeader> =
-        if let Some(bc) = bitcoind_client_opt.as_ref() {
-            let polled_chain_tip =
-                polled_chain_tip_opt.expect("bitcoind branch populates polled_chain_tip_opt");
+
+    match &backend {
+        #[cfg(feature = "block-sync")]
+        ChainBackend::BlockSync {
+            client,
+            polled_chain_tip,
+        } => {
             let chain_tip = if restarting_node {
                 let mut chain_listeners = vec![
                     (
@@ -5262,9 +8219,9 @@ pub(crate) async fn start_ldk(
                 let mut attempts = 3;
                 loop {
                     match init::synchronize_listeners(
-                        bc.as_ref(),
+                        client.as_ref(),
                         network,
-                        &mut cache,
+                        &mut block_sync_cache,
                         chain_listeners.clone(),
                     )
                     .await
@@ -5283,12 +8240,13 @@ pub(crate) async fn start_ldk(
                     }
                 }
             } else {
-                polled_chain_tip
+                *polled_chain_tip
             };
-            Some(chain_tip)
-        } else {
-            None
-        };
+            block_sync_chain_tip = Some(chain_tip);
+        }
+        #[cfg(feature = "transaction-sync")]
+        ChainBackend::TransactionSync { .. } => {}
+    }
 
     // Give ChannelMonitors to ChainMonitor
     for (_, (channel_monitor, _, _, _), _) in chain_listener_channel_monitors {
@@ -5347,6 +8305,66 @@ pub(crate) async fn start_ldk(
     // messages. Doing this only makes sense for an always-online public routing node, and doesn't
     // provide you any direct value, but it's nice to offer the service for others.
     let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
+    {
+        let recovery_channel_manager = Arc::clone(&channel_manager);
+        let recovery_wallet = Arc::clone(&rgb_wallet_wrapper);
+        let recovery_kv_store = Arc::clone(&kv_store);
+        let recovery_operation_guard = Arc::clone(&rgb_funding_recovery_guard);
+        let recovery_indexer_url = indexer_url.to_owned();
+        let unresolved = tokio::task::spawn_blocking(move || {
+            let _operation = recovery_operation_guard.blocking_lock_operation();
+            let (recovered_receivers, mut unresolved_receivers) = reconcile_rgb_receiver_funding(
+                recovery_channel_manager.as_ref(),
+                recovery_wallet.as_ref(),
+                recovery_kv_store.as_ref(),
+            )?;
+            if recovered_receivers > 0 {
+                tracing::info!(
+                    recovered_receivers,
+                    "completed durable RGB receiver recovery before peer startup"
+                );
+            }
+            let mut unresolved = reconcile_rgb_sender_funding(
+                recovery_channel_manager.as_ref(),
+                recovery_wallet.as_ref(),
+                recovery_kv_store.as_ref(),
+            )?;
+            unresolved.append(&mut unresolved_receivers);
+            unresolved.sort_by(|a, b| {
+                a.funding_txid
+                    .cmp(&b.funding_txid)
+                    .then_with(|| a.stage.sort_key().cmp(&b.stage.sort_key()))
+            });
+            let pending_stock = recovery_wallet.pending_funding_fascia()?;
+            let should_check_consistency = should_complete_deferred_rgb_consistency_check(
+                deferred_rgb_consistency_check,
+                pending_stock
+                    .as_ref()
+                    .map(|(operation_id, _)| operation_id.as_str()),
+                &unresolved,
+            )?;
+            if should_check_consistency {
+                recovery_wallet.complete_deferred_consistency_check(recovery_indexer_url, 20)?;
+                tracing::info!("completed deferred RGB consistency check after funding recovery");
+            }
+            Ok::<_, RgbLibError>(unresolved)
+        })
+        .await
+        .map_err(|error| {
+            APIError::Unexpected(format!("RGB funding recovery task failed: {error}"))
+        })?
+        .map_err(|error| APIError::Unexpected(format!("RGB funding recovery failed: {error}")))?;
+        rgb_funding_recovery_guard.replace(&unresolved);
+        if !unresolved.is_empty() {
+            tracing::error!(
+                funding_txids = ?unresolved
+                    .iter()
+                    .map(|recovery| recovery.funding_txid.as_str())
+                    .collect::<Vec<_>>(),
+                "RGB wallet mutations are quarantined pending funding recovery"
+            );
+        }
+    }
     let resolver = "8.8.8.8:53".to_socket_addrs().unwrap().next().unwrap();
     let domain_resolver = Arc::new(OMDomainResolver::new(
         resolver,
@@ -5384,9 +8402,21 @@ pub(crate) async fn start_ldk(
         None => Arc::new(AsyncOrderMessageHandler::new(live_channel_access.clone())),
     };
     let asset_link_handler = Arc::new(AssetLinkMessageHandler::new(live_channel_access));
+    let max_aggregated_media_size_per_channel_mb =
+        static_state.max_aggregated_media_size_per_channel_mb as usize * 1024 * 1024;
+    let rgb_file_transfer_handler: Arc<RgbFileTransferHandler> =
+        Arc::new(RgbFileTransferHandler::new(
+            ldk_data_dir_path.clone(),
+            Arc::clone(&channel_manager) as Arc<dyn PeerChannelGate>,
+            static_state.max_pending_consignments,
+            max_aggregated_media_size_per_channel_mb,
+            static_state.max_media_files_per_channel,
+        ));
+    rgb_file_transfer_handler.cleanup_orphans_from_previous_run();
     let custom_messenger = Arc::new(CustomMessenger {
         async_order: Arc::clone(&async_order_handler),
         asset_link: Arc::clone(&asset_link_handler),
+        rgb_file_transfer: Arc::clone(&rgb_file_transfer_handler),
     });
     let async_payments_preimage_root = Arc::new(
         match internal_mnemonic.as_ref() {
@@ -5425,17 +8455,29 @@ pub(crate) async fn start_ldk(
         Arc::clone(&keys_manager),
     ));
 
-    // GossipVerifier needs both bitcoind (UtxoSource) and P2P gossip mode.
-    // On esplora/electrum or RGS modes the UtxoLookup stays unset — gossip
-    // routing still works but channel-announcement UTXOs aren't verified P2P.
-    if let (Some(bc), Some(p2p)) = (bitcoind_client_opt.as_ref(), &p2p_gossip_sync_for_verifier) {
-        let utxo_lookup = GossipVerifier::new(
-            Arc::clone(&bc.bitcoind_rpc_client),
-            TokioSpawner,
-            Arc::clone(p2p),
-            Arc::clone(&peer_manager),
-        );
-        p2p.add_utxo_lookup(Some(Arc::new(utxo_lookup)));
+    // The UTXO lookup can only attach to a P2P sync; RGS mode skips it. Both chain backends
+    // provide a verifier, so announcements are checked whatever the sync mode is.
+    if let Some(p2p) = &p2p_gossip_sync_for_verifier {
+        let peer_manager_wake = Arc::new({
+            let peer_manager = Arc::clone(&peer_manager);
+            move || peer_manager.process_events()
+        });
+        let utxo_lookup: Arc<dyn UtxoLookup + Send + Sync> = match &backend {
+            #[cfg(feature = "block-sync")]
+            ChainBackend::BlockSync { client, .. } => Arc::new(BlockSyncGossipVerifier::new(
+                Arc::clone(&client.bitcoind_rpc_client),
+                Arc::clone(p2p),
+                peer_manager_wake,
+                handle.clone(),
+            )),
+            #[cfg(feature = "transaction-sync")]
+            ChainBackend::TransactionSync { client, .. } => Arc::new(IndexerGossipVerifier::new(
+                Arc::clone(client),
+                Arc::clone(p2p),
+                peer_manager_wake,
+            )),
+        };
+        p2p.add_utxo_lookup(Some(utxo_lookup));
     }
 
     // ## Running LDK
@@ -5472,75 +8514,57 @@ pub(crate) async fn start_ldk(
     // Connect and Disconnect Blocks
     let output_sweeper: Arc<OutputSweeper> = Arc::new(output_sweeper);
     let stop_listen = Arc::clone(&stop_processing);
-    if let Some(bitcoind_client) = bitcoind_client_opt.clone() {
-        let chain_tip = chain_tip_opt.expect("bitcoind branch populates chain_tip_opt");
-        let channel_manager_listener = channel_manager.clone();
-        let chain_monitor_listener = chain_monitor.clone();
-        let output_sweeper_listener = output_sweeper.clone();
-        let bitcoind_block_source = bitcoind_client.clone();
-        tokio::spawn(async move {
-            let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), network);
-            let chain_listener = (
-                chain_monitor_listener,
-                &(channel_manager_listener, output_sweeper_listener),
-            );
-            let mut spv_client =
-                SpvClient::new(chain_tip, chain_poller, &mut cache, &chain_listener);
-            loop {
-                if stop_listen.load(Ordering::Acquire) {
-                    return;
+    match backend {
+        #[cfg(feature = "block-sync")]
+        ChainBackend::BlockSync { client, .. } => {
+            let channel_manager_listener = channel_manager.clone();
+            let chain_monitor_listener = chain_monitor.clone();
+            let output_sweeper_listener = output_sweeper.clone();
+            let chain_tip =
+                block_sync_chain_tip.expect("block-sync chain tip is set while syncing listeners");
+            let mut cache = block_sync_cache;
+            tokio::spawn(async move {
+                let chain_poller = poll::ChainPoller::new(client.as_ref(), network);
+                let chain_listener = (
+                    chain_monitor_listener,
+                    &(channel_manager_listener, output_sweeper_listener),
+                );
+                let mut spv_client =
+                    SpvClient::new(chain_tip, chain_poller, &mut cache, &chain_listener);
+                loop {
+                    if stop_listen.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if let Err(e) = spv_client.poll_best_tip().await {
+                        tracing::error!("Error while polling best tip: {:?}", e);
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-                if let Err(e) = spv_client.poll_best_tip().await {
-                    tracing::error!("Error while polling best tip: {:?}", e);
+            });
+        }
+        #[cfg(feature = "transaction-sync")]
+        ChainBackend::TransactionSync { tx_sync, .. } => {
+            let confirmables: Vec<Arc<dyn Confirm + Send + Sync>> = vec![
+                channel_manager.clone(),
+                chain_monitor.clone(),
+                output_sweeper.clone(),
+            ];
+            // bring everything up to the current tip before starting to serve
+            sync_chain_data(tx_sync.clone(), confirmables.clone())
+                .await
+                .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
+            tokio::spawn(async move {
+                loop {
+                    if stop_listen.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if let Err(e) = sync_chain_data(tx_sync.clone(), confirmables.clone()).await {
+                        tracing::error!("Error while syncing via indexer: {:?}", e);
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
-    } else if let Some(tx_sync) = tx_sync_opt.clone() {
-        let confirmables: Vec<Arc<dyn Confirm + Send + Sync>> = vec![
-            channel_manager.clone(),
-            chain_monitor.clone(),
-            output_sweeper.clone(),
-        ];
-        sync_chain_data(tx_sync.clone(), confirmables.clone())
-            .await
-            .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
-        tokio::spawn(async move {
-            loop {
-                if stop_listen.load(Ordering::Acquire) {
-                    return;
-                }
-                if let Err(e) = sync_chain_data(tx_sync.clone(), confirmables.clone()).await {
-                    tracing::error!("Error while syncing via esplora: {:?}", e);
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
-    } else {
-        let tx_sync = electrum_tx_sync_opt
-            .clone()
-            .expect("electrum branch populates electrum_tx_sync_opt");
-        let confirmables: Vec<Arc<dyn Confirm + Send + Sync>> = vec![
-            channel_manager.clone(),
-            chain_monitor.clone(),
-            output_sweeper.clone(),
-        ];
-        sync_chain_data_electrum(tx_sync.clone(), confirmables.clone())
-            .await
-            .map_err(|e| APIError::InvalidIndexer(e.to_string()))?;
-        tokio::spawn(async move {
-            loop {
-                if stop_listen.load(Ordering::Acquire) {
-                    return;
-                }
-                if let Err(e) =
-                    sync_chain_data_electrum(tx_sync.clone(), confirmables.clone()).await
-                {
-                    tracing::error!("Error while syncing via electrum: {:?}", e);
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
+            });
+        }
     }
 
     // Read payment info from KVStore
@@ -5754,6 +8778,7 @@ pub(crate) async fn start_ldk(
         kv_store: Arc::clone(&kv_store),
         #[cfg(feature = "vss")]
         monitor_kv_store: Arc::clone(&monitor_kv_store),
+        rgb_file_transfer_handler: Arc::clone(&rgb_file_transfer_handler),
         bump_tx_event_handler,
         rgb_wallet_wrapper,
         maker_swaps,
@@ -5768,6 +8793,7 @@ pub(crate) async fn start_ldk(
         virtual_channel_draft_store,
         virtual_channel_session_store,
         next_payment_idx,
+        rgb_funding_recovery_guard,
     });
 
     asset_link_handler.set_authorizer(Arc::new(NodeAssetLinkAuthorizer {
@@ -5845,6 +8871,7 @@ pub(crate) async fn start_ldk(
     let background_processor = tokio::spawn(supervise_background_processor(
         bp_future,
         Arc::clone(&stop_processing),
+        app_state.cancel_token.clone(),
     ));
 
     // Periodically drain queued VSS replications so an idle node still heals
@@ -5862,7 +8889,9 @@ pub(crate) async fn start_ldk(
                     break;
                 }
                 let store = Arc::clone(&drain_store);
-                let _ = tokio::task::spawn_blocking(move || store.drain_pending()).await;
+                if let Err(e) = tokio::task::spawn_blocking(move || store.drain_pending()).await {
+                    tracing::error!(error = %e, "periodic VSS drain task failed");
+                }
             }
         });
     }
@@ -5878,6 +8907,12 @@ pub(crate) async fn start_ldk(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
+            // checked here and not only per peer: with no channels to reconnect, or once the read
+            // below starts failing, the inner check is unreachable and the task would outlive the
+            // node it belongs to, polling its database by path forever
+            if stop_connect.load(Ordering::Acquire) {
+                return;
+            }
             let db = RlnDatabase::new((*connect_db).clone());
             match db.read_channel_peer_data() {
                 Ok(info) => {
@@ -6001,6 +9036,22 @@ pub(crate) async fn start_ldk(
         }
         None => [0; 32],
     };
+
+    // cleanup the buffers of RGB file transfers a peer started and never finished
+    let sweep_handler = Arc::clone(&rgb_file_transfer_handler);
+    let stop_sweep = Arc::clone(&stop_processing);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(REASSEMBLY_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if stop_sweep.load(Ordering::Acquire) {
+                return;
+            }
+            sweep_handler.sweep_stale_state();
+        }
+    });
+
     let peer_man = Arc::clone(&peer_manager);
     let chan_man = Arc::clone(&channel_manager);
     let announce_initial_delay_secs = static_state.config.node.announce_initial_delay_secs;
@@ -6071,26 +9122,6 @@ pub(crate) fn attach_external_signer_transport(
     })
 }
 
-async fn sync_chain_data(
-    tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
-    confirmables: Vec<Arc<dyn Confirm + Send + Sync>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tokio::task::spawn_blocking(move || tx_sync.sync(confirmables))
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
-}
-
-async fn sync_chain_data_electrum(
-    tx_sync: Arc<ElectrumSyncClient<Arc<FilesystemLogger>>>,
-    confirmables: Vec<Arc<dyn Confirm + Send + Sync>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tokio::task::spawn_blocking(move || tx_sync.sync(confirmables))
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
-}
-
 impl AppState {
     fn stop_ldk(&self) -> Option<JoinHandle<Result<(), io::Error>>> {
         let mut ldk_background_services = self.get_ldk_background_services();
@@ -6111,9 +9142,11 @@ impl AppState {
         ldk_background_services.gossip_shutdown.notify_one();
         ldk_background_services.peer_manager.disconnect_all_peers();
 
-        // Stop the background processor.
+        // Stop the background processor. Its `bp_exit` receiver lives inside the
+        // `process_events_async` future, so nothing to signal if the background processor is
+        // already gone. Also, send can find no receiver during a panic (racy).
         if !ldk_background_services.bp_exit.is_closed() {
-            ldk_background_services.bp_exit.send(()).unwrap();
+            let _ = ldk_background_services.bp_exit.send(());
             ldk_background_services.background_processor.take()
         } else {
             None
@@ -6124,7 +9157,114 @@ impl AppState {
 #[cfg(feature = "vss")]
 const BP_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Budget for draining and stopping the VSS-backed stores at teardown. Same order as the
+/// background-processor join above: it covers the flush window plus a stuck remote request being
+/// given up on, and keeps a shutdown terminating even when VSS never answers.
 #[cfg(feature = "vss")]
+const VSS_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Window for the final drain of queued replications, inside the teardown budget.
+#[cfg(feature = "vss")]
+const VSS_TEARDOWN_FLUSH_WINDOW: Duration = Duration::from_secs(10);
+
+/// Budget for the single VSS round-trip that hands the fence over.
+#[cfg(feature = "vss")]
+const VSS_FENCE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(feature = "vss")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VssTeardown {
+    /// Flush and stops finished: no further remote mutation can begin.
+    Complete,
+    /// A step was abandoned at the deadline: an in-flight write may still land.
+    Abandoned,
+}
+
+/// Drains queued replications and stops both stores, bounding every step by what is left of
+/// `deadline`. `SyncedKvStore::stop` waits on the drain gate, so a hung remote write would
+/// otherwise block the shutdown forever.
+#[cfg(feature = "vss")]
+async fn stop_vss_stores(
+    kv_store: &Arc<SyncedKvStore>,
+    monitor_kv_store: &Arc<RemoteFirstKvStore>,
+    deadline: Instant,
+) -> VssTeardown {
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+
+    let flush_store = Arc::clone(kv_store);
+    let flush_deadline = std::cmp::min(deadline, Instant::now() + VSS_TEARDOWN_FLUSH_WINDOW);
+    let flush =
+        tokio::task::spawn_blocking(move || flush_store.flush_pending_until(flush_deadline));
+    match tokio::time::timeout(remaining(), flush).await {
+        Ok(Ok(0)) => {}
+        Ok(Ok(n)) => tracing::error!(
+            pending = n,
+            "VSS replications still queued at shutdown; they persist locally and \
+             will retry on next unlock"
+        ),
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "pending-queue flush task failed");
+            monitor_kv_store.stop();
+            return VssTeardown::Abandoned;
+        }
+        Err(_) => {
+            tracing::error!("pending-queue flush did not finish within the teardown budget");
+            monitor_kv_store.stop();
+            return VssTeardown::Abandoned;
+        }
+    }
+
+    // Stop drains and abort outage-pending writes: once both stores are stopped no remote
+    // mutation can begin, which is what makes giving up the fence safe.
+    let stop_store = Arc::clone(kv_store);
+    let stop = tokio::task::spawn_blocking(move || stop_store.stop());
+    match tokio::time::timeout(remaining(), stop).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "pending-queue stop task failed");
+            monitor_kv_store.stop();
+            return VssTeardown::Abandoned;
+        }
+        Err(_) => {
+            tracing::error!("pending-queue stop did not finish within the teardown budget");
+            monitor_kv_store.stop();
+            return VssTeardown::Abandoned;
+        }
+    }
+    // Only signals the retry loops to abort, so it cannot block. Idempotent: the abandoned
+    // paths above may have already called it.
+    monitor_kv_store.stop();
+    VssTeardown::Complete
+}
+
+/// Releases the VSS fence, but only after a complete teardown: a write still in flight could
+/// otherwise land on a store another instance has already taken over. Returns whether the
+/// release was attempted.
+#[cfg(feature = "vss")]
+async fn release_vss_fence(kv_store: Arc<SyncedKvStore>, teardown: VssTeardown) -> bool {
+    if teardown != VssTeardown::Complete {
+        tracing::error!(
+            "VSS teardown did not complete within {:?}; keeping the fence, the next \
+             instance needs an explicit fence clear to take over",
+            VSS_TEARDOWN_TIMEOUT
+        );
+        return false;
+    }
+    let release = tokio::task::spawn_blocking(move || kv_store.release_vss_fence_if_owned());
+    match tokio::time::timeout(VSS_FENCE_RELEASE_TIMEOUT, release).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => tracing::warn!(error = %e, "failed to release VSS fence during shutdown"),
+        Ok(Err(e)) => tracing::warn!(error = %e, "VSS fence release task failed"),
+        Err(_) => tracing::warn!(
+            "VSS fence release did not finish within {:?}",
+            VSS_FENCE_RELEASE_TIMEOUT
+        ),
+    }
+    true
+}
+
+// Runs while shutting down, possibly because the background processor itself
+// died, so its outcome is reported instead of unwrapped.
 fn log_bp_shutdown_result(res: Result<Result<(), io::Error>, tokio::task::JoinError>) {
     match res {
         Ok(Ok(())) => {}
@@ -6132,6 +9272,58 @@ fn log_bp_shutdown_result(res: Result<Result<(), io::Error>, tokio::task::JoinEr
             tracing::error!(error = %e, "background processor exited with error during shutdown")
         }
         Err(e) => tracing::error!(error = %e, "background processor task join failed"),
+    }
+}
+
+#[cfg(all(test, feature = "vss"))]
+mod vss_teardown_tests {
+    use super::*;
+    use crate::kv_store::SeaOrmKvStore;
+
+    fn local_stores() -> (Arc<SyncedKvStore>, Arc<RemoteFirstKvStore>) {
+        let connection = crate::runtime::block_on(sea_orm::Database::connect("sqlite::memory:"))
+            .expect("in-memory database");
+        let local = Arc::new(SeaOrmKvStore::from_connection(Arc::new(connection)));
+        (
+            Arc::new(SyncedKvStore::local_only(Arc::clone(&local))),
+            Arc::new(RemoteFirstKvStore::new(local, None)),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_teardown_releases_the_fence() {
+        let (kv_store, monitor_kv_store) = local_stores();
+
+        let teardown = stop_vss_stores(
+            &kv_store,
+            &monitor_kv_store,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(teardown, VssTeardown::Complete);
+        assert!(release_vss_fence(kv_store, teardown).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abandoned_teardown_keeps_the_fence() {
+        let (kv_store, monitor_kv_store) = local_stores();
+        // `stop` blocks on the drain gate; a hung remote write must not hold the shutdown.
+        kv_store.set_before_stop_gate_hook(Arc::new(|| std::thread::sleep(Duration::from_secs(1))));
+        // Stand in for a live retry loop so the shutdown signal has a receiver to observe.
+        let shutdown_rx = monitor_kv_store.subscribe_shutdown();
+
+        let teardown = stop_vss_stores(
+            &kv_store,
+            &monitor_kv_store,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .await;
+
+        assert_eq!(teardown, VssTeardown::Abandoned);
+        // The abandoned path must still abort the monitor retries before giving up.
+        assert!(*shutdown_rx.borrow());
+        assert!(!release_vss_fence(kv_store, teardown).await);
     }
 }
 
@@ -6171,44 +9363,19 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
     }
     #[cfg(not(feature = "vss"))]
     if let Some(join_handle) = app_state.stop_ldk() {
-        join_handle.await.unwrap().unwrap();
+        log_bp_shutdown_result(join_handle.await);
     }
 
-    // Graceful teardown (lock, shutdown, signal): release the VSS fence so
-    // the next unlock — a fresh instance id — takes over without an explicit
-    // /vssclearfence. Hard kills still leave the fence behind by design.
+    // Any shutdown that reaches here (lock, /shutdown, signal, fatal panic) hands the VSS fence
+    // over so the next unlock — a fresh instance id — takes over without an explicit
+    // /vssclearfence. The teardown is bounded, and the fence is only released once it provably
+    // completed; a hard kill, or a teardown abandoned at its deadline, leaves the fence behind.
     #[cfg(feature = "vss")]
     {
         if let Some((kv_store, monitor_kv_store)) = stores {
-            // Best-effort flush of queued replications before the fence goes.
-            let flush_store = Arc::clone(&kv_store);
-            let flush = tokio::task::spawn_blocking(move || {
-                flush_store.flush_pending_until(std::time::Instant::now() + Duration::from_secs(10))
-            });
-            match flush.await {
-                Ok(0) => {}
-                Ok(n) => tracing::error!(
-                    pending = n,
-                    "VSS replications still queued at shutdown; they persist locally and \
-                     will retry on next unlock"
-                ),
-                Err(e) => tracing::warn!(error = %e, "pending-queue flush task failed"),
-            }
-            // Stop drains and abort outage-pending monitor writes before
-            // giving up the fence: a write landing after another instance
-            // owns the store would corrupt its state.
-            let stop_store = Arc::clone(&kv_store);
-            if let Err(e) = tokio::task::spawn_blocking(move || stop_store.stop()).await {
-                tracing::warn!(error = %e, "pending-queue stop task failed");
-            }
-            monitor_kv_store.stop();
-            match tokio::task::spawn_blocking(move || kv_store.release_vss_fence_if_owned()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "failed to release VSS fence during shutdown")
-                }
-                Err(e) => tracing::warn!(error = %e, "VSS fence release task failed"),
-            }
+            let deadline = Instant::now() + VSS_TEARDOWN_TIMEOUT;
+            let teardown = stop_vss_stores(&kv_store, &monitor_kv_store, deadline).await;
+            release_vss_fence(kv_store, teardown).await;
         }
     }
 
@@ -6224,7 +9391,8 @@ pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
             break;
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 10.0 {
-            panic!("LDK peer port not being released")
+            tracing::error!("LDK peer port {peer_port} was not released within 10s");
+            break;
         }
     }
 
@@ -6283,6 +9451,33 @@ pub(crate) fn clear_rgb_payment_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `chain.indexer_url` is the whole reason the unlock request keeps `indexer_url` optional
+    // instead of adopting upstream's mandatory field, so the layering itself is pinned here.
+    #[test]
+    fn indexer_url_falls_back_to_the_config_file() {
+        assert_eq!(
+            resolve_indexer_url(None, Some("127.0.0.1:50001")).unwrap(),
+            "127.0.0.1:50001"
+        );
+    }
+
+    #[test]
+    fn indexer_url_from_the_request_wins_over_the_config_file() {
+        assert_eq!(
+            resolve_indexer_url(Some("from-request:50001"), Some("from-config:50001")).unwrap(),
+            "from-request:50001"
+        );
+    }
+
+    // the per-network default indexer is gone: neither source means the unlock fails outright
+    #[test]
+    fn indexer_url_missing_from_both_sources_errors() {
+        assert!(matches!(
+            resolve_indexer_url(None, None),
+            Err(APIError::MissingIndexerUrl)
+        ));
+    }
     use crate::kv_store::SeaOrmKvStore;
     use lightning::rgb_utils::RgbInfo;
     use rln_migration::{Migrator, MigratorTrait};
@@ -6342,14 +9537,85 @@ mod tests {
         assert!(!access.allows_peer(&peer));
     }
 
-    fn build_kv_store() -> Arc<dyn KVStoreSync + Send + Sync> {
+    fn build_synced_kv_store() -> Arc<SyncedKvStore> {
         let db_path = std::env::temp_dir().join(format!("rln-ldk-unit-{}", uuid::Uuid::new_v4()));
         let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
         let db =
             crate::runtime::block_on(Database::connect(ConnectOptions::new(connection_string)))
                 .expect("db connection");
         crate::runtime::block_on(Migrator::up(&db, None)).expect("run migrations");
-        Arc::new(SeaOrmKvStore::from_connection(Arc::new(db)))
+        Arc::new(SyncedKvStore::local_only(Arc::new(
+            SeaOrmKvStore::from_connection(Arc::new(db)),
+        )))
+    }
+
+    fn build_kv_store() -> Arc<dyn KVStoreSync + Send + Sync> {
+        build_synced_kv_store()
+    }
+
+    #[test]
+    fn canonical_rgb_channel_metadata_is_idempotent_and_conflict_safe() {
+        let kv_store = build_synced_kv_store();
+        let channel_id = "02".repeat(32);
+        let expected = RgbInfo {
+            contract_id: test_contract_id(),
+            schema: AssetSchema::Nia,
+            local_rgb_amount: 600,
+            remote_rgb_amount: 0,
+            batch_transfer_idx: Some(7),
+            counterparty_knows_asset: false,
+        };
+
+        persist_canonical_rgb_channel_info(&channel_id, &expected, kv_store.as_ref())
+            .expect("initial canonical write");
+        persist_canonical_rgb_channel_info(&channel_id, &expected, kv_store.as_ref())
+            .expect("idempotent canonical replay");
+
+        let shifted = RgbInfo {
+            local_rgb_amount: 250,
+            remote_rgb_amount: 350,
+            batch_transfer_idx: None,
+            ..expected.clone()
+        };
+        kv_store.write_rgb_channel_info(&channel_id, &shifted, false);
+        persist_canonical_rgb_channel_info(&channel_id, &expected, kv_store.as_ref())
+            .expect("same channel allocation with a live balance split");
+
+        let mut conflicting = expected.clone();
+        conflicting.local_rgb_amount = 599;
+        persist_canonical_rgb_channel_info(&channel_id, &conflicting, kv_store.as_ref())
+            .expect_err("conflicting recovery metadata must fail closed");
+        assert_eq!(
+            kv_store
+                .read_rgb_channel_info(&channel_id, false)
+                .expect("canonical metadata"),
+            shifted,
+        );
+    }
+
+    #[test]
+    fn finalized_sender_pending_marker_cleanup_is_idempotent() {
+        let kv_store = build_synced_kv_store();
+        let channel_id = "03".repeat(32);
+
+        kv_store
+            .write(
+                PENDING_FUNDING_NAMESPACE,
+                "",
+                &channel_id,
+                b"funding-txid".to_vec(),
+            )
+            .expect("seed pending-funding marker");
+
+        for _ in 0..2 {
+            remove_rgb_sender_funding_entry(
+                PENDING_FUNDING_NAMESPACE,
+                &channel_id,
+                "cannot remove finalized RGB pending-funding marker",
+                kv_store.as_ref(),
+            )
+            .expect("finalized cleanup must be replay-safe");
+        }
     }
 
     fn seed_channel_info(
@@ -6364,6 +9630,7 @@ mod tests {
             local_rgb_amount,
             remote_rgb_amount,
             batch_transfer_idx: None,
+            counterparty_knows_asset: false,
         };
         kv_store.write_rgb_channel_info(channel_id, &info, false);
     }
@@ -6574,5 +9841,562 @@ mod tests {
             assert!(schemas.contains(&AssetSchema::Cfa));
             assert!(schemas.contains(&AssetSchema::Uda));
         }
+    }
+
+    #[test]
+    fn sweep_receive_reuse_margin_is_smaller_under_address_reuse() {
+        let now = 1_000_000;
+        let expiration = now + RGB_TRANSFER_CHAN_EXPIRATION_SECS;
+
+        // at t+23h the 1h margin has been reached, but the reuse margin has not
+        let late = expiration - RGB_RECEIVE_REUSE_MARGIN_SECS;
+        assert!(!sweep_receive_is_reusable(late, expiration, false));
+        assert!(sweep_receive_is_reusable(late, expiration, true));
+    }
+
+    #[test]
+    fn sweep_receive_reuse_respects_both_margin_boundaries() {
+        let expiration = 1_000_000;
+
+        for (reuse, margin) in [
+            (false, RGB_RECEIVE_REUSE_MARGIN_SECS),
+            (true, RGB_RECEIVE_REUSE_MARGIN_ADDR_REUSE_SECS),
+        ] {
+            // strictly inside the margin is reusable, the boundary itself is not
+            assert!(sweep_receive_is_reusable(
+                expiration - margin - 1,
+                expiration,
+                reuse
+            ));
+            assert!(!sweep_receive_is_reusable(
+                expiration - margin,
+                expiration,
+                reuse
+            ));
+        }
+    }
+
+    #[test]
+    fn inbound_payment_expiry_projection_preserves_boundary_semantics() {
+        assert_eq!(
+            effective_inbound_payment_status(HTLCStatus::Pending, Some(100), None, 100, 10),
+            HTLCStatus::Pending
+        );
+        assert_eq!(
+            effective_inbound_payment_status(HTLCStatus::Pending, Some(100), None, 101, 10),
+            HTLCStatus::Failed
+        );
+        assert_eq!(
+            effective_inbound_payment_status(HTLCStatus::Claimable, Some(100), None, 100, 10),
+            HTLCStatus::Failed
+        );
+        assert_eq!(
+            effective_inbound_payment_status(HTLCStatus::Claimable, None, Some(10), 99, 10),
+            HTLCStatus::Failed
+        );
+        assert_eq!(
+            effective_inbound_payment_status(HTLCStatus::Succeeded, Some(1), Some(1), 100, 100),
+            HTLCStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn rgb_sender_recovery_matrix_is_fail_closed_at_broadcast_boundary() {
+        use RgbSenderFundingStage::*;
+        use RgbSenderRecoveryAction::*;
+
+        let record = |stage, manual_broadcast| RgbSenderFundingRecord {
+            version: if manual_broadcast {
+                RgbSenderFundingRecord::MANUAL_BROADCAST_VERSION
+            } else {
+                RgbSenderFundingRecord::LEGACY_VERSION
+            },
+            manual_broadcast,
+            temporary_channel_id: "01".repeat(32),
+            final_channel_id: Some("02".repeat(32)),
+            funding_txid: "03".repeat(32),
+            batch_transfer_idx: 7,
+            rgb_info: None,
+            consignment_delivery: RgbSenderConsignmentDelivery::Proxy,
+            stage,
+        };
+
+        for stage in [
+            Preparing,
+            StockPromoted,
+            HandoffReady,
+            HandedToLdk,
+            BroadcastSafeObserved,
+        ] {
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), false, false),
+                Rollback
+            );
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), true, false),
+                ResumeBroadcast
+            );
+        }
+        for stage in [Broadcasting, BroadcastCommitted] {
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), false, false),
+                FailClosed
+            );
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), true, false),
+                Finalize
+            );
+        }
+        for stage in [
+            HandoffReady,
+            HandedToLdk,
+            BroadcastSafeObserved,
+            Broadcasting,
+            BroadcastCommitted,
+        ] {
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, false), false, false),
+                FailClosed
+            );
+        }
+        for stage in [
+            Preparing,
+            StockPromoted,
+            HandoffReady,
+            HandedToLdk,
+            BroadcastSafeObserved,
+            Broadcasting,
+        ] {
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), true, true),
+                Finalize
+            );
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), false, true),
+                FailClosed
+            );
+        }
+        for stage in [Finalized, DurablyCompleted] {
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), true, false),
+                Finalize
+            );
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), true, true),
+                Finalize
+            );
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), false, false),
+                FailClosed
+            );
+            assert_eq!(
+                rgb_sender_recovery_action(&record(stage, true), false, true),
+                FailClosed
+            );
+        }
+    }
+
+    #[test]
+    fn sweep_receive_past_expiry_is_never_reusable() {
+        let expiration = 1_000_000;
+        for reuse in [false, true] {
+            assert!(!sweep_receive_is_reusable(expiration, expiration, reuse));
+            assert!(!sweep_receive_is_reusable(
+                expiration + 1,
+                expiration,
+                reuse
+            ));
+        }
+        // pins the reuse margin itself: a receive with a minute of life must never be handed out,
+        // otherwise it can expire mid-sweep. Asserted without reference to the constant, so
+        // shrinking it back towards zero fails here.
+        assert!(!sweep_receive_is_reusable(
+            expiration - 60,
+            expiration,
+            true
+        ));
+        // same for the non-reuse margin, which must stay far larger than a sweep's duration
+        assert!(!sweep_receive_is_reusable(
+            expiration - 1800,
+            expiration,
+            false
+        ));
+    }
+
+    #[test]
+    fn legacy_sender_handoff_never_uses_negative_observation_as_rollback_proof() {
+        let record = RgbSenderFundingRecord {
+            version: RgbSenderFundingRecord::LEGACY_VERSION,
+            manual_broadcast: false,
+            temporary_channel_id: "01".repeat(32),
+            final_channel_id: Some("02".repeat(32)),
+            funding_txid: "03".repeat(32),
+            batch_transfer_idx: 7,
+            rgb_info: None,
+            consignment_delivery: RgbSenderConsignmentDelivery::Proxy,
+            stage: RgbSenderFundingStage::HandedToLdk,
+        };
+        assert_eq!(
+            rgb_sender_recovery_action(&record, false, false),
+            RgbSenderRecoveryAction::FailClosed
+        );
+
+        let recovery = rgb_funding_recovery_view(&record, false, Ok(Some(false)), None);
+        assert_eq!(
+            recovery.action,
+            RgbFundingRecoveryAction::ManualChannelStateRecovery
+        );
+        let guard = RgbFundingRecoveryGuard::default();
+        guard.replace(&[recovery]);
+        assert!(matches!(
+            guard.lock_rgb_wallet_mutation(),
+            Err(APIError::RgbFundingRecoveryRequired(ref txid))
+                if txid == &record.funding_txid
+        ));
+    }
+
+    #[test]
+    fn transient_sender_reconciliation_failure_preserves_retryable_evidence() {
+        let record = RgbSenderFundingRecord {
+            version: RgbSenderFundingRecord::VERSION,
+            manual_broadcast: true,
+            temporary_channel_id: "01".repeat(32),
+            final_channel_id: Some("02".repeat(32)),
+            funding_txid: "03".repeat(32),
+            batch_transfer_idx: 7,
+            rgb_info: Some(RgbInfo {
+                contract_id: test_contract_id(),
+                schema: AssetSchema::Nia,
+                local_rgb_amount: 1,
+                remote_rgb_amount: 2,
+                batch_transfer_idx: Some(7),
+                counterparty_knows_asset: false,
+            }),
+            consignment_delivery: RgbSenderConsignmentDelivery::P2p,
+            stage: RgbSenderFundingStage::Broadcasting,
+        };
+        let error = RgbLibError::Network {
+            details: "VSS temporarily unavailable".to_owned(),
+        };
+
+        let recovery = rgb_funding_recovery_view(&record, true, Ok(None), Some(&error));
+        assert_eq!(
+            recovery.stage,
+            RgbFundingRecoveryStage::Sender(RgbSenderFundingStage::Broadcasting)
+        );
+        assert_eq!(
+            recovery.action,
+            RgbFundingRecoveryAction::RetryReconciliation
+        );
+        assert_eq!(recovery.error, Some(error.to_string()));
+    }
+
+    #[test]
+    fn receiver_recovery_decisions_are_exhaustive_and_fail_closed() {
+        use FundingAcceptanceStage::*;
+        use RgbReceiverRecoveryAction::*;
+
+        for stage in [Validating, Prepared, RollingBack, RetryRequired] {
+            assert_eq!(rgb_receiver_recovery_action(stage, false), Rollback);
+            assert_eq!(rgb_receiver_recovery_action(stage, true), Quarantine);
+        }
+        for stage in [Promoted, Finalizing] {
+            assert_eq!(rgb_receiver_recovery_action(stage, false), Quarantine);
+            assert_eq!(rgb_receiver_recovery_action(stage, true), Finalize);
+        }
+        assert_eq!(rgb_receiver_recovery_action(Finalized, false), Quarantine);
+        assert_eq!(rgb_receiver_recovery_action(Finalized, true), Complete);
+    }
+
+    #[test]
+    fn finalized_receiver_recovery_is_typed_and_fail_closed() {
+        let record = PendingFundingAcceptance {
+            version: 3,
+            temporary_channel_id: "01".repeat(32),
+            counterparty_node_id: format!("02{}", "02".repeat(32)),
+            funding_txid: "03".repeat(32),
+            funding_output_index: 1,
+            push_asset_amount: Some(1),
+            stage: FundingAcceptanceStage::Finalized,
+            consignment: Some(vec![1]),
+            rgb_info: None,
+        };
+
+        let unresolved = rgb_receiver_funding_recovery_view(&record, false, None).unwrap();
+        assert_eq!(
+            unresolved.stage,
+            RgbFundingRecoveryStage::Receiver(FundingAcceptanceStage::Finalized)
+        );
+        assert!(!unresolved.channel_is_durable);
+        assert_eq!(unresolved.transaction_is_known, None);
+        assert_eq!(
+            unresolved.action,
+            RgbFundingRecoveryAction::ManualChannelStateRecovery
+        );
+
+        let durable = rgb_receiver_funding_recovery_view(&record, true, None).unwrap();
+        assert_eq!(
+            durable.action,
+            RgbFundingRecoveryAction::RetryReconciliation
+        );
+    }
+
+    #[test]
+    fn transient_receiver_reconciliation_failure_preserves_retryable_evidence() {
+        let record = PendingFundingAcceptance {
+            version: 3,
+            temporary_channel_id: "01".repeat(32),
+            counterparty_node_id: format!("02{}", "02".repeat(32)),
+            funding_txid: "03".repeat(32),
+            funding_output_index: 1,
+            push_asset_amount: Some(1),
+            stage: FundingAcceptanceStage::Prepared,
+            consignment: Some(vec![1]),
+            rgb_info: None,
+        };
+        let error = "VSS temporarily unavailable".to_owned();
+
+        let recovery =
+            rgb_receiver_funding_recovery_view(&record, false, Some(error.clone())).unwrap();
+        assert_eq!(
+            recovery.stage,
+            RgbFundingRecoveryStage::Receiver(FundingAcceptanceStage::Prepared)
+        );
+        assert_eq!(
+            recovery.action,
+            RgbFundingRecoveryAction::RetryReconciliation
+        );
+        assert_eq!(recovery.error, Some(error));
+    }
+
+    #[test]
+    fn rgb_funding_recovery_guard_is_fail_closed_and_deterministic() {
+        let guard = RgbFundingRecoveryGuard::default();
+        let recovery = |funding_txid: &str| RgbFundingRecoveryState {
+            funding_txid: funding_txid.to_owned(),
+            temporary_channel_id: "01".repeat(32),
+            final_channel_id: Some("02".repeat(32)),
+            stage: RgbFundingRecoveryStage::Sender(RgbSenderFundingStage::Broadcasting),
+            channel_is_durable: false,
+            transaction_is_known: None,
+            error: Some("indexer unavailable".to_owned()),
+            action: RgbFundingRecoveryAction::RetryChainObservation,
+        };
+        let first = "11".repeat(32);
+        let second = "22".repeat(32);
+        guard.replace(&[recovery(&second), recovery(&first)]);
+
+        assert_eq!(guard.snapshot(), vec![first.clone(), second.clone()]);
+        assert!(matches!(
+            guard.lock_rgb_wallet_mutation(),
+            Err(APIError::RgbFundingRecoveryRequired(ref txids))
+                if txids == &format!("{first},{second}")
+        ));
+
+        guard.clear(&first);
+        assert!(guard.lock_rgb_wallet_mutation().is_err());
+        guard.clear(&second);
+        assert!(guard.lock_rgb_wallet_mutation().is_ok());
+    }
+
+    #[test]
+    fn rgb_wallet_mutation_admission_holds_an_exclusive_lease() {
+        let guard = RgbFundingRecoveryGuard::default();
+
+        let operation = guard.lock_rgb_wallet_mutation().unwrap();
+        assert!(matches!(
+            guard.lock_rgb_wallet_mutation(),
+            Err(APIError::ChangingState)
+        ));
+
+        drop(operation);
+        assert!(guard.lock_rgb_wallet_mutation().is_ok());
+    }
+
+    #[tokio::test]
+    async fn output_sweeper_waits_for_a_short_wallet_mutation() {
+        let guard = Arc::new(RgbFundingRecoveryGuard::default());
+        let operation = guard.lock_rgb_wallet_mutation().unwrap();
+        let waiter_guard = Arc::clone(&guard);
+        let waiter = tokio::spawn(async move {
+            waiter_guard
+                .lock_rgb_wallet_mutation_for(Duration::from_secs(1), "test-sweeper")
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        drop(operation);
+
+        let sweep_operation = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("sweeper admission should not remain blocked")
+            .expect("sweeper admission task should not panic")
+            .expect("sweeper should acquire the released wallet lease");
+        drop(sweep_operation);
+        assert!(guard.lock_rgb_wallet_mutation().is_ok());
+    }
+
+    #[tokio::test]
+    async fn output_sweeper_wait_is_bounded() {
+        let guard = RgbFundingRecoveryGuard::default();
+        let _operation = guard.lock_rgb_wallet_mutation().unwrap();
+
+        assert!(matches!(
+            guard
+                .lock_rgb_wallet_mutation_for(Duration::from_millis(10), "test-sweeper")
+                .await,
+            Err(APIError::ChangingState)
+        ));
+    }
+
+    #[tokio::test]
+    async fn output_sweeper_remains_blocked_by_recovery_quarantine() {
+        let guard = RgbFundingRecoveryGuard::default();
+        let funding_txid = "11".repeat(32);
+        guard.replace(&[RgbFundingRecoveryState {
+            funding_txid: funding_txid.clone(),
+            temporary_channel_id: "01".repeat(32),
+            final_channel_id: Some("02".repeat(32)),
+            stage: RgbFundingRecoveryStage::Sender(RgbSenderFundingStage::Broadcasting),
+            channel_is_durable: false,
+            transaction_is_known: None,
+            error: Some("indexer unavailable".to_owned()),
+            action: RgbFundingRecoveryAction::RetryChainObservation,
+        }]);
+
+        assert!(matches!(
+            guard.lock_output_sweeper_wallet_mutation().await,
+            Err(APIError::RgbFundingRecoveryRequired(ref blocked_txid))
+                if blocked_txid == &funding_txid
+        ));
+    }
+
+    #[test]
+    fn btc_channel_payments_bypass_rgb_recovery_quarantine() {
+        let guard = RgbFundingRecoveryGuard::default();
+        let funding_txid = "11".repeat(32);
+        guard.replace(&[RgbFundingRecoveryState {
+            funding_txid: funding_txid.clone(),
+            temporary_channel_id: "01".repeat(32),
+            final_channel_id: Some("02".repeat(32)),
+            stage: RgbFundingRecoveryStage::Sender(RgbSenderFundingStage::Broadcasting),
+            channel_is_durable: false,
+            transaction_is_known: None,
+            error: Some("indexer unavailable".to_owned()),
+            action: RgbFundingRecoveryAction::RetryChainObservation,
+        }]);
+
+        assert!(matches!(guard.lock_channel_payment(false), Ok(None)));
+        assert!(matches!(
+            guard.lock_channel_payment(true),
+            Err(APIError::RgbFundingRecoveryRequired(ref blocked_txid))
+                if blocked_txid == &funding_txid
+        ));
+    }
+
+    #[test]
+    fn btc_channel_payments_bypass_an_active_rgb_wallet_mutation() {
+        let guard = RgbFundingRecoveryGuard::default();
+        let _rgb_wallet_operation = guard.lock_rgb_wallet_mutation().unwrap();
+
+        assert!(matches!(guard.lock_channel_payment(false), Ok(None)));
+        assert!(matches!(
+            guard.lock_channel_payment(true),
+            Err(APIError::ChangingState)
+        ));
+    }
+
+    #[test]
+    fn deferred_rgb_consistency_requires_a_durable_owner_or_a_resolved_stock() {
+        let operation_id = "03".repeat(32);
+        let recovery = RgbFundingRecoveryState {
+            funding_txid: operation_id.clone(),
+            temporary_channel_id: "01".repeat(32),
+            final_channel_id: Some("02".repeat(32)),
+            stage: RgbFundingRecoveryStage::Sender(RgbSenderFundingStage::Broadcasting),
+            channel_is_durable: true,
+            transaction_is_known: None,
+            error: None,
+            action: RgbFundingRecoveryAction::ResumeBroadcast,
+        };
+
+        assert!(!should_complete_deferred_rgb_consistency_check(false, None, &[]).unwrap());
+        assert!(should_complete_deferred_rgb_consistency_check(true, None, &[]).unwrap());
+        assert!(!should_complete_deferred_rgb_consistency_check(
+            true,
+            Some(&operation_id),
+            &[recovery]
+        )
+        .unwrap());
+        assert!(
+            should_complete_deferred_rgb_consistency_check(true, Some(&"04".repeat(32)), &[])
+                .is_err()
+        );
+        assert!(
+            should_complete_deferred_rgb_consistency_check(false, Some(&operation_id), &[])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rgb_sender_funding_journal_round_trips_with_version() {
+        let record = RgbSenderFundingRecord {
+            version: RgbSenderFundingRecord::VERSION,
+            manual_broadcast: true,
+            temporary_channel_id: "01".repeat(32),
+            final_channel_id: Some("02".repeat(32)),
+            funding_txid: "03".repeat(32),
+            batch_transfer_idx: 7,
+            rgb_info: Some(RgbInfo {
+                contract_id: test_contract_id(),
+                schema: AssetSchema::Nia,
+                local_rgb_amount: 1,
+                remote_rgb_amount: 2,
+                batch_transfer_idx: Some(7),
+                counterparty_knows_asset: false,
+            }),
+            consignment_delivery: RgbSenderConsignmentDelivery::P2p,
+            stage: RgbSenderFundingStage::HandedToLdk,
+        };
+        record.validate().unwrap();
+        let encoded = serde_json::to_vec(&record).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<RgbSenderFundingRecord>(&encoded).unwrap(),
+            record
+        );
+
+        let mut unsupported = record.clone();
+        unsupported.version += 1;
+        assert!(unsupported.validate().is_err());
+
+        let mut malformed = unsupported;
+        malformed.version = RgbSenderFundingRecord::VERSION;
+        malformed.funding_txid = "zz".repeat(32);
+        assert!(malformed.validate().is_err());
+
+        let legacy_json = serde_json::json!({
+            "version": RgbSenderFundingRecord::LEGACY_VERSION,
+            "temporary_channel_id": "01".repeat(32),
+            "final_channel_id": "02".repeat(32),
+            "funding_txid": "03".repeat(32),
+            "batch_transfer_idx": 7,
+            "stage": "handed_to_ldk"
+        });
+        let legacy: RgbSenderFundingRecord = serde_json::from_value(legacy_json).unwrap();
+        assert!(!legacy.manual_broadcast);
+        assert!(legacy.rgb_info.is_none());
+        assert_eq!(
+            legacy.consignment_delivery,
+            RgbSenderConsignmentDelivery::Proxy
+        );
+        legacy.validate().unwrap();
+
+        let mut wrong_delivery = record;
+        wrong_delivery.consignment_delivery = RgbSenderConsignmentDelivery::Proxy;
+        assert!(wrong_delivery.validate().is_err());
+
+        wrong_delivery.version = RgbSenderFundingRecord::RGB_INFO_VERSION;
+        wrong_delivery.consignment_delivery = RgbSenderConsignmentDelivery::P2p;
+        assert!(wrong_delivery.validate().is_err());
     }
 }

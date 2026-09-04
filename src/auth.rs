@@ -7,7 +7,7 @@ use crate::{
     utils::{hex_str, hex_str_to_vec, AppState},
 };
 
-const READ_ONLY_OPS: [&str; 25] = [
+const READ_ONLY_OPS: [&str; 26] = [
     "/assetbalance",
     "/assetmetadata",
     "/btcbalance",
@@ -19,6 +19,7 @@ const READ_ONLY_OPS: [&str; 25] = [
     "/estimatefee",
     "/getassetmedia",
     "/getchannelid",
+    "/getconsignment",
     "/getpayment",
     "/getswap",
     "/invoicestatus",

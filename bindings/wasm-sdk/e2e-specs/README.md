@@ -126,10 +126,15 @@ From the **repository root**:
      -H 'content-type: application/json' \
      -d '{
        "password":"rln-password",
-       "bitcoind_rpc_username":"user",
-       "bitcoind_rpc_password":"password",
-       "bitcoind_rpc_host":"127.0.0.1",
-       "bitcoind_rpc_port":19443,
+       "ldk_chain_sync":{
+         "mode":"BlockSync",
+         "config":{
+           "bitcoind_rpc_username":"user",
+           "bitcoind_rpc_password":"password",
+           "bitcoind_rpc_host":"127.0.0.1",
+           "bitcoind_rpc_port":19443
+         }
+       },
        "indexer_url":"http://127.0.0.1:3002",
        "proxy_endpoint":"rpc://127.0.0.1:3005/json-rpc",
        "announce_addresses":[]
