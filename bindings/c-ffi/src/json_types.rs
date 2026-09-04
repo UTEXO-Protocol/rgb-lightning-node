@@ -19,22 +19,23 @@ use rgb_lightning_node::{
     BtcBalanceInfo, CancelHodlInvoiceRequest, Channel, ChannelId, ChannelStatus,
     CheckIndexerUrlResponse, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, ContractId,
     DecodeLnInvoiceResponse, DecodeRgbInvoiceResponse, EmbeddedMedia, EstimateFeeResponse,
-    HtlcStatus, IfaIssuanceType, InflateRequest, InflateResponse, InvoiceStatus,
-    ListAssetsResponse, LnInvoiceRequest, LnInvoiceResponse, Media, MediaAttachment, NetworkInfo,
-    NodeInfo, Payment, PaymentHash, PaymentType, Peer, ProofOfReserves, PublicKey, RecipientId,
-    RgbAllocation, RgbOutpoint, RgbRecipient, SdkAssetLinkRequest, SdkCloseChannelRequest,
-    SdkCreateUtxosRequest, SdkDisconnectPeerRequest, SdkExternalSignerBootstrap,
-    SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest, SdkIssueAssetCfaRequest,
-    SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest, SdkIssueAssetUdaRequest, SdkKeysendRequest,
-    SdkKeysendResponse, SdkMakerExecuteRequest, SdkMakerInitRequest, SdkMakerInitResponse,
-    SdkOpenChannelRequest, SdkOpenChannelResponse, SdkPostAssetMediaRequest,
-    SdkPostAssetMediaResponse, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest,
-    SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse, SdkSendOnionMessageRequest,
-    SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest, SdkUnlockRequest,
-    SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse, SignMessageResponse, Swap, SwapList,
-    SwapStatus, Token, TokenLight, Transaction, TransactionType, Transfer,
-    TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo, VerifyMessageResponse,
-    WitnessData,
+    HtlcStatus, IfaIssuanceType, ImportRgbContractRequest, ImportRgbContractResponse,
+    ImportRgbTransferConsignmentRequest, ImportRgbTransferConsignmentResponse, InflateRequest,
+    InflateResponse, InvoiceStatus, ListAssetsResponse, LnInvoiceRequest, LnInvoiceResponse, Media,
+    MediaAttachment, NetworkInfo, NodeInfo, Payment, PaymentHash, PaymentType, Peer,
+    ProofOfReserves, PublicKey, RecipientId, RgbAllocation, RgbOutpoint, RgbRecipient,
+    SdkAssetLinkRequest, SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkDisconnectPeerRequest,
+    SdkExternalSignerBootstrap, SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest,
+    SdkIssueAssetCfaRequest, SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest,
+    SdkIssueAssetUdaRequest, SdkKeysendRequest, SdkKeysendResponse, SdkMakerExecuteRequest,
+    SdkMakerInitRequest, SdkMakerInitResponse, SdkOpenChannelRequest, SdkOpenChannelResponse,
+    SdkPostAssetMediaRequest, SdkPostAssetMediaResponse, SdkRefreshTransfersRequest,
+    SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
+    SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
+    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
+    SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
+    TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
+    VerifyMessageResponse, WitnessData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -981,6 +982,79 @@ impl From<SendRgbResponse> for JsonSendRgbResponse {
         JsonSendRgbResponse {
             txid: fmt_txid(&r.txid),
             batch_transfer_idx: r.batch_transfer_idx,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct JsonImportRgbTransferConsignmentRequest {
+    pub consignment_base64: String,
+    pub offchain_txid: String,
+    #[serde(default)]
+    pub expected_asset_id: Option<String>,
+}
+
+impl TryFrom<JsonImportRgbTransferConsignmentRequest> for ImportRgbTransferConsignmentRequest {
+    type Error = Error;
+    fn try_from(j: JsonImportRgbTransferConsignmentRequest) -> Result<Self, Self::Error> {
+        Ok(ImportRgbTransferConsignmentRequest {
+            consignment_base64: j.consignment_base64,
+            offchain_txid: j.offchain_txid,
+            expected_asset_id: j
+                .expected_asset_id
+                .map(|s| parse_contract_id(&s))
+                .transpose()?,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonImportRgbTransferConsignmentResponse {
+    pub asset_id: String,
+    pub already_imported: bool,
+    pub metadata: JsonAssetMetadataInfo,
+}
+
+impl From<ImportRgbTransferConsignmentResponse> for JsonImportRgbTransferConsignmentResponse {
+    fn from(r: ImportRgbTransferConsignmentResponse) -> Self {
+        JsonImportRgbTransferConsignmentResponse {
+            asset_id: fmt_contract_id(&r.asset_id),
+            already_imported: r.already_imported,
+            metadata: r.metadata.into(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct JsonImportRgbContractRequest {
+    pub contract_base64: String,
+    pub expected_asset_id: String,
+}
+
+impl TryFrom<JsonImportRgbContractRequest> for ImportRgbContractRequest {
+    type Error = Error;
+
+    fn try_from(j: JsonImportRgbContractRequest) -> Result<Self, Self::Error> {
+        Ok(ImportRgbContractRequest {
+            contract_base64: j.contract_base64,
+            expected_asset_id: parse_contract_id(&j.expected_asset_id)?,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonImportRgbContractResponse {
+    pub asset_id: String,
+    pub already_imported: bool,
+    pub metadata: JsonAssetMetadataInfo,
+}
+
+impl From<ImportRgbContractResponse> for JsonImportRgbContractResponse {
+    fn from(r: ImportRgbContractResponse) -> Self {
+        Self {
+            asset_id: fmt_contract_id(&r.asset_id),
+            already_imported: r.already_imported,
+            metadata: r.metadata.into(),
         }
     }
 }
@@ -2165,4 +2239,44 @@ impl From<SdkPostAssetMediaResponse> for JsonPostAssetMediaResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct JsonChannelIdResponse {
     pub channel_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ASSET_ID: &str = "rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8";
+
+    #[test]
+    fn rgb_contract_import_request_uses_the_documented_json_shape() {
+        let json = format!(r#"{{"contract_base64":"AA==","expected_asset_id":"{ASSET_ID}"}}"#);
+        let request: JsonImportRgbContractRequest = serde_json::from_str(&json).unwrap();
+        let typed = ImportRgbContractRequest::try_from(request).unwrap();
+
+        assert_eq!(typed.contract_base64, "AA==");
+        assert_eq!(typed.expected_asset_id.to_string(), ASSET_ID);
+    }
+
+    #[test]
+    fn rgb_transfer_import_request_preserves_optional_asset_verification() {
+        let json = format!(
+            r#"{{"consignment_base64":"AA==","offchain_txid":"offchain-id","expected_asset_id":"{ASSET_ID}"}}"#
+        );
+        let request: JsonImportRgbTransferConsignmentRequest = serde_json::from_str(&json).unwrap();
+        let typed = ImportRgbTransferConsignmentRequest::try_from(request).unwrap();
+
+        assert_eq!(typed.consignment_base64, "AA==");
+        assert_eq!(typed.offchain_txid, "offchain-id");
+        assert_eq!(typed.expected_asset_id.unwrap().to_string(), ASSET_ID);
+    }
+
+    #[test]
+    fn rgb_import_request_rejects_an_invalid_expected_asset_id() {
+        let request = JsonImportRgbContractRequest {
+            contract_base64: "AA==".to_string(),
+            expected_asset_id: "not-an-asset-id".to_string(),
+        };
+
+        assert!(ImportRgbContractRequest::try_from(request).is_err());
+    }
 }

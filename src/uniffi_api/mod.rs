@@ -258,6 +258,24 @@ fn map_asset_balance(data: crate::sdk::AssetBalance) -> AssetBalanceInfo {
     }
 }
 
+fn map_asset_metadata_data(data: crate::sdk::AssetMetadataData) -> AssetMetadataInfo {
+    AssetMetadataInfo {
+        asset_schema: format!("{:?}", data.asset_schema),
+        initial_supply: data.initial_supply,
+        max_supply: data.max_supply,
+        known_circulating_supply: data.known_circulating_supply,
+        timestamp: data.timestamp,
+        name: data.name,
+        precision: data.precision,
+        ticker: data.ticker,
+        details: data.details,
+        token: data.token.map(map_token),
+        unspent_link_right_outpoint: data.unspent_link_right_outpoint.map(map_rgb_outpoint),
+        linked_from_asset_id: data.linked_from_asset_id,
+        linked_to_asset_id: data.linked_to_asset_id,
+    }
+}
+
 fn map_asset_link(data: AssetLinkResponse) -> Result<AssetLinkRecord, RlnError> {
     Ok(AssetLinkRecord {
         parent_asset_id: ContractId::from_str(&data.parent_asset_id).map_err(RlnError::internal)?,
@@ -1171,20 +1189,47 @@ impl SdkNode {
     pub fn asset_metadata(&self, asset_id: ContractId) -> Result<AssetMetadataInfo, RlnError> {
         let state = self.handle.app_state();
         let resp = block_on_sdk(sdk::asset_metadata(state, asset_id.to_string()))?;
-        Ok(AssetMetadataInfo {
-            asset_schema: format!("{:?}", resp.asset_schema),
-            initial_supply: resp.initial_supply,
-            max_supply: resp.max_supply,
-            known_circulating_supply: resp.known_circulating_supply,
-            timestamp: resp.timestamp,
-            name: resp.name,
-            precision: resp.precision,
-            ticker: resp.ticker,
-            details: resp.details,
-            token: resp.token.map(map_token),
-            unspent_link_right_outpoint: resp.unspent_link_right_outpoint.map(map_rgb_outpoint),
-            linked_from_asset_id: resp.linked_from_asset_id,
-            linked_to_asset_id: resp.linked_to_asset_id,
+        Ok(map_asset_metadata_data(resp))
+    }
+
+    pub fn importrgbtransferconsignment(
+        &self,
+        request: ImportRgbTransferConsignmentRequest,
+    ) -> Result<ImportRgbTransferConsignmentResponse, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::import_rgb_transfer_consignment(
+            state,
+            sdk::ImportRgbTransferConsignmentRequestData {
+                consignment_base64: request.consignment_base64,
+                offchain_txid: request.offchain_txid,
+                expected_asset_id: request.expected_asset_id.map(|id| id.to_string()),
+            },
+        ))?;
+        let asset_id = ContractId::from_str(&resp.asset_id).map_err(RlnError::internal)?;
+        Ok(ImportRgbTransferConsignmentResponse {
+            asset_id,
+            already_imported: resp.already_imported,
+            metadata: map_asset_metadata_data(resp.metadata),
+        })
+    }
+
+    pub fn importrgbcontract(
+        &self,
+        request: ImportRgbContractRequest,
+    ) -> Result<ImportRgbContractResponse, RlnError> {
+        let state = self.handle.app_state();
+        let resp = block_on_sdk(sdk::import_rgb_contract(
+            state,
+            sdk::ImportRgbContractRequestData {
+                contract_base64: request.contract_base64,
+                expected_asset_id: request.expected_asset_id.to_string(),
+            },
+        ))?;
+        let asset_id = ContractId::from_str(&resp.asset_id).map_err(RlnError::internal)?;
+        Ok(ImportRgbContractResponse {
+            asset_id,
+            already_imported: resp.already_imported,
+            metadata: map_asset_metadata_data(resp.metadata),
         })
     }
 
@@ -1769,6 +1814,20 @@ pub fn sdk_asset_balance(asset_id: ContractId) -> Result<AssetBalanceInfo, RlnEr
 pub fn sdk_asset_metadata(asset_id: ContractId) -> Result<AssetMetadataInfo, RlnError> {
     let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
     SdkNode { handle }.asset_metadata(asset_id)
+}
+
+pub fn sdk_import_rgb_transfer_consignment(
+    request: ImportRgbTransferConsignmentRequest,
+) -> Result<ImportRgbTransferConsignmentResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.importrgbtransferconsignment(request)
+}
+
+pub fn sdk_import_rgb_contract(
+    request: ImportRgbContractRequest,
+) -> Result<ImportRgbContractResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.importrgbcontract(request)
 }
 
 pub fn sdk_get_asset_media(digest: String) -> Result<AssetMediaResponse, RlnError> {

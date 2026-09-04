@@ -69,6 +69,10 @@ interface SdkNode {
     [Throws=RlnError]
     SdkRgbInvoiceResponse rgbinvoice(SdkRgbInvoiceRequest request);
     [Throws=RlnError]
+    ImportRgbTransferConsignmentResponse importrgbtransferconsignment(ImportRgbTransferConsignmentRequest request);
+    [Throws=RlnError]
+    ImportRgbContractResponse importrgbcontract(ImportRgbContractRequest request);
+    [Throws=RlnError]
     SdkKeysendResponse keysend(SdkKeysendRequest request);
     [Throws=RlnError]
     SdkSendBtcResponse sendbtc(SdkSendBtcRequest request);
@@ -799,6 +803,29 @@ dictionary SdkRgbInvoiceResponse {
     string invoice;
     i64? expiration_timestamp;
     i32 batch_transfer_idx;
+};
+
+dictionary ImportRgbTransferConsignmentRequest {
+    string consignment_base64;
+    string offchain_txid;
+    ContractId? expected_asset_id;
+};
+
+dictionary ImportRgbTransferConsignmentResponse {
+    ContractId asset_id;
+    boolean already_imported;
+    AssetMetadataInfo metadata;
+};
+
+dictionary ImportRgbContractRequest {
+    string contract_base64;
+    ContractId expected_asset_id;
+};
+
+dictionary ImportRgbContractResponse {
+    ContractId asset_id;
+    boolean already_imported;
+    AssetMetadataInfo metadata;
 };
 
 dictionary SdkSendPaymentRequest {

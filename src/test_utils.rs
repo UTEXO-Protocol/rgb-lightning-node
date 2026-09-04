@@ -80,3 +80,28 @@ pub fn error_mapping_snapshot_for_tests() -> ErrorMappingSnapshot {
         ))),
     }
 }
+
+#[cfg(feature = "uniffi")]
+pub fn export_rgb_contract_bytes_for_tests(node: &crate::SdkNode, asset_id: &str) -> Vec<u8> {
+    use rgb_lib::FileContent;
+
+    let state = node.handle.app_state();
+    let unlocked_state = crate::runtime::block_on(async {
+        state
+            .get_unlocked_app_state()
+            .await
+            .as_ref()
+            .cloned()
+            .expect("test node is unlocked")
+    });
+    let contract = unlocked_state
+        .rgb_wallet_wrapper
+        .get_rgb_wallet()
+        .export_asset_contract(asset_id.to_string())
+        .expect("export issued RGB contract");
+    let mut bytes = Vec::new();
+    contract
+        .save(&mut bytes)
+        .expect("serialize issued RGB contract");
+    bytes
+}

@@ -23,6 +23,7 @@ use crate::ldk::{
 #[cfg(feature = "vss")]
 use crate::ldk::{derive_vss_identity, derive_vss_identity_from_key_source};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
+use crate::rgb_import;
 use crate::signer::{
     read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
     write_key_source_file, BootstrapData, KeySourceFile, SUPPORTED_SIGNER_API_LEVEL,
@@ -97,8 +98,9 @@ use rgb_lib::wallet::RecipientType as RgbLibRecipientType;
 use rgb_lib::wallet::{
     AssetCFA as RgbLibAssetCFA, AssetIFA as RgbLibAssetIFA, AssetNIA as RgbLibAssetNIA,
     AssetUDA as RgbLibAssetUDA, EmbeddedMedia as RgbLibEmbeddedMedia,
-    IfaIssuanceType as RgbLibIfaIssuanceType, Media as RgbLibMedia, Outpoint as RgbLibOutpoint,
-    ProofOfReserves as RgbLibProofOfReserves, Token as RgbLibToken, TokenLight as RgbLibTokenLight,
+    IfaIssuanceType as RgbLibIfaIssuanceType, Media as RgbLibMedia, Metadata as RgbLibMetadata,
+    Outpoint as RgbLibOutpoint, ProofOfReserves as RgbLibProofOfReserves, Token as RgbLibToken,
+    TokenLight as RgbLibTokenLight,
 };
 use rgb_lib::BitcoinNetwork as RgbBitcoinNetwork;
 use rgb_lib::{AssetSchema as RgbLibAssetSchema, Assignment as RgbLibAssignment};
@@ -242,6 +244,29 @@ pub(crate) struct AssetMetadataData {
     pub(crate) unspent_link_right_outpoint: Option<RgbLibOutpoint>,
     pub(crate) linked_from_asset_id: Option<String>,
     pub(crate) linked_to_asset_id: Option<String>,
+}
+
+pub(crate) struct ImportRgbTransferConsignmentRequestData {
+    pub(crate) consignment_base64: String,
+    pub(crate) offchain_txid: String,
+    pub(crate) expected_asset_id: Option<String>,
+}
+
+pub(crate) struct ImportRgbTransferConsignmentData {
+    pub(crate) asset_id: String,
+    pub(crate) already_imported: bool,
+    pub(crate) metadata: AssetMetadataData,
+}
+
+pub(crate) struct ImportRgbContractRequestData {
+    pub(crate) contract_base64: String,
+    pub(crate) expected_asset_id: String,
+}
+
+pub(crate) struct ImportRgbContractData {
+    pub(crate) asset_id: String,
+    pub(crate) already_imported: bool,
+    pub(crate) metadata: AssetMetadataData,
 }
 
 pub(crate) struct BtcBalance {
@@ -1609,7 +1634,11 @@ pub(crate) async fn asset_metadata(
         .unwrap()
         .rgb_get_asset_metadata(contract_id)?;
 
-    Ok(AssetMetadataData {
+    Ok(asset_metadata_data_from_metadata(metadata))
+}
+
+fn asset_metadata_data_from_metadata(metadata: RgbLibMetadata) -> AssetMetadataData {
+    AssetMetadataData {
         asset_schema: metadata.asset_schema,
         initial_supply: metadata.initial_supply,
         max_supply: metadata.max_supply,
@@ -1623,6 +1652,47 @@ pub(crate) async fn asset_metadata(
         unspent_link_right_outpoint: metadata.unspent_link_right_outpoint,
         linked_from_asset_id: metadata.linked_from_asset_id,
         linked_to_asset_id: metadata.linked_to_asset_id,
+    }
+}
+
+pub(crate) async fn import_rgb_transfer_consignment(
+    state: Arc<AppState>,
+    request: ImportRgbTransferConsignmentRequestData,
+) -> Result<ImportRgbTransferConsignmentData, APIError> {
+    let imported = rgb_import::import_rgb_transfer_consignment(
+        state,
+        rgb_import::ImportRgbTransferConsignmentRequestData {
+            consignment_base64: request.consignment_base64,
+            offchain_txid: request.offchain_txid,
+            expected_asset_id: request.expected_asset_id,
+        },
+    )
+    .await?;
+
+    Ok(ImportRgbTransferConsignmentData {
+        asset_id: imported.asset_id,
+        already_imported: imported.already_imported,
+        metadata: asset_metadata_data_from_metadata(imported.metadata),
+    })
+}
+
+pub(crate) async fn import_rgb_contract(
+    state: Arc<AppState>,
+    request: ImportRgbContractRequestData,
+) -> Result<ImportRgbContractData, APIError> {
+    let imported = rgb_import::import_rgb_contract(
+        state,
+        rgb_import::ImportRgbContractRequestData {
+            contract_base64: request.contract_base64,
+            expected_asset_id: request.expected_asset_id,
+        },
+    )
+    .await?;
+
+    Ok(ImportRgbContractData {
+        asset_id: imported.asset_id,
+        already_imported: imported.already_imported,
+        metadata: asset_metadata_data_from_metadata(imported.metadata),
     })
 }
 
@@ -4388,7 +4458,7 @@ pub(crate) async fn list_transfers(
     }
     let filter = match asset_id {
         Some(asset_id) => rgb_lib::wallet::AssetFilter::Id(asset_id),
-        None => rgb_lib::wallet::AssetFilter::Any,
+        None => rgb_lib::wallet::AssetFilter::AnyOrNone,
     };
     Ok(unlocked_state
         .rgb_list_transfers(filter, txid)?

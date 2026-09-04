@@ -82,6 +82,11 @@ CResultString rln_get_payment(const COpaqueStruct *node,
 
 CResultString rln_get_swap(const COpaqueStruct *node, const char *payment_hash, bool taker_flag);
 
+CResultString rln_import_rgb_contract(const COpaqueStruct *node, const char *request_json);
+
+CResultString rln_import_rgb_transfer_consignment(const COpaqueStruct *node,
+                                                  const char *request_json);
+
 CResultString rln_inflate(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_invoice_status(const COpaqueStruct *node, const char *invoice);

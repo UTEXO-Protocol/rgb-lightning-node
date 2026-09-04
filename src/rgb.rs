@@ -24,8 +24,8 @@ use rgb_lib::{
         SinglesigKeys, SyncOptions, Transaction as RgbLibTransaction, Transfer, TransferKind,
         TransportEndpoint, Unspent, Wallet as RgbLibWallet,
     },
-    AssetSchema, Assignment, BitcoinNetwork, ContractId, Error as RgbLibError, Fascia, RgbTransfer,
-    RgbTransport, RgbTxid, UpdateRes, WitnessOrd,
+    AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
+    Fascia, RgbContract, RgbTransfer, RgbTransport, RgbTxid, UpdateRes, WitnessOrd,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -217,6 +217,32 @@ impl UnlockedAppState {
         contract_id: ContractId,
     ) -> Result<Metadata, RgbLibError> {
         self.rgb_wallet_wrapper.get_asset_metadata(contract_id)
+    }
+
+    pub(crate) fn rgb_import_transfer_consignment(
+        &self,
+        consignment: RgbTransfer,
+        offchain_txid: String,
+    ) -> Result<(Metadata, bool), RgbLibError> {
+        let contract_id = consignment.contract_id();
+        let already_imported = match self.rgb_get_asset_metadata(contract_id) {
+            Ok(_) => true,
+            Err(RgbLibError::AssetNotFound { .. }) => false,
+            Err(error) => return Err(error),
+        };
+
+        self.rgb_wallet_wrapper
+            .save_new_asset(consignment, offchain_txid)?;
+        let metadata = self.rgb_get_asset_metadata(contract_id)?;
+        Ok((metadata, already_imported))
+    }
+
+    pub(crate) fn rgb_import_asset_contract(
+        &self,
+        contract: RgbContract,
+    ) -> Result<(Metadata, bool), RgbLibError> {
+        let imported = self.rgb_wallet_wrapper.import_asset_contract(contract)?;
+        Ok((imported.metadata, imported.already_imported))
     }
 
     pub(crate) fn rgb_get_btc_balance(&self, skip_sync: bool) -> Result<BtcBalance, RgbLibError> {
@@ -925,6 +951,13 @@ impl RgbLibWalletWrapper {
     ) -> Result<(), RgbLibError> {
         self.get_rgb_wallet()
             .save_new_asset(consignment, offchain_txid)
+    }
+
+    pub(crate) fn import_asset_contract(
+        &self,
+        contract: RgbContract,
+    ) -> Result<rgb_lib::wallet::rust_only::ImportAssetContractResult, RgbLibError> {
+        self.get_rgb_wallet().import_asset_contract(contract)
     }
 
     pub(crate) fn send(

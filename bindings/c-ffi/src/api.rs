@@ -338,6 +338,26 @@ pub(crate) fn send_rgb(node: &COpaqueStruct, request_json: *const c_char) -> Res
     json(JsonSendRgbResponse::from(resp))
 }
 
+pub(crate) fn import_rgb_transfer_consignment(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let req: JsonImportRgbTransferConsignmentRequest = parse_req(request_json)?;
+    let resp = node.importrgbtransferconsignment(req.try_into()?)?;
+    json(JsonImportRgbTransferConsignmentResponse::from(resp))
+}
+
+pub(crate) fn import_rgb_contract(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let req: JsonImportRgbContractRequest = parse_req(request_json)?;
+    let resp = node.importrgbcontract(req.try_into()?)?;
+    json(JsonImportRgbContractResponse::from(resp))
+}
+
 pub(crate) fn refresh_transfers(
     node: &COpaqueStruct,
     request_json: *const c_char,

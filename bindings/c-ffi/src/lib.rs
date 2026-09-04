@@ -343,6 +343,28 @@ pub extern "C" fn rln_send_rgb(node: &COpaqueStruct, request_json: *const c_char
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rln_import_rgb_transfer_consignment(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_import_rgb_transfer_consignment",
+        api::import_rgb_transfer_consignment(node, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_import_rgb_contract(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_import_rgb_contract",
+        api::import_rgb_contract(node, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rln_refresh_transfers(
     node: &COpaqueStruct,
     request_json: *const c_char,

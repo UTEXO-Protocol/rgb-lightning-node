@@ -84,6 +84,14 @@ mod uniffi_smoke_tests {
         });
         assert!(matches!(send_rgb, Err(RlnError::NotInitialized(_))));
 
+        let contract_id =
+            ContractId::from_str("rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8").unwrap();
+        let contract_import = sdk_import_rgb_contract(ImportRgbContractRequest {
+            contract_base64: String::new(),
+            expected_asset_id: contract_id,
+        });
+        assert!(matches!(contract_import, Err(RlnError::NotInitialized(_))));
+
         let invalid_recipient =
             <RecipientId as UniffiCustomTypeConverter>::into_custom("not-recipient-id".to_string());
         assert!(invalid_recipient.is_err());
@@ -185,6 +193,14 @@ mod uniffi_smoke_tests {
             recipient_groups: vec![],
         });
         assert!(matches!(send_rgb, Err(RlnError::InvalidRequest(_))));
+
+        let contract_id =
+            ContractId::from_str("rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8").unwrap();
+        let contract_import = node.importrgbcontract(ImportRgbContractRequest {
+            contract_base64: String::new(),
+            expected_asset_id: contract_id,
+        });
+        assert!(matches!(contract_import, Err(RlnError::InvalidRequest(_))));
 
         // Keep global slot untouched for compatibility wrappers.
         assert!(!uniffi_is_initialized());
