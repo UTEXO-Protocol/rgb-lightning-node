@@ -216,6 +216,25 @@ pub extern "C" fn rln_list_channels(node: &COpaqueStruct) -> CResultString {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rln_list_rgb_funding_recoveries(node: &COpaqueStruct) -> CResultString {
+    ffi_call!(
+        "rln_list_rgb_funding_recoveries",
+        api::list_rgb_funding_recoveries(node)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_resolve_rgb_funding_recovery(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_resolve_rgb_funding_recovery",
+        api::resolve_rgb_funding_recovery(node, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rln_list_peers(node: &COpaqueStruct) -> CResultString {
     ffi_call!("rln_list_peers", api::list_peers(node))
 }

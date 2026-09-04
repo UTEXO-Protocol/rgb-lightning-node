@@ -22,19 +22,20 @@ use rgb_lightning_node::{
     HtlcStatus, IfaIssuanceType, InflateRequest, InflateResponse, InvoiceStatus,
     ListAssetsResponse, LnInvoiceRequest, LnInvoiceResponse, Media, MediaAttachment, NetworkInfo,
     NodeInfo, Payment, PaymentHash, PaymentType, Peer, ProofOfReserves, PublicKey, RecipientId,
-    RgbAllocation, RgbOutpoint, RgbRecipient, SdkAssetLinkRequest, SdkCloseChannelRequest,
+    RgbAllocation, RgbFundingRecovery, RgbFundingRecoveryAction, RgbFundingRecoveryRequiredAction,
+    RgbFundingRecoveryRole, RgbOutpoint, RgbRecipient, SdkAssetLinkRequest, SdkCloseChannelRequest,
     SdkCreateUtxosRequest, SdkDisconnectPeerRequest, SdkExternalSignerBootstrap,
     SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest, SdkIssueAssetCfaRequest,
     SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest, SdkIssueAssetUdaRequest, SdkKeysendRequest,
-    SdkKeysendResponse, SdkMakerExecuteRequest, SdkMakerInitRequest, SdkMakerInitResponse,
-    SdkOpenChannelRequest, SdkOpenChannelResponse, SdkPostAssetMediaRequest,
-    SdkPostAssetMediaResponse, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest,
-    SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse, SdkSendOnionMessageRequest,
-    SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest, SdkUnlockRequest,
-    SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse, SignMessageResponse, Swap, SwapList,
-    SwapStatus, Token, TokenLight, Transaction, TransactionType, Transfer,
-    TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo, VerifyMessageResponse,
-    WitnessData,
+    SdkKeysendResponse, SdkLdkChainSync, SdkMakerExecuteRequest, SdkMakerInitRequest,
+    SdkMakerInitResponse, SdkOpenChannelRequest, SdkOpenChannelResponse, SdkPostAssetMediaRequest,
+    SdkPostAssetMediaResponse, SdkRefreshTransfersRequest, SdkRefreshTransfersResponse,
+    SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
+    SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
+    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
+    SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
+    TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
+    VerifyMessageResponse, WitnessData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -167,17 +168,47 @@ impl TryFrom<JsonSdkInitRequest> for SdkInitRequest {
     }
 }
 
+// How LDK follows the chain. Mirrors `SdkLdkChainSync`, tagged the same way as the daemon's
+// `/unlock` payload.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "mode", content = "config")]
+pub(crate) enum JsonSdkLdkChainSync {
+    BlockSync {
+        bitcoind_rpc_username: String,
+        bitcoind_rpc_password: String,
+        bitcoind_rpc_host: String,
+        bitcoind_rpc_port: u16,
+    },
+    TransactionSync {
+        indexer_url: String,
+    },
+}
+
+impl From<JsonSdkLdkChainSync> for SdkLdkChainSync {
+    fn from(j: JsonSdkLdkChainSync) -> Self {
+        match j {
+            JsonSdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            } => SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            },
+            JsonSdkLdkChainSync::TransactionSync { indexer_url } => {
+                SdkLdkChainSync::TransactionSync { indexer_url }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonSdkUnlockRequest {
     pub password: String,
-    #[serde(default)]
-    pub bitcoind_rpc_username: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_password: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_host: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_port: Option<u16>,
+    pub ldk_chain_sync: JsonSdkLdkChainSync,
     #[serde(default)]
     pub indexer_url: Option<String>,
     #[serde(default)]
@@ -197,10 +228,7 @@ impl From<JsonSdkUnlockRequest> for SdkUnlockRequest {
     fn from(j: JsonSdkUnlockRequest) -> Self {
         SdkUnlockRequest {
             password: j.password,
-            bitcoind_rpc_username: j.bitcoind_rpc_username,
-            bitcoind_rpc_password: j.bitcoind_rpc_password,
-            bitcoind_rpc_host: j.bitcoind_rpc_host,
-            bitcoind_rpc_port: j.bitcoind_rpc_port,
+            ldk_chain_sync: j.ldk_chain_sync.into(),
             indexer_url: j.indexer_url,
             proxy_endpoint: j.proxy_endpoint,
             announce_addresses: j.announce_addresses,
@@ -231,14 +259,7 @@ impl From<JsonVssClearFenceRequest> for SdkVssClearFenceRequest {
 // External-signer mode has no password: the seed never reaches RLN.
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonSdkExternalUnlockRequest {
-    #[serde(default)]
-    pub bitcoind_rpc_username: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_password: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_host: Option<String>,
-    #[serde(default)]
-    pub bitcoind_rpc_port: Option<u16>,
+    pub ldk_chain_sync: JsonSdkLdkChainSync,
     #[serde(default)]
     pub indexer_url: Option<String>,
     #[serde(default)]
@@ -446,6 +467,160 @@ impl From<Channel> for JsonChannel {
             virtual_open_mode: c.virtual_open_mode,
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JsonRgbFundingRecoveryRole {
+    Sender,
+    Receiver,
+}
+
+impl From<RgbFundingRecoveryRole> for JsonRgbFundingRecoveryRole {
+    fn from(role: RgbFundingRecoveryRole) -> Self {
+        match role {
+            RgbFundingRecoveryRole::Sender => Self::Sender,
+            RgbFundingRecoveryRole::Receiver => Self::Receiver,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JsonRgbFundingRecoveryRequiredAction {
+    RetryReconciliation,
+    ResumeBroadcast,
+    RetryChainObservation,
+    ManualChannelStateRecovery,
+}
+
+impl From<RgbFundingRecoveryRequiredAction> for JsonRgbFundingRecoveryRequiredAction {
+    fn from(action: RgbFundingRecoveryRequiredAction) -> Self {
+        match action {
+            RgbFundingRecoveryRequiredAction::RetryReconciliation => Self::RetryReconciliation,
+            RgbFundingRecoveryRequiredAction::ResumeBroadcast => Self::ResumeBroadcast,
+            RgbFundingRecoveryRequiredAction::RetryChainObservation => Self::RetryChainObservation,
+            RgbFundingRecoveryRequiredAction::ManualChannelStateRecovery => {
+                Self::ManualChannelStateRecovery
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRgbFundingRecovery {
+    pub role: JsonRgbFundingRecoveryRole,
+    pub funding_txid: String,
+    pub temporary_channel_id: String,
+    pub final_channel_id: Option<String>,
+    pub stage: String,
+    pub channel_is_durable: bool,
+    pub transaction_is_known: Option<bool>,
+    pub error: Option<String>,
+    pub required_action: JsonRgbFundingRecoveryRequiredAction,
+}
+
+impl From<RgbFundingRecovery> for JsonRgbFundingRecovery {
+    fn from(recovery: RgbFundingRecovery) -> Self {
+        Self {
+            role: recovery.role.into(),
+            funding_txid: fmt_txid(&recovery.funding_txid),
+            temporary_channel_id: fmt_channel_id(&recovery.temporary_channel_id),
+            final_channel_id: recovery.final_channel_id.as_ref().map(fmt_channel_id),
+            stage: recovery.stage,
+            channel_is_durable: recovery.channel_is_durable,
+            transaction_is_known: recovery.transaction_is_known,
+            error: recovery.error,
+            required_action: recovery.required_action.into(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JsonRgbFundingRecoveryAction {
+    Recheck,
+    ResumeBroadcast,
+}
+
+impl From<JsonRgbFundingRecoveryAction> for RgbFundingRecoveryAction {
+    fn from(action: JsonRgbFundingRecoveryAction) -> Self {
+        match action {
+            JsonRgbFundingRecoveryAction::Recheck => Self::Recheck,
+            JsonRgbFundingRecoveryAction::ResumeBroadcast => Self::ResumeBroadcast,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgb_funding_recovery_roles_have_stable_json_names() {
+        let sender = JsonRgbFundingRecoveryRole::from(RgbFundingRecoveryRole::Sender);
+        let receiver = JsonRgbFundingRecoveryRole::from(RgbFundingRecoveryRole::Receiver);
+
+        assert_eq!(serde_json::to_string(&sender).unwrap(), "\"sender\"");
+        assert_eq!(serde_json::to_string(&receiver).unwrap(), "\"receiver\"");
+    }
+
+    #[test]
+    fn rgb_funding_recovery_json_is_stable() {
+        let recovery = RgbFundingRecovery {
+            role: RgbFundingRecoveryRole::Sender,
+            funding_txid: Txid::from_str(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
+            temporary_channel_id: lightning::ln::types::ChannelId([1; 32]),
+            final_channel_id: None,
+            stage: "sender_broadcasting".to_owned(),
+            channel_is_durable: true,
+            transaction_is_known: Some(false),
+            error: Some("indexer unavailable".to_string()),
+            required_action: RgbFundingRecoveryRequiredAction::ResumeBroadcast,
+        };
+
+        let value = serde_json::to_value(JsonRgbFundingRecovery::from(recovery)).unwrap();
+        assert_eq!(value["role"], "sender");
+        assert_eq!(value["stage"], "sender_broadcasting");
+        assert_eq!(value["required_action"], "resume_broadcast");
+        assert_eq!(value["temporary_channel_id"], "01".repeat(32));
+        assert_eq!(value["channel_is_durable"], true);
+        assert_eq!(value["transaction_is_known"], false);
+        assert_eq!(value["error"], "indexer unavailable");
+    }
+
+    #[test]
+    fn rgb_funding_recovery_request_accepts_only_supported_actions() {
+        let recheck: JsonResolveRgbFundingRecoveryRequest =
+            serde_json::from_str(r#"{"funding_txid":"00","action":"recheck"}"#).unwrap();
+        assert!(matches!(
+            recheck.action,
+            JsonRgbFundingRecoveryAction::Recheck
+        ));
+
+        assert!(
+            serde_json::from_str::<JsonResolveRgbFundingRecoveryRequest>(
+                r#"{"funding_txid":"00","action":"rollback"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<JsonResolveRgbFundingRecoveryRequest>(
+                r#"{"funding_txid":"00","action":"recheck","unexpected":true}"#
+            )
+            .is_err()
+        );
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JsonResolveRgbFundingRecoveryRequest {
+    pub funding_txid: String,
+    pub action: JsonRgbFundingRecoveryAction,
 }
 
 #[derive(Debug, Serialize)]
@@ -769,6 +944,8 @@ pub(crate) struct JsonDecodeLnInvoiceResponse {
     pub timestamp: u64,
     pub asset_id: Option<String>,
     pub asset_amount: Option<u64>,
+    pub description: Option<String>,
+    pub description_hash: Option<String>,
     pub payment_hash: String,
     pub payment_secret: String,
     pub payee_pubkey: Option<String>,
@@ -783,6 +960,8 @@ impl From<DecodeLnInvoiceResponse> for JsonDecodeLnInvoiceResponse {
             timestamp: r.timestamp,
             asset_id: r.asset_id.as_ref().map(fmt_contract_id),
             asset_amount: r.asset_amount,
+            description: r.description,
+            description_hash: r.description_hash,
             payment_hash: fmt_payment_hash(&r.payment_hash),
             payment_secret: r.payment_secret,
             payee_pubkey: r.payee_pubkey.as_ref().map(fmt_pubkey),
@@ -994,6 +1173,46 @@ impl From<JsonRefreshTransfersRequest> for SdkRefreshTransfersRequest {
     fn from(j: JsonRefreshTransfersRequest) -> Self {
         SdkRefreshTransfersRequest {
             skip_sync: j.skip_sync,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshFailure {
+    pub name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshedTransfer {
+    pub updated_status: Option<String>,
+    pub failure: Option<JsonRefreshFailure>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRefreshTransfersResponse {
+    pub transfers: std::collections::HashMap<i32, JsonRefreshedTransfer>,
+}
+
+impl From<SdkRefreshTransfersResponse> for JsonRefreshTransfersResponse {
+    fn from(r: SdkRefreshTransfersResponse) -> Self {
+        JsonRefreshTransfersResponse {
+            transfers: r
+                .transfers
+                .into_iter()
+                .map(|(idx, t)| {
+                    (
+                        idx,
+                        JsonRefreshedTransfer {
+                            updated_status: t.updated_status,
+                            failure: t.failure.map(|f| JsonRefreshFailure {
+                                name: f.name,
+                                message: f.message,
+                            }),
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -1942,6 +2161,7 @@ pub(crate) struct JsonUtxo {
     pub outpoint: String,
     pub btc_amount: u64,
     pub colorable: bool,
+    pub exists: bool,
 }
 
 impl From<Utxo> for JsonUtxo {
@@ -1950,6 +2170,7 @@ impl From<Utxo> for JsonUtxo {
             outpoint: u.outpoint,
             btc_amount: u.btc_amount,
             colorable: u.colorable,
+            exists: u.exists,
         }
     }
 }

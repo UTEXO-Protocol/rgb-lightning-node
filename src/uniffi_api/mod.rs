@@ -101,6 +101,12 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
         ldk_peer_listening_port: request.ldk_peer_listening_port,
         network,
         max_media_upload_size_mb: request.max_media_upload_size_mb,
+        // `SdkInitRequest` doesn't expose the p2p transfer limits yet; extending the FFI surface
+        // (and the mobile bindings) is a separate change, so embedders get the defaults.
+        max_aggregated_media_size_per_channel_mb:
+            crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+        max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+        max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
         root_public_key: None,
         enable_virtual_channels_v0: request.enable_virtual_channels_v0.unwrap_or(false),
         virtual_peer_pubkeys: request.virtual_peer_pubkeys.unwrap_or_default(),
@@ -235,6 +241,55 @@ fn map_swap_data(data: crate::sdk::SwapViewData) -> Result<Swap, RlnError> {
         initiated_at: data.initiated_at,
         expires_at: data.expires_at,
         completed_at: data.completed_at,
+    })
+}
+
+fn channel_id_from_hex(value: &str) -> Result<ChannelId, RlnError> {
+    let bytes = Vec::<u8>::from_hex(value).map_err(RlnError::internal)?;
+    if bytes.len() != 32 {
+        return Err(RlnError::internal("invalid channel ID length"));
+    }
+    let mut channel_id = [0u8; 32];
+    channel_id.copy_from_slice(&bytes);
+    Ok(lightning::ln::types::ChannelId(channel_id))
+}
+
+fn map_rgb_funding_recovery(
+    recovery: crate::ldk::RgbFundingRecoveryState,
+) -> Result<RgbFundingRecovery, RlnError> {
+    let role = match recovery.stage {
+        crate::ldk::RgbFundingRecoveryStage::Sender(_) => RgbFundingRecoveryRole::Sender,
+        crate::ldk::RgbFundingRecoveryStage::Receiver(_) => RgbFundingRecoveryRole::Receiver,
+    };
+    let stage = recovery.stage.as_str().to_owned();
+    let required_action = match recovery.action {
+        crate::ldk::RgbFundingRecoveryAction::RetryReconciliation => {
+            RgbFundingRecoveryRequiredAction::RetryReconciliation
+        }
+        crate::ldk::RgbFundingRecoveryAction::ResumeBroadcast => {
+            RgbFundingRecoveryRequiredAction::ResumeBroadcast
+        }
+        crate::ldk::RgbFundingRecoveryAction::RetryChainObservation => {
+            RgbFundingRecoveryRequiredAction::RetryChainObservation
+        }
+        crate::ldk::RgbFundingRecoveryAction::ManualChannelStateRecovery => {
+            RgbFundingRecoveryRequiredAction::ManualChannelStateRecovery
+        }
+    };
+    Ok(RgbFundingRecovery {
+        role,
+        funding_txid: Txid::from_str(&recovery.funding_txid).map_err(RlnError::internal)?,
+        temporary_channel_id: channel_id_from_hex(&recovery.temporary_channel_id)?,
+        final_channel_id: recovery
+            .final_channel_id
+            .as_deref()
+            .map(channel_id_from_hex)
+            .transpose()?,
+        stage,
+        channel_is_durable: recovery.channel_is_durable,
+        transaction_is_known: recovery.transaction_is_known,
+        error: recovery.error,
+        required_action,
     })
 }
 
@@ -387,6 +442,19 @@ fn map_transfer(t: crate::sdk::TransferData) -> Result<Transfer, RlnError> {
     })
 }
 
+#[cfg(feature = "test-utils")]
+pub(crate) fn channel_has_inflight_htlcs_for_tests(
+    node: &SdkNode,
+    channel_id: &str,
+) -> Result<bool, RlnError> {
+    let channels = block_on_sdk(sdk::list_channels(node.handle.app_state()))?;
+    channels
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id)
+        .map(|channel| channel.has_inflight_htlcs)
+        .ok_or_else(|| RlnError::NotFound(format!("channel not found: {channel_id}")))
+}
+
 impl SdkNode {
     pub fn create(request: SdkInitRequest) -> Result<Self, RlnError> {
         let handle = handle_from_request(request)?;
@@ -425,10 +493,7 @@ impl SdkNode {
             state,
             sdk::UnlockRequest {
                 password: request.password,
-                bitcoind_rpc_username: request.bitcoind_rpc_username,
-                bitcoind_rpc_password: request.bitcoind_rpc_password,
-                bitcoind_rpc_host: request.bitcoind_rpc_host,
-                bitcoind_rpc_port: request.bitcoind_rpc_port,
+                ldk_chain_sync: request.ldk_chain_sync.into(),
                 indexer_url: request.indexer_url,
                 proxy_endpoint: request.proxy_endpoint,
                 announce_addresses: request.announce_addresses,
@@ -874,15 +939,35 @@ impl SdkNode {
         })
     }
 
-    pub fn refreshtransfers(&self, request: SdkRefreshTransfersRequest) -> Result<(), RlnError> {
+    pub fn refreshtransfers(
+        &self,
+        request: SdkRefreshTransfersRequest,
+    ) -> Result<SdkRefreshTransfersResponse, RlnError> {
         let state = self.handle.app_state();
-        block_on_sdk(sdk::refresh_transfers(
+        let response = block_on_sdk(sdk::refresh_transfers(
             state,
             sdk::RefreshTransfersRequestData {
                 skip_sync: request.skip_sync,
             },
         ))?;
-        Ok(())
+        Ok(SdkRefreshTransfersResponse {
+            transfers: response
+                .transfers
+                .into_iter()
+                .map(|(idx, t)| {
+                    (
+                        idx,
+                        SdkRefreshedTransfer {
+                            updated_status: t.updated_status,
+                            failure: t.failure.map(|f| SdkRefreshFailure {
+                                name: f.name,
+                                message: f.message,
+                            }),
+                        },
+                    )
+                })
+                .collect(),
+        })
     }
 
     pub fn failtransfers(
@@ -1009,14 +1094,7 @@ impl SdkNode {
         channels
             .into_iter()
             .map(|c| {
-                let channel_id_bytes =
-                    Vec::<u8>::from_hex(&c.channel_id).map_err(RlnError::internal)?;
-                if channel_id_bytes.len() != 32 {
-                    return Err(RlnError::internal("invalid channel ID length"));
-                }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&channel_id_bytes);
-                let channel_id = lightning::ln::types::ChannelId(arr);
+                let channel_id = channel_id_from_hex(&c.channel_id)?;
                 let peer_pubkey =
                     PublicKey::from_str(&c.peer_pubkey).map_err(RlnError::internal)?;
                 let funding_txid = c
@@ -1055,6 +1133,34 @@ impl SdkNode {
                 })
             })
             .collect()
+    }
+
+    pub fn list_rgb_funding_recoveries(&self) -> Result<Vec<RgbFundingRecovery>, RlnError> {
+        let state = self.handle.app_state();
+        block_on_sdk(sdk::list_rgb_funding_recoveries(state))?
+            .into_iter()
+            .map(map_rgb_funding_recovery)
+            .collect()
+    }
+
+    pub fn resolve_rgb_funding_recovery(
+        &self,
+        funding_txid: Txid,
+        action: RgbFundingRecoveryAction,
+    ) -> Result<Option<RgbFundingRecovery>, RlnError> {
+        let action = match action {
+            RgbFundingRecoveryAction::Recheck => sdk::RgbFundingRecoveryActionData::Recheck,
+            RgbFundingRecoveryAction::ResumeBroadcast => {
+                sdk::RgbFundingRecoveryActionData::ResumeBroadcast
+            }
+        };
+        block_on_sdk(sdk::resolve_rgb_funding_recovery(
+            self.handle.app_state(),
+            funding_txid.to_string(),
+            action,
+        ))?
+        .map(map_rgb_funding_recovery)
+        .transpose()
     }
 
     pub fn list_peers(&self) -> Result<Vec<Peer>, RlnError> {
@@ -1350,6 +1456,8 @@ impl SdkNode {
             timestamp: resp.timestamp,
             asset_id,
             asset_amount: resp.asset_amount,
+            description: resp.description,
+            description_hash: resp.description_hash,
             payment_hash,
             payment_secret: resp.payment_secret,
             payee_pubkey,
@@ -1419,6 +1527,7 @@ impl SdkNode {
                         outpoint: u.utxo.outpoint,
                         btc_amount: u.utxo.btc_amount,
                         colorable: u.utxo.colorable,
+                        exists: u.utxo.exists,
                     },
                     rgb_allocations: u
                         .rgb_allocations
@@ -1561,10 +1670,7 @@ impl SdkNode {
     #[allow(clippy::too_many_arguments)] // Mirrors `UnlockRequest`; UniFFI keeps a flat argument list.
     pub fn unlock_with_attached_external_signer(
         &self,
-        bitcoind_rpc_username: Option<String>,
-        bitcoind_rpc_password: Option<String>,
-        bitcoind_rpc_host: Option<String>,
-        bitcoind_rpc_port: Option<u16>,
+        ldk_chain_sync: SdkLdkChainSync,
         indexer_url: Option<String>,
         proxy_endpoint: Option<String>,
         announce_addresses: Vec<String>,
@@ -1575,10 +1681,7 @@ impl SdkNode {
             state,
             sdk::UnlockRequest {
                 password: String::new(),
-                bitcoind_rpc_username,
-                bitcoind_rpc_password,
-                bitcoind_rpc_host,
-                bitcoind_rpc_port,
+                ldk_chain_sync: ldk_chain_sync.into(),
                 indexer_url,
                 proxy_endpoint,
                 announce_addresses,
@@ -1614,10 +1717,7 @@ impl SdkNode {
     pub fn unlock_with_native_external_signer(
         &self,
         signer: Arc<NativeExternalSigner>,
-        bitcoind_rpc_username: Option<String>,
-        bitcoind_rpc_password: Option<String>,
-        bitcoind_rpc_host: Option<String>,
-        bitcoind_rpc_port: Option<u16>,
+        ldk_chain_sync: SdkLdkChainSync,
         indexer_url: Option<String>,
         proxy_endpoint: Option<String>,
         announce_addresses: Vec<String>,
@@ -1625,10 +1725,7 @@ impl SdkNode {
     ) -> Result<(), RlnError> {
         self.attach_native_external_signer(signer.clone())?;
         self.unlock_with_attached_external_signer(
-            bitcoind_rpc_username,
-            bitcoind_rpc_password,
-            bitcoind_rpc_host,
-            bitcoind_rpc_port,
+            ldk_chain_sync,
             indexer_url,
             proxy_endpoint,
             announce_addresses,

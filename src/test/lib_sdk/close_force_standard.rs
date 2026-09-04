@@ -2,6 +2,10 @@ use crate::helpers::*;
 use serial_test::serial;
 use std::{fs, thread::sleep, time::Duration};
 
+const CHANNEL_ASSET_AMOUNT: u64 = 600;
+const ASSET_SEND_A_TO_B: u64 = 150;
+const ASSET_SEND_B_TO_A: u64 = 50;
+
 #[test]
 #[serial]
 fn close_force_standard() {
@@ -74,7 +78,7 @@ fn close_force_standard() {
                 fee_proportional_millionths: None,
                 temporary_channel_id: None,
                 asset_id: Some(asset_id.clone()),
-                asset_amount: Some(600),
+                asset_amount: Some(CHANNEL_ASSET_AMOUNT),
                 push_asset_amount: None,
                 virtual_open_mode: None,
             })
@@ -89,8 +93,56 @@ fn close_force_standard() {
             .get_channel_id(open_channel.temporary_channel_id)
             .expect("node A get_channel_id");
 
-        keysend(&node_a, node_b_pubkey, None, Some(&asset_id), Some(150));
-        keysend(&node_b, node_a_pubkey, None, Some(&asset_id), Some(50));
+        keysend(
+            &node_a,
+            node_b_pubkey,
+            None,
+            Some(&asset_id),
+            Some(ASSET_SEND_A_TO_B),
+        );
+        wait_for_channel_asset_state(
+            "node A after outbound RGB keysend",
+            &node_a,
+            channel_id,
+            Some(CHANNEL_ASSET_AMOUNT - ASSET_SEND_A_TO_B),
+            Some(ASSET_SEND_A_TO_B),
+            None,
+            Duration::from_secs(60),
+        );
+        wait_for_channel_asset_state(
+            "node B before return RGB keysend",
+            &node_b,
+            channel_id,
+            Some(ASSET_SEND_A_TO_B),
+            Some(CHANNEL_ASSET_AMOUNT - ASSET_SEND_A_TO_B),
+            Some(PAYMENT_MSAT),
+            Duration::from_secs(60),
+        );
+        keysend(
+            &node_b,
+            node_a_pubkey,
+            None,
+            Some(&asset_id),
+            Some(ASSET_SEND_B_TO_A),
+        );
+        wait_for_channel_asset_state(
+            "node A after return RGB keysend",
+            &node_a,
+            channel_id,
+            Some(CHANNEL_ASSET_AMOUNT - ASSET_SEND_A_TO_B + ASSET_SEND_B_TO_A),
+            Some(ASSET_SEND_A_TO_B - ASSET_SEND_B_TO_A),
+            None,
+            Duration::from_secs(60),
+        );
+        wait_for_channel_asset_state(
+            "node B after return RGB keysend",
+            &node_b,
+            channel_id,
+            Some(ASSET_SEND_A_TO_B - ASSET_SEND_B_TO_A),
+            Some(CHANNEL_ASSET_AMOUNT - ASSET_SEND_A_TO_B + ASSET_SEND_B_TO_A),
+            None,
+            Duration::from_secs(60),
+        );
 
         // Mirrors the original test to avoid racing an outdated commitment TX.
         sleep(Duration::from_secs(5));

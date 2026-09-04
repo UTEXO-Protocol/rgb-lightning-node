@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::disk::FilesystemLogger;
-use crate::ldk::{GossipVerifier, NetworkGraph, P2PGossipSync, RapidGossipSync};
+use crate::ldk::{NetworkGraph, P2PGossipSync, RapidGossipSync};
 
 pub(crate) const RGS_SNAPSHOT_MAX_SIZE: usize = 15 * 1024 * 1024;
 pub(crate) const RGS_CONNECT_TIMEOUT_SECS: u64 = 5;
@@ -56,7 +56,7 @@ pub(crate) enum GossipSource {
 impl GossipSource {
     pub(crate) fn new_p2p(
         network_graph: Arc<NetworkGraph>,
-        utxo_lookup: Option<Arc<GossipVerifier>>,
+        utxo_lookup: Option<Arc<dyn lightning::routing::utxo::UtxoLookup + Send + Sync>>,
         logger: Arc<FilesystemLogger>,
     ) -> Self {
         let gossip_sync = Arc::new(P2PGossipSync::new(network_graph, utxo_lookup, logger));

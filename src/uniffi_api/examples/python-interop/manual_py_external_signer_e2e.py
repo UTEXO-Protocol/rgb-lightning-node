@@ -112,10 +112,12 @@ def make_node(storage_dir: Path, daemon_port: int, peer_port: int) -> rln.SdkNod
 def unlock_request(password: str) -> rln.SdkUnlockRequest:
     return rln.SdkUnlockRequest(
         password=password,
-        bitcoind_rpc_username="user",
-        bitcoind_rpc_password="password",
-        bitcoind_rpc_host="localhost",
-        bitcoind_rpc_port=18443,
+        ldk_chain_sync=rln.SdkLdkChainSync.BLOCK_SYNC(
+            bitcoind_rpc_username="user",
+            bitcoind_rpc_password="password",
+            bitcoind_rpc_host="localhost",
+            bitcoind_rpc_port=18443,
+        ),
         indexer_url="127.0.0.1:50001",
         proxy_endpoint=PROXY_ENDPOINT_LOCAL,
         announce_addresses=[],
@@ -126,10 +128,7 @@ def unlock_with_attached_signer(
     node: rln.SdkNode,
 ):
     node.unlock_with_attached_external_signer(
-        "user",
-        "password",
-        "localhost",
-        18443,
+        rln.SdkLdkChainSync.BLOCK_SYNC("user", "password", "localhost", 18443),
         "127.0.0.1:50001",
         PROXY_ENDPOINT_LOCAL,
         [],
@@ -586,10 +585,7 @@ def _setup_mixed_asset_channel_with_payment(
     node_a.unlock(unlock_request(NODE_A_PASSWORD))
     node_b.unlock_with_native_external_signer(
         signer,
-        "user",
-        "password",
-        "localhost",
-        18443,
+        rln.SdkLdkChainSync.BLOCK_SYNC("user", "password", "localhost", 18443),
         "127.0.0.1:50001",
         PROXY_ENDPOINT_LOCAL,
         [],
@@ -697,10 +693,7 @@ def run_regular_channel_flow_external_real():
         node_b.init(NODE_B_PASSWORD, None)
         node_a.unlock_with_native_external_signer(
             signer,
-            "user",
-            "password",
-            "localhost",
-            18443,
+            rln.SdkLdkChainSync.BLOCK_SYNC("user", "password", "localhost", 18443),
             "127.0.0.1:50001",
             PROXY_ENDPOINT_LOCAL,
             [],
@@ -781,10 +774,7 @@ def run_regular_channel_flow_external_real():
         # can lose enforcement state needed for subsequent commitment validation.
         node_a.unlock_with_native_external_signer(
             signer,
-            "user",
-            "password",
-            "localhost",
-            18443,
+            rln.SdkLdkChainSync.BLOCK_SYNC("user", "password", "localhost", 18443),
             "127.0.0.1:50001",
             PROXY_ENDPOINT_LOCAL,
             [],
@@ -1049,10 +1039,7 @@ def run_connection_loss_restore_real():
         node_a.init_with_native_external_signer(signer)
         node_a.unlock_with_native_external_signer(
             signer,
-            "user",
-            "password",
-            "localhost",
-            18443,
+            rln.SdkLdkChainSync.BLOCK_SYNC("user", "password", "localhost", 18443),
             "127.0.0.1:50001",
             PROXY_ENDPOINT_LOCAL,
             [],
@@ -1187,10 +1174,7 @@ def run_restart_with_mismatched_signer_real():
         node.init_with_native_external_signer(signer_a)
         node.unlock_with_native_external_signer(
             signer_a,
-            "user",
-            "password",
-            "localhost",
-            18443,
+            rln.SdkLdkChainSync.BLOCK_SYNC("user", "password", "localhost", 18443),
             "127.0.0.1:50001",
             PROXY_ENDPOINT_LOCAL,
             [],
@@ -1211,10 +1195,7 @@ def run_restart_with_mismatched_signer_real():
         try:
             restarted.unlock_with_native_external_signer(
                 signer_b,
-                "user",
-                "password",
-                "localhost",
-                18443,
+                rln.SdkLdkChainSync.BLOCK_SYNC("user", "password", "localhost", 18443),
                 "127.0.0.1:50001",
                 PROXY_ENDPOINT_LOCAL,
                 [],

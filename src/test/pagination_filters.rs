@@ -305,9 +305,18 @@ async fn by_txid() {
         .await
         .is_empty());
 
-    // neither asset_id nor txid is a bad request
+    // an asset-less filter returns only transfers not tied to an asset. A blind receive naming no
+    // asset stays untied, so the filter has something to find and the check below is not vacuous
+    let untied = rgb_invoice(node1_addr, None, false).await;
+    let no_asset = list_transfers_no_asset(node1_addr).await;
+    assert!(no_asset
+        .iter()
+        .any(|t| t.recipient_id.as_deref() == Some(untied.recipient_id.as_str())));
+    assert!(no_asset.iter().all(|t| !all.iter().any(|a| a.idx == t.idx)));
+
+    // an unnarrowed filter with no txid is a bad request
     let payload = ListTransfersRequest {
-        asset_id: None,
+        asset_filter: AssetFilter::AnyOrNone,
         txid: None,
         index_offset: None,
         max_transfers: None,
@@ -324,7 +333,7 @@ async fn by_txid() {
     check_response_is_nok(
         res,
         reqwest::StatusCode::BAD_REQUEST,
-        "either asset_id or txid",
+        "either a narrowing asset_filter",
         "InvalidRequest",
     )
     .await;

@@ -13,6 +13,13 @@ pub struct NodeConfig {
     pub ldk_peer_listening_port: u16,
     pub network: BitcoinNetwork,
     pub max_media_upload_size_mb: u16,
+    /// Max aggregate size of RGB media accepted over p2p per channel-open (in MB).
+    pub max_aggregated_media_size_per_channel_mb: u16,
+    /// Max number of pending channel-open consignments buffered over p2p at once. This is a
+    /// node-wide cap counted across all peers.
+    pub max_pending_consignments: usize,
+    /// Max number of RGB media files accepted over p2p per channel-open.
+    pub max_media_files_per_channel: usize,
     pub root_public_key: Option<biscuit_auth::PublicKey>,
     pub enable_virtual_channels_v0: bool,
     pub virtual_peer_pubkeys: Vec<bitcoin::secp256k1::PublicKey>,
@@ -51,6 +58,10 @@ impl NodeHandle {
             ldk_peer_listening_port: config.ldk_peer_listening_port,
             network: config.network,
             max_media_upload_size_mb: config.max_media_upload_size_mb,
+            max_aggregated_media_size_per_channel_mb: config
+                .max_aggregated_media_size_per_channel_mb,
+            max_pending_consignments: config.max_pending_consignments,
+            max_media_files_per_channel: config.max_media_files_per_channel,
             root_public_key: config.root_public_key,
             enable_virtual_channels_v0: config.enable_virtual_channels_v0,
             virtual_peer_pubkeys: config.virtual_peer_pubkeys,
@@ -103,6 +114,10 @@ mod tests {
             ldk_peer_listening_port: 0,
             network: BitcoinNetwork::Regtest,
             max_media_upload_size_mb: 1,
+            max_aggregated_media_size_per_channel_mb:
+                crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+            max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+            max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
             root_public_key: None,
             enable_virtual_channels_v0: false,
             virtual_peer_pubkeys: vec![],

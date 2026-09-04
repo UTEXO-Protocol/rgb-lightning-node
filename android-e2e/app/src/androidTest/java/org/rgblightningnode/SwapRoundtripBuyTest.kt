@@ -18,6 +18,7 @@ import org.utexo.rgblightningnode.SdkInitRequest
 import org.utexo.rgblightningnode.SdkIssueAssetNiaRequest
 import org.utexo.rgblightningnode.SdkMakerExecuteRequest
 import org.utexo.rgblightningnode.SdkMakerInitRequest
+import org.utexo.rgblightningnode.SdkLdkChainSync
 import org.utexo.rgblightningnode.SdkNode
 import org.utexo.rgblightningnode.SdkOpenChannelRequest
 import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
@@ -140,10 +141,12 @@ class SwapRoundtripBuyTest {
 
     private fun unlockRequest(password: String) = SdkUnlockRequest(
         password = password,
-        bitcoindRpcUsername = bitcoindUser,
-        bitcoindRpcPassword = bitcoindPass,
-        bitcoindRpcHost = bitcoindHost,
-        bitcoindRpcPort = bitcoindPort.toUShort(),
+        ldkChainSync = SdkLdkChainSync.BlockSync(
+            bitcoindRpcUsername = bitcoindUser,
+            bitcoindRpcPassword = bitcoindPass,
+            bitcoindRpcHost = bitcoindHost,
+            bitcoindRpcPort = bitcoindPort.toUShort(),
+        ),
         indexerUrl = "$bitcoindHost:50001",
         proxyEndpoint = proxyEndpoint,
         announceAddresses = listOf(),

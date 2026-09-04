@@ -79,10 +79,12 @@ def init_if_needed(node: rln.SdkNode, password: str, name: str):
 def unlock_if_needed(node: rln.SdkNode, password: str, name: str):
     req = rln.SdkUnlockRequest(
         password=password,
-        bitcoind_rpc_username="user",
-        bitcoind_rpc_password="password",
-        bitcoind_rpc_host="localhost",
-        bitcoind_rpc_port=18443,
+        ldk_chain_sync=rln.SdkLdkChainSync.BLOCK_SYNC(
+            bitcoind_rpc_username="user",
+            bitcoind_rpc_password="password",
+            bitcoind_rpc_host="localhost",
+            bitcoind_rpc_port=18443,
+        ),
         indexer_url="127.0.0.1:50001",
         proxy_endpoint="rpc://127.0.0.1:3000/json-rpc",
         announce_addresses=[],

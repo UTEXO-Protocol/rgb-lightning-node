@@ -18,6 +18,7 @@ import org.utexo.rgblightningnode.PaymentType
 import org.utexo.rgblightningnode.RlnException
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
 import org.utexo.rgblightningnode.SdkInitRequest
+import org.utexo.rgblightningnode.SdkLdkChainSync
 import org.utexo.rgblightningnode.SdkNode
 import org.utexo.rgblightningnode.SdkOpenChannelRequest
 import org.utexo.rgblightningnode.SdkSendPaymentRequest
@@ -111,10 +112,12 @@ class ConcurrentBtcPaymentsTest {
 
     private fun unlockRequest(password: String) = SdkUnlockRequest(
         password = password,
-        bitcoindRpcUsername = bitcoindUser,
-        bitcoindRpcPassword = bitcoindPass,
-        bitcoindRpcHost = bitcoindHost,
-        bitcoindRpcPort = bitcoindPort.toUShort(),
+        ldkChainSync = SdkLdkChainSync.BlockSync(
+            bitcoindRpcUsername = bitcoindUser,
+            bitcoindRpcPassword = bitcoindPass,
+            bitcoindRpcHost = bitcoindHost,
+            bitcoindRpcPort = bitcoindPort.toUShort(),
+        ),
         indexerUrl = "$bitcoindHost:50001",
         proxyEndpoint = proxyEndpoint,
         announceAddresses = listOf(),

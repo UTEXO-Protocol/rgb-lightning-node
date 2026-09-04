@@ -25,6 +25,7 @@ import org.utexo.rgblightningnode.SdkCloseChannelRequest
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
 import org.utexo.rgblightningnode.SdkInitRequest
 import org.utexo.rgblightningnode.SdkIssueAssetNiaRequest
+import org.utexo.rgblightningnode.SdkLdkChainSync
 import org.utexo.rgblightningnode.SdkNode
 import org.utexo.rgblightningnode.SdkOpenChannelRequest
 import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
@@ -67,6 +68,18 @@ class PaymentTest {
     private val assetSupply: ULong = 1000u
     private val channelAssetAmount: ULong = 600u
     private val channelReadyTimeoutSec: Long = 120L
+
+    private val changingStateMessage = "Cannot call other APIs while node is changing state"
+
+    private inline fun <T> pollWhileNodeStable(label: String, operation: () -> T): Result<T> {
+        return try {
+            Result.success(operation())
+        } catch (error: RlnException.Conflict) {
+            if (error.message != changingStateMessage) throw error
+            log("$label deferred while node is changing state")
+            Result.failure(error)
+        }
+    }
 
     // ── Bitcoin RPC ──────────────────────────────────────────────────────────
 
@@ -123,10 +136,12 @@ class PaymentTest {
 
     private fun unlockRequest(password: String) = SdkUnlockRequest(
         password = password,
-        bitcoindRpcUsername = bitcoindUser,
-        bitcoindRpcPassword = bitcoindPass,
-        bitcoindRpcHost = bitcoindHost,
-        bitcoindRpcPort = bitcoindPort.toUShort(),
+        ldkChainSync = SdkLdkChainSync.BlockSync(
+            bitcoindRpcUsername = bitcoindUser,
+            bitcoindRpcPassword = bitcoindPass,
+            bitcoindRpcHost = bitcoindHost,
+            bitcoindRpcPort = bitcoindPort.toUShort(),
+        ),
         indexerUrl = "$bitcoindHost:50001",
         proxyEndpoint = proxyEndpoint,
         announceAddresses = listOf(),
@@ -183,7 +198,14 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var lastBalance = 0uL
         while (System.currentTimeMillis() < deadline) {
-            val balance = assetBalanceOffchainOutbound(node, assetId)
+            val attempt = pollWhileNodeStable("off-chain balance poll") {
+                assetBalanceOffchainOutbound(node, assetId)
+            }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val balance = attempt.getOrThrow()
             lastBalance = balance
             if (balance == expected) {
                 return
@@ -197,12 +219,22 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var lastBalance = 0uL
         while (System.currentTimeMillis() < deadline) {
-            val balance = assetBalanceSpendable(node, assetId)
+            val attempt = pollWhileNodeStable("on-chain balance poll") {
+                val balance = assetBalanceSpendable(node, assetId)
+                if (balance != expected) {
+                    node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
+                }
+                balance
+            }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val balance = attempt.getOrThrow()
             lastBalance = balance
             if (balance == expected) {
                 return
             }
-            node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
             Thread.sleep(1_000L)
         }
         error("spendable balance did not become expected=$expected actual=$lastBalance after ${timeoutSec}s")
@@ -211,8 +243,16 @@ class PaymentTest {
     private fun waitForChannelFundingTx(nodeA: SdkNode, nodeB: SdkNode, assetId: ContractId, timeoutSec: Long): Txid {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         while (System.currentTimeMillis() < deadline) {
-            nodeA.sync(); nodeB.sync()
-            val opening = nodeA.listChannels().firstOrNull { it.assetId == assetId && it.fundingTxid != null }
+            val attempt = pollWhileNodeStable("channel funding poll") {
+                nodeA.sync()
+                nodeB.sync()
+                nodeA.listChannels().firstOrNull { it.assetId == assetId && it.fundingTxid != null }
+            }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val opening = attempt.getOrThrow()
             if (opening != null) {
                 log("channel funding tx found: ${opening.fundingTxid}")
                 return requireNotNull(opening.fundingTxid)
@@ -226,8 +266,15 @@ class PaymentTest {
     private fun mineUntilTxConfirmed(node: SdkNode, txid: Txid, timeoutSec: Long = 180L) {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         while (System.currentTimeMillis() < deadline) {
-            node.sync()
-            val tx = node.listTransactions(false, null).firstOrNull { it.txid == txid }
+            val attempt = pollWhileNodeStable("funding confirmation poll") {
+                node.sync()
+                node.listTransactions(false, null).firstOrNull { it.txid == txid }
+            }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val tx = attempt.getOrThrow()
             if (tx != null && tx.confirmationTime != null) {
                 log("funding tx confirmed in block: $txid")
                 return
@@ -243,9 +290,17 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var polls = 0
         while (System.currentTimeMillis() < deadline) {
+            val attempt = pollWhileNodeStable("usable channel poll") {
+                nodeA.sync()
+                nodeB.sync()
+                nodeA.listChannels().any { it.isUsable && it.assetId == assetId }
+            }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
             polls++
-            nodeA.sync(); nodeB.sync()
-            val usable = nodeA.listChannels().any { it.isUsable && it.assetId == assetId }
+            val usable = attempt.getOrThrow()
             if (usable) { log("channel is usable"); return }
             if (polls % 5 == 0) { log("mining 1 block..."); mine(1) }
             log("waiting for usable channel... (poll $polls)")
@@ -266,10 +321,19 @@ class PaymentTest {
         var lastNodeABalance: ULong? = null
         var lastNodeBBalance: ULong? = null
         while (System.currentTimeMillis() < deadline) {
-            nodeA.sync()
-            nodeB.sync()
-            val channelA = nodeA.listChannels().firstOrNull { it.channelId == channelId }
-            val channelB = nodeB.listChannels().firstOrNull { it.channelId == channelId }
+            val attempt = pollWhileNodeStable("channel balance poll") {
+                nodeA.sync()
+                nodeB.sync()
+                Pair(
+                    nodeA.listChannels().firstOrNull { it.channelId == channelId },
+                    nodeB.listChannels().firstOrNull { it.channelId == channelId },
+                )
+            }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val (channelA, channelB) = attempt.getOrThrow()
             lastNodeABalance = channelA?.localBalanceSat
             lastNodeBBalance = channelB?.localBalanceSat
             if (lastNodeABalance == expectedNodeABalance && lastNodeBBalance == expectedNodeBBalance) {
@@ -288,8 +352,15 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var last = InvoiceStatus.PENDING
         while (System.currentTimeMillis() < deadline) {
-            node.sync()
-            val status = node.invoiceStatus(invoice)
+            val attempt = pollWhileNodeStable("invoice status poll") {
+                node.sync()
+                node.invoiceStatus(invoice)
+            }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val status = attempt.getOrThrow()
             last = status
             if (status == InvoiceStatus.SUCCEEDED || status == InvoiceStatus.FAILED || status == InvoiceStatus.EXPIRED) {
                 return status
@@ -308,9 +379,16 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var last = "not found"
         while (System.currentTimeMillis() < deadline) {
-            val payment = node.listPayments().firstOrNull {
-                it.paymentHash == paymentHash && it.paymentType == paymentType
+            val attempt = pollWhileNodeStable("payment status poll") {
+                node.listPayments().firstOrNull {
+                    it.paymentHash == paymentHash && it.paymentType == paymentType
+                }
             }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val payment = attempt.getOrThrow()
             if (payment != null) {
                 last = payment.status.name
                 if (payment.status == HtlcStatus.SUCCEEDED) {
@@ -331,7 +409,12 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var lastCount = 0
         while (System.currentTimeMillis() < deadline) {
-            val payments = node.listPayments()
+            val attempt = pollWhileNodeStable("payment list poll") { node.listPayments() }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val payments = attempt.getOrThrow()
             lastCount = payments.size
             val payment = payments.firstOrNull {
                 it.paymentHash == paymentHash && it.paymentType == paymentType
@@ -380,7 +463,12 @@ class PaymentTest {
         val deadline = System.currentTimeMillis() + 30_000L
         var lastChannels = "no channels"
         while (System.currentTimeMillis() < deadline) {
-            val channels = node.listChannels()
+            val attempt = pollWhileNodeStable("channel close poll") { node.listChannels() }
+            if (attempt.isFailure) {
+                Thread.sleep(250L)
+                continue
+            }
+            val channels = attempt.getOrThrow()
             lastChannels = channels.joinToString { it.channelId }.ifEmpty { "no channels" }
             if (channels.none { it.channelId == channelId }) {
                 mine(if (force) 144 else 6)
@@ -787,8 +875,9 @@ class PaymentTest {
             assertNotNull(xfer2.recipientId)
             assertNull(xfer2.receiveUtxo)
             assertNotNull(xfer2.changeUtxo)
-            assertNull(xfer2.expiration)
-            assertTrue(xfer2.transportEndpoints.isNotEmpty())
+            assertNotNull(xfer2.expiration)
+            // the channel funding consignment travels over the p2p link, so no proxy is involved
+            assertTrue(xfer2.transportEndpoints.isEmpty())
 
             val xfer3 = transfers.first { it.idx == 3 }
             assertEquals("Settled", xfer3.status)
@@ -798,8 +887,8 @@ class PaymentTest {
             assertNotNull(xfer3.recipientId)
             assertNotNull(xfer3.receiveUtxo)
             assertNull(xfer3.changeUtxo)
-            assertNull(xfer3.expiration)
-            assertTrue(xfer3.transportEndpoints.isNotEmpty())
+            assertNotNull(xfer3.expiration)
+            assertTrue(xfer3.transportEndpoints.isEmpty())
 
             log("SUCCESS: Android payment parity flow completed")
         } finally {

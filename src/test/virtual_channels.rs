@@ -1563,3 +1563,70 @@ async fn virtual_one_sat_htlc_routes_both_directions() {
 
     shutdown(&[host_node_address, client_node_address]).await;
 }
+
+#[serial_test::serial]
+#[tokio::test]
+#[traced_test]
+async fn virtual_open_sends_asset_media_over_p2p() {
+    initialize();
+
+    let file_path = "README.md";
+    let test_storage_root = format!("{TEST_DIR_BASE}media/");
+    let host_node_peer_port = next_peer_port();
+    let client_node_peer_port = next_peer_port();
+
+    let (host_node_address, _host_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}host_node"),
+        host_node_peer_port,
+        false,
+        true,
+        vec![],
+    )
+    .await;
+    let host_node_info = node_info(host_node_address).await;
+
+    fund_and_create_utxos(host_node_address, None).await;
+    let asset = issue_asset_cfa(host_node_address, Some(file_path)).await;
+    let digest = asset.media.unwrap().digest;
+
+    let (client_node_address, _client_password) = start_node_with_virtual_options(
+        &format!("{test_storage_root}client_node"),
+        client_node_peer_port,
+        false,
+        true,
+        vec![bitcoin::secp256k1::PublicKey::from_str(&host_node_info.pubkey).unwrap()],
+    )
+    .await;
+    let client_node_info = node_info(client_node_address).await;
+
+    // the client does not know the media before the open
+    let res = reqwest::Client::new()
+        .post(format!("http://{client_node_address}/getassetmedia"))
+        .json(&GetAssetMediaRequest {
+            digest: digest.clone(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let channel = open_virtual_channel(
+        host_node_address,
+        &client_node_info.pubkey,
+        Some(client_node_peer_port),
+        Some(100_000),
+        Some(10_000_000),
+        Some(200),
+        Some(&asset.asset_id),
+        None,
+    )
+    .await;
+    assert!(channel.ready);
+
+    // the virtual open must have carried the media over the same p2p link as the consignment
+    let media_hex = get_asset_media(client_node_address, &digest).await;
+    let file_bytes = std::fs::read(file_path).unwrap();
+    assert_eq!(hex_str_to_vec(&media_hex).unwrap(), file_bytes);
+
+    shutdown(&[host_node_address, client_node_address]).await;
+}

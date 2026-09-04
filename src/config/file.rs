@@ -127,6 +127,9 @@ pub(crate) struct TomlVss {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TomlApi {
     pub(crate) max_media_upload_size_mb: Option<u16>,
+    pub(crate) max_aggregated_media_size_per_channel_mb: Option<u16>,
+    pub(crate) max_pending_consignments: Option<usize>,
+    pub(crate) max_media_files_per_channel: Option<usize>,
     pub(crate) default_page_size: Option<u64>,
 }
 

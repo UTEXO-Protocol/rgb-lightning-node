@@ -207,6 +207,35 @@ pub enum ChannelStatus {
     Closing,
 }
 
+pub struct RgbFundingRecovery {
+    pub role: RgbFundingRecoveryRole,
+    pub funding_txid: Txid,
+    pub temporary_channel_id: ChannelId,
+    pub final_channel_id: Option<ChannelId>,
+    pub stage: String,
+    pub channel_is_durable: bool,
+    pub transaction_is_known: Option<bool>,
+    pub error: Option<String>,
+    pub required_action: RgbFundingRecoveryRequiredAction,
+}
+
+pub enum RgbFundingRecoveryRole {
+    Sender,
+    Receiver,
+}
+
+pub enum RgbFundingRecoveryRequiredAction {
+    RetryReconciliation,
+    ResumeBroadcast,
+    RetryChainObservation,
+    ManualChannelStateRecovery,
+}
+
+pub enum RgbFundingRecoveryAction {
+    Recheck,
+    ResumeBroadcast,
+}
+
 pub struct Peer {
     pub pubkey: PublicKey,
 }
@@ -390,6 +419,8 @@ pub struct DecodeLnInvoiceResponse {
     pub timestamp: u64,
     pub asset_id: Option<ContractId>,
     pub asset_amount: Option<u64>,
+    pub description: Option<String>,
+    pub description_hash: Option<String>,
     pub payment_hash: PaymentHash,
     pub payment_secret: String,
     pub payee_pubkey: Option<PublicKey>,
@@ -452,6 +483,7 @@ pub struct Utxo {
     pub outpoint: String,
     pub btc_amount: u64,
     pub colorable: bool,
+    pub exists: bool,
 }
 
 pub struct Unspent {
@@ -495,12 +527,44 @@ pub struct InflateResponse {
     pub txid: Txid,
 }
 
+/// How LDK follows the chain. Mirrors `core_types::LdkChainSync`, minus the cargo-feature
+/// gating the generated bindings cannot express.
+pub enum SdkLdkChainSync {
+    BlockSync {
+        bitcoind_rpc_username: String,
+        bitcoind_rpc_password: String,
+        bitcoind_rpc_host: String,
+        bitcoind_rpc_port: u16,
+    },
+    TransactionSync {
+        indexer_url: String,
+    },
+}
+
+impl From<SdkLdkChainSync> for crate::core_types::LdkChainSync {
+    fn from(value: SdkLdkChainSync) -> Self {
+        match value {
+            SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            } => Self::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            },
+            SdkLdkChainSync::TransactionSync { indexer_url } => {
+                Self::TransactionSync { indexer_url }
+            }
+        }
+    }
+}
+
 pub struct SdkUnlockRequest {
     pub password: String,
-    pub bitcoind_rpc_username: Option<String>,
-    pub bitcoind_rpc_password: Option<String>,
-    pub bitcoind_rpc_host: Option<String>,
-    pub bitcoind_rpc_port: Option<u16>,
+    pub ldk_chain_sync: SdkLdkChainSync,
     pub indexer_url: Option<String>,
     pub proxy_endpoint: Option<String>,
     pub announce_addresses: Vec<String>,
@@ -577,6 +641,20 @@ pub struct SdkFailTransfersRequest {
 
 pub struct SdkFailTransfersResponse {
     pub transfers_changed: bool,
+}
+
+pub struct SdkRefreshFailure {
+    pub name: String,
+    pub message: String,
+}
+
+pub struct SdkRefreshedTransfer {
+    pub updated_status: Option<String>,
+    pub failure: Option<SdkRefreshFailure>,
+}
+
+pub struct SdkRefreshTransfersResponse {
+    pub transfers: std::collections::HashMap<i32, SdkRefreshedTransfer>,
 }
 
 pub struct SdkCreateUtxosRequest {

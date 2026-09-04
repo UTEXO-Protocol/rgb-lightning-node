@@ -1,5 +1,52 @@
 use super::*;
 
+#[test]
+fn rgb_funding_recovery_mapping_preserves_opaque_stage() {
+    let mapped = map_rgb_funding_recovery(crate::ldk::RgbFundingRecoveryState {
+        funding_txid: "0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        temporary_channel_id: "01".repeat(32),
+        final_channel_id: Some("02".repeat(32)),
+        stage: crate::ldk::RgbFundingRecoveryStage::Receiver(
+            lightning::rgb_utils::FundingAcceptanceStage::RetryRequired,
+        ),
+        channel_is_durable: false,
+        transaction_is_known: None,
+        error: Some("indexer unavailable".to_string()),
+        action: crate::ldk::RgbFundingRecoveryAction::ManualChannelStateRecovery,
+    })
+    .unwrap();
+
+    assert!(matches!(mapped.role, RgbFundingRecoveryRole::Receiver));
+    assert_eq!(mapped.stage, "receiver_retry_required");
+    assert!(matches!(
+        mapped.required_action,
+        RgbFundingRecoveryRequiredAction::ManualChannelStateRecovery
+    ));
+    assert_eq!(mapped.temporary_channel_id.0, [1; 32]);
+    assert_eq!(mapped.final_channel_id.unwrap().0, [2; 32]);
+    assert_eq!(mapped.error.as_deref(), Some("indexer unavailable"));
+}
+
+#[test]
+fn rgb_funding_recovery_mapping_rejects_invalid_channel_ids() {
+    let result = map_rgb_funding_recovery(crate::ldk::RgbFundingRecoveryState {
+        funding_txid: "0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        temporary_channel_id: "01".to_string(),
+        final_channel_id: None,
+        stage: crate::ldk::RgbFundingRecoveryStage::Sender(
+            crate::ldk::RgbSenderFundingStage::Preparing,
+        ),
+        channel_is_durable: false,
+        transaction_is_known: None,
+        error: None,
+        action: crate::ldk::RgbFundingRecoveryAction::RetryReconciliation,
+    });
+
+    assert!(matches!(result, Err(RlnError::Internal(_))));
+}
+
 #[cfg(test)]
 mod uniffi_smoke_tests {
     use super::*;
@@ -30,6 +77,17 @@ mod uniffi_smoke_tests {
         assert!(matches!(payment, Err(RlnError::NotInitialized(_))));
         let swap = sdk_get_swap(lightning::types::payment::PaymentHash([0u8; 32]), true);
         assert!(matches!(swap, Err(RlnError::NotInitialized(_))));
+        let recovery_node = SdkNode {
+            handle: crate::NodeHandle::from_app_state(mock_locked_state()),
+        };
+        let recoveries = recovery_node.list_rgb_funding_recoveries();
+        assert!(matches!(recoveries, Err(RlnError::NotInitialized(_))));
+        let funding_txid =
+            Txid::from_str("0000000000000000000000000000000000000000000000000000000000000000")
+                .unwrap();
+        let recovery = recovery_node
+            .resolve_rgb_funding_recovery(funding_txid, RgbFundingRecoveryAction::Recheck);
+        assert!(matches!(recovery, Err(RlnError::NotInitialized(_))));
         let bootstrap = SdkExternalSignerBootstrap {
             node_id: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .to_string(),
@@ -105,6 +163,10 @@ mod uniffi_smoke_tests {
                 ldk_data_dir: tmp.path().join(".ldk"),
                 logger: Arc::new(FilesystemLogger::new(tmp.path().to_path_buf())),
                 max_media_upload_size_mb: 1,
+                max_aggregated_media_size_per_channel_mb:
+                    crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+                max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+                max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
                 enable_virtual_channels_v0: false,
                 virtual_peer_pubkeys: vec![],
                 database: RwLock::new(Arc::new(database)),

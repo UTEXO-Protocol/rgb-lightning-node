@@ -169,6 +169,24 @@ fn openchannel_push_asset_amount() {
             350,
             250,
         );
+        wait_for_channel_asset_state(
+            "node A partial push before cooperative close",
+            &node_a,
+            partial_channel_id,
+            Some(300),
+            Some(300),
+            None,
+            Duration::from_secs(30),
+        );
+        wait_for_channel_asset_state(
+            "node B partial push before cooperative close",
+            &node_b,
+            partial_channel_id,
+            Some(300),
+            Some(300),
+            None,
+            Duration::from_secs(30),
+        );
 
         let node_a_channel = node_a
             .list_channels()
@@ -288,6 +306,24 @@ fn openchannel_push_asset_amount() {
             100,
             600,
             0,
+        );
+        wait_for_channel_asset_state(
+            "node A full push before cooperative close",
+            &node_a,
+            full_channel_id,
+            Some(100),
+            Some(500),
+            None,
+            Duration::from_secs(30),
+        );
+        wait_for_channel_asset_state(
+            "node B full push before cooperative close",
+            &node_b,
+            full_channel_id,
+            Some(500),
+            Some(100),
+            None,
+            Duration::from_secs(30),
         );
 
         let node_a_channel = node_a

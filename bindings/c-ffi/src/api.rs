@@ -192,6 +192,29 @@ pub(crate) fn list_channels(node: &COpaqueStruct) -> Result<String, Error> {
     )
 }
 
+pub(crate) fn list_rgb_funding_recoveries(node: &COpaqueStruct) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let recoveries = node.list_rgb_funding_recoveries()?;
+    json(
+        recoveries
+            .into_iter()
+            .map(JsonRgbFundingRecovery::from)
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(crate) fn resolve_rgb_funding_recovery(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let request: JsonResolveRgbFundingRecoveryRequest = parse_req(request_json)?;
+    let funding_txid = rln::Txid::from_str(&request.funding_txid)
+        .map_err(|error| Error::StringParse(format!("invalid funding txid: {error}")))?;
+    let recovery = node.resolve_rgb_funding_recovery(funding_txid, request.action.into())?;
+    json(recovery.map(JsonRgbFundingRecovery::from))
+}
+
 pub(crate) fn list_peers(node: &COpaqueStruct) -> Result<String, Error> {
     let node = require_handle(node)?;
     let peers = node.list_peers()?;
@@ -344,8 +367,8 @@ pub(crate) fn refresh_transfers(
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
     let req: JsonRefreshTransfersRequest = parse_req(request_json)?;
-    node.refreshtransfers(req.into())?;
-    ok_void()
+    let resp = node.refreshtransfers(req.into())?;
+    json(JsonRefreshTransfersResponse::from(resp))
 }
 
 pub(crate) fn fail_transfers(
@@ -752,10 +775,7 @@ pub(crate) fn sdk_node_unlock_with_native_external_signer(
     let r: JsonSdkExternalUnlockRequest = parse_req(request_json)?;
     node.unlock_with_native_external_signer(
         Arc::clone(signer),
-        r.bitcoind_rpc_username,
-        r.bitcoind_rpc_password,
-        r.bitcoind_rpc_host,
-        r.bitcoind_rpc_port,
+        r.ldk_chain_sync.into(),
         r.indexer_url,
         r.proxy_endpoint,
         r.announce_addresses,
@@ -787,10 +807,7 @@ pub(crate) fn sdk_node_unlock_with_attached_external_signer(
     let node = require_handle(node)?;
     let r: JsonSdkExternalUnlockRequest = parse_req(request_json)?;
     node.unlock_with_attached_external_signer(
-        r.bitcoind_rpc_username,
-        r.bitcoind_rpc_password,
-        r.bitcoind_rpc_host,
-        r.bitcoind_rpc_port,
+        r.ldk_chain_sync.into(),
         r.indexer_url,
         r.proxy_endpoint,
         r.announce_addresses,

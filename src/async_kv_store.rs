@@ -60,6 +60,11 @@ impl RemoteFirstKvStore {
         let _ = self.shutdown.send(true);
     }
 
+    #[cfg(test)]
+    pub(crate) fn subscribe_shutdown(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
     /// Probes the configured VSS server. `true` when VSS is not configured or
     /// answered (a missing probe key still proves the server responded).
     pub async fn remote_reachable(&self) -> bool {

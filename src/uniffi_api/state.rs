@@ -147,13 +147,13 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::ChangingState
         | APIError::InsufficientAssets
         | APIError::InvalidIndexer(_)
-        | APIError::InvalidProxyEndpoint
         | APIError::InvalidProxyProtocol(_)
         | APIError::MaxFeeExceeded(_)
         | APIError::MinFeeNotMet(_)
         | APIError::NetworkMismatch(_, _)
         | APIError::DuplicatePayment(_)
         | APIError::RecipientIDAlreadyUsed
+        | APIError::RgbFundingRecoveryRequired(_)
         | APIError::TemporaryChannelIdAlreadyUsed
         | APIError::UnsupportedLayer1(_)
         | APIError::UnsupportedTransportType

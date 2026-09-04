@@ -78,10 +78,12 @@ fn attach_external_signer_host(
 
 fn unlock_with_attached_external_signer(node: &SdkNode, announce_alias: &str) {
     node.unlock_with_attached_external_signer(
-        Some("user".to_string()),
-        Some("password".to_string()),
-        Some("localhost".to_string()),
-        Some(18443),
+        SdkLdkChainSync::BlockSync {
+            bitcoind_rpc_username: "user".to_string(),
+            bitcoind_rpc_password: "password".to_string(),
+            bitcoind_rpc_host: "localhost".to_string(),
+            bitcoind_rpc_port: 18443,
+        },
         Some("127.0.0.1:50001".to_string()),
         Some(PROXY_ENDPOINT_LOCAL.to_string()),
         vec![],
@@ -171,10 +173,12 @@ fn external_init_unlock_and_restart_same_signer() {
             .expect("external init");
         node.unlock_with_native_external_signer(
             signer.clone(),
-            Some("user".to_string()),
-            Some("password".to_string()),
-            Some("localhost".to_string()),
-            Some(18443),
+            SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username: "user".to_string(),
+                bitcoind_rpc_password: "password".to_string(),
+                bitcoind_rpc_host: "localhost".to_string(),
+                bitcoind_rpc_port: 18443,
+            },
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),
             vec![],
@@ -192,10 +196,12 @@ fn external_init_unlock_and_restart_same_signer() {
         restarted
             .unlock_with_native_external_signer(
                 signer.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -234,10 +240,12 @@ fn external_restart_with_mismatched_signer_fails_unlock() {
             .expect("external init");
         node.unlock_with_native_external_signer(
             signer_a.clone(),
-            Some("user".to_string()),
-            Some("password".to_string()),
-            Some("localhost".to_string()),
-            Some(18443),
+            SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username: "user".to_string(),
+                bitcoind_rpc_password: "password".to_string(),
+                bitcoind_rpc_host: "localhost".to_string(),
+                bitcoind_rpc_port: 18443,
+            },
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),
             vec![],
@@ -253,10 +261,12 @@ fn external_restart_with_mismatched_signer_fails_unlock() {
         let err = restarted
             .unlock_with_native_external_signer(
                 signer_b,
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -598,10 +608,12 @@ fn rgb_native_external_signer_mixed_one_hop_payment_quick() {
         node_b
             .unlock_with_native_external_signer(
                 signer_b.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -744,10 +756,12 @@ fn rgb_native_external_signer_mixed_one_hop_payment_roundtrip() {
         node_b
             .unlock_with_native_external_signer(
                 signer_b.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -908,10 +922,12 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
         node_b
             .unlock_with_native_external_signer(
                 signer_b.clone(),
-                Some("user".to_string()),
-                Some("password".to_string()),
-                Some("localhost".to_string()),
-                Some(18443),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
                 Some("127.0.0.1:50001".to_string()),
                 Some(PROXY_ENDPOINT_LOCAL.to_string()),
                 vec![],
@@ -1083,10 +1099,12 @@ fn external_signer_virtual_channel_survives_restart() {
     let unlock_device = |node: &SdkNode, signer: &Arc<rgb_lightning_node::NativeExternalSigner>| {
         node.unlock_with_native_external_signer(
             signer.clone(),
-            Some("user".to_string()),
-            Some("password".to_string()),
-            Some("localhost".to_string()),
-            Some(18443),
+            SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username: "user".to_string(),
+                bitcoind_rpc_password: "password".to_string(),
+                bitcoind_rpc_host: "localhost".to_string(),
+                bitcoind_rpc_port: 18443,
+            },
             Some("127.0.0.1:50001".to_string()),
             Some(PROXY_ENDPOINT_LOCAL.to_string()),
             vec![],
@@ -1254,5 +1272,181 @@ fn external_signer_virtual_channel_survives_restart() {
 
     if result.is_err() {
         panic!("external_signer_virtual_channel_survives_restart failed after restart");
+    }
+}
+
+/// `/sendrgb` in external-signer mode goes through the begin/sign/end split, so the `send_end`
+/// variant it calls must still generate and post the consignment. Guards against regressing it to
+/// `send_end_db_update_only`, which broadcasts and updates the DB but produces no consignment: the
+/// sender would look fine while the recipient could never receive the asset.
+#[test]
+#[serial]
+fn external_signer_send_rgb_delivers_consignment_to_recipient() {
+    ensure_regtest_available();
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    const PORT_OFF: u16 = 270;
+    const SEED_AMOUNT: u64 = 500;
+    const SEND_AMOUNT: u64 = 200;
+    let da = NODE_A_DAEMON_PORT + PORT_OFF;
+    let pa = NODE_A_PEER_PORT + PORT_OFF;
+    let db = NODE_B_DAEMON_PORT + PORT_OFF;
+    let pb = NODE_B_PEER_PORT + PORT_OFF;
+
+    let test_dir = test_dir("sdk_external_signer_send_rgb");
+    if test_dir.exists() {
+        fs::remove_dir_all(&test_dir).expect("remove previous lib_sdk test dir");
+    }
+    fs::create_dir_all(&test_dir).expect("create lib_sdk test dir");
+    let node_a_dir = test_dir.join("node_a");
+    let node_b_dir = test_dir.join("node_b");
+    let signer_a_dir = test_dir.join("signer_a");
+
+    // node A (the sender) runs in external-signer mode, node B receives normally
+    let signer_a = make_native_signer(&signer_a_dir, None);
+    let node_a = make_node(&node_a_dir, da, pa);
+    let node_b = make_node(&node_b_dir, db, pb);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        node_a
+            .init_with_native_external_signer(signer_a.clone())
+            .expect("node A init native external signer");
+        node_b
+            .init("nodeBpass".to_string(), None)
+            .expect("node B init");
+
+        node_a
+            .unlock_with_native_external_signer(
+                signer_a.clone(),
+                SdkLdkChainSync::BlockSync {
+                    bitcoind_rpc_username: "user".to_string(),
+                    bitcoind_rpc_password: "password".to_string(),
+                    bitcoind_rpc_host: "localhost".to_string(),
+                    bitcoind_rpc_port: 18443,
+                },
+                Some("127.0.0.1:50001".to_string()),
+                Some(PROXY_ENDPOINT_LOCAL.to_string()),
+                vec![],
+                Some("RLN_external_send_rgb".to_string()),
+            )
+            .expect("node A unlock native external signer");
+        node_b
+            .unlock(unlock_request("nodeBpass"))
+            .expect("node B unlock");
+
+        fund_and_create_utxos(&node_a, "node A external send_rgb");
+        fund_and_create_utxos(&node_b, "node B external send_rgb");
+        mine(1);
+        node_a.sync().expect("node A sync after fund");
+        node_b.sync().expect("node B sync after fund");
+
+        // asset issuance is not supported in external-signer mode, so node B issues and seeds
+        // node A; the send under test is the one node A (external signer) makes back to node B
+        let asset_id = node_b
+            .issueassetnia(SdkIssueAssetNiaRequest {
+                amounts: vec![1_000],
+                ticker: "EXTS".to_string(),
+                name: "ExternalSend".to_string(),
+                precision: 0,
+            })
+            .expect("node B issueassetnia")
+            .asset_id;
+
+        let seed_recipient_id = node_a
+            .rgbinvoice(SdkRgbInvoiceRequest {
+                asset_id: None,
+                assignment_kind: None,
+                assignment_amount: None,
+                duration_seconds: Some(3600),
+                min_confirmations: 1,
+                witness: false,
+            })
+            .expect("node A rgbinvoice (seed)")
+            .recipient_id;
+        node_b
+            .send_rgb(SendRgbRequest {
+                donation: true,
+                fee_rate: CREATE_UTXOS_FEE_RATE,
+                min_confirmations: 1,
+                recipient_groups: vec![AssetRecipients {
+                    asset_id: asset_id.clone(),
+                    recipients: vec![RgbRecipient {
+                        recipient_id: RecipientId(seed_recipient_id.0),
+                        witness_data: None,
+                        assignment_kind: AssignmentKind::Fungible,
+                        assignment_amount: Some(SEED_AMOUNT),
+                        transport_endpoints: vec![TransportEndpoint(
+                            PROXY_ENDPOINT_LOCAL.to_string(),
+                        )],
+                    }],
+                }],
+            })
+            .expect("node B send_rgb (seed)");
+        mine(1);
+        refresh_transfers(&node_a);
+        refresh_transfers(&node_a);
+        refresh_transfers(&node_b);
+        assert_eq!(
+            asset_balance_spendable(&node_a, &asset_id),
+            SEED_AMOUNT,
+            "external-signer node must first receive the asset"
+        );
+
+        // the send under test: node A runs in external-signer mode, so /sendrgb goes through the
+        // begin/sign/end split and must still generate and post a consignment
+        let recipient_id = node_b
+            .rgbinvoice(SdkRgbInvoiceRequest {
+                asset_id: None,
+                assignment_kind: None,
+                assignment_amount: None,
+                duration_seconds: Some(3600),
+                min_confirmations: 1,
+                witness: false,
+            })
+            .expect("node B rgbinvoice")
+            .recipient_id;
+        node_a
+            .send_rgb(SendRgbRequest {
+                donation: true,
+                fee_rate: CREATE_UTXOS_FEE_RATE,
+                min_confirmations: 1,
+                recipient_groups: vec![AssetRecipients {
+                    asset_id: asset_id.clone(),
+                    recipients: vec![RgbRecipient {
+                        recipient_id: RecipientId(recipient_id.0),
+                        witness_data: None,
+                        assignment_kind: AssignmentKind::Fungible,
+                        assignment_amount: Some(SEND_AMOUNT),
+                        transport_endpoints: vec![TransportEndpoint(
+                            PROXY_ENDPOINT_LOCAL.to_string(),
+                        )],
+                    }],
+                }],
+            })
+            .expect("node A (external signer) send_rgb");
+
+        mine(1);
+        refresh_transfers(&node_b);
+        refresh_transfers(&node_b);
+        refresh_transfers(&node_a);
+
+        // the recipient can only settle this if the consignment was generated and posted
+        assert_eq!(
+            asset_balance_spendable(&node_b, &asset_id),
+            1_000 - SEED_AMOUNT + SEND_AMOUNT,
+            "recipient must receive the asset sent by an external-signer node"
+        );
+        assert_eq!(
+            asset_balance_spendable(&node_a, &asset_id),
+            SEED_AMOUNT - SEND_AMOUNT,
+        );
+
+        node_a.shutdown();
+        node_b.shutdown();
+        thread::sleep(Duration::from_millis(300));
+    }));
+
+    if result.is_err() {
+        panic!("external_signer_send_rgb_delivers_consignment_to_recipient failed");
     }
 }
