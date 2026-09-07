@@ -366,6 +366,8 @@ impl FeeEstimator for IndexerClient {
     }
 }
 
+impl super::TransactionBroadcaster for IndexerClient {}
+
 impl BroadcasterInterface for IndexerClient {
     fn broadcast_transactions(&self, txs: &[&Transaction]) {
         match &self.backend {

@@ -86,6 +86,7 @@ use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
     AsyncOrderOutboundInvoiceResponse,
 };
+use crate::core_types::cpfp::{BumpForceCloseFeeRequest, BumpForceCloseFeeResponse};
 use crate::error::error_name;
 use crate::ldk::{
     clear_rgb_payment_pending, peer_has_live_channel, start_ldk, stop_ldk, LdkBackgroundServices,
@@ -2066,6 +2067,60 @@ pub(crate) async fn btc_balance(
     };
 
     Ok(Json(BtcBalanceResponse { vanilla, colored }))
+}
+
+pub(crate) async fn bump_force_close_fee(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<BumpForceCloseFeeRequest>, APIError>,
+) -> Result<Json<BumpForceCloseFeeResponse>, APIError> {
+    no_cancel(async move {
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
+
+        let channel_id = hex_str_to_vec(&payload.channel_id)
+            .filter(|bytes| bytes.len() == 32)
+            .map(|bytes| ChannelId(bytes.try_into().unwrap()))
+            .ok_or(APIError::InvalidChannelID)?;
+        let peer_pubkey =
+            PublicKey::from_str(&payload.peer_pubkey).map_err(|_| APIError::InvalidPubkey)?;
+        let record_response =
+            |record: crate::cpfp::ChannelCloseBumpRecord| BumpForceCloseFeeResponse {
+                status: record.status,
+                commitment_txid: record.commitment_txid,
+                child_txid: record.child_txid,
+                target_feerate_sat_per_1000_weight: record.target_feerate_sat_per_1000_weight,
+                backend: record.backend,
+                last_error: record.last_error,
+            };
+
+        if !unlocked_state.cpfp_state.package_capable() {
+            return unlocked_state
+                .cpfp_state
+                .record_for(&channel_id)
+                .filter(|record| record.peer_pubkey == peer_pubkey.to_string())
+                .map(record_response)
+                .ok_or(APIError::AnchorCpfpUnavailable(
+                    "anchor CPFP is unavailable: indexer-backed package submission is deferred"
+                        .to_string(),
+                ));
+        }
+
+        let event = unlocked_state
+            .cpfp_state
+            .event_for(&channel_id, &peer_pubkey.to_string())
+            .ok_or(APIError::AnchorCpfpNotFound)?;
+        unlocked_state
+            .cpfp_state
+            .handle_event(&event, &unlocked_state.bump_tx_event_handler)
+            .await?;
+        unlocked_state
+            .cpfp_state
+            .record_for(&channel_id)
+            .map(record_response)
+            .ok_or(APIError::AnchorCpfpNotFound)
+    })
+    .await
+    .map(Json)
 }
 
 pub(crate) async fn cancel_hodl_invoice(

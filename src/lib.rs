@@ -28,6 +28,7 @@ mod auth;
 mod backup;
 mod config;
 mod core_types;
+mod cpfp;
 mod crypto;
 mod custom_msg_rpc;
 mod database;

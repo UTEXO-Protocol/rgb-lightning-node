@@ -6,6 +6,7 @@ use biscuit_auth::{builder::date, macros::*, KeyPair};
 use bitcoin::block::Header;
 #[cfg(all(feature = "transaction-sync", feature = "electrum"))]
 use bitcoin::consensus::encode;
+use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
@@ -14,12 +15,15 @@ use bitcoin::{Amount, Denomination};
 use bitcoin::{BlockHash, ScriptBuf, Transaction as BitcoinTransaction, Txid};
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
+use futures::FutureExt;
 use http::response::Builder;
 #[cfg(all(feature = "transaction-sync", feature = "electrum"))]
 use lightning::chain::transaction::TransactionData;
 #[cfg(all(feature = "transaction-sync", feature = "electrum"))]
 use lightning::chain::{Confirm, Filter};
+use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::ln::channelmanager::DROP_FUNDING_SIGNED_ON_NODE;
+use lightning::ln::types::ChannelId;
 use lightning::rgb_utils::{
     RgbPaymentInfo, RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
@@ -38,18 +42,19 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
-use std::sync::atomic::AtomicBool;
-use std::sync::{atomic::Ordering, Arc, Mutex, Once, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Once, OnceLock, RwLock};
 use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing_test::traced_test;
 
 use crate::core_types::asset_link::{AssetLinkRequest, AssetLinkResponse};
+use crate::core_types::cpfp::{BumpForceCloseFeeRequest, BumpForceCloseFeeResponse};
 use crate::core_types::{
     HTLCStatus, LdkChainSync, SwapStatus, FEE_RATE, HTLC_MIN_MSAT, VIRTUAL_HTLC_MIN_MSAT,
 };
@@ -3459,6 +3464,8 @@ pub fn set_mock_fee(fee: u32) {
 }
 
 mod address_reuse;
+#[cfg(feature = "block-sync")]
+mod anchor_cpfp;
 mod asset_link;
 mod auth_db_persistence;
 mod authentication;

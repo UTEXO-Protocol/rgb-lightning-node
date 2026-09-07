@@ -204,6 +204,7 @@ pub(crate) struct UnlockedAppState {
     #[cfg(feature = "vss")]
     pub(crate) monitor_kv_store: Arc<crate::async_kv_store::RemoteFirstKvStore>,
     pub(crate) rgb_file_transfer_handler: Arc<RgbFileTransferHandler>,
+    pub(crate) cpfp_state: Arc<crate::cpfp::CpfpState>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,

@@ -22,6 +22,12 @@ pub enum APIError {
     #[error("Address reuse is disabled")]
     AddressReuseDisabled,
 
+    #[error("Anchor CPFP is unavailable: {0}")]
+    AnchorCpfpUnavailable(String),
+
+    #[error("No pending anchor CPFP attempt for this channel")]
+    AnchorCpfpNotFound,
+
     #[error("Allocations already available")]
     AllocationsAlreadyAvailable,
 
@@ -634,6 +640,7 @@ impl IntoResponse for APIError {
             | APIError::AlreadyInitialized
             | APIError::AlreadyUnlocked
             | APIError::AuthenticationDisabled
+            | APIError::AnchorCpfpUnavailable(_)
             | APIError::BatchTransferNotFound
             | APIError::CannotCloseChannel(_)
             | APIError::CannotEstimateFees
@@ -685,7 +692,9 @@ impl IntoResponse for APIError {
             APIError::ExternalSignerMismatch => {
                 (StatusCode::CONFLICT, self.to_string(), self.name())
             }
-            APIError::InvoiceNotClaimable => (StatusCode::NOT_FOUND, self.to_string(), self.name()),
+            APIError::InvoiceNotClaimable | APIError::AnchorCpfpNotFound => {
+                (StatusCode::NOT_FOUND, self.to_string(), self.name())
+            }
             APIError::ExternalSignerProtocolError(_)
             | APIError::ExternalSignerUnavailable(_)
             | APIError::GossipUpdateFailed(_)
