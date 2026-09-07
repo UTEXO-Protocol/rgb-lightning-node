@@ -101,6 +101,12 @@ fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> 
         ldk_peer_listening_port: request.ldk_peer_listening_port,
         network,
         max_media_upload_size_mb: request.max_media_upload_size_mb,
+        // `SdkInitRequest` doesn't expose the p2p transfer limits yet; extending the FFI surface
+        // (and the mobile bindings) is a separate change, so embedders get the defaults.
+        max_aggregated_media_size_per_channel_mb:
+            crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+        max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+        max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
         root_public_key: None,
         enable_virtual_channels_v0: request.enable_virtual_channels_v0.unwrap_or(false),
         virtual_peer_pubkeys: request.virtual_peer_pubkeys.unwrap_or_default(),
@@ -425,10 +431,7 @@ impl SdkNode {
             state,
             sdk::UnlockRequest {
                 password: request.password,
-                bitcoind_rpc_username: request.bitcoind_rpc_username,
-                bitcoind_rpc_password: request.bitcoind_rpc_password,
-                bitcoind_rpc_host: request.bitcoind_rpc_host,
-                bitcoind_rpc_port: request.bitcoind_rpc_port,
+                ldk_chain_sync: request.ldk_chain_sync.into(),
                 indexer_url: request.indexer_url,
                 proxy_endpoint: request.proxy_endpoint,
                 announce_addresses: request.announce_addresses,
@@ -874,15 +877,35 @@ impl SdkNode {
         })
     }
 
-    pub fn refreshtransfers(&self, request: SdkRefreshTransfersRequest) -> Result<(), RlnError> {
+    pub fn refreshtransfers(
+        &self,
+        request: SdkRefreshTransfersRequest,
+    ) -> Result<SdkRefreshTransfersResponse, RlnError> {
         let state = self.handle.app_state();
-        block_on_sdk(sdk::refresh_transfers(
+        let response = block_on_sdk(sdk::refresh_transfers(
             state,
             sdk::RefreshTransfersRequestData {
                 skip_sync: request.skip_sync,
             },
         ))?;
-        Ok(())
+        Ok(SdkRefreshTransfersResponse {
+            transfers: response
+                .transfers
+                .into_iter()
+                .map(|(idx, t)| {
+                    (
+                        idx,
+                        SdkRefreshedTransfer {
+                            updated_status: t.updated_status,
+                            failure: t.failure.map(|f| SdkRefreshFailure {
+                                name: f.name,
+                                message: f.message,
+                            }),
+                        },
+                    )
+                })
+                .collect(),
+        })
     }
 
     pub fn failtransfers(
@@ -1350,6 +1373,8 @@ impl SdkNode {
             timestamp: resp.timestamp,
             asset_id,
             asset_amount: resp.asset_amount,
+            description: resp.description,
+            description_hash: resp.description_hash,
             payment_hash,
             payment_secret: resp.payment_secret,
             payee_pubkey,
@@ -1419,6 +1444,7 @@ impl SdkNode {
                         outpoint: u.utxo.outpoint,
                         btc_amount: u.utxo.btc_amount,
                         colorable: u.utxo.colorable,
+                        exists: u.utxo.exists,
                     },
                     rgb_allocations: u
                         .rgb_allocations
@@ -1561,10 +1587,7 @@ impl SdkNode {
     #[allow(clippy::too_many_arguments)] // Mirrors `UnlockRequest`; UniFFI keeps a flat argument list.
     pub fn unlock_with_attached_external_signer(
         &self,
-        bitcoind_rpc_username: Option<String>,
-        bitcoind_rpc_password: Option<String>,
-        bitcoind_rpc_host: Option<String>,
-        bitcoind_rpc_port: Option<u16>,
+        ldk_chain_sync: SdkLdkChainSync,
         indexer_url: Option<String>,
         proxy_endpoint: Option<String>,
         announce_addresses: Vec<String>,
@@ -1575,10 +1598,7 @@ impl SdkNode {
             state,
             sdk::UnlockRequest {
                 password: String::new(),
-                bitcoind_rpc_username,
-                bitcoind_rpc_password,
-                bitcoind_rpc_host,
-                bitcoind_rpc_port,
+                ldk_chain_sync: ldk_chain_sync.into(),
                 indexer_url,
                 proxy_endpoint,
                 announce_addresses,
@@ -1614,10 +1634,7 @@ impl SdkNode {
     pub fn unlock_with_native_external_signer(
         &self,
         signer: Arc<NativeExternalSigner>,
-        bitcoind_rpc_username: Option<String>,
-        bitcoind_rpc_password: Option<String>,
-        bitcoind_rpc_host: Option<String>,
-        bitcoind_rpc_port: Option<u16>,
+        ldk_chain_sync: SdkLdkChainSync,
         indexer_url: Option<String>,
         proxy_endpoint: Option<String>,
         announce_addresses: Vec<String>,
@@ -1625,10 +1642,7 @@ impl SdkNode {
     ) -> Result<(), RlnError> {
         self.attach_native_external_signer(signer.clone())?;
         self.unlock_with_attached_external_signer(
-            bitcoind_rpc_username,
-            bitcoind_rpc_password,
-            bitcoind_rpc_host,
-            bitcoind_rpc_port,
+            ldk_chain_sync,
             indexer_url,
             proxy_endpoint,
             announce_addresses,

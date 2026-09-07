@@ -1,3 +1,11 @@
+#[cfg(not(any(feature = "electrum", feature = "esplora")))]
+compile_error!("at least one of the `electrum` and `esplora` features needs to be enabled");
+
+#[cfg(not(any(feature = "block-sync", feature = "transaction-sync")))]
+compile_error!(
+    "at least one of the `block-sync` and `transaction-sync` features needs to be enabled"
+);
+
 mod apay_merkle;
 mod args;
 mod asset_link;
@@ -6,10 +14,9 @@ mod async_kv_store;
 mod async_order;
 mod auth;
 mod backup;
-mod bitcoind;
-mod chain_backend;
 mod config;
 mod core_types;
+mod crypto;
 mod custom_msg_rpc;
 mod database;
 mod disk;
@@ -18,10 +25,11 @@ mod error;
 #[path = "test/fee_mock.rs"]
 mod fee_mock;
 mod gossip;
-mod indexer;
 mod kv_store;
 mod ldk;
+mod ldk_chain_backend;
 mod rgb;
+mod rgb_file_transfer;
 mod routes;
 mod runtime;
 mod signer;
@@ -31,7 +39,9 @@ mod utils;
 #[cfg(feature = "vss")]
 mod vss_kv_store;
 
-#[cfg(test)]
+// the test suite calls into `electrum_client` to wait for electrs to catch up with bitcoind, and
+// that crate is only pulled in by the `electrum` feature
+#[cfg(all(test, feature = "electrum"))]
 mod test;
 
 use anyhow::Result;
@@ -43,7 +53,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::signal;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -62,6 +76,7 @@ use crate::args::UserArgs;
 use crate::auth::conditional_auth_middleware;
 use crate::error::AppError;
 use crate::ldk::stop_ldk;
+use crate::rgb_file_transfer::MAX_CONSIGNMENT_SIZE;
 #[cfg(feature = "remote-signer")]
 use crate::routes::init_external_signer;
 use crate::routes::{
@@ -69,17 +84,21 @@ use crate::routes::{
     async_order_outbound_invoice, backup, btc_balance, cancel_hodl_invoice, change_password,
     check_indexer_url, check_proxy_endpoint, claim_hodl_invoice, close_channel, connect_peer,
     create_utxos, decode_ln_invoice, decode_rgb_invoice, decode_swapstring, disconnect_peer,
-    estimate_fee, fail_transfers, get_asset_media, get_channel_id, get_payment, get_swap, inflate,
-    init, invoice_status, issue_asset_cfa, issue_asset_ifa, issue_asset_nia, issue_asset_uda,
-    keysend, list_assets, list_channels, list_payments, list_peers, list_swaps, list_transactions,
-    list_transfers, list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info,
-    node_info, open_channel, post_asset_media, refresh_transfers, restore, revoke_token,
-    rgb_invoice, rotate_address, send_btc, send_onion_message, send_payment, send_rgb, shutdown,
-    sign_message, sync, taker, unlock,
+    estimate_fee, fail_transfers, get_asset_media, get_channel_id, get_consignment, get_payment,
+    get_swap, inflate, init, invoice_status, issue_asset_cfa, issue_asset_ifa, issue_asset_nia,
+    issue_asset_uda, keysend, list_assets, list_channels, list_payments, list_peers, list_swaps,
+    list_transactions, list_transfers, list_unspents, ln_invoice, lock, maker_execute, maker_init,
+    network_info, node_info, open_channel, post_asset_media, provide_out_of_band_ack,
+    provide_out_of_band_consignment, refresh_transfers, restore, revoke_token, rgb_invoice,
+    rotate_address, send_btc, send_onion_message, send_payment, send_rgb, shutdown, sign_message,
+    sync, taker, unlock,
 };
 #[cfg(feature = "vss")]
 use crate::routes::{vss_backup, vss_backup_info, vss_clear_fence};
-use crate::utils::{start_daemon, AppState, LOGS_DIR};
+use crate::utils::{fatal_exit_code, start_daemon, AppState, FATAL_ERROR, LOGS_DIR};
+
+// how long a fatal shutdown waits for an in-progress state change (unlock or lock)
+const STATE_CHANGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -109,12 +128,35 @@ async fn main() -> Result<()> {
 
     let (router, app_state) = app(args).await?;
 
+    // The default hook only writes to stderr, which never reaches the file logger, and a panic on
+    // any thread has to start the shutdown so the node does not keep serving half-dead.
+    let default_panic_hook = std::panic::take_hook();
+    let cancel_token = app_state.cancel_token.clone();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        tracing::error!("{panic_info}");
+        let _ = FATAL_ERROR.set(panic_info.to_string());
+        cancel_token.cancel();
+        default_panic_hook(panic_info);
+    }));
+
     tracing::info!("Listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal(app_state))
         .await
         .unwrap();
+
+    let exit_code = fatal_exit_code();
+    if exit_code != 0 {
+        tracing::error!(
+            "Shutting down due to fatal error: {}",
+            FATAL_ERROR.get().map(String::as_str).unwrap_or_default()
+        );
+        // `process::exit` runs no destructors, so the file logger has to be flushed by hand:
+        // dropping the guard waits for the appender to write out what is still buffered
+        drop(_guard);
+        std::process::exit(exit_code);
+    }
 
     Ok(())
 }
@@ -127,6 +169,13 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
             "/postassetmedia",
             post(post_asset_media).layer(RequestBodyLimitLayer::new(
                 args.max_media_upload_size_mb as usize * 1024 * 1024,
+            )),
+        )
+        .route(
+            "/provideoutofbandconsignment",
+            post(provide_out_of_band_consignment).layer(RequestBodyLimitLayer::new(
+                args.max_aggregated_media_size_per_channel_mb as usize * 1024 * 1024
+                    + MAX_CONSIGNMENT_SIZE,
             )),
         )
         // all routes before this will have the default body limit disabled
@@ -155,6 +204,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/failtransfers", post(fail_transfers))
         .route("/getassetmedia", post(get_asset_media))
         .route("/getchannelid", post(get_channel_id))
+        .route("/getconsignment", post(get_consignment))
         .route("/getpayment", post(get_payment))
         .route("/getswap", post(get_swap))
         .route("/inflate", post(inflate))
@@ -180,6 +230,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/networkinfo", get(network_info))
         .route("/nodeinfo", get(node_info))
         .route("/openchannel", post(open_channel))
+        .route("/provideoutofbandack", post(provide_out_of_band_ack))
         .route("/refreshtransfers", post(refresh_transfers))
         .route("/restore", post(restore))
         .route("/revoketoken", post(revoke_token))
@@ -275,11 +326,23 @@ async fn shutdown_signal(app_state: Arc<AppState>) {
     tracing::info!("Received a shutdown signal");
 
     let app_state_copy = app_state.clone();
+    // only a fatal shutdown gives up on an in-progress state change: nobody is waiting for the
+    // node and the exit code still has to be reported, so it cannot wait forever
+    let deadline = FATAL_ERROR
+        .get()
+        .map(|_| Instant::now() + STATE_CHANGE_SHUTDOWN_TIMEOUT);
     loop {
         {
             if app_state_copy.wait_state_change() {
                 break;
             }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() > deadline) {
+            tracing::warn!(
+                "State change did not complete within {}s, shutting down anyway",
+                STATE_CHANGE_SHUTDOWN_TIMEOUT.as_secs()
+            );
+            break;
         }
         tracing::info!("Will shutdown after change state is complete");
         tokio::time::sleep(Duration::from_millis(300)).await;

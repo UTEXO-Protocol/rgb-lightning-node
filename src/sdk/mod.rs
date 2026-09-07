@@ -23,6 +23,7 @@ use crate::ldk::{
 #[cfg(feature = "vss")]
 use crate::ldk::{derive_vss_identity, derive_vss_identity_from_key_source};
 use crate::rgb::{check_rgb_proxy_endpoint, get_rgb_channel_info_optional};
+use crate::routes::DEFAULT_RGB_TRANSFER_EXPIRATION_SECS;
 use crate::signer::{
     read_key_source_file, validate_bootstrap_payload, validate_key_source_matches_bootstrap,
     write_key_source_file, BootstrapData, KeySourceFile, SUPPORTED_SIGNER_API_LEVEL,
@@ -32,8 +33,8 @@ use crate::utils::{
     check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
     connect_peer_if_necessary, description_from_invoice, description_hash_from_invoice,
     encrypt_and_save_mnemonic, get_current_timestamp, get_max_local_rgb_amount, get_route, hex_str,
-    hex_str_to_compressed_pubkey, hex_str_to_vec, is_external_signer_mode_configured,
-    new_jsonrpc_request_id, parse_invoice_description, parse_peer_info,
+    hex_str_to_compressed_pubkey, hex_str_to_vec, invoice_description_from_request,
+    is_external_signer_mode_configured, new_jsonrpc_request_id, parse_peer_info,
     validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState,
     UserOnionMessageContents,
 };
@@ -81,7 +82,7 @@ use rgb_lib::wallet::{
 use rgb_lib::{
     bdk_wallet::keys::bip39::Mnemonic,
     keys::{generate_keys, WitnessVersion},
-    ContractId, RgbTransport,
+    ContractId,
 };
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
@@ -261,6 +262,8 @@ pub(crate) struct DecodeLnInvoiceData {
     pub(crate) timestamp: u64,
     pub(crate) asset_id: Option<String>,
     pub(crate) asset_amount: Option<u64>,
+    pub(crate) description: Option<String>,
+    pub(crate) description_hash: Option<String>,
     pub(crate) payment_hash: String,
     pub(crate) payment_secret: String,
     pub(crate) payee_pubkey: Option<String>,
@@ -363,10 +366,7 @@ pub(crate) struct InitData {
 
 pub(crate) struct UnlockRequest {
     pub(crate) password: String,
-    pub(crate) bitcoind_rpc_username: Option<String>,
-    pub(crate) bitcoind_rpc_password: Option<String>,
-    pub(crate) bitcoind_rpc_host: Option<String>,
-    pub(crate) bitcoind_rpc_port: Option<u16>,
+    pub(crate) ldk_chain_sync: crate::core_types::LdkChainSync,
     pub(crate) indexer_url: Option<String>,
     pub(crate) proxy_endpoint: Option<String>,
     pub(crate) announce_addresses: Vec<String>,
@@ -445,6 +445,20 @@ pub(crate) struct FailTransfersRequestData {
 
 pub(crate) struct FailTransfersData {
     pub(crate) transfers_changed: bool,
+}
+
+pub(crate) struct RefreshFailureData {
+    pub(crate) name: String,
+    pub(crate) message: String,
+}
+
+pub(crate) struct RefreshedTransferData {
+    pub(crate) updated_status: Option<String>,
+    pub(crate) failure: Option<RefreshFailureData>,
+}
+
+pub(crate) struct RefreshTransfersData {
+    pub(crate) transfers: HashMap<i32, RefreshedTransferData>,
 }
 
 pub(crate) struct CreateUtxosRequestData {
@@ -677,6 +691,7 @@ pub(crate) struct UtxoData {
     pub(crate) outpoint: String,
     pub(crate) btc_amount: u64,
     pub(crate) colorable: bool,
+    pub(crate) exists: bool,
 }
 
 pub(crate) struct UnspentData {
@@ -772,6 +787,7 @@ pub(crate) enum TransferStatus {
     WaitingCounterparty,
     WaitingSafeHeight,
     WaitingConfirmations,
+    WaitingBroadcast,
     Settled,
     Failed,
 }
@@ -1751,7 +1767,7 @@ pub(crate) async fn send_rgb(
                 donation,
                 fee_rate,
                 min_confirmations,
-                None,
+                get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS,
                 false,
                 None,
             )
@@ -1775,7 +1791,13 @@ pub(crate) async fn send_rgb(
     } else {
         let unlocked_state_copy = unlocked_state.clone();
         tokio::task::spawn_blocking(move || {
-            unlocked_state_copy.rgb_send(recipient_map, donation, fee_rate, min_confirmations, None)
+            unlocked_state_copy.rgb_send(
+                recipient_map,
+                donation,
+                fee_rate,
+                min_confirmations,
+                get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS,
+            )
         })
         .await
         .unwrap()?
@@ -2008,10 +2030,7 @@ pub(crate) async fn unlock(state: Arc<AppState>, request: UnlockRequest) -> Resu
         .gossip_rgs_server_url
         .map(|server_url| crate::gossip::GossipSourceConfig::RapidGossipSync { server_url });
     let unlock_request = crate::core_types::UnlockRequest {
-        bitcoind_rpc_username: request.bitcoind_rpc_username,
-        bitcoind_rpc_password: request.bitcoind_rpc_password,
-        bitcoind_rpc_host: request.bitcoind_rpc_host,
-        bitcoind_rpc_port: request.bitcoind_rpc_port,
+        ldk_chain_sync: request.ldk_chain_sync,
         indexer_url: request.indexer_url,
         proxy_endpoint: request.proxy_endpoint,
         announce_addresses: request.announce_addresses,
@@ -2108,10 +2127,7 @@ pub(crate) async fn unlock_with_attached_external_signer(
         .gossip_rgs_server_url
         .map(|server_url| crate::gossip::GossipSourceConfig::RapidGossipSync { server_url });
     let unlock_request = crate::core_types::UnlockRequest {
-        bitcoind_rpc_username: request.bitcoind_rpc_username,
-        bitcoind_rpc_password: request.bitcoind_rpc_password,
-        bitcoind_rpc_host: request.bitcoind_rpc_host,
-        bitcoind_rpc_port: request.bitcoind_rpc_port,
+        ldk_chain_sync: request.ldk_chain_sync,
         indexer_url: request.indexer_url,
         proxy_endpoint: request.proxy_endpoint,
         announce_addresses: request.announce_addresses,
@@ -2734,9 +2750,11 @@ pub(crate) async fn rgb_invoice(
         None => RgbLibAssignment::Any,
     };
 
-    let expiration_timestamp = request
-        .duration_seconds
-        .map(|duration| get_current_timestamp() + u64::from(duration));
+    let expiration_timestamp = get_current_timestamp()
+        + request
+            .duration_seconds
+            .map(u64::from)
+            .unwrap_or(DEFAULT_RGB_TRANSFER_EXPIRATION_SECS);
     let receive_data = if request.witness {
         unlocked_state.rgb_witness_receive(
             request.asset_id,
@@ -2758,7 +2776,7 @@ pub(crate) async fn rgb_invoice(
     Ok(RgbInvoiceData {
         recipient_id: receive_data.recipient_id,
         invoice: receive_data.invoice,
-        expiration_timestamp: receive_data.expiration_timestamp.map(|t| t as i64),
+        expiration_timestamp: Some(receive_data.expiration_timestamp as i64),
         batch_transfer_idx: receive_data.batch_transfer_idx,
     })
 }
@@ -2958,13 +2976,13 @@ pub(crate) async fn open_channel(
         ..Default::default()
     };
 
-    let consignment_endpoint = if let Some((contract_id, asset_amount)) = &colored_info {
+    let rgb_asset = if let Some((contract_id, asset_amount)) = &colored_info {
         let balance = unlocked_state.rgb_get_asset_balance(*contract_id)?;
         let spendable_rgb_amount = balance.spendable;
         if *asset_amount > spendable_rgb_amount {
             return Err(APIError::InsufficientAssets);
         }
-        Some(RgbTransport::from_str(&unlocked_state.proxy_endpoint).unwrap())
+        Some((*contract_id, request.push_asset_amount))
     } else {
         None
     };
@@ -3005,7 +3023,7 @@ pub(crate) async fn open_channel(
                 true,
                 fee_rate_sat_vb,
                 min_channel_confirmations,
-                None,
+                get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS,
                 true,
                 Some(0),
             )
@@ -3044,6 +3062,7 @@ pub(crate) async fn open_channel(
                 local_rgb_amount: *asset_amount - push_amount,
                 remote_rgb_amount: push_amount,
                 batch_transfer_idx: None,
+                counterparty_knows_asset: false,
             };
             unlocked_state
                 .kv_store
@@ -3065,8 +3084,7 @@ pub(crate) async fn open_channel(
             0,
             temporary_channel_id,
             Some(config),
-            consignment_endpoint,
-            request.push_asset_amount,
+            rgb_asset,
             is_virtual_open,
         )
         .map_err(|e| {
@@ -3372,17 +3390,34 @@ pub(crate) async fn fail_transfers(
 pub(crate) async fn refresh_transfers(
     state: Arc<AppState>,
     request: RefreshTransfersRequestData,
-) -> Result<(), APIError> {
+) -> Result<RefreshTransfersData, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
     let unlocked_state_copy = unlocked_state.clone();
 
-    tokio::task::spawn_blocking(move || {
+    let refresh_result = tokio::task::spawn_blocking(move || {
         unlocked_state_copy.rgb_refresh(None, vec![], request.skip_sync)
     })
     .await
     .unwrap()?;
-    Ok(())
+    let transfers = refresh_result
+        .into_iter()
+        .map(|(idx, transfer)| {
+            (
+                idx,
+                RefreshedTransferData {
+                    updated_status: transfer
+                        .updated_status
+                        .map(|s| format!("{:?}", to_transfer_status(s))),
+                    failure: transfer.failure.map(|e| RefreshFailureData {
+                        name: crate::error::error_name(&e),
+                        message: e.to_string(),
+                    }),
+                },
+            )
+        })
+        .collect();
+    Ok(RefreshTransfersData { transfers })
 }
 
 pub(crate) async fn maker_execute(
@@ -3750,6 +3785,8 @@ pub(crate) async fn decode_ln_invoice(
         timestamp: invoice.duration_since_epoch().as_secs(),
         asset_id: invoice.rgb_contract_id().map(|c| c.to_string()),
         asset_amount: invoice.rgb_amount(),
+        description: description_from_invoice(&invoice),
+        description_hash: description_hash_from_invoice(&invoice).map(|h| hex_str(&h)),
         payment_hash: hex_str(&invoice.payment_hash().to_byte_array()),
         payment_secret: hex_str(&invoice.payment_secret().0),
         payee_pubkey: Some(invoice.get_payee_pub_key().to_string()),
@@ -3866,7 +3903,7 @@ pub(crate) async fn create_ln_invoice(
         None => None,
     };
     let description =
-        parse_invoice_description(description.as_deref(), description_hash.as_deref())?;
+        invoice_description_from_request(description.as_deref(), description_hash.as_deref())?;
 
     let invoice_params = Bolt11InvoiceParameters {
         amount_msats: amt_msat,
@@ -4313,19 +4350,24 @@ fn to_transaction_data(tx: rgb_lib::wallet::Transaction) -> TransactionData {
     }
 }
 
+fn to_transfer_status(status: rgb_lib::TransferStatus) -> TransferStatus {
+    match status {
+        rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
+        rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
+        rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
+        rgb_lib::TransferStatus::WaitingConfirmations => TransferStatus::WaitingConfirmations,
+        rgb_lib::TransferStatus::WaitingBroadcast => TransferStatus::WaitingBroadcast,
+        rgb_lib::TransferStatus::Settled => TransferStatus::Settled,
+        rgb_lib::TransferStatus::Failed => TransferStatus::Failed,
+    }
+}
+
 fn to_transfer_data(transfer: rgb_lib::wallet::Transfer) -> TransferData {
     TransferData {
         idx: transfer.idx,
         created_at: transfer.created_at,
         updated_at: transfer.updated_at,
-        status: match transfer.status {
-            rgb_lib::TransferStatus::Initiated => TransferStatus::Initiated,
-            rgb_lib::TransferStatus::WaitingCounterparty => TransferStatus::WaitingCounterparty,
-            rgb_lib::TransferStatus::WaitingSafeHeight => TransferStatus::WaitingSafeHeight,
-            rgb_lib::TransferStatus::WaitingConfirmations => TransferStatus::WaitingConfirmations,
-            rgb_lib::TransferStatus::Settled => TransferStatus::Settled,
-            rgb_lib::TransferStatus::Failed => TransferStatus::Failed,
-        },
+        status: to_transfer_status(transfer.status),
         requested_assignment: transfer.requested_assignment,
         assignments: transfer.assignments,
         kind: match transfer.kind {
@@ -4388,7 +4430,7 @@ pub(crate) async fn list_transfers(
     }
     let filter = match asset_id {
         Some(asset_id) => rgb_lib::wallet::AssetFilter::Id(asset_id),
-        None => rgb_lib::wallet::AssetFilter::Any,
+        None => rgb_lib::wallet::AssetFilter::AnyOrNone,
     };
     Ok(unlocked_state
         .rgb_list_transfers(filter, txid)?
@@ -4411,6 +4453,7 @@ pub(crate) async fn list_unspents(
                 outpoint: unspent.utxo.outpoint.to_string(),
                 btc_amount: unspent.utxo.btc_amount,
                 colorable: unspent.utxo.colorable,
+                exists: unspent.utxo.exists,
             },
             rgb_allocations: unspent
                 .rgb_allocations
@@ -4535,6 +4578,10 @@ mod tests {
                 ldk_data_dir: storage_dir.join(".ldk"),
                 logger: Arc::new(FilesystemLogger::new(storage_dir)),
                 max_media_upload_size_mb: 1,
+                max_aggregated_media_size_per_channel_mb:
+                    crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL,
+                max_pending_consignments: crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS,
+                max_media_files_per_channel: crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL,
                 enable_virtual_channels_v0: false,
                 virtual_peer_pubkeys: vec![],
                 lsp_base_url: None,
@@ -4569,13 +4616,24 @@ mod tests {
         }
     }
 
+    fn sample_ldk_chain_sync() -> crate::core_types::LdkChainSync {
+        #[cfg(feature = "block-sync")]
+        return crate::core_types::LdkChainSync::BlockSync {
+            bitcoind_rpc_username: "user".to_string(),
+            bitcoind_rpc_password: "pass".to_string(),
+            bitcoind_rpc_host: "127.0.0.1".to_string(),
+            bitcoind_rpc_port: 18443,
+        };
+        #[cfg(not(feature = "block-sync"))]
+        return crate::core_types::LdkChainSync::TransactionSync {
+            indexer_url: "127.0.0.1:50001".to_string(),
+        };
+    }
+
     fn sample_unlock_request() -> UnlockRequest {
         UnlockRequest {
             password: "unused-in-external-mode".to_string(),
-            bitcoind_rpc_username: Some("user".to_string()),
-            bitcoind_rpc_password: Some("pass".to_string()),
-            bitcoind_rpc_host: Some("127.0.0.1".to_string()),
-            bitcoind_rpc_port: Some(18443),
+            ldk_chain_sync: sample_ldk_chain_sync(),
             indexer_url: Some("127.0.0.1:50001".to_string()),
             proxy_endpoint: Some("rpc://127.0.0.1:3000/json-rpc".to_string()),
             announce_addresses: vec![],

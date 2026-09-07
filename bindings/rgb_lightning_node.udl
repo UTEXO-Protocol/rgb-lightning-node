@@ -85,7 +85,7 @@ interface SdkNode {
     [Throws=RlnError]
     SdkSendPaymentResponse sendpayment(SdkSendPaymentRequest request);
     [Throws=RlnError]
-    void refreshtransfers(SdkRefreshTransfersRequest request);
+    SdkRefreshTransfersResponse refreshtransfers(SdkRefreshTransfersRequest request);
     [Throws=RlnError]
     SdkFailTransfersResponse failtransfers(SdkFailTransfersRequest request);
     [Throws=RlnError]
@@ -473,6 +473,8 @@ dictionary DecodeLnInvoiceResponse {
     u64 timestamp;
     ContractId? asset_id;
     u64? asset_amount;
+    string? description;
+    string? description_hash;
     PaymentHash payment_hash;
     string payment_secret;
     PublicKey? payee_pubkey;
@@ -535,6 +537,7 @@ dictionary Utxo {
     string outpoint;
     u64 btc_amount;
     boolean colorable;
+    boolean exists;
 };
 
 dictionary Unspent {
@@ -598,12 +601,15 @@ dictionary SdkInitRequest {
     boolean reuse_addresses = false;
 };
 
+[Enum]
+interface SdkLdkChainSync {
+    BlockSync(string bitcoind_rpc_username, string bitcoind_rpc_password, string bitcoind_rpc_host, u16 bitcoind_rpc_port);
+    TransactionSync(string indexer_url);
+};
+
 dictionary SdkUnlockRequest {
     string password;
-    string? bitcoind_rpc_username;
-    string? bitcoind_rpc_password;
-    string? bitcoind_rpc_host;
-    u16? bitcoind_rpc_port;
+    SdkLdkChainSync ldk_chain_sync;
     string? indexer_url;
     string? proxy_endpoint;
     sequence<string> announce_addresses;
@@ -665,6 +671,20 @@ dictionary SdkFailTransfersRequest {
 
 dictionary SdkFailTransfersResponse {
     boolean transfers_changed;
+};
+
+dictionary SdkRefreshFailure {
+    string name;
+    string message;
+};
+
+dictionary SdkRefreshedTransfer {
+    string? updated_status;
+    SdkRefreshFailure? failure;
+};
+
+dictionary SdkRefreshTransfersResponse {
+    record<i32, SdkRefreshedTransfer> transfers;
 };
 
 dictionary SdkCreateUtxosRequest {

@@ -146,6 +146,9 @@ allow_empty_restore = true
 
 [api]
 max_media_upload_size_mb = 10
+max_aggregated_media_size_per_channel_mb = 7
+max_pending_consignments = 25
+max_media_files_per_channel = 3
 "#,
     )
     .unwrap();
@@ -168,6 +171,9 @@ max_media_upload_size_mb = 10
     assert_eq!(vss.allow_empty_restore, Some(true));
     let api = t.api.unwrap();
     assert_eq!(api.max_media_upload_size_mb, Some(10));
+    assert_eq!(api.max_aggregated_media_size_per_channel_mb, Some(7));
+    assert_eq!(api.max_pending_consignments, Some(25));
+    assert_eq!(api.max_media_files_per_channel, Some(3));
 }
 
 #[test]

@@ -25,6 +25,7 @@ import org.utexo.rgblightningnode.SdkCloseChannelRequest
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
 import org.utexo.rgblightningnode.SdkInitRequest
 import org.utexo.rgblightningnode.SdkIssueAssetNiaRequest
+import org.utexo.rgblightningnode.SdkLdkChainSync
 import org.utexo.rgblightningnode.SdkNode
 import org.utexo.rgblightningnode.SdkOpenChannelRequest
 import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
@@ -123,10 +124,12 @@ class PaymentTest {
 
     private fun unlockRequest(password: String) = SdkUnlockRequest(
         password = password,
-        bitcoindRpcUsername = bitcoindUser,
-        bitcoindRpcPassword = bitcoindPass,
-        bitcoindRpcHost = bitcoindHost,
-        bitcoindRpcPort = bitcoindPort.toUShort(),
+        ldkChainSync = SdkLdkChainSync.BlockSync(
+            bitcoindRpcUsername = bitcoindUser,
+            bitcoindRpcPassword = bitcoindPass,
+            bitcoindRpcHost = bitcoindHost,
+            bitcoindRpcPort = bitcoindPort.toUShort(),
+        ),
         indexerUrl = "$bitcoindHost:50001",
         proxyEndpoint = proxyEndpoint,
         announceAddresses = listOf(),
@@ -787,8 +790,9 @@ class PaymentTest {
             assertNotNull(xfer2.recipientId)
             assertNull(xfer2.receiveUtxo)
             assertNotNull(xfer2.changeUtxo)
-            assertNull(xfer2.expiration)
-            assertTrue(xfer2.transportEndpoints.isNotEmpty())
+            assertNotNull(xfer2.expiration)
+            // the channel funding consignment travels over the p2p link, so no proxy is involved
+            assertTrue(xfer2.transportEndpoints.isEmpty())
 
             val xfer3 = transfers.first { it.idx == 3 }
             assertEquals("Settled", xfer3.status)
@@ -798,8 +802,8 @@ class PaymentTest {
             assertNotNull(xfer3.recipientId)
             assertNotNull(xfer3.receiveUtxo)
             assertNull(xfer3.changeUtxo)
-            assertNull(xfer3.expiration)
-            assertTrue(xfer3.transportEndpoints.isNotEmpty())
+            assertNotNull(xfer3.expiration)
+            assertTrue(xfer3.transportEndpoints.isEmpty())
 
             log("SUCCESS: Android payment parity flow completed")
         } finally {

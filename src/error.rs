@@ -4,7 +4,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use rgb_lib::{BitcoinNetwork, Error as RgbLibError};
+#[cfg(feature = "block-sync")]
+use rgb_lib::BitcoinNetwork;
+use rgb_lib::Error as RgbLibError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -25,9 +27,6 @@ pub enum APIError {
 
     #[error("Node has already been initialized")]
     AlreadyInitialized,
-
-    #[error("Provide either bitcoind RPC credentials (all four fields) or an esplora indexer_url, not both")]
-    AmbiguousChainBackend,
 
     #[error("Anchor outputs are required for RGB channels")]
     AnchorsRequired,
@@ -50,8 +49,26 @@ pub enum APIError {
     #[error("Batch transfer cannot be set to failed status")]
     CannotFailBatchTransfer,
 
+    #[error("Cannot provide out-of-band ACK: {0}")]
+    CannotProvideOutOfBandAck(String),
+
+    #[error("Cannot provide out-of-band consignment: {0}")]
+    CannotProvideOutOfBandConsignment(String),
+
     #[error("Cannot call other APIs while node is changing state")]
     ChangingState,
+
+    #[error("Consignment file is empty")]
+    ConsignmentFileEmpty,
+
+    #[error("Consignment file has not been provided")]
+    ConsignmentFileNotProvided,
+
+    #[error("Consignment not found")]
+    ConsignmentNotFound,
+
+    #[error("The stored mnemonic is corrupted: {0}")]
+    CorruptedMnemonic(String),
 
     #[error("External signer is required for this operation")]
     ExternalSignerRequired,
@@ -81,6 +98,7 @@ pub enum APIError {
     #[error("Failed to sync BDK: {0}")]
     FailedBdkSync(String),
 
+    #[cfg(feature = "block-sync")]
     #[error("Failed to connect to bitcoind client: {0}")]
     FailedBitcoindConnection(String),
 
@@ -170,6 +188,9 @@ pub enum APIError {
     #[error("Invalid channel ID")]
     InvalidChannelID,
 
+    #[error("Invalid consignment")]
+    InvalidConsignment,
+
     #[error("Invalid contract link: {0}")]
     InvalidContractLink(String),
 
@@ -232,9 +253,6 @@ pub enum APIError {
 
     #[error("Invalid precision: {0}")]
     InvalidPrecision(String),
-
-    #[error("Invalid proxy endpoint")]
-    InvalidProxyEndpoint,
 
     #[error("Invalid proxy protocol version: {0}")]
     InvalidProxyProtocol(String),
@@ -311,8 +329,8 @@ pub enum APIError {
     #[error("Min fee not met for transfer with TXID: {0}")]
     MinFeeNotMet(String),
 
-    #[error("Provide either bitcoind RPC credentials (all four fields) or an esplora indexer_url; none were supplied")]
-    MissingChainBackend,
+    #[error("No indexer_url was supplied, in the unlock request or in the config file")]
+    MissingIndexerUrl,
 
     #[error("Unable to find payment preimage, be sure you've provided the correct swap info")]
     MissingSwapPaymentPreimage,
@@ -320,6 +338,7 @@ pub enum APIError {
     #[error("Network error: {0}")]
     Network(String),
 
+    #[cfg(feature = "block-sync")]
     #[error("The network of the given bitcoind ({0}) doesn't match the node's chain ({1})")]
     NetworkMismatch(String, BitcoinNetwork),
 
@@ -393,16 +412,16 @@ pub enum APIError {
     WrongPassword,
 }
 
+pub(crate) fn error_name(e: &impl std::error::Error) -> String {
+    format!("{e:?}")
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
 impl APIError {
-    fn name(&self) -> String {
-        format!("{self:?}")
-            .split('(')
-            .next()
-            .unwrap()
-            .split(" {")
-            .next()
-            .unwrap()
-            .to_string()
+    pub(crate) fn name(&self) -> String {
+        error_name(self)
     }
 }
 
@@ -433,6 +452,12 @@ impl From<RgbLibError> for APIError {
             RgbLibError::BatchTransferNotFound { .. } => APIError::BatchTransferNotFound,
             RgbLibError::CannotEstimateFees => APIError::CannotEstimateFees,
             RgbLibError::CannotFailBatchTransfer => APIError::CannotFailBatchTransfer,
+            RgbLibError::CannotProvideOutOfBandAck { details } => {
+                APIError::CannotProvideOutOfBandAck(details)
+            }
+            RgbLibError::CannotProvideOutOfBandConsignment { details } => {
+                APIError::CannotProvideOutOfBandConsignment(details)
+            }
             RgbLibError::EmptyFile { .. } => APIError::MediaFileEmpty,
             RgbLibError::FailedBdkSync { details } => APIError::FailedBdkSync(details),
             RgbLibError::FailedBroadcast { details } => APIError::FailedBroadcast(details),
@@ -526,7 +551,8 @@ impl From<RgbLibError> for APIError {
 impl IntoResponse for APIError {
     fn into_response(self) -> Response {
         let (status, error, name) = match self {
-            APIError::FailedClosingChannel(_)
+            APIError::CorruptedMnemonic(_)
+            | APIError::FailedClosingChannel(_)
             | APIError::FailedInvoiceCreation(_)
             | APIError::FailedIssuingAsset(_)
             | APIError::FailedLoadingChannelState(_)
@@ -542,6 +568,11 @@ impl IntoResponse for APIError {
                 self.name(),
             ),
             APIError::AnchorsRequired
+            | APIError::CannotProvideOutOfBandAck(_)
+            | APIError::CannotProvideOutOfBandConsignment(_)
+            | APIError::ConsignmentFileEmpty
+            | APIError::ConsignmentFileNotProvided
+            | APIError::ConsignmentNotFound
             | APIError::ExpiredSwapOffer
             | APIError::IncompleteRGBInfo
             | APIError::InvalidAddress(_)
@@ -555,6 +586,7 @@ impl IntoResponse for APIError {
             | APIError::InvalidBackupPath
             | APIError::InvalidBiscuitToken
             | APIError::InvalidChannelID
+            | APIError::InvalidConsignment
             | APIError::InvalidContractLink(_)
             | APIError::InvalidRightOutpoint(_)
             | APIError::InvalidDescription(_)
@@ -601,7 +633,6 @@ impl IntoResponse for APIError {
             APIError::AllocationsAlreadyAvailable
             | APIError::AlreadyInitialized
             | APIError::AlreadyUnlocked
-            | APIError::AmbiguousChainBackend
             | APIError::AuthenticationDisabled
             | APIError::BatchTransferNotFound
             | APIError::CannotCloseChannel(_)
@@ -612,22 +643,19 @@ impl IntoResponse for APIError {
             | APIError::ExternalSignerRequiresAuthentication
             | APIError::DuplicatePayment(_)
             | APIError::FailedBdkSync(_)
-            | APIError::FailedBitcoindConnection(_)
             | APIError::FailedBroadcast(_)
             | APIError::FailedPeerConnection
             | APIError::InsufficientAssets
             | APIError::InsufficientCapacity(_)
             | APIError::InsufficientFunds(_)
             | APIError::InvalidIndexer(_)
-            | APIError::InvalidProxyEndpoint
             | APIError::InvalidProxyProtocol(_)
             | APIError::InvoiceNotHodl
             | APIError::InvoiceSettlingInProgress
             | APIError::LockedNode
             | APIError::MaxFeeExceeded(_)
             | APIError::MinFeeNotMet(_)
-            | APIError::MissingChainBackend
-            | APIError::NetworkMismatch(_, _)
+            | APIError::MissingIndexerUrl
             | APIError::NoAvailableUtxos
             | APIError::NoRoute
             | APIError::NotInitialized
@@ -645,6 +673,10 @@ impl IntoResponse for APIError {
             | APIError::UnsupportedSchema(_)
             | APIError::UnsupportedTransportType
             | APIError::UnsupportedInExternalSignerMode(_) => {
+                (StatusCode::FORBIDDEN, self.to_string(), self.name())
+            }
+            #[cfg(feature = "block-sync")]
+            APIError::FailedBitcoindConnection(_) | APIError::NetworkMismatch(_, _) => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
             }
             APIError::InvoiceAlreadyClaimed => {

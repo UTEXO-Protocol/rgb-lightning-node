@@ -119,6 +119,24 @@ async fn description_hash_invoice() {
         invoice.min_final_cltv_expiry_delta(),
         u64::from(inbound_min_final_cltv) + 3
     );
+
+    let decoded = decode_ln_invoice(node1_addr, &res.invoice).await;
+    assert_eq!(decoded.description, None);
+    assert_eq!(
+        decoded.description_hash.as_deref(),
+        Some(description_hash.0.to_string().as_str())
+    );
+
+    let payment = list_payments(node1_addr)
+        .await
+        .into_iter()
+        .find(|p| p.payment_hash == decoded.payment_hash)
+        .unwrap();
+    assert_eq!(payment.description, None);
+    assert_eq!(
+        payment.description_hash.as_deref(),
+        Some(description_hash.0.to_string().as_str())
+    );
 }
 
 #[serial_test::serial]
@@ -199,6 +217,14 @@ async fn description_invoice() {
     let decoded = decode_ln_invoice(node1_addr, &res.invoice).await;
     assert_eq!(decoded.description.as_deref(), Some(description));
     assert_eq!(decoded.description_hash, None);
+
+    let payment = list_payments(node1_addr)
+        .await
+        .into_iter()
+        .find(|p| p.payment_hash == decoded.payment_hash)
+        .unwrap();
+    assert_eq!(payment.description.as_deref(), Some(description));
+    assert_eq!(payment.description_hash, None);
 }
 
 #[serial_test::serial]

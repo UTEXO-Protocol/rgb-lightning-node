@@ -37,6 +37,18 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     max_media_upload_size_mb: u16,
 
+    /// Max aggregate size of RGB media accepted over p2p per channel-open (in MB)
+    #[arg(long, default_value_t = crate::rgb_file_transfer::MAX_MEDIA_MB_PER_CHANNEL)]
+    max_aggregated_media_size_per_channel_mb: u16,
+
+    /// Max number of pending channel-open consignments buffered over p2p at once
+    #[arg(long, default_value_t = crate::rgb_file_transfer::MAX_PENDING_CONSIGNMENTS)]
+    max_pending_consignments: usize,
+
+    /// Max number of RGB media files accepted over p2p per channel-open
+    #[arg(long, default_value_t = crate::rgb_file_transfer::MAX_MEDIA_FILES_PER_CHANNEL)]
+    max_media_files_per_channel: usize,
+
     /// Root public key for biscuit token authentication (hex-encoded)
     #[arg(long)]
     root_public_key: Option<String>,
@@ -108,6 +120,9 @@ pub(crate) struct UserArgs {
     pub(crate) ldk_peer_listening_port: u16,
     pub(crate) network: BitcoinNetwork,
     pub(crate) max_media_upload_size_mb: u16,
+    pub(crate) max_aggregated_media_size_per_channel_mb: u16,
+    pub(crate) max_pending_consignments: usize,
+    pub(crate) max_media_files_per_channel: usize,
     pub(crate) root_public_key: Option<biscuit_auth::PublicKey>,
     pub(crate) enable_virtual_channels_v0: bool,
     pub(crate) virtual_peer_pubkeys: Vec<PublicKey>,
@@ -199,6 +214,28 @@ fn resolve_user_args(
             .unwrap_or(args.max_media_upload_size_mb)
     };
 
+    let max_aggregated_media_size_per_channel_mb =
+        if from_cli("max_aggregated_media_size_per_channel_mb") {
+            args.max_aggregated_media_size_per_channel_mb
+        } else {
+            api.max_aggregated_media_size_per_channel_mb
+                .unwrap_or(args.max_aggregated_media_size_per_channel_mb)
+        };
+
+    let max_pending_consignments = if from_cli("max_pending_consignments") {
+        args.max_pending_consignments
+    } else {
+        api.max_pending_consignments
+            .unwrap_or(args.max_pending_consignments)
+    };
+
+    let max_media_files_per_channel = if from_cli("max_media_files_per_channel") {
+        args.max_media_files_per_channel
+    } else {
+        api.max_media_files_per_channel
+            .unwrap_or(args.max_media_files_per_channel)
+    };
+
     let disable_authentication =
         args.disable_authentication || auth.disable_authentication.unwrap_or(false);
     let root_public_key_hex = args.root_public_key.or(auth.root_public_key);
@@ -246,6 +283,9 @@ fn resolve_user_args(
         ldk_peer_listening_port,
         network,
         max_media_upload_size_mb,
+        max_aggregated_media_size_per_channel_mb,
+        max_pending_consignments,
+        max_media_files_per_channel,
         root_public_key,
         enable_virtual_channels_v0,
         virtual_peer_pubkeys,
@@ -417,6 +457,25 @@ mod tests {
     fn policy_sections_attached_to_user_args() {
         let ua = resolve(&base(&[]), "[rgb]\nfee_rate_sat_vb = 12\n").unwrap();
         assert_eq!(ua.config.rgb.fee_rate_sat_vb, 12);
+    }
+
+    #[test]
+    fn p2p_transfer_limits_from_file_cli_wins() {
+        let ua = resolve(
+            &base(&[]),
+            "[api]\nmax_aggregated_media_size_per_channel_mb = 7\nmax_pending_consignments = 25\nmax_media_files_per_channel = 3\n",
+        )
+        .unwrap();
+        assert_eq!(ua.max_aggregated_media_size_per_channel_mb, 7);
+        assert_eq!(ua.max_pending_consignments, 25);
+        assert_eq!(ua.max_media_files_per_channel, 3);
+
+        let ua = resolve(
+            &base(&["--max-pending-consignments", "40"]),
+            "[api]\nmax_pending_consignments = 25\n",
+        )
+        .unwrap();
+        assert_eq!(ua.max_pending_consignments, 40);
     }
 
     #[test]

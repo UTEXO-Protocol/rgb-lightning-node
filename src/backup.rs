@@ -1,11 +1,8 @@
 use amplify::s;
 use chacha20poly1305::aead::{generic_array::GenericArray, stream};
-use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305};
 use rand::{distributions::Alphanumeric, Rng};
-use scrypt::password_hash::{PasswordHasher, Salt};
-use scrypt::Scrypt;
+use scrypt::password_hash::Salt;
 use tempfile::TempDir;
-use typenum::consts::U32;
 use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 
@@ -13,14 +10,16 @@ use std::fs::{create_dir_all, read_to_string, remove_file, write, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::crypto::{aead_from_key, derive_key, KdfParams, KEY_LEN};
 use crate::error::APIError;
 use crate::utils::LOGS_DIR;
 
 const BACKUP_BUFFER_LEN_ENCRYPT: usize = 239; // 255 max, leaving 16 for the checksum
 const BACKUP_BUFFER_LEN_DECRYPT: usize = BACKUP_BUFFER_LEN_ENCRYPT + 16;
-const BACKUP_KEY_LENGTH: usize = 32;
+const BACKUP_SALT_LENGTH: usize = 32;
 const BACKUP_NONCE_LENGTH: usize = 19;
 const BACKUP_VERSION: u8 = 1;
+const RESTORE_STAGING_DIR: &str = "restored";
 
 struct BackupPaths {
     encrypted: PathBuf,
@@ -32,7 +31,7 @@ struct BackupPaths {
 }
 
 struct CypherSecrets {
-    key: GenericArray<u8, U32>,
+    key: [u8; KEY_LEN],
     nonce: [u8; BACKUP_NONCE_LENGTH],
 }
 
@@ -56,7 +55,7 @@ pub(crate) fn do_backup(
     let files = get_backup_paths(&tmp_base_path)?;
     let salt: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
-        .take(BACKUP_KEY_LENGTH)
+        .take(BACKUP_SALT_LENGTH)
         .map(char::from)
         .collect();
     tracing::debug!("using generated salt: {}", &salt);
@@ -86,18 +85,36 @@ pub(crate) fn do_backup(
     Ok(())
 }
 
-/// Restore a backup from the given file and password to the provided target directory.
-pub(crate) fn restore_backup(
+/// A decrypted backup, extracted to a temporary directory.
+///
+/// Restoring is split in two steps so the caller can check the backup before the target directory
+/// is touched: a backup that turns out to be unusable must not leave the node holding data it
+/// cannot open, since both `init` and `restore` refuse to run on an initialized node.
+pub(crate) struct UnpackedBackup {
+    dir: PathBuf,
+    zip: PathBuf,
+    // extraction happens under this directory, removed when the backup is dropped
+    _tempdir: TempDir,
+}
+
+impl UnpackedBackup {
+    /// The directory holding the extracted backup contents.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+/// Decrypt the backup at the given path with the given password and extract it to a temporary
+/// directory, leaving the node's storage directory untouched.
+pub(crate) fn unpack_backup(
     backup_path: &Path,
     password: &str,
-    target_dir: &Path,
-) -> Result<(), APIError> {
+) -> Result<UnpackedBackup, APIError> {
     // setup
     tracing::info!("starting restore...");
     let backup_file = PathBuf::from(backup_path);
     let tmp_base_path = get_parent_path(&backup_file)?;
     let files = get_backup_paths(&tmp_base_path)?;
-    let target_dir_path = PathBuf::from(&target_dir);
 
     // unpack given zip file and retrieve backup data
     tracing::info!("unzipping {:?}", backup_file);
@@ -116,11 +133,24 @@ pub(crate) fn restore_backup(
         });
     }
 
-    // decrypt backup and restore files
+    // decrypt the backup and extract it out of the way of the target directory
     tracing::info!("decrypting {:?} to {:?}", files.encrypted, files.zip);
     decrypt_file(&files.encrypted, &files.zip, password, &salt, &nonce)?;
-    tracing::info!("unzipping {:?} to {:?}", &files.zip, &target_dir_path);
-    unzip(&files.zip, &target_dir_path)?;
+    let dir = files.tempdir.path().join(RESTORE_STAGING_DIR);
+    tracing::info!("unzipping {:?} to {:?}", &files.zip, &dir);
+    unzip(&files.zip, &dir)?;
+
+    Ok(UnpackedBackup {
+        dir,
+        zip: files.zip,
+        _tempdir: files.tempdir,
+    })
+}
+
+/// Install a previously unpacked backup into the provided target directory.
+pub(crate) fn install_backup(backup: &UnpackedBackup, target_dir: &Path) -> Result<(), APIError> {
+    tracing::info!("unzipping {:?} to {:?}", &backup.zip, target_dir);
+    unzip(&backup.zip, target_dir)?;
 
     tracing::info!("restore completed");
     Ok(())
@@ -251,20 +281,14 @@ fn get_cypher_secrets(
     salt_str: &str,
     nonce_str: &str,
 ) -> Result<CypherSecrets, APIError> {
-    // hash password using scrypt with the provided salt
-    let password_bytes = password.as_bytes();
+    // derive the key from the password, hashing it with scrypt and the provided salt
     let salt = Salt::from_b64(salt_str)
         .map_err(|e| APIError::Unexpected(format!("Failed to create salt: {e}")))?;
-    let password_hash = Scrypt
-        .hash_password(password_bytes, salt)
-        .map_err(|e| APIError::Unexpected(format!("Failed to hash password: {e}")))?;
-    let hash_output = password_hash
-        .hash
-        .ok_or_else(|| APIError::Unexpected(s!("Failed to hash password")))?;
-    let hash = hash_output.as_bytes();
-
-    // get key from password hash
-    let key = Key::clone_from_slice(&hash[..BACKUP_KEY_LENGTH]);
+    let mut salt_buf = [0u8; Salt::MAX_LENGTH];
+    let salt_bytes = salt
+        .decode_b64(&mut salt_buf)
+        .map_err(|e| APIError::Unexpected(format!("Failed to decode salt: {e}")))?;
+    let key = derive_key(password, salt_bytes, KdfParams::BACKUP_V1)?;
 
     // get nonce from provided str
     let nonce_bytes = nonce_str.as_bytes();
@@ -288,7 +312,7 @@ fn encrypt_file(
     // - stream mode required as files to encrypt may be big, so avoiding a memory buffer
 
     // setup
-    let aead = XChaCha20Poly1305::new(&cypher_secrets.key);
+    let aead = aead_from_key(&cypher_secrets.key);
     let nonce = GenericArray::from_slice(&cypher_secrets.nonce);
     let mut stream_encryptor = stream::EncryptorBE32::from_aead(aead, nonce);
     let mut buffer = [0u8; BACKUP_BUFFER_LEN_ENCRYPT];
@@ -328,7 +352,7 @@ fn decrypt_file(
     let cypher_secrets = get_cypher_secrets(password, salt_str, nonce_str)?;
 
     // setup
-    let aead = XChaCha20Poly1305::new(&cypher_secrets.key);
+    let aead = aead_from_key(&cypher_secrets.key);
     let nonce = GenericArray::from_slice(&cypher_secrets.nonce);
     let mut stream_decryptor = stream::DecryptorBE32::from_aead(aead, nonce);
     let mut buffer = [0u8; BACKUP_BUFFER_LEN_DECRYPT];

@@ -20,7 +20,6 @@ use lightning::{
     util::ser::{Writeable, Writer},
 };
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
-use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use rgb_lib::{bdk_wallet::keys::bip39::Mnemonic, BitcoinNetwork, ContractId};
 use rln_migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
@@ -31,7 +30,7 @@ use std::{
     path::Path,
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, Mutex, MutexGuard, RwLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock},
     time::{Duration, SystemTime},
 };
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
@@ -39,8 +38,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::asset_link::AssetLinkMessageHandler;
 use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
+use crate::crypto::{decrypt_mnemonic, encrypt_mnemonic};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
+use crate::rgb_file_transfer::RgbFileTransferHandler;
 use crate::signer::{
     read_key_source_file, ActiveSignerRef, ExternalSigner, ExternalSignerAttachment,
     RlnEntropySource,
@@ -58,15 +59,28 @@ use crate::{
 
 pub(crate) const LDK_DIR: &str = ".ldk";
 pub(crate) const LOGS_DIR: &str = "logs";
+// the test suite drives local electrs/esplora instances
+#[cfg(test)]
 pub(crate) const ELECTRUM_URL_REGTEST: &str = "127.0.0.1:50001";
 #[cfg(test)]
 pub(crate) const ESPLORA_URL_REGTEST: &str = "http://127.0.0.1:3002";
-pub(crate) const ELECTRUM_URL_SIGNET: &str = "ssl://electrum.iriswallet.com:50033";
-pub(crate) const ELECTRUM_URL_TESTNET: &str = "ssl://electrum.iriswallet.com:50013";
-pub(crate) const ELECTRUM_URL_TESTNET4: &str = "ssl://electrum.iriswallet.com:50053";
-pub(crate) const ELECTRUM_URL_MAINNET: &str = "ssl://electrum.iriswallet.com:50003";
 pub(crate) const PROXY_ENDPOINT_LOCAL: &str = "rpc://127.0.0.1:3000/json-rpc";
 pub(crate) const PROXY_ENDPOINT_PUBLIC: &str = "rpcs://proxy.iriswallet.com/0.2/json-rpc";
+
+/// Set by the panic hook and by the background-processor watchdog. Once set, the shutdown is
+/// fatal: it stops waiting for an in-progress state change and the process exits non-zero.
+pub(crate) static FATAL_ERROR: OnceLock<String> = OnceLock::new();
+
+/// Process exit code `main` returns once the server future is done: `70` (sysexits
+/// `EX_SOFTWARE`) when a fatal error was recorded, `0` otherwise. Single source of truth so the
+/// watchdog tests exercise the real decision rather than a copy.
+pub(crate) fn fatal_exit_code() -> i32 {
+    if FATAL_ERROR.get().is_some() {
+        70
+    } else {
+        0
+    }
+}
 
 pub(crate) struct AppState {
     pub(crate) static_state: Arc<StaticState>,
@@ -90,13 +104,17 @@ impl AppState {
     }
 
     pub(crate) fn get_changing_state(&self) -> MutexGuard<'_, bool> {
-        self.changing_state.lock().unwrap()
+        self.changing_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) // ignore the poison: a wedged flag must not block shutdown
     }
 
     pub(crate) fn get_ldk_background_services(
         &self,
     ) -> MutexGuard<'_, Option<LdkBackgroundServices>> {
-        self.ldk_background_services.lock().unwrap()
+        self.ldk_background_services
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) // ignore the poison: a wedged flag must not block shutdown
     }
 
     #[allow(dead_code)]
@@ -156,6 +174,9 @@ pub(crate) struct StaticState {
     /// `remote-signer`-gated unlock path, so it is dead code when that feature is off.
     #[cfg_attr(not(feature = "remote-signer"), allow(dead_code))]
     pub(crate) remote_signer_listen_addr: Option<std::net::SocketAddr>,
+    pub(crate) max_aggregated_media_size_per_channel_mb: u16,
+    pub(crate) max_pending_consignments: usize,
+    pub(crate) max_media_files_per_channel: usize,
 }
 
 impl StaticState {
@@ -182,6 +203,7 @@ pub(crate) struct UnlockedAppState {
     pub(crate) kv_store: Arc<SyncedKvStore>,
     #[cfg(feature = "vss")]
     pub(crate) monitor_kv_store: Arc<crate::async_kv_store::RemoteFirstKvStore>,
+    pub(crate) rgb_file_transfer_handler: Arc<RgbFileTransferHandler>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,
@@ -452,15 +474,12 @@ pub(crate) fn check_password_validity(
     database: &DatabaseConnection,
 ) -> Result<Mnemonic, APIError> {
     let db = crate::database::RlnDatabase::new(database.clone());
-    if let Some(mnemonic_record) = db.get_mnemonic()? {
-        let mcrypt = new_magic_crypt!(password, 256);
-        let mnemonic_str = mcrypt
-            .decrypt_base64_to_string(mnemonic_record.encrypted_mnemonic)
-            .map_err(|_| APIError::WrongPassword)?;
-        Ok(Mnemonic::from_str(&mnemonic_str).expect("valid mnemonic"))
-    } else {
-        Err(APIError::NotInitialized)
-    }
+    let Some(mnemonic_record) = db.get_mnemonic()? else {
+        return Err(APIError::NotInitialized);
+    };
+    let mnemonic_str = decrypt_mnemonic(password, &mnemonic_record.encrypted_mnemonic)?;
+    Mnemonic::from_str(&mnemonic_str)
+        .map_err(|e| APIError::CorruptedMnemonic(format!("invalid mnemonic: {e}")))
 }
 
 pub(crate) fn check_channel_id(channel_id_str: &str) -> Result<ChannelId, APIError> {
@@ -528,8 +547,7 @@ pub(crate) fn encrypt_and_save_mnemonic(
     mnemonic: String,
     database: &DatabaseConnection,
 ) -> Result<(), APIError> {
-    let mcrypt = new_magic_crypt!(password, 256);
-    let encrypted_mnemonic = mcrypt.encrypt_str_to_base64(mnemonic);
+    let encrypted_mnemonic = encrypt_mnemonic(&password, &mnemonic)?;
     let db = crate::database::RlnDatabase::new(database.clone());
     db.save_mnemonic(encrypted_mnemonic)?;
     tracing::info!("Saved wallet mnemonic");
@@ -633,25 +651,6 @@ pub(crate) fn hex_str_to_vec(hex: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Runs a closure on drop, including during panic unwinding, so cleanup (e.g.
-/// clearing the changing-state flag) still happens if the guarded work returns
-/// early or panics.
-pub(crate) struct CallOnDrop<F: FnMut()> {
-    action: F,
-}
-
-impl<F: FnMut()> CallOnDrop<F> {
-    pub(crate) fn new(action: F) -> Self {
-        Self { action }
-    }
-}
-
-impl<F: FnMut()> Drop for CallOnDrop<F> {
-    fn drop(&mut self) {
-        (self.action)();
-    }
-}
-
 pub(crate) async fn no_cancel<Fut>(fut: Fut) -> Fut::Output
 where
     Fut: 'static + Future + Send,
@@ -662,7 +661,10 @@ where
         let result = fut.await;
         let _ = tx.send(result);
     });
-    rx.await.unwrap()
+    // the sender is only dropped without sending if the spawned task panicked, which the default
+    // panic hook has already reported
+    rx.await
+        .expect("request task panicked, see the preceding panic for the cause")
 }
 
 pub(crate) fn parse_peer_info(
@@ -753,6 +755,9 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
         vss_allow_empty_restore: args.vss_allow_empty_restore,
         reuse_addresses: args.reuse_addresses,
         remote_signer_listen_addr: args.remote_signer_listen_addr,
+        max_aggregated_media_size_per_channel_mb: args.max_aggregated_media_size_per_channel_mb,
+        max_pending_consignments: args.max_pending_consignments,
+        max_media_files_per_channel: args.max_media_files_per_channel,
     });
 
     let app_state = Arc::new(AppState {
@@ -882,6 +887,16 @@ pub(crate) fn validate_and_parse_description(
         .map_err(|e| APIError::InvalidDescription(e.to_string()))
 }
 
+// Builds the invoice description from request fields, treating an explicit empty description as
+// "none": a caller may send an empty `description` alongside a `description_hash`, which must
+// mint an h-tag invoice rather than be rejected as "both provided".
+pub(crate) fn invoice_description_from_request(
+    description: Option<&str>,
+    description_hash: Option<&str>,
+) -> Result<Bolt11InvoiceDescription, APIError> {
+    parse_invoice_description(description.filter(|d| !d.is_empty()), description_hash)
+}
+
 pub(crate) fn parse_invoice_description(
     description: Option<&str>,
     description_hash: Option<&str>,
@@ -947,6 +962,21 @@ pub(crate) async fn bind_first_available(
 
 #[cfg(test)]
 mod utils_tests {
+    use super::*;
+
+    const HASH_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn empty_description_with_hash_mints_hash_invoice() {
+        let d = invoice_description_from_request(Some(""), Some(HASH_HEX)).unwrap();
+        assert!(matches!(d, Bolt11InvoiceDescription::Hash(_)));
+    }
+
+    #[test]
+    fn present_description_with_hash_is_rejected() {
+        assert!(invoice_description_from_request(Some("hi"), Some(HASH_HEX)).is_err());
+    }
+
     #[tokio::test]
     async fn bind_first_available_falls_back_when_first_addr_fails() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -989,37 +1019,5 @@ mod utils_tests {
     fn vss_url_other_schemes_rejected() {
         assert!(validate_vss_url("ftp://example.com/vss", true).is_err());
         assert!(validate_vss_url("example.com/vss", true).is_err());
-    }
-}
-
-#[cfg(test)]
-mod call_on_drop_tests {
-    use super::CallOnDrop;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-
-    #[test]
-    fn runs_action_on_scope_exit() {
-        let ran = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&ran);
-        {
-            let _g = CallOnDrop::new(move || flag.store(true, Ordering::SeqCst));
-        }
-        assert!(ran.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn runs_action_during_panic_unwind() {
-        let ran = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&ran);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _g = CallOnDrop::new(move || flag.store(true, Ordering::SeqCst));
-            panic!("boom");
-        }));
-        assert!(result.is_err(), "closure should have panicked");
-        assert!(
-            ran.load(Ordering::SeqCst),
-            "action must run while unwinding a panic"
-        );
     }
 }

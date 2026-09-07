@@ -147,7 +147,6 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::ChangingState
         | APIError::InsufficientAssets
         | APIError::InvalidIndexer(_)
-        | APIError::InvalidProxyEndpoint
         | APIError::InvalidProxyProtocol(_)
         | APIError::MaxFeeExceeded(_)
         | APIError::MinFeeNotMet(_)

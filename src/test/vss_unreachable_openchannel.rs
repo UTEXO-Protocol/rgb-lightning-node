@@ -5,10 +5,9 @@ const TEST_DIR_BASE: &str = "tmp/vss_unreachable_openchannel/";
 async fn unlock_electrum_only(node_address: SocketAddr, password: &str) {
     let payload = UnlockRequest {
         password: password.to_string(),
-        bitcoind_rpc_username: None,
-        bitcoind_rpc_password: None,
-        bitcoind_rpc_host: None,
-        bitcoind_rpc_port: None,
+        ldk_chain_sync: LdkChainSync::TransactionSync {
+            indexer_url: ELECTRUM_URL_REGTEST.to_string(),
+        },
         indexer_url: Some(ELECTRUM_URL_REGTEST.to_string()),
         proxy_endpoint: Some(PROXY_ENDPOINT_LOCAL.to_string()),
         announce_addresses: vec![],
@@ -120,7 +119,7 @@ async fn openchannel_refused_while_vss_unreachable_inner() {
     .await
     .expect_err("openchannel must be refused while VSS is unreachable");
     check_response_is_nok(
-        res,
+        *res,
         reqwest::StatusCode::SERVICE_UNAVAILABLE,
         "VSS server is unreachable",
         "VssUnreachable",

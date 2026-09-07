@@ -22,3 +22,8 @@ jobs:
           components: rustfmt
       - name: Format
         run: cargo fmt -- --check
+      # these crates have their own workspace, so the root `cargo fmt` skips them
+      - name: Format (out-of-workspace binding crates)
+        run: |
+          cargo fmt --manifest-path bindings/c-ffi/Cargo.toml -- --check
+          cargo fmt --manifest-path bindings/uniffi-bindgen/Cargo.toml -- --check

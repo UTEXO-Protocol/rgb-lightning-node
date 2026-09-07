@@ -2,6 +2,22 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+#[cfg(not(any(feature = "electrum", feature = "esplora")))]
+compile_error!("at least one of the `electrum` and `esplora` features needs to be enabled");
+
+#[cfg(not(any(feature = "block-sync", feature = "transaction-sync")))]
+compile_error!(
+    "at least one of the `block-sync` and `transaction-sync` features needs to be enabled"
+);
+
+// the generated bindings cannot express cargo-feature gating on `LdkChainSync`, so they need
+// both sync backends compiled in
+#[cfg(all(
+    feature = "uniffi",
+    not(all(feature = "block-sync", feature = "transaction-sync"))
+))]
+compile_error!("the `uniffi` bindings require both `block-sync` and `transaction-sync`");
+
 mod apay_merkle;
 mod args;
 mod asset_link;
@@ -10,10 +26,9 @@ mod async_kv_store;
 mod async_order;
 mod auth;
 mod backup;
-mod bitcoind;
-mod chain_backend;
 mod config;
 mod core_types;
+mod crypto;
 mod custom_msg_rpc;
 mod database;
 mod disk;
@@ -24,11 +39,12 @@ mod fee_mock;
 #[cfg(feature = "uniffi")]
 pub mod ffi;
 mod gossip;
-mod indexer;
 mod kv_store;
 mod ldk;
+mod ldk_chain_backend;
 mod node;
 mod rgb;
+mod rgb_file_transfer;
 mod routes;
 mod runtime;
 mod sdk;

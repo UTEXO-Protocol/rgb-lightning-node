@@ -35,7 +35,7 @@
 
 [chain]
 # Default indexer URL used when /unlock does not provide one
-# (defaults to a per-network public electrum server)
+# (there is no built-in default: unlock fails if neither supplies one)
 #indexer_url = ""
 # Default RGB proxy endpoint used when /unlock does not provide one
 # (defaults to a per-network public proxy)

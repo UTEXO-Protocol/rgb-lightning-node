@@ -4,6 +4,7 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import org.utexo.rgblightningnode.NativeExternalSigner
 import org.utexo.rgblightningnode.SdkInitRequest
+import org.utexo.rgblightningnode.SdkLdkChainSync
 import org.utexo.rgblightningnode.SdkNode
 
 private const val PROXY_ENDPOINT_LOCAL = "rpc://127.0.0.1:3000/json-rpc"
@@ -53,10 +54,12 @@ fun main() {
         node.initWithNativeExternalSigner(signer)
         node.unlockWithNativeExternalSigner(
             signer,
-            bitcoindUser,
-            bitcoindPassword,
-            bitcoindHost,
-            bitcoindPort,
+            SdkLdkChainSync.BlockSync(
+                bitcoindUser,
+                bitcoindPassword,
+                bitcoindHost,
+                bitcoindPort,
+            ),
             indexerUrl,
             proxyEndpoint,
             emptyList(),

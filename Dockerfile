@@ -17,4 +17,10 @@ RUN apt-get update && apt install -y --no-install-recommends \
     ca-certificates openssl \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+RUN groupadd -g 1000 user \
+    && useradd -u 1000 -g user -M -s /usr/sbin/nologin user \
+    && mkdir -p /RLNdata && chown user:user /RLNdata
+
+USER user
+
 ENTRYPOINT ["/usr/bin/rgb-lightning-node"]

@@ -77,7 +77,7 @@ jobs:
           cargo test --features "uniffi,vls" --lib 'signer::channel_signer::tests::' -- --test-threads=1
           cargo test --features "uniffi,vls" --lib 'signer::in_process_transport::tests::' -- --test-threads=1
 
-  test:
+  test_and_coverage:
     runs-on: warp-ubuntu-latest-x64-16x
     timeout-minutes: 90
     steps:
@@ -86,9 +86,24 @@ jobs:
           submodules: true
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          components: llvm-tools-preview
+          toolchain: stable
           rustflags: ""
-      - name: Tests
-        run: cargo test -- --test-threads=1 --skip test::gossip_
+      - name: Install llvm-cov
+        env:
+          LLVM_COV_RELEASES: https://github.com/taiki-e/cargo-llvm-cov/releases
+        run: |
+          host=$(rustc -Vv | grep host | sed 's/host: //')
+          curl -fsSL $LLVM_COV_RELEASES/latest/download/cargo-llvm-cov-$host.tar.gz | tar xzf - -C "$HOME/.cargo/bin"
+      - name: Tests and coverage report
+        run: ./coverage.sh --ci --skip test::gossip_
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v6
+        with:
+          fail_ci_if_error: false
+          file: coverage.lcov
+          flags: rust
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: UniFFI SDK smoke tests
         run: cargo test --features uniffi --lib 'uniffi_smoke_tests::' -- --test-threads=1
 
@@ -141,6 +156,8 @@ jobs:
         run: cargo build --features vss
       - name: Run deterministic VSS durability regressions
         run: cargo test --features vss "test::vss_durability_gaps" -- --test-threads=1
+      - name: Run VSS teardown headline tests
+        run: cargo test --features "uniffi,test-utils,vls,vss" --bin rgb-lightning-node ldk::vss_teardown_tests -- --test-threads=1
       - name: Start regtest and VSS services
         run: VSS=1 ./regtest.sh start
       - name: Run VSS tests (e2e against regtest + VSS server)

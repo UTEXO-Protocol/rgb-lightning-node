@@ -127,12 +127,24 @@ impl_writeable_tlv_based_enum!(SwapStatus,
     (4, Failed) => {},
 );
 
+/// How LDK follows the chain: full blocks from bitcoind, or the indexer.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "mode", content = "config")]
+pub(crate) enum LdkChainSync {
+    #[cfg(feature = "block-sync")]
+    BlockSync {
+        bitcoind_rpc_username: String,
+        bitcoind_rpc_password: String,
+        bitcoind_rpc_host: String,
+        bitcoind_rpc_port: u16,
+    },
+    #[cfg(feature = "transaction-sync")]
+    TransactionSync { indexer_url: String },
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct UnlockRequest {
-    pub(crate) bitcoind_rpc_username: Option<String>,
-    pub(crate) bitcoind_rpc_password: Option<String>,
-    pub(crate) bitcoind_rpc_host: Option<String>,
-    pub(crate) bitcoind_rpc_port: Option<u16>,
+    pub(crate) ldk_chain_sync: LdkChainSync,
     pub(crate) indexer_url: Option<String>,
     pub(crate) proxy_endpoint: Option<String>,
     pub(crate) announce_addresses: Vec<String>,
