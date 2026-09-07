@@ -164,8 +164,13 @@ docker run \
         --disable-authentication \
         RLNdata
 ```
-Note: this persists data across runs in the `RLNdata1` volume; to start from
-scratch delete it with `docker volume rm RLNdata1`
+Notes:
+- this persists data across runs in the `RLNdata1` volume; to start from
+  scratch delete it with `docker volume rm RLNdata1`
+- the container runs as an unprivileged user (uid/gid `1000:1000`). A fresh
+  named volume, as in the example above, is automatically owned by that user.
+  If a bind-mount is used instead, the host directory needs to be writable by
+  uid/gid `1000:1000` before starting the container
 
 To send some bitcoins to a node, first get a bitcoin address with the POST
 `/address` API, then run:

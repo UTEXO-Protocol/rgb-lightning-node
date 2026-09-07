@@ -119,7 +119,7 @@ async fn openchannel_refused_while_vss_unreachable_inner() {
     .await
     .expect_err("openchannel must be refused while VSS is unreachable");
     check_response_is_nok(
-        res,
+        *res,
         reqwest::StatusCode::SERVICE_UNAVAILABLE,
         "VSS server is unreachable",
         "VssUnreachable",

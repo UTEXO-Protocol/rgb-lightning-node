@@ -2377,7 +2377,7 @@ async fn open_channel_request_raw(
     temporary_channel_id: Option<&str>,
     with_anchors: bool,
     public: bool,
-) -> Result<OpenChannelResponse, Response> {
+) -> Result<OpenChannelResponse, Box<Response>> {
     println!(
         "opening channel with {asset_amount:?} of asset {asset_id:?} from node {node_address} \
               to {dest_peer_pubkey}"
@@ -2424,7 +2424,7 @@ async fn open_channel_request_raw(
 
     let status = res.status();
     if !status.is_success() {
-        return Err(res);
+        return Err(Box::new(res));
     }
 
     Ok(res.json::<OpenChannelResponse>().await.unwrap())
@@ -2446,7 +2446,7 @@ async fn open_channel_funded_raw(
     temporary_channel_id: Option<&str>,
     with_anchors: bool,
     public: bool,
-) -> Result<Channel, Response> {
+) -> Result<Channel, Box<Response>> {
     open_channel_request_raw(
         node_address,
         dest_peer_pubkey,
@@ -2496,12 +2496,12 @@ async fn open_channel_funded_raw(
         }
         if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 50.0 {
             println!("cannot find funding TX for channel to {dest_peer_pubkey}");
-            return Err(Response::from(
+            return Err(Box::new(Response::from(
                 Builder::new()
                     .status(reqwest::StatusCode::FORBIDDEN)
                     .body("")
                     .unwrap(),
-            ));
+            )));
         }
     }
     let channel_id = channel_id.unwrap();
