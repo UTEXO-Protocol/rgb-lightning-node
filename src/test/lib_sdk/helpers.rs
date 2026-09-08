@@ -335,7 +335,7 @@ pub(crate) fn unlock_request(password: &str) -> SdkUnlockRequest {
         ldk_chain_sync: SdkLdkChainSync::BlockSync {
             bitcoind_rpc_username: "user".to_string(),
             bitcoind_rpc_password: "password".to_string(),
-            bitcoind_rpc_host: "localhost".to_string(),
+            bitcoind_rpc_host: "127.0.0.1".to_string(),
             bitcoind_rpc_port: 18443,
         },
         indexer_url: Some("127.0.0.1:50001".to_string()),
