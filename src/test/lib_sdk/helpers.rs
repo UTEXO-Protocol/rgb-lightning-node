@@ -330,12 +330,19 @@ fn make_node_inner(
 }
 
 pub(crate) fn unlock_request(password: &str) -> SdkUnlockRequest {
+    unlock_request_with_host(password, "127.0.0.1")
+}
+
+pub(crate) fn unlock_request_with_host(
+    password: &str,
+    bitcoind_rpc_host: &str,
+) -> SdkUnlockRequest {
     SdkUnlockRequest {
         password: password.to_string(),
         ldk_chain_sync: SdkLdkChainSync::BlockSync {
             bitcoind_rpc_username: "user".to_string(),
             bitcoind_rpc_password: "password".to_string(),
-            bitcoind_rpc_host: "127.0.0.1".to_string(),
+            bitcoind_rpc_host: bitcoind_rpc_host.to_string(),
             bitcoind_rpc_port: 18443,
         },
         indexer_url: Some("127.0.0.1:50001".to_string()),
