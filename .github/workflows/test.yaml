@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [rest-uniffi-with-vls, wasm-without-vls]
+        mode: [rest-uniffi-with-vls, wasm-without-vls, block-sync-all-targets]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +49,8 @@ jobs:
             else
               echo "bindings/wasm-sdk/Cargo.toml not found; skipping direct wasm-sdk cargo check in this repository layout"
             fi
+          elif [ "${{ matrix.mode }}" = "block-sync-all-targets" ]; then
+            cargo check --locked --all-targets --no-default-features --features "block-sync,electrum,esplora"
           else
             echo "unknown matrix mode: ${{ matrix.mode }}"
             exit 1
