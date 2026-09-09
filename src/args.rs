@@ -259,7 +259,10 @@ fn resolve_user_args(
     let lsp_base_url = args.lsp_base_url.or(lsp.base_url);
     let lsp_bearer_token = args.lsp_bearer_token.or(lsp.bearer_token);
 
-    let vss_url = args.vss_url.or(vss.url);
+    let vss_url = match args.vss_url {
+        Some(url) => Some(url),
+        None => vss.url.filter(|url| !url.is_empty()),
+    };
     let vss_allow_http = args.vss_allow_http || vss.allow_http.unwrap_or(false);
     let vss_allow_empty_restore =
         args.vss_allow_empty_restore || vss.allow_empty_restore.unwrap_or(false);
@@ -482,5 +485,35 @@ mod tests {
     fn invalid_policy_in_file_rejected() {
         let res = resolve(&base(&[]), "[rgb]\nfee_rate_sat_vb = 0\n");
         assert!(matches!(res, Err(AppError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn empty_vss_url_disables_vss() {
+        let ua = resolve(&base(&[]), "[vss]\nurl = \"\"\n").unwrap();
+        assert!(ua.vss_url.is_none());
+    }
+
+    #[test]
+    fn cli_vss_url_overrides_file_value() {
+        let cli_url = "https://cli.example.com/vss";
+        for file_url in ["", "https://file.example.com/vss"] {
+            let ua = resolve(
+                &base(&["--vss-url", cli_url]),
+                &format!("[vss]\nurl = \"{file_url}\"\n"),
+            )
+            .unwrap();
+            assert_eq!(ua.vss_url.as_deref(), Some(cli_url));
+        }
+    }
+
+    #[test]
+    fn blank_cli_vss_url_is_rejected() {
+        for cli_url in ["", "   "] {
+            let res = resolve(
+                &base(&["--vss-url", cli_url]),
+                "[vss]\nurl = \"https://file.example.com/vss\"\n",
+            );
+            assert!(matches!(res, Err(AppError::InvalidVssConfig(_))));
+        }
     }
 }
