@@ -150,8 +150,8 @@ const PENDING_FUNDING_NAMESPACE: &str = "pending_funding";
 const FUNDING_CONSIGNMENT_NAMESPACE: &str = "funding_consignment";
 /// Local-only marker: absent on a freshly restored device, so the fascia
 /// replay reruns until it completes once.
-const REIMPORT_MARKER_NAMESPACE: &str = "reimport_marker";
-const REIMPORT_MARKER_KEY: &str = "fascia_replay";
+pub(crate) const REIMPORT_MARKER_NAMESPACE: &str = "reimport_marker";
+pub(crate) const REIMPORT_MARKER_KEY: &str = "fascia_replay";
 const CONFIG_INDEXER_URL: &str = "indexer_url";
 const CONFIG_BITCOIN_NETWORK: &str = "bitcoin_network";
 const CONFIG_WALLET_FINGERPRINT: &str = "wallet_fingerprint";
@@ -4880,6 +4880,12 @@ pub(crate) async fn start_ldk(
                     }
                 }
             }
+        } else {
+            // Local state is authoritative: refill whatever the remote lacks
+            // (wiped or partial store) without overwriting what it holds.
+            synced.push_missing_to_vss().map_err(|e| {
+                APIError::FailedVssInit(format!("VSS resync of local state failed: {e}"))
+            })?;
         }
 
         (synced, monitor_kv_store)
@@ -5461,6 +5467,20 @@ pub(crate) async fn start_ldk(
                 ))
             })?;
             tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
+            // Auto-backup only tracks local changes; an empty remote (fresh
+            // wallet or wiped store) needs an explicit upload.
+            if let Some(client) = rgb_wallet.vss_client() {
+                let rt = client.handle().clone();
+                let info = rt
+                    .block_on(rgb_wallet.vss_backup_info(&client))
+                    .map_err(|e| APIError::FailedVssInit(format!("VSS backup info: {e}")))?;
+                if !info.backup_exists {
+                    rt.block_on(rgb_wallet.vss_backup(&client)).map_err(|e| {
+                        APIError::FailedVssInit(format!("initial RGB VSS backup failed: {e}"))
+                    })?;
+                    tracing::info!("Uploaded RGB wallet backup to empty VSS store");
+                }
+            }
         }
         Ok::<_, APIError>((rgb_wallet, rgb_online))
     })

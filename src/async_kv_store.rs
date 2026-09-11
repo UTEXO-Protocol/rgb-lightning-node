@@ -255,13 +255,13 @@ pub struct BpKvStoreRouter {
     rest: Arc<crate::synced_kv_store::SyncedKvStore>,
 }
 
-enum BpRoute {
+pub(crate) enum BpRoute {
     RemoteFirst,
     LocalOnly,
     Rest,
 }
 
-fn bp_route(primary: &str, secondary: &str, key: &str) -> BpRoute {
+pub(crate) fn bp_route(primary: &str, secondary: &str, key: &str) -> BpRoute {
     use lightning::util::persist::{
         CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
         CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
