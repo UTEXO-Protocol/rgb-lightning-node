@@ -8,6 +8,7 @@ use crate::async_order::{
     AsyncOrderRequestInvoiceParamsWire, AsyncPaymentsPreimageRoot,
     ASYNC_ERROR_INVOICE_HASH_MISMATCH, ASYNC_ERROR_STALE_FLOW,
 };
+use crate::cpfp::{CpfpBroadcaster, CpfpState};
 use crate::custom_msg_rpc::{CustomMessenger, CustomMsgPeerAccessControl, JsonRpcErrorWire};
 use crate::synced_kv_store::SyncedKvStore;
 use amplify::{map, s};
@@ -1237,7 +1238,7 @@ pub(crate) type OnionMessenger = LdkOnionMessenger<
 >;
 
 pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
-    Arc<DynBroadcaster>,
+    Arc<CpfpBroadcaster>,
     Arc<Wallet<Arc<RgbBumpWalletSource>, Arc<FilesystemLogger>>>,
     ActiveSignerRef,
     Arc<FilesystemLogger>,
@@ -3762,10 +3763,10 @@ async fn handle_ldk_events(
             // event.
         }
         Event::BumpTransaction(event) => {
-            unlocked_state
-                .bump_tx_event_handler
-                .handle_event(&event)
-                .await
+            return unlocked_state.cpfp_state.handle_event(&event, &unlocked_state.bump_tx_event_handler).await.map_err(|e| {
+                tracing::error!(error = %e, "Unable to persist CPFP attempt; replaying LDK event");
+                ReplayEvent()
+            });
         }
         Event::ConnectionNeeded { node_id, addresses } => {
             tokio::spawn(async move {
@@ -5065,6 +5066,13 @@ pub(crate) async fn start_ldk(
         }
     };
 
+    let cpfp_state = CpfpState::load(
+        Arc::clone(&kv_store),
+        backend.cpfp_package_capable(),
+        backend.name(),
+        Arc::clone(&broadcaster),
+    )?;
+
     // LDK signing: internal mode uses `KeysManager` from the mnemonic-derived LDK seed (BIP32 child
     // 535 of the master xpriv). External mode uses `ExternalSigner` only; inbound / peer_storage /
     // receive_auth key material comes from bootstrap hex fields (see `ExternalSigner::from_attachment`).
@@ -6012,8 +6020,9 @@ pub(crate) async fn start_ldk(
         external_signer: external_signer.clone(),
         external_signer_mode,
     });
+    let cpfp_broadcaster = CpfpBroadcaster::new(Arc::clone(&broadcaster), Arc::clone(&cpfp_state));
     let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
-        Arc::clone(&broadcaster),
+        cpfp_broadcaster,
         Arc::new(Wallet::new(bump_wallet_source, Arc::clone(&logger))),
         Arc::clone(&keys_manager),
         Arc::clone(&logger),
@@ -6129,6 +6138,7 @@ pub(crate) async fn start_ldk(
         #[cfg(feature = "vss")]
         monitor_kv_store: Arc::clone(&monitor_kv_store),
         rgb_file_transfer_handler: Arc::clone(&rgb_file_transfer_handler),
+        cpfp_state,
         bump_tx_event_handler,
         rgb_wallet_wrapper,
         maker_swaps,

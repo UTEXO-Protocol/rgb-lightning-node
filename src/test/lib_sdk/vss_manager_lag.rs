@@ -228,10 +228,10 @@ fn setup_with_open_channel(test_name: &str) -> LagSetup {
         .init(PASSWORD_B.to_string(), None)
         .expect("node B init");
     node_a
-        .unlock(unlock_request(PASSWORD_A))
+        .unlock(unlock_request_with_host(PASSWORD_A, "localhost"))
         .expect("node A initial unlock");
     node_b
-        .unlock(unlock_request(PASSWORD_B))
+        .unlock(unlock_request_with_host(PASSWORD_B, "localhost"))
         .expect("node B initial unlock");
 
     fund_and_create_utxos(&node_a, "node A");
@@ -326,7 +326,7 @@ fn restore_node_a(setup: &LagSetup) -> (SdkNode, Result<(), rgb_lightning_node::
             password: PASSWORD_A.to_string(),
         })
         .expect("node A vss_clear_fence");
-    let unlock_res = node_a.unlock(unlock_request(PASSWORD_A));
+    let unlock_res = node_a.unlock(unlock_request_with_host(PASSWORD_A, "localhost"));
     (node_a, unlock_res)
 }
 
@@ -429,7 +429,9 @@ fn restore_refuses_when_final_flush_fails() {
     );
     // A retry must hit the guard again, not skip the restore and force-close.
     assert!(
-        node_a.unlock(unlock_request(PASSWORD_A)).is_err(),
+        node_a
+            .unlock(unlock_request_with_host(PASSWORD_A, "localhost"))
+            .is_err(),
         "second unlock attempt must be refused again"
     );
     assert!(
@@ -469,7 +471,7 @@ fn restore_refuses_when_final_flush_fails() {
         })
         .expect("override clear fence");
     node_a
-        .unlock(unlock_request(PASSWORD_A))
+        .unlock(unlock_request_with_host(PASSWORD_A, "localhost"))
         .expect("unlock with --vss-allow-empty-restore must proceed");
     assert!(
         node_a

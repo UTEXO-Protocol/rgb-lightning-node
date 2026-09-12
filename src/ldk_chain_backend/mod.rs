@@ -15,8 +15,18 @@ use lightning::chain::{BestBlock, Filter};
 // the chain backends are used as trait objects so a single set of LDK type aliases works
 // regardless of the selected sync mode
 pub(crate) type DynFeeEstimator = dyn lightning::chain::chaininterface::FeeEstimator + Send + Sync;
-pub(crate) type DynBroadcaster =
-    dyn lightning::chain::chaininterface::BroadcasterInterface + Send + Sync;
+pub(crate) type DynBroadcaster = dyn TransactionBroadcaster;
+
+pub(crate) trait TransactionBroadcaster:
+    lightning::chain::chaininterface::BroadcasterInterface + Send + Sync
+{
+    fn submit_transactions(
+        &self,
+        _txs: Vec<bitcoin::Transaction>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+        Box::pin(async { Err("package submission is unavailable on this backend".to_string()) })
+    }
+}
 
 pub(crate) const MIN_FEERATE: u32 = 253;
 
@@ -31,6 +41,26 @@ pub(crate) enum ChainBackend {
         client: Arc<transaction_sync::IndexerClient>,
         tx_sync: Arc<transaction_sync::IndexerSyncClient>,
     },
+}
+
+impl ChainBackend {
+    pub(crate) fn cpfp_package_capable(&self) -> bool {
+        match self {
+            #[cfg(feature = "block-sync")]
+            Self::BlockSync { .. } => true,
+            #[cfg(feature = "transaction-sync")]
+            Self::TransactionSync { .. } => false,
+        }
+    }
+
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "block-sync")]
+            Self::BlockSync { .. } => "bitcoind",
+            #[cfg(feature = "transaction-sync")]
+            Self::TransactionSync { .. } => "indexer",
+        }
+    }
 }
 
 pub(crate) struct ChainSetup {

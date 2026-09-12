@@ -65,10 +65,10 @@ fn restored_node_recovers_force_closed_channel_funds() {
         .init(PASSWORD_B.to_string(), None)
         .expect("node B init");
     node_a
-        .unlock(unlock_request(PASSWORD_A))
+        .unlock(unlock_request_with_host(PASSWORD_A, "localhost"))
         .expect("node A initial unlock");
     node_b
-        .unlock(unlock_request(PASSWORD_B))
+        .unlock(unlock_request_with_host(PASSWORD_B, "localhost"))
         .expect("node B initial unlock");
 
     proxy.block_rgb_backup_writes();
@@ -181,7 +181,7 @@ fn restored_node_recovers_force_closed_channel_funds() {
         })
         .expect("node A vss_clear_fence");
     node_a
-        .unlock(unlock_request(PASSWORD_A))
+        .unlock(unlock_request_with_host(PASSWORD_A, "localhost"))
         .expect("node A unlock after restore");
 
     // Phase 3: right after unlock the wallet must know the channel asset

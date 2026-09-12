@@ -16,6 +16,7 @@ mod auth;
 mod backup;
 mod config;
 mod core_types;
+mod cpfp;
 mod crypto;
 mod custom_msg_rpc;
 mod database;
@@ -81,17 +82,17 @@ use crate::rgb_file_transfer::MAX_CONSIGNMENT_SIZE;
 use crate::routes::init_external_signer;
 use crate::routes::{
     address, asset_balance, asset_link, asset_metadata, async_order_new,
-    async_order_outbound_invoice, backup, btc_balance, cancel_hodl_invoice, change_password,
-    check_indexer_url, check_proxy_endpoint, claim_hodl_invoice, close_channel, connect_peer,
-    create_utxos, decode_ln_invoice, decode_rgb_invoice, decode_swapstring, disconnect_peer,
-    estimate_fee, fail_transfers, get_asset_media, get_channel_id, get_consignment, get_payment,
-    get_swap, inflate, init, invoice_status, issue_asset_cfa, issue_asset_ifa, issue_asset_nia,
-    issue_asset_uda, keysend, list_assets, list_channels, list_payments, list_peers, list_swaps,
-    list_transactions, list_transfers, list_unspents, ln_invoice, lock, maker_execute, maker_init,
-    network_info, node_info, open_channel, post_asset_media, provide_out_of_band_ack,
-    provide_out_of_band_consignment, refresh_transfers, restore, revoke_token, rgb_invoice,
-    rotate_address, send_btc, send_onion_message, send_payment, send_rgb, shutdown, sign_message,
-    sync, taker, unlock,
+    async_order_outbound_invoice, backup, btc_balance, bump_force_close_fee, cancel_hodl_invoice,
+    change_password, check_indexer_url, check_proxy_endpoint, claim_hodl_invoice, close_channel,
+    connect_peer, create_utxos, decode_ln_invoice, decode_rgb_invoice, decode_swapstring,
+    disconnect_peer, estimate_fee, fail_transfers, get_asset_media, get_channel_id,
+    get_consignment, get_payment, get_swap, inflate, init, invoice_status, issue_asset_cfa,
+    issue_asset_ifa, issue_asset_nia, issue_asset_uda, keysend, list_assets, list_channels,
+    list_payments, list_peers, list_swaps, list_transactions, list_transfers, list_unspents,
+    ln_invoice, lock, maker_execute, maker_init, network_info, node_info, open_channel,
+    post_asset_media, provide_out_of_band_ack, provide_out_of_band_consignment, refresh_transfers,
+    restore, revoke_token, rgb_invoice, rotate_address, send_btc, send_onion_message, send_payment,
+    send_rgb, shutdown, sign_message, sync, taker, unlock,
 };
 #[cfg(feature = "vss")]
 use crate::routes::{vss_backup, vss_backup_info, vss_clear_fence};
@@ -188,6 +189,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/assetmetadata", post(asset_metadata))
         .route("/backup", post(backup))
         .route("/btcbalance", post(btc_balance))
+        .route("/bumpforceclosefee", post(bump_force_close_fee))
         .route("/cancelhodlinvoice", post(cancel_hodl_invoice))
         .route("/changepassword", post(change_password))
         .route("/checkindexerurl", post(check_indexer_url))

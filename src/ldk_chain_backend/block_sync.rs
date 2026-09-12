@@ -24,7 +24,9 @@ use std::time::Duration;
 use crate::disk::FilesystemLogger;
 use crate::ldk::P2PGossipSync;
 
-use super::{default_fee_buckets, fee_from_bucket, store_fee_estimates, MIN_FEERATE};
+use super::{
+    default_fee_buckets, fee_from_bucket, store_fee_estimates, TransactionBroadcaster, MIN_FEERATE,
+};
 
 pub struct BitcoindClient {
     pub(crate) bitcoind_rpc_client: Arc<RpcClient>,
@@ -85,6 +87,21 @@ pub struct BlockchainInfo {
     pub chain: String,
 }
 
+struct NetworkInfo {
+    version: u64,
+}
+
+impl TryInto<NetworkInfo> for JsonResponse {
+    type Error = std::io::Error;
+    fn try_into(self) -> std::io::Result<NetworkInfo> {
+        Ok(NetworkInfo {
+            version: self.0["version"].as_u64().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "bitcoind version missing")
+            })?,
+        })
+    }
+}
+
 impl TryInto<BlockchainInfo> for JsonResponse {
     type Error = std::io::Error;
     fn try_into(self) -> std::io::Result<BlockchainInfo> {
@@ -139,6 +156,21 @@ impl BitcoindClient {
                 std::io::Error::new(std::io::ErrorKind::PermissionDenied,
                 "failed to make initial call to bitcoind - please check your RPC user/password and access settings")
             })?;
+        let network_info = bitcoind_rpc_client
+            .call_method::<NetworkInfo>("getnetworkinfo", &[])
+            .await
+            .map_err(|e| {
+                std::io::Error::new(e.kind(), format!("failed to read bitcoind version: {e}"))
+            })?;
+        if network_info.version < 280000 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "anchor CPFP requires Bitcoin Core 28.0 or newer for guaranteed submitpackage (found {})",
+                    network_info.version
+                ),
+            ));
+        }
         let client = Self {
             bitcoind_rpc_client: Arc::new(bitcoind_rpc_client),
             fees: Arc::new(default_fee_buckets()),
@@ -278,26 +310,16 @@ impl BroadcasterInterface for BitcoindClient {
         // Sadly, Bitcoin Core has an arbitrary restriction on `submitpackage` - it must actually
         // contain a package (see https://github.com/bitcoin/bitcoin/issues/31085).
         let txn = txs.iter().map(encode::serialize_hex).collect::<Vec<_>>();
-        let bitcoind_rpc_client = Arc::clone(&self.bitcoind_rpc_client);
+        let submission = self.submit_transactions(txs.iter().map(|tx| (*tx).clone()).collect());
         let logger = Arc::clone(&self.logger);
         self.handle.spawn(async move {
-			let res = if txn.len() == 1 {
-				let tx_json = serde_json::json!(txn[0]);
-				bitcoind_rpc_client
-					.call_method::<serde_json::Value>("sendrawtransaction", &[tx_json])
-					.await
-			} else {
-				let tx_json = serde_json::json!(txn);
-				bitcoind_rpc_client
-					.call_method::<serde_json::Value>("submitpackage", &[tx_json])
-					.await
-			};
+			let res = submission.await;
 			// This may error due to RL calling `broadcast_transactions` with the same transaction
 			// multiple times, but the error is safe to ignore.
 			match res {
 				Ok(_) => {}
 				Err(e) => {
-					let err_str = e.get_ref().unwrap().to_string();
+					let err_str = e;
 					log_warn!(logger,
 						"Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\nTransactions: {:?}",
 						err_str,
@@ -306,6 +328,50 @@ impl BroadcasterInterface for BitcoindClient {
 				}
 			}
 		});
+    }
+}
+
+impl TransactionBroadcaster for BitcoindClient {
+    fn submit_transactions(
+        &self,
+        txs: Vec<Transaction>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+        let client = Arc::clone(&self.bitcoind_rpc_client);
+        Box::pin(async move {
+            let txn: Vec<_> = txs.iter().map(encode::serialize_hex).collect();
+            if txn.len() == 1 {
+                client
+                    .call_method::<serde_json::Value>(
+                        "sendrawtransaction",
+                        &[serde_json::json!(txn[0])],
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let result = client
+                    .call_method::<serde_json::Value>("submitpackage", &[serde_json::json!(txn)])
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let accepted = result["package_msg"] == "success"
+                    && result["tx-results"].as_object().is_some_and(|results| {
+                        txs.iter().all(|tx| {
+                            results
+                                .get(&tx.compute_wtxid().to_string())
+                                .is_some_and(|entry| {
+                                    entry.get("error").is_none()
+                                        && entry["txid"].as_str()
+                                            == Some(tx.compute_txid().to_string().as_str())
+                                })
+                        })
+                    });
+                if !accepted {
+                    return Err(format!(
+                        "submitpackage rejected or returned an incomplete result: {result}"
+                    ));
+                }
+            }
+            Ok(())
+        })
     }
 }
 

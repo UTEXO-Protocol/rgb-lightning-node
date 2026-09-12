@@ -62,10 +62,10 @@ fn vss_restores_btc_assets_and_channels_on_fresh_device() {
         .expect("node B init");
 
     node_a
-        .unlock(unlock_request(PASSWORD_A))
+        .unlock(unlock_request_with_host(PASSWORD_A, "localhost"))
         .expect("node A initial unlock");
     node_b
-        .unlock(unlock_request(PASSWORD_B))
+        .unlock(unlock_request_with_host(PASSWORD_B, "localhost"))
         .expect("node B initial unlock");
 
     fund_and_create_utxos(&node_a, "node A");
@@ -173,7 +173,7 @@ fn vss_restores_btc_assets_and_channels_on_fresh_device() {
     // Unlock restores both the KV stream (channels, monitors, payments) and
     // the RGB wallet (assets, allocations) from VSS.
     node_a
-        .unlock(unlock_request(PASSWORD_A))
+        .unlock(unlock_request_with_host(PASSWORD_A, "localhost"))
         .expect("node A unlock after restore");
 
     // Reconnect to B so on-chain channel state can resync.

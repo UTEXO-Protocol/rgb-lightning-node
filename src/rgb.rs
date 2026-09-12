@@ -1103,6 +1103,17 @@ impl WalletSource for RgbBumpWalletSource {
     }
 
     fn sign_psbt<'a>(&'a self, tx: Psbt) -> AsyncResult<'a, Transaction, ()> {
+        let mut tx = tx;
+        // LDK provides the keyed anchor witness script as the first CPFP input's
+        // witness_utxo scriptPubKey, while the commitment output is P2WSH. P2A
+        // anchors are already witness programs and must not be converted.
+        if let Some(input) = tx.inputs.get_mut(0) {
+            if let Some(utxo) = input.witness_utxo.as_mut() {
+                if !utxo.script_pubkey.is_witness_program() {
+                    utxo.script_pubkey = utxo.script_pubkey.to_p2wsh();
+                }
+            }
+        }
         if !self.external_signer_mode {
             return WalletSource::sign_psbt(self.inner.as_ref(), tx);
         }

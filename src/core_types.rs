@@ -77,6 +77,26 @@ pub mod async_order {
     }
 }
 
+pub mod cpfp {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub(crate) struct BumpForceCloseFeeRequest {
+        pub(crate) channel_id: String,
+        pub(crate) peer_pubkey: String,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub(crate) struct BumpForceCloseFeeResponse {
+        pub(crate) status: String,
+        pub(crate) commitment_txid: String,
+        pub(crate) child_txid: Option<String>,
+        pub(crate) target_feerate_sat_per_1000_weight: u32,
+        pub(crate) backend: String,
+        pub(crate) last_error: Option<String>,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) enum HTLCStatus {
     Pending,

@@ -330,12 +330,19 @@ fn make_node_inner(
 }
 
 pub(crate) fn unlock_request(password: &str) -> SdkUnlockRequest {
+    unlock_request_with_host(password, "127.0.0.1")
+}
+
+pub(crate) fn unlock_request_with_host(
+    password: &str,
+    bitcoind_rpc_host: &str,
+) -> SdkUnlockRequest {
     SdkUnlockRequest {
         password: password.to_string(),
         ldk_chain_sync: SdkLdkChainSync::BlockSync {
             bitcoind_rpc_username: "user".to_string(),
             bitcoind_rpc_password: "password".to_string(),
-            bitcoind_rpc_host: "localhost".to_string(),
+            bitcoind_rpc_host: bitcoind_rpc_host.to_string(),
             bitcoind_rpc_port: 18443,
         },
         indexer_url: Some("127.0.0.1:50001".to_string()),
@@ -465,16 +472,20 @@ pub(crate) fn wait_for_channel_funding_tx(
             .sync()
             .expect("node B sync while waiting for funding tx");
 
-        let funding_seen = node_a
+        let funding_txid = node_a
             .list_channels()
             .expect("node A list_channels while waiting for funding tx")
             .into_iter()
-            .any(|channel| {
-                channel.asset_id.as_ref() == Some(asset_id) && channel.funding_txid.is_some()
+            .find_map(|channel| {
+                (channel.asset_id.as_ref() == Some(asset_id))
+                    .then_some(channel.funding_txid)
+                    .flatten()
             });
 
-        if funding_seen {
-            return;
+        if let Some(txid) = funding_txid {
+            if !get_txout(&txid.to_string()).trim().is_empty() {
+                return;
+            }
         }
 
         assert!(
