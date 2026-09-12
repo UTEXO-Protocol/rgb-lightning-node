@@ -109,6 +109,16 @@ impl SeaOrmKvStore {
         &self.connection
     }
 
+    #[cfg(feature = "vss")]
+    pub(crate) fn list_all(
+        &self,
+    ) -> Result<Vec<crate::database::entities::kv_store::Model>, io::Error> {
+        block_on(KvStoreEntity::find().all(self.get_connection())).map_err(|e| {
+            tracing::error!(error = %e, "KVStore list_all failed");
+            io::Error::new(io::ErrorKind::Other, format!("Database list failed: {e}"))
+        })
+    }
+
     /// Atomically writes a local value and its durable VSS replication intent.
     ///
     /// A process may terminate immediately after this transaction commits. Keeping both rows in

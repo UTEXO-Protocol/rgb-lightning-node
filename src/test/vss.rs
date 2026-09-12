@@ -449,6 +449,96 @@ mod tests {
         assert_eq!(cm_keys, vec!["manager"]);
     }
 
+    /// A wiped VSS store is refilled from local state: keys missing on the
+    /// remote are pushed, keys the remote already holds are left untouched,
+    /// and local-only rows (pending queue, marker, graph/scorer) stay local.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synced_kv_store_push_fills_missing_remote_keys() {
+        use lightning::util::persist::{
+            NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+            NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+        };
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let (signing_key, store_id) = generate_test_keys();
+        let db = create_test_sqlite();
+        let local = Arc::new(SeaOrmKvStore::from_connection(db));
+        let vss = Arc::new(
+            VssKvStore::new(VSS_URL.to_string(), store_id, signing_key).expect("vss store"),
+        );
+        let synced = SyncedKvStore::with_vss(local.clone(), vss.clone());
+
+        synced
+            .write("channel_manager", "", "manager", vec![0xCA; 64])
+            .unwrap();
+        synced
+            .write("monitors", "", "deadbeef_0", vec![0xBE; 64])
+            .unwrap();
+        synced
+            .write("monitors", "", "deadbeef_1", vec![0xBF; 64])
+            .unwrap();
+        synced
+            .write_local_only("reimport_marker", "", "fascia_replay", vec![1])
+            .unwrap();
+        local
+            .write(
+                NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+                NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+                NETWORK_GRAPH_PERSISTENCE_KEY,
+                vec![0x11; 8],
+            )
+            .unwrap();
+        local
+            .write(
+                crate::synced_kv_store::PENDING_NS,
+                "",
+                "x//y",
+                vec![1, 0xAA],
+            )
+            .unwrap();
+
+        // Wipe the remote, then plant a foreign value the push must not clobber.
+        for k in vss.list_all_keys().expect("list keys") {
+            let (p, s, key) = parse_vss_key(&k).expect("rln key");
+            vss.remove(&p, &s, &key, false).expect("remote remove");
+        }
+        assert!(vss.list_all_keys().expect("list keys").is_empty());
+        vss.write("monitors", "", "deadbeef_1", vec![0xEE; 64])
+            .unwrap();
+
+        assert_eq!(synced.push_missing_to_vss().expect("push"), 2);
+
+        assert_eq!(
+            vss.read("channel_manager", "", "manager").unwrap(),
+            vec![0xCA; 64]
+        );
+        assert_eq!(
+            vss.read("monitors", "", "deadbeef_0").unwrap(),
+            vec![0xBE; 64]
+        );
+        assert_eq!(
+            vss.read("monitors", "", "deadbeef_1").unwrap(),
+            vec![0xEE; 64],
+            "existing remote value must not be overwritten"
+        );
+        let mut remote_keys = vss.list_all_keys().expect("list keys");
+        remote_keys.sort();
+        assert_eq!(
+            remote_keys,
+            vec![
+                vss_key("channel_manager", "", "manager"),
+                vss_key("monitors", "", "deadbeef_0"),
+                vss_key("monitors", "", "deadbeef_1"),
+            ],
+            "local-only rows must not be pushed"
+        );
+
+        assert_eq!(synced.push_missing_to_vss().expect("push again"), 0);
+    }
+
     /// Edge case: VSS server unreachable. Writes must still succeed locally
     /// (the local store is authoritative) and the failed replication must be
     /// queued for later retry. Does not require a running VSS server.
@@ -891,6 +981,97 @@ mod tests {
 
         // With the fence rolled back a retry with good parameters succeeds.
         unlock_with_electrum_backend(node_address, password).await;
+
+        crate::test::shutdown(&[node_address]).await;
+    }
+
+    /// A VSS store wiped while the node keeps its local state is refilled at
+    /// the next unlock: node keys are pushed and the RGB backup re-uploaded.
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn vss_wiped_store_is_refilled_on_unlock() {
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            wiped_store_is_refilled_inner(),
+        )
+        .await
+        .expect("vss_wiped_store_is_refilled_on_unlock timed out");
+    }
+
+    async fn wiped_store_is_refilled_inner() {
+        use lightning::util::persist::{
+            CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+            CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+        };
+        use rgb_lib::bdk_wallet::keys::bip39::Mnemonic;
+
+        crate::test::initialize();
+
+        let test_dir_node = "tmp/vss_wiped_store_refilled/node1";
+        let node_address = crate::test::start_daemon_with_vss(
+            test_dir_node,
+            crate::test::NODE1_PEER_PORT,
+            false,
+            Some(VSS_URL.to_string()),
+            false,
+        )
+        .await;
+        let password = "vss_wiped_store_refilled";
+        let mnemonic = crate::test::init(node_address, password, None)
+            .await
+            .mnemonic;
+        unlock_with_electrum_backend(node_address, password).await;
+        crate::test::lock(node_address).await;
+
+        let identity = crate::ldk::derive_vss_identity(
+            &Mnemonic::parse(&mnemonic).unwrap(),
+            bitcoin::Network::Regtest,
+        )
+        .unwrap();
+        let node_store = VssKvStore::new(
+            VSS_URL.to_string(),
+            identity.pubkey_hex.clone(),
+            identity.signing_key,
+        )
+        .unwrap();
+        let rgb_store = VssKvStore::new(
+            VSS_URL.to_string(),
+            format!("{}_rgb", identity.pubkey_hex),
+            identity.signing_key,
+        )
+        .unwrap();
+
+        let before = node_store.list_all_keys().unwrap();
+        assert!(before.contains(&vss_key(
+            CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+            CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+            CHANNEL_MANAGER_PERSISTENCE_KEY,
+        )));
+        assert!(!rgb_store.list_all_keys().unwrap().is_empty());
+        for store in [&node_store, &rgb_store] {
+            for key in store.list_all_keys().unwrap() {
+                store.remove_raw(&key).unwrap();
+            }
+            assert!(store.list_all_keys().unwrap().is_empty());
+        }
+
+        unlock_with_electrum_backend(node_address, password).await;
+
+        let after = node_store.list_all_keys().unwrap();
+        for key in &before {
+            assert!(after.contains(key), "key missing after refill: {key}");
+        }
+        let info: serde_json::Value = reqwest::get(format!("http://{node_address}/vssbackupinfo"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(info["backup_exists"], true, "{info}");
 
         crate::test::shutdown(&[node_address]).await;
     }

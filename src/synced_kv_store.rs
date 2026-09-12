@@ -405,6 +405,33 @@ impl SyncedKvStore {
         Ok(restored)
     }
 
+    /// Pushes local rows the remote lacks, never overwriting what it holds.
+    /// Refills a VSS store that was wiped or is otherwise incomplete.
+    #[cfg(feature = "vss")]
+    pub(crate) fn push_missing_to_vss(&self) -> Result<usize, io::Error> {
+        let Some(ref remote) = self.remote else {
+            return Ok(0);
+        };
+        let remote_keys: std::collections::HashSet<String> =
+            remote.list_all_keys()?.into_iter().collect();
+        let mut pushed = 0usize;
+        for row in self.local.list_all()? {
+            let (primary, secondary, key) =
+                (&row.primary_namespace, &row.secondary_namespace, &row.key);
+            if is_local_only(primary, secondary, key)
+                || remote_keys.contains(&crate::vss_kv_store::vss_key(primary, secondary, key))
+            {
+                continue;
+            }
+            remote.write(primary, secondary, key, row.value)?;
+            pushed += 1;
+        }
+        if pushed > 0 {
+            tracing::info!(pushed, "Pushed local keys missing from VSS");
+        }
+        Ok(pushed)
+    }
+
     /// Local-only write; the row is never replicated, so a wipe-and-restore
     /// intentionally loses it.
     pub(crate) fn write_local_only(
@@ -620,6 +647,15 @@ impl SyncedKvStore {
         self.local
             .write(primary_namespace, secondary_namespace, key, buf)
     }
+}
+
+#[cfg(feature = "vss")]
+fn is_local_only(primary: &str, secondary: &str, key: &str) -> bool {
+    use crate::async_kv_store::{bp_route, BpRoute};
+    primary == PENDING_NS
+        || (primary == crate::ldk::REIMPORT_MARKER_NAMESPACE
+            && key == crate::ldk::REIMPORT_MARKER_KEY)
+        || matches!(bp_route(primary, secondary, key), BpRoute::LocalOnly)
 }
 
 impl KVStoreSync for SyncedKvStore {

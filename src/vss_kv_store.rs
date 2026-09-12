@@ -625,6 +625,89 @@ impl VssKvStore {
 
         Ok(all_items)
     }
+
+    /// Deletes a key by its raw VSS name, e.g. one of rgb-lib's backup keys.
+    pub(crate) fn remove_raw(&self, vss_key: &str) -> Result<(), io::Error> {
+        // VSS honors `version = -1` only for puts; `delete_items` require the
+        // object's current version, so a blind delete is rejected with a
+        // version conflict and, once queued, retries forever without ever
+        // converging. Read the current version and issue a conditional delete;
+        // an absent key means the removal goal is already met.
+        let get_req = GetObjectRequest {
+            store_id: self.store_id.clone(),
+            key: vss_key.to_string(),
+        };
+        let existing_version = match self.block_on(self.client.get_object(&get_req)) {
+            Ok(resp) => match resp.value {
+                Some(kv) => kv.version,
+                None => return Ok(()),
+            },
+            Err(VssError::NoSuchKeyError(_)) => return Ok(()),
+            Err(e) => {
+                tracing::error!(vss_key, error = %e, "VssKvStore remove read failed");
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("VSS remove read failed: {e}"),
+                ));
+            }
+        };
+
+        let request = PutObjectRequest {
+            store_id: self.store_id.clone(),
+            global_version: None,
+            transaction_items: vec![],
+            delete_items: vec![KeyValue {
+                key: vss_key.to_string(),
+                version: existing_version,
+                value: vec![],
+            }],
+        };
+
+        match self.block_on(self.client.put_object(&request)) {
+            Ok(_) | Err(VssError::NoSuchKeyError(_)) => Ok(()),
+            Err(e) => {
+                tracing::error!(vss_key, error = %e, "VssKvStore remove failed");
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("VSS remove failed: {e}"),
+                ))
+            }
+        }
+    }
+
+    /// Lists every key in the store except the fence.
+    pub fn list_all_keys(&self) -> Result<Vec<String>, io::Error> {
+        let mut keys = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let list_req = ListKeyVersionsRequest {
+                store_id: self.store_id.clone(),
+                key_prefix: None,
+                page_size: None,
+                page_token: page_token.clone(),
+            };
+            let response = self
+                .block_on(self.client.list_key_versions(&list_req))
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("VSS list_key_versions failed: {e}"),
+                    )
+                })?;
+            keys.extend(
+                response
+                    .key_versions
+                    .into_iter()
+                    .map(|kv| kv.key)
+                    .filter(|k| k != FENCE_KEY),
+            );
+            match response.next_page_token {
+                Some(token) if !token.is_empty() => page_token = Some(token),
+                _ => break,
+            }
+        }
+        Ok(keys)
+    }
 }
 
 /// Encode a `(primary_namespace, secondary_namespace, key)` triple as a
@@ -770,52 +853,7 @@ impl KVStoreSync for VssKvStore {
         tracing::trace!(vss_key, "VssKvStore remove");
 
         self.check_fence_periodic();
-
-        // VSS honors `version = -1` only for puts; `delete_items` require the
-        // object's current version, so a blind delete is rejected with a
-        // version conflict and, once queued, retries forever without ever
-        // converging. Read the current version and issue a conditional delete;
-        // an absent key means the removal goal is already met.
-        let get_req = GetObjectRequest {
-            store_id: self.store_id.clone(),
-            key: vss_key.clone(),
-        };
-        let existing_version = match self.block_on(self.client.get_object(&get_req)) {
-            Ok(resp) => match resp.value {
-                Some(kv) => kv.version,
-                None => return Ok(()),
-            },
-            Err(VssError::NoSuchKeyError(_)) => return Ok(()),
-            Err(e) => {
-                tracing::error!(vss_key, error = %e, "VssKvStore remove read failed");
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("VSS remove read failed: {e}"),
-                ));
-            }
-        };
-
-        let request = PutObjectRequest {
-            store_id: self.store_id.clone(),
-            global_version: None,
-            transaction_items: vec![],
-            delete_items: vec![KeyValue {
-                key: vss_key.clone(),
-                version: existing_version,
-                value: vec![],
-            }],
-        };
-
-        match self.block_on(self.client.put_object(&request)) {
-            Ok(_) | Err(VssError::NoSuchKeyError(_)) => Ok(()),
-            Err(e) => {
-                tracing::error!(vss_key, error = %e, "VssKvStore remove failed");
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("VSS remove failed: {e}"),
-                ))
-            }
-        }
+        self.remove_raw(&vss_key)
     }
 
     fn list(
