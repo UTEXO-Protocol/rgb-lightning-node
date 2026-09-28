@@ -3,6 +3,7 @@
 //! (identity/scripts/channel signing/node-crypto/RGB PSBT), so the node itself stays watch-only and
 //! needs no VLS client stack of its own — see [`daemon`] for the daemon side.
 
+pub(crate) mod auth;
 pub(crate) mod daemon;
 pub(crate) mod framing;
 pub(crate) mod tls;
@@ -20,8 +21,9 @@ use crate::signer::types::RlnSignerError;
 pub(crate) fn build_external_signer_attachment_via_daemon(
     addr: SocketAddr,
     tls: Option<std::sync::Arc<rustls::ClientConfig>>,
+    auth_token: auth::AuthToken,
 ) -> Result<crate::signer::ExternalSignerAttachment, crate::error::APIError> {
-    let transport = DaemonEnvelopeTransport::connect(addr, tls)
+    let transport = DaemonEnvelopeTransport::connect(addr, tls, Some(auth_token))
         .map_err(|e| crate::error::APIError::ExternalSignerUnavailable(e.to_string()))?;
     crate::ldk::attach_external_signer_transport(Arc::new(transport))
 }
@@ -48,10 +50,29 @@ pub(crate) async fn connect_daemon_attachment(
     let storage_dir_path = state.static_state.storage_dir_path.clone();
     tokio::task::spawn_blocking(move || {
         // TLS/mTLS material by convention under <storage_dir>/remote-signer-tls/ (ca.pem + optional
-        // client.pem/client.key). Absent → plaintext (localhost / trusted link).
+        // client.pem/client.key). Absent → plaintext, which the daemon only accepts on a loopback
+        // listener; logged either way so an operator who *meant* to configure TLS (a typo'd path, a
+        // cert that never got copied) sees it instead of silently getting a plaintext link.
         let tls = tls::node_client_config_from_dir(&storage_dir_path)
             .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?;
-        build_external_signer_attachment_via_daemon(daemon_addr, tls)
+        if tls.is_none() {
+            tracing::warn!(
+                addr = %daemon_addr,
+                dir = %storage_dir_path.join("remote-signer-tls").display(),
+                "connecting to the remote signer daemon WITHOUT TLS (no ca.pem found)"
+            );
+        }
+        // The token is mandatory: the daemon rejects unauthenticated callers, so a missing file is a
+        // setup error to report here rather than an opaque connection reset later.
+        let token_path = auth::AuthToken::node_path(&storage_dir_path);
+        let auth_token = auth::AuthToken::load(&token_path).map_err(|e| {
+            APIError::ExternalSignerProtocolError(format!(
+                "{e:#}; copy the daemon's auth token file (logged at daemon startup, by default \
+                 <data-dir>/auth-token) to {} and chmod it 0600",
+                token_path.display()
+            ))
+        })?;
+        build_external_signer_attachment_via_daemon(daemon_addr, tls, auth_token)
     })
     .await
     .map_err(|e| APIError::Unexpected(e.to_string()))?
@@ -79,6 +100,10 @@ pub(crate) struct DaemonEnvelopeTransport {
     stream: std::sync::Mutex<Option<Box<dyn ReadWrite>>>,
     /// Pre-encoded `SignerRequest::Bootstrap` envelope, replayed by [`Self::reconnect`].
     bootstrap_request: Vec<u8>,
+    /// Shared secret presented as the first frame of every connection (see [`Self::authenticate`]).
+    /// `None` only in tests that serve with `daemon::DaemonAuth::Disabled`; the production attach
+    /// path ([`connect_daemon_attachment`]) always carries one.
+    auth_token: Option<auth::AuthToken>,
     /// Marked down when a call observes a broken connection and up when one re-establishes it.
     /// Exposed via [`ExternalSignerTransport::link_watch`] so `start_ldk` drives `signer_unblocked`
     /// exactly while there's an outage to recover from, instead of polling forever.
@@ -88,9 +113,11 @@ pub(crate) struct DaemonEnvelopeTransport {
 impl DaemonEnvelopeTransport {
     /// Connect to the daemon. `tls = Some` establishes a (m)TLS session verifying the daemon cert's
     /// SAN against [`tls::SERVER_NAME`]; `None` is plaintext (localhost / trusted link only).
+    /// `auth_token` is presented on every connection — the daemon serves nothing without it.
     pub(crate) fn connect(
         addr: SocketAddr,
         tls: Option<std::sync::Arc<rustls::ClientConfig>>,
+        auth_token: Option<auth::AuthToken>,
     ) -> Result<Self, RlnSignerError> {
         let bootstrap_request = crate::signer::proto::encode_signer_request(
             &signer_external::contract::SignerRequest::Bootstrap,
@@ -101,6 +128,7 @@ impl DaemonEnvelopeTransport {
             tls,
             stream: std::sync::Mutex::new(None),
             bootstrap_request,
+            auth_token,
             link: Arc::new(SignerLinkWatch::new_connected()),
         };
         // Establish eagerly so attach-time failures are surfaced immediately. No handshake replay
@@ -116,7 +144,7 @@ impl DaemonEnvelopeTransport {
         tcp.set_read_timeout(Some(DAEMON_IO_TIMEOUT))
             .and_then(|_| tcp.set_write_timeout(Some(DAEMON_IO_TIMEOUT)))
             .map_err(|e| RlnSignerError::Transport(format!("remote signer io timeout: {e}")))?;
-        match &self.tls {
+        let mut stream: Box<dyn ReadWrite> = match &self.tls {
             Some(config) => {
                 let server_name = rustls::pki_types::ServerName::try_from(tls::SERVER_NAME)
                     .map_err(|e| {
@@ -126,9 +154,42 @@ impl DaemonEnvelopeTransport {
                     rustls::ClientConnection::new(config.clone(), server_name).map_err(|e| {
                         RlnSignerError::Transport(format!("remote signer TLS client: {e}"))
                     })?;
-                Ok(Box::new(rustls::StreamOwned::new(conn, tcp)))
+                Box::new(rustls::StreamOwned::new(conn, tcp))
             }
-            None => Ok(Box::new(tcp)),
+            None => Box::new(tcp),
+        };
+        // Authenticate here rather than at the call sites so every path that obtains a stream —
+        // the eager connect and each [`Self::reconnect`] — is authenticated by construction.
+        if let Some(token) = &self.auth_token {
+            Self::authenticate(stream.as_mut(), token)?;
+        }
+        Ok(stream)
+    }
+
+    /// Present the shared token as the connection's first frame and require the daemon's ack before
+    /// any signer op goes out. Over TLS this rides inside the session (the rustls stream performs its
+    /// handshake on this first write); on a plaintext loopback link it is what stops any other local
+    /// process from being served.
+    fn authenticate(
+        stream: &mut dyn ReadWrite,
+        token: &auth::AuthToken,
+    ) -> Result<(), RlnSignerError> {
+        framing::write_frame(stream, &token.handshake_frame())
+            .map_err(|e| RlnSignerError::Transport(format!("send remote signer auth: {e}")))?;
+        match framing::read_frame(stream) {
+            Ok(Some(ack)) if auth::is_ack(&ack) => Ok(()),
+            // The daemon's rejection sentinel: our token file does not match the daemon's.
+            Ok(None) => Err(RlnSignerError::Transport(
+                "remote signer daemon rejected our auth token: the node's \
+                 remote-signer-auth-token does not match the daemon's auth token file"
+                    .into(),
+            )),
+            Ok(Some(_)) => Err(RlnSignerError::Transport(
+                "remote signer daemon sent an unexpected reply to the auth handshake".into(),
+            )),
+            Err(e) => Err(RlnSignerError::Transport(format!(
+                "remote signer auth handshake: {e}"
+            ))),
         }
     }
 
@@ -267,11 +328,16 @@ mod tests {
             super::daemon::DaemonSigner::new_ephemeral(seed, bitcoin::Network::Regtest, true)
                 .expect("daemon signer"),
         );
-        tokio::spawn(super::daemon::serve(listener, signer, None));
+        tokio::spawn(super::daemon::serve(
+            listener,
+            signer,
+            None,
+            std::sync::Arc::new(super::daemon::DaemonAuth::Disabled),
+        ));
 
         let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
             let transport =
-                DaemonEnvelopeTransport::connect(addr, None).map_err(|e| e.to_string())?;
+                DaemonEnvelopeTransport::connect(addr, None, None).map_err(|e| e.to_string())?;
             let call = |req: &SignerRequest| -> Result<SignerResponse, String> {
                 let bytes = encode_signer_request(req).map_err(|e| e.to_string())?;
                 let reply = transport.call(&bytes).map_err(|e| e.to_string())?;
@@ -322,8 +388,138 @@ mod tests {
         result.expect("daemon responses");
     }
 
-    /// The custom daemon over **mTLS**: self-signed server cert (SAN = `tls::SERVER_NAME`) pinned by the
-    /// node, plus a node client cert the daemon requires + verifies. A bootstrap must round-trip.
+    /// The regression this authentication exists for: a caller that presents no token — or the wrong
+    /// one — must not get a single signer op out of the seed-holding daemon, while the node holding
+    /// the matching token works normally. Before the token handshake, any local process could connect
+    /// to the daemon's loopback port and ask for the account xpubs, the seed-derived offer-key HMAC or
+    /// an ECDH secret against a pubkey of its choosing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn daemon_serves_only_callers_presenting_the_shared_token() {
+        use signer_external::contract::{NodeRequest, NodeResponse};
+
+        let token = super::auth::AuthToken::from_bytes([5u8; super::auth::TOKEN_LEN]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let signer = std::sync::Arc::new(
+            super::daemon::DaemonSigner::new_ephemeral([11u8; 32], bitcoin::Network::Regtest, true)
+                .expect("daemon signer"),
+        );
+        tokio::spawn(super::daemon::serve(
+            listener,
+            signer,
+            None,
+            std::sync::Arc::new(super::daemon::DaemonAuth::Token(token.clone())),
+        ));
+
+        let outcomes = tokio::task::spawn_blocking(move || {
+            // 1. No token at all — what an arbitrary local process would do: connect and ask straight
+            // out for seed-backed material. The TCP connect itself still succeeds (nothing is sent
+            // until the first call), so what matters is that the op gets no answer.
+            let unauthenticated = DaemonEnvelopeTransport::connect(addr, None, None)
+                .map_err(|e| e.to_string())
+                .and_then(|transport| {
+                    let req = encode_signer_request(&SignerRequest::Node(
+                        NodeRequest::GetHmacForOfferKey,
+                    ))
+                    .map_err(|e| e.to_string())?;
+                    transport.call(&req).map_err(|e| e.to_string())
+                });
+
+            // 2. A wrong token.
+            let wrong = DaemonEnvelopeTransport::connect(
+                addr,
+                None,
+                Some(super::auth::AuthToken::from_bytes(
+                    [6u8; super::auth::TOKEN_LEN],
+                )),
+            )
+            .err()
+            .map(|e| e.to_string());
+
+            // 3. The real node, holding the daemon's token: a seed-only op must still round-trip.
+            let authorized = DaemonEnvelopeTransport::connect(addr, None, Some(token))
+                .map_err(|e| e.to_string())
+                .and_then(|transport| {
+                    let req = encode_signer_request(&SignerRequest::Node(
+                        NodeRequest::GetHmacForOfferKey,
+                    ))
+                    .map_err(|e| e.to_string())?;
+                    let reply = transport.call(&req).map_err(|e| e.to_string())?;
+                    match decode_signer_response(&reply).map_err(|e| e.to_string())? {
+                        SignerResponse::Node(NodeResponse::HmacForOfferKey { key_hex })
+                            if key_hex.len() == 64 =>
+                        {
+                            Ok(())
+                        }
+                        other => Err(format!("unexpected response: {other:?}")),
+                    }
+                });
+            (unauthenticated, wrong, authorized)
+        })
+        .await
+        .expect("join blocking");
+
+        let (unauthenticated, wrong, authorized) = outcomes;
+        // The unauthenticated caller's first frame is a signer envelope where the token belongs, so
+        // the daemon rejects it and drops the connection instead of answering.
+        let unauthenticated =
+            unauthenticated.expect_err("a caller presenting no token must not be served");
+        assert!(
+            !unauthenticated.is_empty(),
+            "the rejection must surface as an error"
+        );
+        let wrong = wrong.expect("a caller presenting the wrong token must not be served");
+        assert!(
+            wrong.contains("rejected our auth token"),
+            "a wrong token must be reported as an auth rejection, got: {wrong}"
+        );
+        authorized.expect("the node holding the daemon's token must be served normally");
+    }
+
+    /// Authentication must survive the reconnect path too: [`DaemonEnvelopeTransport::reconnect`]
+    /// builds a fresh stream, which has to re-present the token or every post-blip call would fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reconnect_reauthenticates() {
+        let token = super::auth::AuthToken::from_bytes([13u8; super::auth::TOKEN_LEN]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let signer = std::sync::Arc::new(
+            super::daemon::DaemonSigner::new_ephemeral([17u8; 32], bitcoin::Network::Regtest, true)
+                .expect("daemon signer"),
+        );
+        tokio::spawn(super::daemon::serve(
+            listener,
+            signer,
+            None,
+            std::sync::Arc::new(super::daemon::DaemonAuth::Token(token.clone())),
+        ));
+
+        let ok = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let transport = DaemonEnvelopeTransport::connect(addr, None, Some(token))
+                .map_err(|e| e.to_string())?;
+            let req =
+                encode_signer_request(&SignerRequest::Bootstrap).map_err(|e| e.to_string())?;
+            transport.call(&req).map_err(|e| e.to_string())?;
+
+            transport.force_disconnect();
+            transport.call(&req).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+        .expect("join blocking");
+
+        ok.expect("call after a reconnect must re-authenticate and succeed");
+    }
+
+    /// The custom daemon over **mTLS**, with token authentication on top: self-signed server cert
+    /// (SAN = `tls::SERVER_NAME`) pinned by the node, plus a node client cert the daemon requires +
+    /// verifies, plus the shared token. A bootstrap must round-trip. The two layers have to compose:
+    /// the token frame is the first thing written to the rustls stream, which is what drives that
+    /// stream's (lazily performed) TLS handshake.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn custom_daemon_over_mtls() {
         let server = rcgen::generate_simple_self_signed(vec![super::tls::SERVER_NAME.to_string()])
@@ -349,19 +545,26 @@ mod tests {
             super::tls::server_config(&server_cert, &server_key, Some(&client_cert))
                 .expect("server tls config");
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+        let token = super::auth::AuthToken::from_bytes([23u8; super::auth::TOKEN_LEN]);
         let signer = std::sync::Arc::new(
             super::daemon::DaemonSigner::new_ephemeral([7u8; 32], bitcoin::Network::Regtest, true)
                 .expect("daemon signer"),
         );
-        tokio::spawn(super::daemon::serve(listener, signer, Some(acceptor)));
+        tokio::spawn(super::daemon::serve(
+            listener,
+            signer,
+            Some(acceptor),
+            std::sync::Arc::new(super::daemon::DaemonAuth::Token(token.clone())),
+        ));
 
         let client_config =
             super::tls::client_config(&server_cert, Some((&client_cert, &client_key)))
                 .expect("client tls config");
 
         let ok = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let transport = DaemonEnvelopeTransport::connect(addr, Some(client_config))
-                .map_err(|e| e.to_string())?;
+            let transport =
+                DaemonEnvelopeTransport::connect(addr, Some(client_config), Some(token))
+                    .map_err(|e| e.to_string())?;
             let bytes =
                 encode_signer_request(&SignerRequest::Bootstrap).map_err(|e| e.to_string())?;
             let reply = transport.call(&bytes).map_err(|e| e.to_string())?;
@@ -388,11 +591,16 @@ mod tests {
             super::daemon::DaemonSigner::new_ephemeral([9u8; 32], bitcoin::Network::Regtest, true)
                 .expect("daemon signer"),
         );
-        tokio::spawn(super::daemon::serve(listener, signer, None));
+        tokio::spawn(super::daemon::serve(
+            listener,
+            signer,
+            None,
+            std::sync::Arc::new(super::daemon::DaemonAuth::Disabled),
+        ));
 
         let ok = tokio::task::spawn_blocking(move || -> Result<(), String> {
             let transport =
-                DaemonEnvelopeTransport::connect(addr, None).map_err(|e| e.to_string())?;
+                DaemonEnvelopeTransport::connect(addr, None, None).map_err(|e| e.to_string())?;
             let req =
                 encode_signer_request(&SignerRequest::Bootstrap).map_err(|e| e.to_string())?;
 
@@ -425,10 +633,15 @@ mod tests {
             super::daemon::DaemonSigner::new_ephemeral([13u8; 32], bitcoin::Network::Regtest, true)
                 .expect("daemon signer"),
         );
-        tokio::spawn(super::daemon::serve(listener, signer, None));
+        tokio::spawn(super::daemon::serve(
+            listener,
+            signer,
+            None,
+            std::sync::Arc::new(super::daemon::DaemonAuth::Disabled),
+        ));
 
         let transport = Arc::new(
-            tokio::task::spawn_blocking(move || DaemonEnvelopeTransport::connect(addr, None))
+            tokio::task::spawn_blocking(move || DaemonEnvelopeTransport::connect(addr, None, None))
                 .await
                 .expect("join blocking")
                 .expect("connect"),
@@ -495,10 +708,15 @@ mod tests {
             super::daemon::DaemonSigner::new_ephemeral(seed, bitcoin::Network::Regtest, true)
                 .expect("daemon signer"),
         );
-        let serve_task = tokio::spawn(super::daemon::serve(listener, signer, None));
+        let serve_task = tokio::spawn(super::daemon::serve(
+            listener,
+            signer,
+            None,
+            std::sync::Arc::new(super::daemon::DaemonAuth::Disabled),
+        ));
 
         let transport = Arc::new(
-            tokio::task::spawn_blocking(move || DaemonEnvelopeTransport::connect(addr, None))
+            tokio::task::spawn_blocking(move || DaemonEnvelopeTransport::connect(addr, None, None))
                 .await
                 .expect("join blocking")
                 .expect("connect"),
@@ -541,7 +759,12 @@ mod tests {
             super::daemon::DaemonSigner::new_ephemeral(seed, bitcoin::Network::Regtest, true)
                 .expect("restarted daemon signer"),
         );
-        tokio::spawn(super::daemon::serve(listener, signer, None));
+        tokio::spawn(super::daemon::serve(
+            listener,
+            signer,
+            None,
+            std::sync::Arc::new(super::daemon::DaemonAuth::Disabled),
+        ));
 
         // The very next op must succeed: reconnect + Bootstrap handshake replay, then the envelope.
         let reply = tokio::task::spawn_blocking({
@@ -657,7 +880,7 @@ mod tests {
                 .expect("write handler-error sentinel");
         });
 
-        let transport = DaemonEnvelopeTransport::connect(addr, None).expect("connect");
+        let transport = DaemonEnvelopeTransport::connect(addr, None, None).expect("connect");
 
         // Spawned (not awaited inline) so it runs concurrently with `other_task` below on the sole
         // worker. `call` is a plain sync method here — exactly how LDK's sync signer trait invokes it.

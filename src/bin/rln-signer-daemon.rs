@@ -5,10 +5,16 @@
 //! (ECDH / inbound-payment / peer-storage / offers), and `sign_rgb_psbt` — over a length-prefixed TCP
 //! framing. The RLN node connects to `--listen-addr` (its `--remote-signer-addr`).
 //!
-//! The seed never leaves this process. Because any client that can reach the port can request
-//! signatures, a non-loopback `--listen-addr` requires mTLS (`--client-ca`) — server-auth TLS alone
-//! does not authenticate the caller — unless `--allow-unauthenticated-remote-signer` explicitly
-//! accepts that risk (e.g. the link is secured by a WireGuard tunnel).
+//! The seed never leaves this process. Every caller — local or remote — must present the shared
+//! token from `--auth-token-file` (generated on first run) as the first frame of its connection:
+//! loopback is not an authentication boundary, so without it any local process could ask this daemon
+//! for seed-backed material. Copy that file to the node's storage dir as `remote-signer-auth-token`
+//! (mode 0600).
+//!
+//! On top of that, because reaching the port at all should be hard, a non-loopback `--listen-addr`
+//! requires mTLS (`--client-ca`) — server-auth TLS alone does not authenticate the caller — unless
+//! `--allow-unauthenticated-remote-signer` explicitly accepts that risk (e.g. the link is secured by
+//! a WireGuard tunnel).
 
 use std::fs;
 use std::net::SocketAddr;
@@ -69,6 +75,12 @@ struct Args {
     /// PEM CA to verify node client certificates. Enables mTLS (requires `--tls-cert`).
     #[arg(long, requires = "tls_cert")]
     client_ca: Option<PathBuf>,
+
+    /// Path to the 32-byte hex token the node must present to be served. A fresh token is generated
+    /// (mode 0600) if the file does not exist. Defaults to `auth-token` inside `--data-dir`. Copy it
+    /// to the node's storage dir as `remote-signer-auth-token`.
+    #[arg(long)]
+    auth_token_file: Option<PathBuf>,
 
     /// Allow a non-loopback `--listen-addr` without mTLS. Dangerous for a seed-holding signer:
     /// anyone who can reach the port can request signatures (server-auth TLS does not authenticate
@@ -150,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
         permissive_policy: args.permissive,
         data_dir,
         tls,
+        auth_token_file: args.auth_token_file,
         allow_unauthenticated_remote: args.allow_unauthenticated_remote_signer,
     })
     .await

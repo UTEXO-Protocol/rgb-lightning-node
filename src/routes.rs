@@ -5950,12 +5950,16 @@ mod external_signer_auth_tests {
     }
 
     /// Starts a real `DaemonSigner` over an ephemeral seed and returns its listen address, for tests
-    /// that need `init_external_signer`'s live daemon probe to succeed against something real.
-    async fn spawn_test_daemon(seed: [u8; 32]) -> std::net::SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
+    /// that need `init_external_signer`'s live daemon probe to succeed against something real. The
+    /// daemon requires the shared token just as in production, so `state`'s storage dir is given the
+    /// node's copy — otherwise the probe never gets past the auth handshake.
+    async fn spawn_test_daemon(
+        seed: [u8; 32],
+        listener: tokio::net::TcpListener,
+        state: &Arc<AppState>,
+    ) {
+        use crate::signer::remote::auth::AuthToken;
+
         let signer = Arc::new(
             crate::signer::remote::daemon::DaemonSigner::new_ephemeral(
                 seed,
@@ -5964,8 +5968,24 @@ mod external_signer_auth_tests {
             )
             .expect("daemon signer"),
         );
-        tokio::spawn(crate::signer::remote::daemon::serve(listener, signer, None));
-        addr
+        let token_path = AuthToken::node_path(&state.static_state.storage_dir_path);
+        let token = AuthToken::load_or_generate(&token_path).expect("node auth token");
+        tokio::spawn(crate::signer::remote::daemon::serve(
+            listener,
+            signer,
+            None,
+            Arc::new(crate::signer::remote::daemon::DaemonAuth::Token(token)),
+        ));
+    }
+
+    /// Binds the daemon's loopback listener up front: a test needs its address to build the state,
+    /// and [`spawn_test_daemon`] needs that state's storage dir to place the node's token in.
+    async fn bind_test_daemon_listener() -> (tokio::net::TcpListener, std::net::SocketAddr) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        (listener, addr)
     }
 
     #[tokio::test]
@@ -6040,8 +6060,9 @@ mod external_signer_auth_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn init_external_signer_rejects_identity_mismatching_the_live_daemon() {
         let seed = [21u8; 32];
-        let daemon_addr = spawn_test_daemon(seed).await;
+        let (listener, daemon_addr) = bind_test_daemon_listener().await;
         let state = mock_state(Some(test_root_public_key()), Some(daemon_addr)).await;
+        spawn_test_daemon(seed, listener, &state).await;
 
         let payload = crate::signer::remote::daemon::DaemonBootstrap {
             node_id: "02".to_string() + &"ab".repeat(32), // wrong: not the daemon's real node_id
@@ -6058,11 +6079,19 @@ mod external_signer_auth_tests {
         )
         .await;
 
-        assert!(
-            matches!(result, Err(APIError::ExternalSignerProtocolError(_))),
-            "expected a protocol error rejecting the mismatched identity, got {:?}",
-            result.as_ref().err()
-        );
+        // Assert on the message, not just the variant: with the auth handshake in front of the probe,
+        // a setup slip (e.g. a missing token file) would produce the same variant and let this test
+        // pass without ever reaching the identity comparison it exists to cover.
+        match result.as_ref() {
+            Err(APIError::ExternalSignerProtocolError(msg)) => assert!(
+                msg.contains("submitted identity does not match"),
+                "expected the identity-mismatch rejection, got: {msg}"
+            ),
+            Err(other) => {
+                panic!("expected a protocol error rejecting the mismatched identity, got {other:?}")
+            }
+            Ok(_) => panic!("expected the mismatched identity to be rejected, but init succeeded"),
+        }
         assert!(
             !is_external_signer_mode_configured(&state).expect("check configured"),
             "a rejected init must not persist key_source.json"
@@ -6074,8 +6103,9 @@ mod external_signer_auth_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn init_external_signer_accepts_identity_matching_the_live_daemon() {
         let seed = [22u8; 32];
-        let daemon_addr = spawn_test_daemon(seed).await;
+        let (listener, daemon_addr) = bind_test_daemon_listener().await;
         let state = mock_state(Some(test_root_public_key()), Some(daemon_addr)).await;
+        spawn_test_daemon(seed, listener, &state).await;
 
         // Fetch the daemon's real identity the same way an operator would via --print-bootstrap.
         let probe_signer = crate::signer::remote::daemon::DaemonSigner::new_ephemeral(
