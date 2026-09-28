@@ -19,6 +19,21 @@ const balanceSchema = {
 /** Base58 account xpub (tpub/xpub/vpub...); length bounds, not full checksum. */
 const xpubPattern = '^[a-zA-Z0-9]{100,120}$';
 
+/**
+ * An rgb-lib Assignment as a variant name plus its fungible value. `kind`
+ * carries the variant verbatim, so a new rgb-lib assignment variant reaches a
+ * client as itself rather than as a silently dropped field.
+ */
+const assignmentSchema = {
+  type: 'object',
+  properties: {
+    kind: { type: 'string' },
+    amount: { type: ['integer', 'null'] },
+  },
+  required: ['kind', 'amount'],
+  additionalProperties: false,
+} as const;
+
 export const registerXpubsRouteSchema = {
   body: {
     type: 'object',
@@ -50,12 +65,34 @@ export const walletAddressRouteSchema = {
   response: {
     200: {
       type: 'object',
-      properties: { address: { type: 'string' } },
-      required: ['address'],
+      properties: {
+        address: { type: 'string' },
+        /**
+         * Derivation the address came from, so a client can re-derive it from
+         * its own seed before trusting it as a deposit target — the gateway
+         * holds the xpubs and could otherwise return any address. Null when it
+         * could not be attributed (see wallets/derivation.ts): the address is
+         * still rgb-lib's, it just carries no proof.
+         */
+        derivation: {
+          type: ['object', 'null'],
+          properties: {
+            account: { type: 'string', enum: ['vanilla'] },
+            keychain: { type: 'integer' },
+            index: { type: 'integer' },
+            derivationPath: { type: 'string' },
+            scriptHex: { type: 'string' },
+          },
+          required: ['account', 'keychain', 'index', 'derivationPath', 'scriptHex'],
+          additionalProperties: false,
+        },
+      },
+      required: ['address', 'derivation'],
       additionalProperties: false,
     },
     401: errorBodySchema,
     404: errorBodySchema,
+    502: errorBodySchema,
   },
 } as const;
 
@@ -79,10 +116,28 @@ export const walletBalancesRouteSchema = {
               schema: { type: 'string' },
               ticker: { type: ['string', 'null'] },
               name: { type: 'string' },
+              details: { type: ['string', 'null'] },
               precision: { type: 'integer' },
+              /** Total issued amount; null for schemas without one (UDA). */
+              issuedSupply: { type: ['integer', 'null'] },
+              /** Unix seconds of asset genesis. */
+              timestamp: { type: 'integer' },
+              /** Unix seconds this wallet imported the asset. */
+              addedAt: { type: 'integer' },
               balance: balanceSchema,
             },
-            required: ['assetId', 'schema', 'ticker', 'name', 'precision', 'balance'],
+            required: [
+              'assetId',
+              'schema',
+              'ticker',
+              'name',
+              'details',
+              'precision',
+              'issuedSupply',
+              'timestamp',
+              'addedAt',
+              'balance',
+            ],
             additionalProperties: false,
           },
         },
@@ -92,6 +147,7 @@ export const walletBalancesRouteSchema = {
     },
     401: errorBodySchema,
     404: errorBodySchema,
+    502: errorBodySchema,
   },
 } as const;
 
@@ -109,6 +165,13 @@ export const walletUnspentsRouteSchema = {
               vout: { type: 'integer' },
               amountSat: { type: 'number' },
               colorable: { type: 'boolean' },
+              /**
+               * Blind receives already promised against this UTXO. A client
+               * counting free allocation slots cannot derive this from
+               * `allocations`: a pending blind receive reserves a slot before it
+               * holds an allocation.
+               */
+              pendingBlinded: { type: 'integer' },
               allocations: {
                 type: 'array',
                 items: {
@@ -116,14 +179,15 @@ export const walletUnspentsRouteSchema = {
                   properties: {
                     assetId: { type: ['string', 'null'] },
                     amount: { type: ['number', 'null'] },
+                    assignment: assignmentSchema,
                     settled: { type: 'boolean' },
                   },
-                  required: ['assetId', 'amount', 'settled'],
+                  required: ['assetId', 'amount', 'assignment', 'settled'],
                   additionalProperties: false,
                 },
               },
             },
-            required: ['txid', 'vout', 'amountSat', 'colorable', 'allocations'],
+            required: ['txid', 'vout', 'amountSat', 'colorable', 'pendingBlinded', 'allocations'],
             additionalProperties: false,
           },
         },
@@ -133,6 +197,7 @@ export const walletUnspentsRouteSchema = {
     },
     401: errorBodySchema,
     404: errorBodySchema,
+    502: errorBodySchema,
   },
 } as const;
 
@@ -152,8 +217,16 @@ export const walletTransfersRouteSchema = {
             type: 'object',
             properties: {
               idx: { type: 'integer' },
+              /**
+               * Batch this transfer belongs to. rgb-lib keys refresh, fail and
+               * delete by the BATCH index, not by `idx`, so a client that only
+               * sees `idx` cannot act on the transfer it just read.
+               */
+              batchTransferIdx: { type: ['integer', 'null'] },
               assetId: { type: ['string', 'null'] },
               amount: { type: ['number', 'null'] },
+              /** Full assignment list; `amount` is only its fungible summary. */
+              assignments: { type: 'array', items: assignmentSchema },
               kind: { type: 'string' },
               status: { type: 'string' },
               txid: { type: ['string', 'null'] },
@@ -164,8 +237,10 @@ export const walletTransfersRouteSchema = {
             },
             required: [
               'idx',
+              'batchTransferIdx',
               'assetId',
               'amount',
+              'assignments',
               'kind',
               'status',
               'txid',
@@ -183,6 +258,7 @@ export const walletTransfersRouteSchema = {
     },
     401: errorBodySchema,
     404: errorBodySchema,
+    502: errorBodySchema,
   },
 } as const;
 
@@ -208,14 +284,21 @@ export const walletReceiveRouteSchema = {
         invoice: { type: 'string' },
         recipientId: { type: 'string' },
         expirationTimestamp: { type: ['number', 'null'] },
+        /**
+         * Batch index of the created receive; rgb-lib keys refresh, fail and
+         * delete by it, so without this a client cannot manage the receive it
+         * just asked for. Null only on rgb-lib shape drift.
+         */
+        batchTransferIdx: { type: ['integer', 'null'] },
         mode: { type: 'string', enum: ['blind', 'witness'] },
       },
-      required: ['invoice', 'recipientId', 'expirationTimestamp', 'mode'],
+      required: ['invoice', 'recipientId', 'expirationTimestamp', 'batchTransferIdx', 'mode'],
       additionalProperties: false,
     },
     400: errorBodySchema,
     401: errorBodySchema,
     404: errorBodySchema,
+    502: errorBodySchema,
   },
 } as const;
 

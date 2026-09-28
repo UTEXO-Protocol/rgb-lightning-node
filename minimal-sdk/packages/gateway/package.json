@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@scure/base": "^2.4.0",
+    "@scure/bip32": "^2.4.0",
     "@scure/btc-signer": "^2.4.1",
     "@utexo/rgb-lib": "0.3.0-beta.18",
     "better-sqlite3": "^12.4.0",
@@ -24,7 +25,6 @@
     "@utexo/rgb-lib-linux-x64": "0.3.0-beta.18"
   },
   "devDependencies": {
-    "@scure/bip32": "^2.4.0",
     "@scure/bip39": "^2.4.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.19.0",

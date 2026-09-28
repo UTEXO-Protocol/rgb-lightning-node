@@ -191,7 +191,7 @@ export function txidFromPsbt(psbtBase64: string): string | null {
 const PSBT_REJECTION_VARIANTS =
   /\b(FailedBroadcast|InvalidPsbt|CannotFinalizePsbt|CannotCombinePsbts)\b/;
 
-interface PendingOpRow {
+export interface PendingOpRow {
   id: string;
   user_id: string;
   kind: OnchainOpKind;
@@ -199,6 +199,9 @@ interface PendingOpRow {
   intent: string;
   state: 'pending' | 'completed' | 'expired';
   txid: string | null;
+  /** Retained only on the ambiguous path, so the gateway can finish the job. */
+  signed_psbt: string | null;
+  completion_attempts: number;
   created_at: number;
   expires_at: number;
 }
@@ -433,16 +436,7 @@ export class OnchainService {
     let txid: string | null = null;
     let utxosCreated: number | null = null;
     try {
-      await this.pool.withWallet(identity, async (wallet) => {
-        if (kind === 'send_btc') {
-          txid = await wallet.sendBtcEnd(signedPsbt);
-        } else if (kind === 'send_asset') {
-          txid = await wallet.sendAssetEnd(signedPsbt);
-        } else {
-          utxosCreated = await wallet.createUtxosEnd(signedPsbt);
-          txid = txidFromPsbt(signedPsbt);
-        }
-      });
+      ({ txid, utxosCreated } = await this.runEnd(identity, kind, signedPsbt));
     } catch (error) {
       if (error instanceof WalletBackendError) {
         if (error.insufficientFunds) {
@@ -465,9 +459,17 @@ export class OnchainService {
         // rebroadcasting a transaction the indexer already knows succeeds
         // (rgb-lib `online.rs:79-84`), so the retry just redoes the
         // bookkeeping that failed here.
+        // The signed PSBT is retained with the txid so the completions worker
+        // can finish this op's bookkeeping without the client coming back. A
+        // client is entitled to treat a 5xx as unresolved and never retry, and
+        // the row would otherwise stay pending forever with its transaction on
+        // the network. Signatures are public and the transaction is already
+        // broadcast, so retaining it reveals nothing.
         this.db
-          .prepare(`UPDATE pending_ops SET txid = ? WHERE id = ? AND state = 'pending'`)
-          .run(signedTxid, opId);
+          .prepare(
+            `UPDATE pending_ops SET txid = ?, signed_psbt = ? WHERE id = ? AND state = 'pending'`,
+          )
+          .run(signedTxid, signedPsbt, opId);
         throw new HttpError(
           502,
           'COMPLETE_AMBIGUOUS',
@@ -478,8 +480,49 @@ export class OnchainService {
       throw error;
     }
 
+    this.settleCompleted(opId, kind, userId, txid, now);
+    return { txid, utxosCreated };
+  }
+
+  /**
+   * The wallet half of a completion. Shared verbatim with the completions
+   * worker so a server-side finish is the same call the client's retry would
+   * have made — the recovery path must not be a second, differently-behaving
+   * implementation of `complete`.
+   */
+  private async runEnd(
+    identity: WalletIdentity,
+    kind: OnchainOpKind,
+    signedPsbt: string,
+  ): Promise<CompletedOp> {
+    let txid: string | null = null;
+    let utxosCreated: number | null = null;
+    await this.pool.withWallet(identity, async (wallet) => {
+      if (kind === 'send_btc') {
+        txid = await wallet.sendBtcEnd(signedPsbt);
+      } else if (kind === 'send_asset') {
+        txid = await wallet.sendAssetEnd(signedPsbt);
+      } else {
+        utxosCreated = await wallet.createUtxosEnd(signedPsbt);
+        txid = txidFromPsbt(signedPsbt);
+      }
+    });
+    return { txid, utxosCreated };
+  }
+
+  /** Terminal bookkeeping for a finished op; shared with the worker. */
+  private settleCompleted(
+    opId: string,
+    kind: OnchainOpKind,
+    userId: string,
+    txid: string | null,
+    now: number,
+  ): void {
+    // Completed: drop the retained signed PSBT, it has no further purpose.
     this.db
-      .prepare(`UPDATE pending_ops SET state = 'completed', txid = ? WHERE id = ?`)
+      .prepare(
+        `UPDATE pending_ops SET state = 'completed', txid = ?, signed_psbt = NULL WHERE id = ?`,
+      )
       .run(txid, opId);
     if (kind === 'send_asset' && txid !== null) {
       recordOwnership(
@@ -488,6 +531,55 @@ export class OnchainService {
         now,
       );
     }
-    return { txid, utxosCreated };
+  }
+
+  /**
+   * Finish the bookkeeping of an op left ambiguous by a failed `complete`,
+   * server-side. Driven by the completions worker; see
+   * ../workers/completions.ts for why this cannot wait for the client.
+   *
+   * Deliberately NOT subject to the op TTL. The TTL exists so an UNSIGNED PSBT
+   * stops being completable; this op's transaction is already signed and (very
+   * likely) on the network, and refusing to record that after ten minutes would
+   * strand the bookkeeping for a transaction that confirmed anyway.
+   *
+   * Re-running the wallet end-call is safe: rgb-lib re-broadcasts and treats a
+   * transaction the indexer already knows as success (`online.rs:79-84`), so
+   * this redoes exactly the bookkeeping that failed.
+   *
+   * Returns whether the op reached a terminal state. Every failure is the
+   * caller's to log; the attempt counter is bumped either way so a permanently
+   * unfinishable op stops consuming wallet time.
+   */
+  async resumeAmbiguous(stale: PendingOpRow, now: number = Date.now()): Promise<boolean> {
+    // Re-read rather than trust the caller's snapshot. The worker selects a
+    // batch and then works through it, so by the time a row's turn comes the
+    // client's own `complete` retry may have finished it — acting on the stale
+    // row would spend a wallet slot and an attempt re-broadcasting a
+    // transaction that is already recorded as done.
+    const row = this.db.prepare('SELECT * FROM pending_ops WHERE id = ?').get(stale.id) as
+      PendingOpRow | undefined;
+    if (row === undefined) return false;
+    const signedPsbt = row.signed_psbt;
+    // Mirrors the worker's SQL filter, for a direct caller.
+    if (row.state !== 'pending' || row.txid === null || signedPsbt === null) return false;
+    // Counted before the checks below, not after: a row that can never be
+    // finished must walk itself out of the worker's queue rather than be
+    // re-examined on every pass forever.
+    this.db
+      .prepare('UPDATE pending_ops SET completion_attempts = completion_attempts + 1 WHERE id = ?')
+      .run(row.id);
+    // The retained PSBT must BE the transaction this row says may have
+    // broadcast. If it is not, the row's intent, txid and transfer ownership
+    // would end up describing a transaction that never went out — so this is
+    // checked against retained state before any wallet call, rather than
+    // against whatever the wallet happens to return afterwards.
+    if (txidFromPsbt(signedPsbt) !== row.txid) return false;
+    const identity = this.wallets.identityOf(row.user_id);
+    // Same terminal bookkeeping as `complete`, including taking the txid from
+    // the wallet rather than from the row.
+    const { txid } = await this.runEnd(identity, row.kind, signedPsbt);
+    this.settleCompleted(row.id, row.kind, row.user_id, txid ?? row.txid, now);
+    return true;
   }
 }

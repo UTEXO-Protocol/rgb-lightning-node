@@ -53,6 +53,13 @@ export interface GatewayConfig {
   rgbTransportAllowlist: string[];
   /** Poll interval of the deposits watcher (ms). */
   depositsIntervalMs: number;
+  /** Poll interval of the ambiguous-completion worker (ms). */
+  completionsIntervalMs: number;
+  /**
+   * Attempts the completions worker makes at finishing one ambiguous operation
+   * before leaving it to an operator.
+   */
+  completionsMaxAttempts: number;
   /** Poll interval of the payments reconciler (ms). */
   reconcilerIntervalMs: number;
   /**
@@ -153,6 +160,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     assetInvoiceMinMsat: intWithDefault(env, 'GATEWAY_ASSET_INVOICE_MIN_MSAT', 3_000_000),
     rgbTransportAllowlist: [rgbProxyUrl, ...extraTransports.filter((e) => e !== rgbProxyUrl)],
     depositsIntervalMs: intWithDefault(env, 'GATEWAY_DEPOSITS_INTERVAL_MS', 10_000),
+    completionsIntervalMs: intWithDefault(env, 'GATEWAY_COMPLETIONS_INTERVAL_MS', 30_000),
+    completionsMaxAttempts: intWithDefault(env, 'GATEWAY_COMPLETIONS_MAX_ATTEMPTS', 5),
     reconcilerIntervalMs: intWithDefault(env, 'GATEWAY_RECONCILER_INTERVAL_MS', 10_000),
     reconcilerGraceSeconds: intWithDefault(env, 'GATEWAY_RECONCILER_GRACE_SECONDS', 600),
     queueGlobalConcurrency: intWithDefault(env, 'GATEWAY_QUEUE_GLOBAL_CONCURRENCY', 4),

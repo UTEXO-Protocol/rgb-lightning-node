@@ -8,6 +8,11 @@ import type { GatewayDb } from '../db.js';
 import { HttpError } from '../errors.js';
 import { recordOwnership } from '../rln/scoping.js';
 import {
+  attributeVanillaAddress,
+  ATTRIBUTION_WINDOW,
+  type AddressDerivation,
+} from './derivation.js';
+import {
   WalletBackendError,
   walletHttpError,
   type ReceiveData,
@@ -24,6 +29,17 @@ import type { WalletPool } from './pool.js';
 export interface WalletBalances {
   btc: WalletBtcBalance;
   assets: WalletAsset[];
+}
+
+export interface WalletAddress {
+  address: string;
+  /**
+   * Where the address came from, so a client can re-derive it from its own seed
+   * before trusting it as a deposit target. Null when attribution failed (see
+   * wallets/derivation.ts) — the address is still rgb-lib's, it just carries no
+   * proof, and a client that requires proof should refuse it.
+   */
+  derivation: AddressDerivation | null;
 }
 
 export interface ReceiveParams {
@@ -130,8 +146,34 @@ export class WalletService {
     return { created: true, address };
   }
 
-  async getAddress(userId: string): Promise<string> {
-    return this.run(this.identityOf(userId), (wallet) => wallet.getAddress());
+  /**
+   * Next address from the user's vanilla wallet, with the derivation it came
+   * from where that can be established.
+   *
+   * The scan ceiling follows the user's own revealed indices: rgb-lib reveals
+   * sequentially, so the address just handed out is at most one past the
+   * highest one previously attributed. The high-water mark is persisted so the
+   * window travels with the wallet rather than expiring at a fixed index.
+   */
+  async getAddress(userId: string): Promise<WalletAddress> {
+    const identity = this.identityOf(userId);
+    const address = await this.run(identity, (wallet) => wallet.getAddress());
+    const row = this.db
+      .prepare('SELECT address_index_high_water AS highWater FROM user_xpubs WHERE user_id = ?')
+      .get(userId) as { highWater: number } | undefined;
+    const highWater = row?.highWater ?? 0;
+    const derivation = attributeVanillaAddress(
+      identity.xpubs.vanilla,
+      this.config.bitcoinNetwork,
+      address,
+      highWater + ATTRIBUTION_WINDOW,
+    );
+    if (derivation !== null && derivation.index > highWater) {
+      this.db
+        .prepare('UPDATE user_xpubs SET address_index_high_water = ? WHERE user_id = ?')
+        .run(derivation.index, userId);
+    }
+    return { address, derivation };
   }
 
   async getBalances(userId: string): Promise<WalletBalances> {

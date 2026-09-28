@@ -139,6 +139,28 @@ const MIGRATIONS: readonly Migration[] = [
       UPDATE ln_invoices SET expires_at = created_at WHERE expires_at = 0;
     `,
   },
+  {
+    version: 3,
+    // Server-side completion recovery, plus address attribution state.
+    //
+    // `signed_psbt` is retained ONLY on the ambiguous path, where rgb-lib may
+    // already have broadcast but its bookkeeping did not finish: without the
+    // signed PSBT the gateway cannot finish that bookkeeping itself and the row
+    // is stuck forever unless the client retries `complete` (which a client is
+    // entitled not to do — a 502 is not proof the send failed). It carries no
+    // secret: signatures are public and the transaction is already on the
+    // network. `completion_attempts` bounds the retries so a permanently
+    // unfinishable op stops burning wallet time and surfaces to an operator.
+    //
+    // `address_index_high_water` is the ceiling of the address-attribution scan
+    // (see wallets/derivation.ts), so attribution keeps working as a user's
+    // revealed index grows instead of silently falling off a fixed window.
+    sql: `
+      ALTER TABLE pending_ops ADD COLUMN signed_psbt TEXT;
+      ALTER TABLE pending_ops ADD COLUMN completion_attempts INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE user_xpubs ADD COLUMN address_index_high_water INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export function schemaVersion(db: GatewayDb): number {

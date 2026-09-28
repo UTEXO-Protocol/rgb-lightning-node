@@ -29,42 +29,34 @@ against its stated intent and signs; the server broadcasts. Package READMEs:
 boundary) and `packages/client-sdk/README.md` (quickstart, the verify-before-sign
 contract); `packages/e2e/README.md` covers the regtest journey suite.
 
-### Native mobile: one Rust core, two packages
+### Native mobile: an out-of-repo Kotlin SDK
 
-For natively written Android and iOS apps the same client role is filled by **one Rust
-crate** exposed to both platforms through uniffi
-(`docs/plans/20260915-minimal-mobile-rust-sdk.md`):
+Natively written Android apps fill the same client role from a **separate repository**,
+`rgb-sdk-kotlin-light` (`com.utexo.rgb.sdk`), which ships its own Rust signing core and
+speaks the REST surface above:
 
 ```
-Android app (Kotlin)                 iOS app (Swift)
-  └─ android/  AAR + JNA               └─ apple/  SwiftPM + XCFramework
-        └──────────── rust-sdk/  (keys, derive, verify-before-sign, sign, invoice, gateway client)
-                          │  HTTP through a host-implemented HttpTransport (OkHttp / URLSession)
-                      API gateway  (same REST surface as above)
+Android app (Kotlin)
+  └─ rgb-sdk-kotlin-light   (Keystore seed custody, operation journal, local PSBT
+        │                    verify + sign via its own `utexo-local-signer` core)
+        │  HTTPS / OkHttp
+     API gateway  (same REST surface as above)
 ```
 
-- `rust-sdk/` — the core: `bitcoin` + `bip39` + `thiserror` + `uniffi`, nothing else; no
-  rgb-lib, no HTTP or TLS stack. `cargo test` is the gate (99 tests: 68 parity and
-  adversarial cases in `tests/parity.rs` plus 31 unit tests, a release size gate, a
-  dependency-creep guard). README: `rust-sdk/README.md` (quickstart in Kotlin
-  and Swift, the five checks, the `HttpTransport` seam, sizes, mobile runtime constraints).
-- `android/` — Gradle library `com.utexo.minimalsdk` (minSdk 24, JNA runtime dependency),
-  JNI libs for three ABIs with a 16 KB page-alignment gate and a 3.0 MB arm64 size gate.
-- `apple/` — Swift package `MinimalSdk` (iOS 15 / macOS 12), static XCFramework built by
-  `scripts/build_apple.sh` on macOS.
-- `scripts/` — `generate_bindings.sh` (uniffi library mode, no UDL), `build_android.sh`,
-  `build_apple.sh`. CI: `.github/workflows/minimal-sdk-mobile.yaml`.
+Two consequences for work in this workspace:
 
-**The TypeScript SDK stays hand-written and stays shipped.** It is the behavioural
-reference the Rust crate was ported from and is the **independent cross-check** on the
-Rust implementation, not legacy to be replaced: both read the same rgb-lib-authored
-`packages/client-sdk/test/fixtures/rgblib-parity.json` and share no code, so a shared
-misreading of BIP-86 or the RGB coin types cannot hide. Web and React Native keep using
-it (185.5 KB of pure JS); native Kotlin and Swift apps use the Rust core.
+- **The gateway's HTTP surface is a published contract with an out-of-repo consumer.**
+  Response schemas are strict (`additionalProperties: false`), so removing a field,
+  retyping one, or narrowing an accepted range is breaking; adding a field is not. That
+  client validates response shapes strictly and refuses anything it cannot map, so a
+  silent default is worse than an explicit error.
+- **`packages/client-sdk` is the in-repo reference for that contract.** It is the
+  behavioural spec the gateway is tested against and the only client exercised by
+  `packages/e2e`; web and React Native keep using it (185.5 KB of pure JS). It also reads
+  the rgb-lib-authored `packages/client-sdk/test/fixtures/rgblib-parity.json`, which is
+  what keeps this repo's reading of BIP-86 and the RGB coin types honest.
 
-`pnpm-workspace.yaml` is unaffected: it globs `packages/*` only, so the Cargo, Gradle and
-SwiftPM directories above are invisible to pnpm and none of the workspace commands below
-touch them.
+`pnpm-workspace.yaml` globs `packages/*` only.
 
 ## Deliberately deferred
 

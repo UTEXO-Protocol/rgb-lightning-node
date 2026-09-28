@@ -31,18 +31,34 @@ export interface WalletBtcBalance {
   colored: Balance;
 }
 
+/** An rgb-lib Assignment flattened to a variant name plus its fungible value. */
+export interface Assignment {
+  kind: string;
+  amount: number | null;
+}
+
 export interface WalletAsset {
   assetId: string;
   schema: string;
   ticker: string | null;
   name: string;
+  details: string | null;
   precision: number;
+  /** Total issued amount; null for schemas without one (UDA). */
+  issuedSupply: number | null;
+  /** Unix seconds of asset genesis. */
+  timestamp: number;
+  /** Unix seconds this wallet imported the asset. */
+  addedAt: number;
   balance: Balance;
 }
 
 export interface UnspentAllocation {
   assetId: string | null;
+  /** Fungible amount, when the assignment carries one. */
   amount: number | null;
+  /** The full assignment, so non-fungible variants are not silently dropped. */
+  assignment: Assignment;
   settled: boolean;
 }
 
@@ -51,13 +67,18 @@ export interface WalletUnspent {
   vout: number;
   amountSat: number;
   colorable: boolean;
+  /** Blind receives already promised against this UTXO (reserved slots). */
+  pendingBlinded: number;
   allocations: UnspentAllocation[];
 }
 
 export interface WalletTransfer {
   idx: number;
+  /** Batch this transfer belongs to; rgb-lib keys refresh/fail/delete by it. */
+  batchTransferIdx: number | null;
   assetId: string | null;
   amount: number | null;
+  assignments: Assignment[];
   kind: string;
   status: string;
   txid: string | null;
@@ -82,6 +103,8 @@ export interface ReceiveData {
   invoice: string;
   recipientId: string;
   expirationTimestamp: number | null;
+  /** Batch index of the created receive; null only on rgb-lib shape drift. */
+  batchTransferIdx: number | null;
 }
 
 export interface SendAssetBeginRequest {
@@ -152,6 +175,13 @@ export class WalletBackendError extends Error {
     readonly insufficientFunds: boolean = false,
     /** rgb-lib rejected the REQUEST (bad recipient/asset/address/fee/endpoint). */
     readonly clientError: boolean = false,
+    /**
+     * rgb-lib returned a value this API cannot carry losslessly — in practice a
+     * u64 asset amount above 2^53-1, which `JSON.parse` has already rounded.
+     * Nobody's request is at fault and no retry helps; it is reported rather
+     * than rounded (see `safeInteger` in ./rgblib.ts).
+     */
+    readonly unrepresentable: boolean = false,
   ) {
     super(message);
     this.name = 'WalletBackendError';
@@ -174,6 +204,17 @@ export class WalletBackendError extends Error {
  */
 export function walletHttpError(error: unknown): unknown {
   if (!(error instanceof WalletBackendError)) return error;
+  if (error.unrepresentable) {
+    // 502 like DEPOSIT_ADDRESS_CONFLICT: an upstream-shaped, permanent problem
+    // that no client request can fix. It is deliberately NOT a 4xx — the caller
+    // did nothing wrong — and deliberately not a rounded success.
+    return new HttpError(
+      502,
+      'AMOUNT_NOT_REPRESENTABLE',
+      'the wallet holds an amount this API cannot represent exactly',
+      { cause: error },
+    );
+  }
   if (error.insufficientFunds) {
     return new HttpError(
       400,

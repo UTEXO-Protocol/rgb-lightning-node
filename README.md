@@ -47,12 +47,9 @@ docker build -t rgb-lightning-node .
 See [UniFFI SDK documentation](src/uniffi_api/README.md) for setup, runtime
 model, binding generation, test commands, and artifact packaging details.
 
-That node SDK is not the only uniffi surface in this repository.
-[`minimal-sdk/rust-sdk`](minimal-sdk/rust-sdk/README.md) is a separate, node-free Rust
-crate (keys, taproot derivation, verify-before-sign, signing, invoice decoding and a
-gateway client) packaged for Android (`minimal-sdk/android`) and iOS (`minimal-sdk/apple`).
-It is its own Cargo workspace, built and tested by
-`.github/workflows/minimal-sdk-mobile.yaml`, not by the root `cargo` commands.
+Native mobile clients are no longer built here: the Android SDK lives in its own
+`rgb-sdk-kotlin-light` repository with its own signing core, and talks to
+[`minimal-sdk/packages/gateway`](minimal-sdk/packages/gateway/README.md) over REST.
 
 ## AI code review
 The repository supports AI-assisted pull request reviews.

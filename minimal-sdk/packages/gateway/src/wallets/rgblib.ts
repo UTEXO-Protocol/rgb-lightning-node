@@ -180,12 +180,40 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
 
-function numberOrZero(value: unknown): number {
-  return typeof value === 'number' ? value : 0;
+/**
+ * A JSON number from rgb-lib that must round-trip losslessly.
+ *
+ * rgb-lib counts assets in u64 and `JSON.parse` decodes into a double, so any
+ * value above 2^53-1 is already rounded by the time this sees it — it cannot be
+ * recovered, only detected. Detection is exact: a u64 above the safe range
+ * always parses to at least 2^53, which `Number.isSafeInteger` rejects. The
+ * alternative was to keep returning the rounded value, which would report a
+ * balance the wallet does not hold; a loud failure is the lesser evil, and the
+ * caller (`walletHttpError`) maps it to 502 AMOUNT_NOT_REPRESENTABLE.
+ *
+ * Absence is a separate concern and stays with each caller: some fields are
+ * genuinely optional (an amount-less RGB assignment) and some are drift.
+ */
+function safeInteger(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    throw new WalletBackendError(
+      'wallet value is not representable',
+      `${field} is not a safe integer: ${String(value)}`,
+      false,
+      false,
+      true,
+    );
+  }
+  return value;
 }
 
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' ? value : null;
+/** Drift-tolerant read for fields rgb-lib may omit; a present value is still range-checked. */
+function safeIntegerOrZero(value: unknown, field: string): number {
+  return value === undefined || value === null ? 0 : safeInteger(value, field);
+}
+
+function safeIntegerOrNull(value: unknown, field: string): number | null {
+  return value === undefined || value === null ? null : safeInteger(value, field);
 }
 
 function stringOrNull(value: unknown): string | null {
@@ -204,19 +232,44 @@ export function unquote(value: string): string {
   return value;
 }
 
-function mapBalance(value: unknown): Balance {
+function mapBalance(value: unknown, field: string): Balance {
   const record = asRecord(value);
   return {
-    settled: numberOrZero(record['settled']),
-    future: numberOrZero(record['future']),
-    spendable: numberOrZero(record['spendable']),
+    settled: safeIntegerOrZero(record['settled'], `${field}.settled`),
+    future: safeIntegerOrZero(record['future'], `${field}.future`),
+    spendable: safeIntegerOrZero(record['spendable'], `${field}.spendable`),
   };
 }
 
 /** Fungible amount of an externally tagged rgb-lib Assignment, if any. */
-function assignmentAmount(value: unknown): number | null {
+function assignmentAmount(value: unknown, field: string): number | null {
   const record = asRecord(value);
-  return numberOrNull(record['Fungible']);
+  return safeIntegerOrNull(record['Fungible'], `${field}.Fungible`);
+}
+
+/**
+ * An rgb-lib Assignment as a flat pair. The wire form is externally tagged —
+ * `{"Fungible": 100}`, `{"InflationRight": 100}`, `{"NonFungible": …}` or the
+ * bare string `"Any"` / `"ReplaceRight"` for unit variants — which is awkward
+ * to declare in a strict response schema and awkward to consume. `kind` carries
+ * the variant name verbatim so a new rgb-lib variant surfaces as itself rather
+ * than as a dropped field; `amount` is set only for the fungible-valued ones.
+ */
+export function mapAssignment(
+  value: unknown,
+  field: string,
+): { kind: string; amount: number | null } {
+  if (typeof value === 'string') return { kind: value, amount: null };
+  const entries = Object.entries(asRecord(value));
+  const first = entries[0];
+  if (entries.length !== 1 || first === undefined) {
+    throw new WalletBackendError(
+      'wallet returned an unreadable assignment',
+      `${field} is not an externally tagged assignment: ${JSON.stringify(value)}`,
+    );
+  }
+  const [kind, payload] = first;
+  return { kind, amount: typeof payload === 'number' ? safeInteger(payload, field) : null };
 }
 
 /** Exported for unit tests (response-shape drift must fail loudly, not corrupt data). */
@@ -229,13 +282,28 @@ export function mapAssets(raw: unknown): WalletAsset[] {
       const record = asRecord(entry);
       const assetId = stringOrNull(record['assetId']);
       if (assetId === null) continue;
+      // Every rgb-lib asset schema declares a non-optional, non-empty name.
+      // Substituting '' here used to hide the drift and then hand a client a
+      // nameless asset it cannot display or validate; fail loudly instead.
+      const name = stringOrNull(record['name']);
+      if (name === null) {
+        throw new WalletBackendError(
+          'wallet returned an unnamed asset',
+          `asset ${assetId} (${schemaKey}) has no name`,
+        );
+      }
       assets.push({
         assetId,
         schema: schemaKey,
         ticker: stringOrNull(record['ticker']),
-        name: typeof record['name'] === 'string' ? record['name'] : '',
-        precision: numberOrZero(record['precision']),
-        balance: mapBalance(record['balance']),
+        name,
+        details: stringOrNull(record['details']),
+        precision: safeIntegerOrZero(record['precision'], `asset ${assetId} precision`),
+        // UDA has no issued supply; NIA/CFA/IFA do.
+        issuedSupply: safeIntegerOrNull(record['issuedSupply'], `asset ${assetId} issuedSupply`),
+        timestamp: safeIntegerOrZero(record['timestamp'], `asset ${assetId} timestamp`),
+        addedAt: safeIntegerOrZero(record['addedAt'], `asset ${assetId} addedAt`),
+        balance: mapBalance(record['balance'], `asset ${assetId} balance`),
       });
     }
   }
@@ -250,20 +318,27 @@ export function mapUnspents(raw: unknown): WalletUnspent[] {
     const outpoint = asRecord(utxo['outpoint']);
     const allocationsRaw = record['rgbAllocations'];
     const allocations: UnspentAllocation[] = Array.isArray(allocationsRaw)
-      ? allocationsRaw.map((allocation) => {
+      ? allocationsRaw.map((allocation, index) => {
           const allocationRecord = asRecord(allocation);
+          const field = `unspent allocation[${index}]`;
           return {
             assetId: stringOrNull(allocationRecord['assetId']),
-            amount: assignmentAmount(allocationRecord['assignment']),
+            amount: assignmentAmount(allocationRecord['assignment'], field),
+            assignment: mapAssignment(allocationRecord['assignment'], `${field}.assignment`),
             settled: allocationRecord['settled'] === true,
           };
         })
       : [];
     return {
       txid: typeof outpoint['txid'] === 'string' ? outpoint['txid'] : '',
-      vout: numberOrZero(outpoint['vout']),
-      amountSat: numberOrZero(utxo['btcAmount']),
+      vout: safeIntegerOrZero(outpoint['vout'], 'unspent vout'),
+      amountSat: safeIntegerOrZero(utxo['btcAmount'], 'unspent btcAmount'),
       colorable: utxo['colorable'] === true,
+      // Blind receives already promised against this UTXO. A client choosing
+      // inputs or counting free allocation slots cannot do it from
+      // `allocations` alone: a pending blind receive reserves a slot without
+      // yet holding an allocation.
+      pendingBlinded: safeIntegerOrZero(record['pendingBlinded'], 'unspent pendingBlinded'),
       allocations,
     };
   });
@@ -273,25 +348,36 @@ export function mapTransfers(raw: unknown, assetId: string | null): WalletTransf
   if (!Array.isArray(raw)) return [];
   return raw.map((entry) => {
     const record = asRecord(entry);
-    let amount = assignmentAmount(record['requestedAssignment']);
-    if (amount === null && Array.isArray(record['assignments'])) {
-      const total = record['assignments']
-        .map((assignment) => assignmentAmount(assignment))
+    let amount = assignmentAmount(record['requestedAssignment'], 'transfer requestedAssignment');
+    const rawAssignments = record['assignments'];
+    const assignments = Array.isArray(rawAssignments)
+      ? rawAssignments.map((assignment, index) =>
+          mapAssignment(assignment, `transfer assignments[${index}]`),
+        )
+      : [];
+    if (amount === null && Array.isArray(rawAssignments)) {
+      const total = rawAssignments
+        .map((assignment, index) => assignmentAmount(assignment, `transfer assignments[${index}]`))
         .filter((value): value is number => value !== null)
         .reduce((sum, value) => sum + value, 0);
-      amount = total > 0 ? total : null;
+      amount = total > 0 ? safeInteger(total, 'transfer assignments total') : null;
     }
     return {
-      idx: numberOrZero(record['idx']),
+      idx: safeIntegerOrZero(record['idx'], 'transfer idx'),
+      // The batch transfer this one belongs to. rgb-lib's own operations
+      // (refresh, fail, delete) are keyed by the BATCH index, not `idx`, so a
+      // client that only sees `idx` cannot address the transfer it just read.
+      batchTransferIdx: safeIntegerOrNull(record['batchTransferIdx'], 'transfer batchTransferIdx'),
       assetId,
       amount,
+      assignments,
       kind: typeof record['kind'] === 'string' ? record['kind'] : 'Unknown',
       status: typeof record['status'] === 'string' ? record['status'] : 'Unknown',
       txid: stringOrNull(record['txid']),
       recipientId: stringOrNull(record['recipientId']),
-      expiration: numberOrNull(record['expiration']),
-      createdAt: numberOrZero(record['createdAt']),
-      updatedAt: numberOrZero(record['updatedAt']),
+      expiration: safeIntegerOrNull(record['expiration'], 'transfer expiration'),
+      createdAt: safeIntegerOrZero(record['createdAt'], 'transfer createdAt'),
+      updatedAt: safeIntegerOrZero(record['updatedAt'], 'transfer updatedAt'),
     };
   });
 }
@@ -376,7 +462,10 @@ class NativeWalletHandle implements WalletHandle {
     const raw = this.call('getBtcBalance', () =>
       JSON.parse(this.lib.rgblib_get_btc_balance(this.wallet, this.online, false)),
     ) as Record<string, unknown>;
-    return { vanilla: mapBalance(raw['vanilla']), colored: mapBalance(raw['colored']) };
+    return {
+      vanilla: mapBalance(raw['vanilla'], 'btc balance vanilla'),
+      colored: mapBalance(raw['colored'], 'btc balance colored'),
+    };
   }
 
   async listAssets(): Promise<WalletAsset[]> {
@@ -427,7 +516,18 @@ class NativeWalletHandle implements WalletHandle {
         `unexpected receive response shape: ${Object.keys(raw).join(',')}`,
       );
     }
-    return { invoice, recipientId, expirationTimestamp: numberOrNull(raw['expirationTimestamp']) };
+    return {
+      invoice,
+      recipientId,
+      expirationTimestamp: safeIntegerOrNull(
+        raw['expirationTimestamp'],
+        'receive expirationTimestamp',
+      ),
+      // rgb-lib keys refresh/fail/delete by batch index, so a client that wants
+      // to manage the receive it just created needs this. It is non-optional in
+      // rgb-lib's ReceiveData; null here only means shape drift.
+      batchTransferIdx: safeIntegerOrNull(raw['batchTransferIdx'], 'receive batchTransferIdx'),
+    };
   }
 
   async sendBtcBegin(address: string, amountSat: number, feeRateSatPerVb: number): Promise<string> {

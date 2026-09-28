@@ -74,6 +74,7 @@ auto-retries a send.
 | POST   | `/v1/onchain/create-utxos/prepare`  | bearer   | required        |
 | POST   | `/v1/onchain/create-utxos/complete` | bearer   | required        |
 | GET    | `/v1/onchain/operations/:opId`      | bearer   | —               |
+| GET    | `/v1/onchain/fee-estimate`          | bearer   | —               |
 | POST   | `/v1/ln/deposit/prepare`            | bearer   | required        |
 | POST   | `/v1/ln/pay`                        | bearer   | required        |
 | POST   | `/v1/ln/invoice`                    | bearer   | —               |
@@ -81,6 +82,12 @@ auto-retries a send.
 | GET    | `/v1/ln/payments`                   | bearer   | —               |
 | GET    | `/v1/ln/balance`                    | bearer   | —               |
 | POST   | `/v1/ln/withdraw`                   | bearer   | required        |
+
+Every response carries an `x-request-id` header (a fresh random UUID per
+request; a caller-supplied one is never adopted). Error bodies carry only `code`
+and `message` — the RLN or wallet failure they were mapped from is logged under
+that id and nowhere else, so it is the handle to quote when asking an operator
+about a `COMPLETE_AMBIGUOUS` or `WITHDRAWAL_UNRESOLVED`.
 
 ### Errors
 
@@ -111,7 +118,47 @@ Every error response is `{"error": {"code", "message"}}`. Notable codes:
 | `DEPOSIT_ADDRESS_CONFLICT`               | 502       | RLN returned a deposit address (or RGB `recipient_id`) already assigned to another intent — it is misconfigured (see the deployment note).                                                                                                     |
 | `OP_EXPIRED`                             | 410       | The prepared on-chain operation passed `GATEWAY_ONCHAIN_OP_TTL_SECONDS`; prepare again.                                                                                                                                                        |
 | `UPSTREAM_ERROR` / `UPSTREAM_TIMEOUT`    | 502 / 504 | Sanitized RLN failures.                                                                                                                                                                                                                        |
+| `AMOUNT_NOT_REPRESENTABLE`               | 502       | The wallet holds an amount above 2^53−1, which JSON numbers cannot carry exactly. Permanent, and not the caller's fault: reported rather than silently rounded (see Known limitations).                                                        |
+| `FEE_ESTIMATE_UNAVAILABLE`               | 502       | The indexer gave no usable fee estimate. Detail stays server-side.                                                                                                                                                                             |
 | `COMPLETE_AMBIGUOUS`                     | 502       | The wallet failed while completing an on-chain op, after rgb-lib may already have broadcast. The op stays pending with its txid recorded; read it back with `GET /v1/onchain/operations/:opId` and retry `complete` to finish the bookkeeping. |
+
+## What the wallet reads carry for a verifying client
+
+A client that keeps its own keys has to be able to check what the gateway tells it, and to
+act on RGB state afterwards. Three things in the wallet responses exist for that:
+
+- `GET /v1/wallet/address` returns `derivation` — `account`, `keychain`, `index`,
+  `derivationPath` and `scriptHex` — so the address can be re-derived from the client's own
+  seed before it is shown as a deposit target. `null` means the gateway could not attribute
+  it; see Known limitations.
+- `GET /v1/wallet/transfers` and `POST /v1/wallet/receive` return `batchTransferIdx`.
+  rgb-lib keys refresh, fail and delete by the **batch** index, not by `idx`, so without it
+  a client cannot address the transfer it just read or created.
+- `GET /v1/wallet/unspents` returns `pendingBlinded` per UTXO, and every allocation carries
+  its full `assignment` (`{kind, amount}`) alongside the fungible `amount` summary. Free
+  allocation slots cannot be counted from `allocations` alone — a pending blind receive
+  reserves a slot before it holds an allocation — and a non-fungible assignment has no
+  `amount` to summarize.
+
+`assignment.kind` is the rgb-lib variant name verbatim (`Fungible`, `Any`,
+`InflationRight`, `NonFungible`, ...), so a variant added upstream arrives named rather
+than dropped.
+
+## Fee estimates
+
+`GET /v1/onchain/fee-estimate?blocks=N` (default `N=6`, range 1..1008) answers
+`{blocks, feeRateSatPerVb, sourceBlocks}` from the shared indexer. Clients cannot reach
+esplora themselves — it sits behind the gateway with RLN and the RGB proxy — so without
+this they either hardcode a rate or send none and take the 2 sat/vB default.
+
+`feeRateSatPerVb` is a whole sat/vB in the same 1..1000 range every fee-taking route
+accepts, so it can be passed straight back. Two roundings are deliberate, both away from
+under-paying: the fractional rate is rounded **up**, and a target the indexer does not
+publish resolves to the nearest published target **at or below** it (the more urgent, so
+never cheaper, neighbour) — which `sourceBlocks` reports. The answer is cached for 30s, so
+a burst of clients is one indexer call. It needs no `Idempotency-Key`, no registered
+wallet, and is not queued behind the per-user wallet work: a client needs a fee rate
+_before_ it can prepare anything.
 
 ## Recovering a lost on-chain completion
 
@@ -134,12 +181,12 @@ operation row is the durable record of what happened, and
 
 How to read it:
 
-| `state`     | `mayHaveBroadcast` | Meaning                                           | Do                                                                                                                   |
-| ----------- | ------------------ | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `completed` | `false`            | Done; `txid` is final                             | nothing                                                                                                              |
-| `pending`   | `false`            | Prepared, never broadcast                         | sign and `complete`, or let it expire                                                                                |
-| `pending`   | `true`             | **The transaction may already be on the network** | retry `complete` — it is safe (rebroadcasting a transaction the indexer knows succeeds) and finishes the bookkeeping |
-| `expired`   | `true`             | Past TTL, but a txid was recorded                 | do **not** prepare a replacement before checking `txid` on-chain; needs operator resolution                          |
+| `state`     | `mayHaveBroadcast` | Meaning                                           | Do                                                                                      |
+| ----------- | ------------------ | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `completed` | `false`            | Done; `txid` is final                             | nothing                                                                                 |
+| `pending`   | `false`            | Prepared, never broadcast                         | sign and `complete`, or let it expire                                                   |
+| `pending`   | `true`             | **The transaction may already be on the network** | nothing — **the gateway finishes this itself** (below); poll until it reads `completed` |
+| `expired`   | `true`             | Past TTL while ambiguous                          | same: the gateway still finishes it, and completion is not blocked by the TTL           |
 
 Three properties worth relying on. It takes **no** `Idempotency-Key` and is not queued
 behind the per-user wallet work, so it answers even while the `complete` you are asking
@@ -148,11 +195,36 @@ it from `prepare`. And an operation belonging to another user is reported as `40
 OP_NOT_FOUND`, identical to one that does not exist (I3).
 
 Expiry is **derived** on read, never written: an op past `expiresAt` reports `expired`
-here while the stored row stays `pending` until `complete` flips it. Note the last row of
-the table — an op that expires while ambiguous can no longer be completed (`complete`
-answers 410), so its bookkeeping stays unfinished even though the transaction may be
-confirmed. Raising `GATEWAY_ONCHAIN_OP_TTL_SECONDS` above the worst-case wallet stall is
-the mitigation today.
+here while the stored row stays `pending` until it is completed.
+
+### The gateway resolves ambiguous completions itself
+
+A client that gets a 502 is entitled never to retry: a 5xx is not proof the send failed,
+and a retry it cannot prove safe could, for all it knows, send twice. So the side that
+_can_ prove it is safe does it. On the ambiguous path the gateway retains the signed PSBT
+next to the recorded txid, and a background worker (`src/workers/completions.ts`) replays
+the wallet's end-call until the bookkeeping lands. Replaying is safe because rgb-lib
+re-broadcasts and treats a transaction the indexer already knows as success, so the retry
+only redoes the write that failed.
+
+Three boundaries on that:
+
+- It only ever replays a PSBT **the client itself already submitted** to `complete`, for
+  an op whose txid is already recorded. It never prepares, re-signs, or broadcasts
+  anything the client did not authorize, and an op that never reached broadcast (no txid)
+  is left alone.
+- The retained PSBT must still be the transaction the row's txid names, checked before any
+  wallet call; otherwise the op is left for an operator rather than completed under a
+  transaction its intent does not describe.
+- It stops after `GATEWAY_COMPLETIONS_MAX_ATTEMPTS`. An op that runs out of attempts stays
+  `pending` with its txid and needs a human: check the node for the recorded txid, then
+  mark the row completed or resolve it by hand. `CompletionsWorker.unresolved()` lists
+  exactly those rows and is what a health check should alert on.
+
+The op TTL deliberately does **not** apply here. The TTL exists so an _unsigned_ PSBT
+stops being completable; an ambiguous op's transaction is signed and probably confirmed,
+and refusing to record that after ten minutes would strand the bookkeeping for money that
+already moved.
 
 ## Configuration reference
 
@@ -187,6 +259,8 @@ Optional (default in parentheses):
 | `GATEWAY_ASSET_INVOICE_MIN_MSAT` (`3000000`)     | HTLC carrier value (msat) put on asset invoices that declare no `amtMsat`. Must match the node's `channels.htlc_min_msat` (or the higher `inbound_htlc_minimum_msat` of the asset's channels) — RLN refuses an asset invoice below that floor.       |
 | `GATEWAY_RGB_TRANSPORT_ALLOWLIST` (empty)        | Comma-separated extra RGB consignment-proxy endpoints users may pin in withdraw/send-asset requests. `RGB_PROXY_URL` is always allowlisted; anything else is rejected with 400 `TRANSPORT_ENDPOINT_NOT_ALLOWED` (SSRF guard — the node dials these). |
 | `GATEWAY_DEPOSITS_INTERVAL_MS` (`10000`)         | Poll interval of the deposits watcher.                                                                                                                                                                                                               |
+| `GATEWAY_COMPLETIONS_INTERVAL_MS` (`30000`)      | Poll interval of the ambiguous-completion worker.                                                                                                                                                                                                    |
+| `GATEWAY_COMPLETIONS_MAX_ATTEMPTS` (`5`)         | Attempts at finishing one ambiguous operation before it is left to an operator.                                                                                                                                                                      |
 | `GATEWAY_RECONCILER_INTERVAL_MS` (`10000`)       | Poll interval of the payments reconciler.                                                                                                                                                                                                            |
 | `GATEWAY_RECONCILER_GRACE_SECONDS` (`600`)       | Age before the reconciler refunds a debited-pending send RLN does not know about (the send may still be queued behind RLN's global lock).                                                                                                            |
 | `GATEWAY_QUEUE_GLOBAL_CONCURRENCY` (`4`)         | Max downstream operations running at once across all users.                                                                                                                                                                                          |
@@ -294,8 +368,16 @@ the rest are deliberately deferred (see the workspace README).
   `GATEWAY_DEPOSIT_TTL_SECONDS`, and each intent credits exactly once — on the first
   confirmed poll. Later payments to the same address are not credited; prepare a fresh
   deposit per payment.
-- **Ambiguous withdrawals need manual resolution.** The reconciler drives LN _payments_
-  to a terminal state but does not cover the `withdrawals` table. If RLN times out or
+- **Amounts above 2^53−1 are reported, not rounded.** rgb-lib counts assets in u64 while
+  JSON numbers are doubles, so a balance or assignment above `Number.MAX_SAFE_INTEGER`
+  cannot round-trip. It is detected exactly (any such u64 decodes to at least 2^53) and
+  answered with 502 `AMOUNT_NOT_REPRESENTABLE` rather than served as a wrong number.
+  Carrying such amounts losslessly needs decimal-string fields on the wire, which is a
+  breaking change to the wallet read routes and is deferred; until then an asset with a
+  supply that large is unusable through this gateway rather than silently mis-reported.
+- **Ambiguous withdrawals need manual resolution.** The completions worker covers the
+  on-chain `pending_ops` table; the LN `withdrawals` table has no equivalent. The
+  reconciler drives LN _payments_ to a terminal state but does not cover `withdrawals`. If RLN times out or
   answers 5xx mid-`/sendbtc`/`/sendrgb` — rgb-lib broadcasts before writing its
   bookkeeping, and every post-broadcast failure surfaces as a 500, so the transaction may
   already be on the network — the row is marked `ambiguous`, the debit stands, and
@@ -303,6 +385,13 @@ the rest are deliberately deferred (see the workspace README).
   (`/listtransactions`, `/listtransfers`) for a matching broadcast and then, in the
   gateway SQLite, either mark the row `sent` with its txid or mark it `failed` and post
   a compensating `refund` ledger entry. There is no admin API for this yet.
+- **Address attribution is best-effort.** `GET /v1/wallet/address` reports the derivation
+  it recovered by re-deriving candidates from the registered xpub and matching the script,
+  because rgb-lib's `get_address` returns only the encoded address. The scan follows the
+  user's own high-water mark plus a window, so it covers sequential use; a wallet restored
+  far past that window, or an rgb-lib `reuse_addresses` deployment, reports `derivation:
+null`. A client that needs ownership proof must treat null as unproven — it is the same
+  position it was in when the route returned a bare string.
 - **Unattributable RGB deposits stay pending.** If a settled RGB transfer for a deposit
   target carries no fungible assignment, the watcher cannot tell what was received and
   leaves the intent pending with a warning rather than crediting the declared amount

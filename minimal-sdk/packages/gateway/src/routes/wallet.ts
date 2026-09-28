@@ -32,9 +32,7 @@ export function registerWalletRoutes(app: FastifyInstance): void {
 
   app.get('/v1/wallet/address', { schema: walletAddressRouteSchema, ...auth }, (request) => {
     const userId = request.userId as string;
-    return app.queues.enqueue(userId, async () => ({
-      address: await app.wallets.getAddress(userId),
-    }));
+    return app.queues.enqueue(userId, () => app.wallets.getAddress(userId));
   });
 
   app.get('/v1/wallet/balances', { schema: walletBalancesRouteSchema, ...auth }, (request) => {

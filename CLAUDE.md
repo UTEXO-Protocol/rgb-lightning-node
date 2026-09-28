@@ -17,21 +17,21 @@ Repository conventions:
 - Avoid introducing breaking API changes unless the PR explicitly requires it.
 - Keep CI/workflow changes conservative and deterministic.
 
-Minimal mobile SDK (`minimal-sdk/rust-sdk`, `minimal-sdk/android`, `minimal-sdk/apple`):
+Minimal SDK workspace (`minimal-sdk/`, a pnpm workspace; the root `cargo` commands do
+not build it):
 
-- A separate Cargo workspace with its own `Cargo.lock`; the root `cargo` commands do not
-  build it. Test with `cargo test --manifest-path minimal-sdk/rust-sdk/Cargo.toml`;
-  Android with `./minimal-sdk/android/gradlew -p minimal-sdk/android test assembleRelease`;
-  Apple with `minimal-sdk/scripts/build_apple.sh` (macOS only) and
-  `swift test --package-path minimal-sdk/apple`.
-- Invariants to enforce in review: uniffi proc-macros only (no `.udl`); dependencies are
-  `bitcoin`, `bip39`, `thiserror`, `uniffi` and nothing else (no `rgb-lib`, HTTP, TLS or
-  async runtime; the release cdylib has a size gate in `tests/parity.rs`);
-  `verify_and_sign_psbt` is the only signing entry point and runs `verify_psbt` first; no
-  `SdkError` variant, `Debug` impl or log line may render a mnemonic, seed, xprv, private
-  key or bearer token; every exported function returns `SdkResult` and no panic crosses
-  the FFI, including from a foreign `HttpTransport` that throws.
+- `packages/gateway` is the REST gateway in front of one shared RLN. Its native mobile
+  client is the separate `rgb-sdk-kotlin-light` repository, which ships its own Rust
+  signing core; this repo holds no mobile SDK any more. Treat the gateway's HTTP surface
+  as a published contract: response schemas are strict (`additionalProperties: false`),
+  so removing or retyping a field is breaking, while adding one is not.
+- `packages/client-sdk` is the TypeScript client (web / React Native) and the behavioural
+  reference for that contract; `packages/e2e` is the regtest journey suite. Test with
+  `pnpm -C minimal-sdk test`.
 - The parity fixture `minimal-sdk/packages/client-sdk/test/fixtures/rgblib-parity.json`
   is rgb-lib-authored ground truth: read by relative path, never copied or regenerated
-  here. Changes to the mobile SDK must not touch `src/`, `bindings/` or
-  `minimal-sdk/packages/`.
+  here.
+- Invariants to enforce in review: no secret ever reaches the gateway (I1), one watch-only
+  rgb-lib wallet per user (I2), no cross-user visibility (I3), only the gateway holds the
+  RLN credential (I4). No `SdkError`, error body or log line may render a mnemonic, seed,
+  xprv, private key or bearer token.

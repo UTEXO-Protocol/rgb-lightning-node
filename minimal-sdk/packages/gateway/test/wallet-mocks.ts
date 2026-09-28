@@ -89,6 +89,7 @@ export class MockWalletHandle implements WalletHandle {
         invoice: `mock-invoice-${this.identity.userId}-${this.receiveCount}`,
         recipientId: `mock-recipient-${this.identity.userId}-${this.receiveCount}`,
         expirationTimestamp: request.expirationTimestamp,
+        batchTransferIdx: this.receiveCount,
       };
     });
   }

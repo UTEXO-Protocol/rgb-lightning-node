@@ -2,13 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { migrate, openDb, schemaVersion } from '../src/db.js';
 
 /** Bump alongside a new MIGRATIONS entry in src/db.ts. */
-const LATEST_SCHEMA_VERSION = 2;
+const LATEST_SCHEMA_VERSION = 3;
 
 describe('db migrations', () => {
   it('upgrades a v1 database in place, backfilling ln_invoices.expires_at', () => {
     const db = openDb(':memory:');
-    // Simulate a database created before migration v2.
+    // Simulate a database created before migration v2: every later migration's
+    // columns have to go, or re-running them fails on the ones openDb added.
     db.exec('ALTER TABLE ln_invoices DROP COLUMN expires_at');
+    db.exec('ALTER TABLE pending_ops DROP COLUMN signed_psbt');
+    db.exec('ALTER TABLE pending_ops DROP COLUMN completion_attempts');
+    db.exec('ALTER TABLE user_xpubs DROP COLUMN address_index_high_water');
     db.pragma('user_version = 1');
     db.prepare('INSERT INTO users (id, token_hash, created_at) VALUES (?, ?, ?)').run(
       'u_1',
@@ -61,6 +65,47 @@ describe('db migrations', () => {
       .all()
       .map((row) => (row as { name: string }).name);
     expect(invoiceColumns).toContain('expires_at');
+    // v3: server-side completion recovery and address attribution state.
+    const opColumns = db
+      .prepare('PRAGMA table_info(pending_ops)')
+      .all()
+      .map((row) => (row as { name: string }).name);
+    expect(opColumns).toContain('signed_psbt');
+    expect(opColumns).toContain('completion_attempts');
+    const xpubColumns = db
+      .prepare('PRAGMA table_info(user_xpubs)')
+      .all()
+      .map((row) => (row as { name: string }).name);
+    expect(xpubColumns).toContain('address_index_high_water');
+    db.close();
+  });
+
+  it('upgrades a v2 database in place, adding the completion-recovery columns', () => {
+    const db = openDb(':memory:');
+    db.exec('ALTER TABLE pending_ops DROP COLUMN signed_psbt');
+    db.exec('ALTER TABLE pending_ops DROP COLUMN completion_attempts');
+    db.exec('ALTER TABLE user_xpubs DROP COLUMN address_index_high_water');
+    db.pragma('user_version = 2');
+    db.prepare('INSERT INTO users (id, token_hash, created_at) VALUES (?, ?, ?)').run(
+      'u_1',
+      'hash',
+      1,
+    );
+    db.prepare(
+      `INSERT INTO pending_ops (id, user_id, kind, psbt, intent, state, txid, created_at, expires_at)
+       VALUES ('op-1', 'u_1', 'send_btc', 'psbt', '{}', 'pending', 'txid-1', 1, 2)`,
+    ).run();
+
+    migrate(db);
+
+    expect(schemaVersion(db)).toBe(LATEST_SCHEMA_VERSION);
+    // An op that was already ambiguous before the upgrade has no retained PSBT,
+    // so the worker cannot finish it — it stays an operator job, not a crash.
+    const row = db
+      .prepare('SELECT signed_psbt, completion_attempts FROM pending_ops WHERE id = ?')
+      .get('op-1') as { signed_psbt: string | null; completion_attempts: number };
+    expect(row.signed_psbt).toBeNull();
+    expect(row.completion_attempts).toBe(0);
     db.close();
   });
 

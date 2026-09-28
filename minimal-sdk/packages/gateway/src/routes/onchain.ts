@@ -8,6 +8,7 @@ import type { FastifyInstance, FastifySchema } from 'fastify';
 import {
   createUtxosCompleteRouteSchema,
   createUtxosPrepareRouteSchema,
+  feeEstimateRouteSchema,
   operationGetRouteSchema,
   sendAssetCompleteRouteSchema,
   sendAssetPrepareRouteSchema,
@@ -25,6 +26,9 @@ interface CompleteBody {
   opId: string;
   signedPsbt: string;
 }
+
+/** Confirmation target used when a fee-estimate request names none. */
+const DEFAULT_FEE_TARGET_BLOCKS = 6;
 
 export function registerOnchainRoutes(app: FastifyInstance): void {
   const routeOptions = (schema: FastifySchema) => ({
@@ -44,6 +48,21 @@ export function registerOnchainRoutes(app: FastifyInstance): void {
       });
     });
   };
+
+  // Fee source for clients, which cannot reach esplora themselves. Read-only,
+  // no Idempotency-Key and not queued behind the per-user wallet work: it makes
+  // no wallet call, and a client needs a fee rate BEFORE it can prepare
+  // anything — queueing it behind that user's stalled wallet operation would
+  // deny it precisely when it is about to be used. Cached in the estimator, so
+  // a burst of clients does not become a burst of indexer calls.
+  app.get(
+    '/v1/onchain/fee-estimate',
+    { schema: feeEstimateRouteSchema, onRequest: [app.authenticate] },
+    (request) => {
+      const { blocks } = request.query as { blocks?: number };
+      return app.fees.estimate(blocks ?? DEFAULT_FEE_TARGET_BLOCKS);
+    },
+  );
 
   // Read-only recovery route: the outcome of `complete` can be lost to a
   // timeout, a crash, or the 502 COMPLETE_AMBIGUOUS that rgb-lib's

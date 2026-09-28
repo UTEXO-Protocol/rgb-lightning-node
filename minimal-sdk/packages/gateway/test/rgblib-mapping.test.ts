@@ -7,11 +7,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   mapAssets,
+  mapAssignment,
   mapTransfers,
   mapUnspents,
   unquote,
   wrapNativeError,
 } from '../src/wallets/rgblib.js';
+import { walletHttpError, WalletBackendError } from '../src/wallets/backend.js';
+import { HttpError } from '../src/errors.js';
+
+/** Smallest integer a u64 above the safe range can decode to. */
+const UNSAFE_AMOUNT = Number.MAX_SAFE_INTEGER + 1;
 
 describe('wrapNativeError', () => {
   it.each([
@@ -70,6 +76,33 @@ describe('unquote', () => {
   });
 });
 
+describe('mapAssignment', () => {
+  it('flattens externally tagged fungible and unit variants', () => {
+    expect(mapAssignment({ Fungible: 42 }, 'a')).toEqual({ kind: 'Fungible', amount: 42 });
+    expect(mapAssignment('Any', 'a')).toEqual({ kind: 'Any', amount: null });
+  });
+
+  it('carries an unknown variant through by name instead of dropping it', () => {
+    expect(mapAssignment({ InflationRight: 7 }, 'a')).toEqual({
+      kind: 'InflationRight',
+      amount: 7,
+    });
+    expect(mapAssignment({ NonFungible: { token: 1 } }, 'a')).toEqual({
+      kind: 'NonFungible',
+      amount: null,
+    });
+  });
+
+  it('rejects a payload that is not a single-key tagged object', () => {
+    expect(() => mapAssignment({}, 'a')).toThrow(WalletBackendError);
+    expect(() => mapAssignment({ Fungible: 1, Any: 2 }, 'a')).toThrow(WalletBackendError);
+  });
+
+  it('refuses a fungible amount outside the safe integer range', () => {
+    expect(() => mapAssignment({ Fungible: UNSAFE_AMOUNT }, 'a')).toThrow(WalletBackendError);
+  });
+});
+
 describe('mapAssets', () => {
   it('flattens the per-schema camelCase asset map', () => {
     const raw = {
@@ -78,7 +111,11 @@ describe('mapAssets', () => {
           assetId: 'rgb:asset-1',
           ticker: 'TST',
           name: 'Test Asset',
+          details: 'a test asset',
           precision: 0,
+          issuedSupply: 1000,
+          timestamp: 1_700_000_000,
+          addedAt: 1_700_000_100,
           balance: { settled: 100, future: 100, spendable: 100 },
         },
       ],
@@ -94,10 +131,67 @@ describe('mapAssets', () => {
         schema: 'nia',
         ticker: 'TST',
         name: 'Test Asset',
+        details: 'a test asset',
         precision: 0,
+        issuedSupply: 1000,
+        timestamp: 1_700_000_000,
+        addedAt: 1_700_000_100,
         balance: { settled: 100, future: 100, spendable: 100 },
       },
     ]);
+  });
+
+  it('leaves issuance metadata null when the schema has none (UDA)', () => {
+    const [asset] = mapAssets({
+      uda: [
+        {
+          assetId: 'rgb:uda-1',
+          ticker: 'UDA',
+          name: 'Unique',
+          precision: 0,
+          balance: { settled: 1, future: 1, spendable: 1 },
+        },
+      ],
+    });
+    expect(asset?.issuedSupply).toBeNull();
+    expect(asset?.details).toBeNull();
+    expect(asset?.timestamp).toBe(0);
+  });
+
+  it('refuses an asset with no name rather than emitting an empty one', () => {
+    // A nameless asset is undisplayable and unvalidatable by a client; the old
+    // '' substitution hid rgb-lib shape drift behind a usable-looking response.
+    expect(() =>
+      mapAssets({
+        nia: [{ assetId: 'rgb:asset-1', ticker: 'TST', precision: 0 }],
+      }),
+    ).toThrow(WalletBackendError);
+  });
+
+  it('refuses a balance outside the safe integer range instead of rounding it', () => {
+    let thrown: unknown;
+    try {
+      mapAssets({
+        nia: [
+          {
+            assetId: 'rgb:asset-1',
+            ticker: 'TST',
+            name: 'Test Asset',
+            precision: 0,
+            balance: { settled: UNSAFE_AMOUNT, future: 0, spendable: 0 },
+          },
+        ],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(WalletBackendError);
+    expect((thrown as WalletBackendError).unrepresentable).toBe(true);
+    // The route answer is an explicit 502, not a silently wrong balance.
+    const mapped = walletHttpError(thrown);
+    expect(mapped).toBeInstanceOf(HttpError);
+    expect((mapped as HttpError).statusCode).toBe(502);
+    expect((mapped as HttpError).code).toBe('AMOUNT_NOT_REPRESENTABLE');
   });
 
   it('returns an empty list for a non-object payload', () => {
@@ -115,6 +209,7 @@ describe('mapUnspents', () => {
           btcAmount: 998,
           colorable: true,
         },
+        pendingBlinded: 1,
         rgbAllocations: [
           { assetId: 'rgb:asset-1', assignment: { Fungible: 42 }, settled: true },
           { assetId: null, assignment: 'Any', settled: false },
@@ -127,12 +222,30 @@ describe('mapUnspents', () => {
         vout: 2,
         amountSat: 998,
         colorable: true,
+        pendingBlinded: 1,
         allocations: [
-          { assetId: 'rgb:asset-1', amount: 42, settled: true },
-          { assetId: null, amount: null, settled: false },
+          {
+            assetId: 'rgb:asset-1',
+            amount: 42,
+            assignment: { kind: 'Fungible', amount: 42 },
+            settled: true,
+          },
+          {
+            assetId: null,
+            amount: null,
+            assignment: { kind: 'Any', amount: null },
+            settled: false,
+          },
         ],
       },
     ]);
+  });
+
+  it('defaults a missing pendingBlinded to zero', () => {
+    const [unspent] = mapUnspents([
+      { utxo: { outpoint: { txid: 't', vout: 0 }, btcAmount: 1, colorable: false } },
+    ]);
+    expect(unspent?.pendingBlinded).toBe(0);
   });
 
   it('returns an empty list for a non-array payload', () => {
@@ -145,6 +258,7 @@ describe('mapTransfers', () => {
     const raw = [
       {
         idx: 1,
+        batchTransferIdx: 11,
         requestedAssignment: { Fungible: 50 },
         assignments: [],
         kind: 'ReceiveBlind',
@@ -157,6 +271,7 @@ describe('mapTransfers', () => {
       },
       {
         idx: 2,
+        batchTransferIdx: 12,
         requestedAssignment: null,
         assignments: [{ Fungible: 10 }, { Fungible: 15 }, 'Any'],
         kind: 'Send',
@@ -172,8 +287,10 @@ describe('mapTransfers', () => {
     expect(mapped).toEqual([
       {
         idx: 1,
+        batchTransferIdx: 11,
         assetId: 'rgb:asset-1',
         amount: 50,
+        assignments: [],
         kind: 'ReceiveBlind',
         status: 'Settled',
         txid: 'txid-1',
@@ -184,8 +301,14 @@ describe('mapTransfers', () => {
       },
       {
         idx: 2,
+        batchTransferIdx: 12,
         assetId: 'rgb:asset-1',
         amount: 25,
+        assignments: [
+          { kind: 'Fungible', amount: 10 },
+          { kind: 'Fungible', amount: 15 },
+          { kind: 'Any', amount: null },
+        ],
         kind: 'Send',
         status: 'WaitingConfirmations',
         txid: null,
@@ -197,13 +320,21 @@ describe('mapTransfers', () => {
     ]);
   });
 
+  it('refuses a transfer amount outside the safe integer range', () => {
+    expect(() =>
+      mapTransfers([{ idx: 1, requestedAssignment: { Fungible: UNSAFE_AMOUNT } }], null),
+    ).toThrow(WalletBackendError);
+  });
+
   it('defaults missing fields instead of throwing on shape drift', () => {
     const mapped = mapTransfers([{}], null);
     expect(mapped).toEqual([
       {
         idx: 0,
+        batchTransferIdx: null,
         assetId: null,
         amount: null,
+        assignments: [],
         kind: 'Unknown',
         status: 'Unknown',
         txid: null,

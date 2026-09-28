@@ -1,4 +1,7 @@
 import type { FastifyInstance } from 'fastify';
+import { hex } from '@scure/base';
+import { HDKey } from '@scure/bip32';
+import { p2tr } from '@scure/btc-signer';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WalletBackendError } from '../src/wallets/backend.js';
 import { createTestUser, testServer, type TestUser } from './helpers.js';
@@ -12,6 +15,26 @@ const XPUBS = {
     'tpubDCtpoJs6YJcjLnr9gq6jYriYNMuWEu8mSDvEQU5st3ZkJbFqqzwpHUiPvxqD2366ciFAfpehk1k2d7Tyk7AJEr8uZva7KfnX4RpsiVSoEcZ',
   fingerprint: '73c5da0a',
 };
+
+/**
+ * Re-derive the fixture wallet's vanilla addresses the way a client would, so
+ * the attribution the route reports is checked against an independent
+ * derivation rather than against the gateway's own helper.
+ */
+function deriveVanilla(index: number): { address: string; scriptHex: string } {
+  const account = HDKey.fromExtendedKey(XPUBS.vanilla, {
+    private: 0x04358394,
+    public: 0x043587cf,
+  });
+  const key = account.deriveChild(0).deriveChild(index);
+  const payment = p2tr(key.publicKey!.slice(1), undefined, {
+    bech32: 'bcrt',
+    pubKeyHash: 0x6f,
+    scriptHash: 0xc4,
+    wif: 0xef,
+  });
+  return { address: payment.address as string, scriptHex: hex.encode(payment.script) };
+}
 
 describe('wallet routes', () => {
   let app: FastifyInstance;
@@ -185,7 +208,54 @@ describe('wallet routes', () => {
         headers: authed(),
       });
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ address: `addr-${user.userId}` });
+      // The mock hands out a synthetic address, so it cannot be attributed to a
+      // derivation under the registered xpub: null evidence, not a guess.
+      expect(response.json()).toEqual({ address: `addr-${user.userId}`, derivation: null });
+    });
+
+    it('attributes a real rgb-lib address to its vanilla derivation', async () => {
+      // Derived from the fixture xpub at m/86'/1'/0'/0/0 — the first address
+      // rgb-lib reveals on the vanilla keychain for these xpubs.
+      const derived = deriveVanilla(0);
+      backend.dataFor = () => ({ address: derived.address });
+      await register();
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/wallet/address',
+        headers: authed(),
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        address: derived.address,
+        derivation: {
+          account: 'vanilla',
+          keychain: 0,
+          index: 0,
+          derivationPath: "m/86'/1'/0'/0/0",
+          scriptHex: derived.scriptHex,
+        },
+      });
+    });
+
+    it('attributes an address past the first index and advances the scan window', async () => {
+      const derived = deriveVanilla(7);
+      backend.dataFor = () => ({ address: derived.address });
+      await register();
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/wallet/address',
+        headers: authed(),
+      });
+      expect(response.json().derivation).toMatchObject({
+        index: 7,
+        derivationPath: "m/86'/1'/0'/0/7",
+      });
+      // High-water mark persisted, so attribution keeps working as the wallet's
+      // revealed index grows instead of falling off a fixed window.
+      const row = app.db
+        .prepare('SELECT address_index_high_water AS h FROM user_xpubs WHERE user_id = ?')
+        .get(user.userId) as { h: number };
+      expect(row.h).toBe(7);
     });
 
     it('reports balances from the user wallet (BTC + per-asset)', async () => {
@@ -200,7 +270,11 @@ describe('wallet routes', () => {
             schema: 'nia',
             ticker: 'TST',
             name: 'Test',
+            details: null,
             precision: 0,
+            issuedSupply: 1000,
+            timestamp: 1_700_000_000,
+            addedAt: 1_700_000_100,
             balance: { settled: 100, future: 100, spendable: 100 },
           },
         ],
@@ -220,7 +294,11 @@ describe('wallet routes', () => {
           schema: 'nia',
           ticker: 'TST',
           name: 'Test',
+          details: null,
           precision: 0,
+          issuedSupply: 1000,
+          timestamp: 1_700_000_000,
+          addedAt: 1_700_000_100,
           balance: { settled: 100, future: 100, spendable: 100 },
         },
       ]);
@@ -234,7 +312,15 @@ describe('wallet routes', () => {
             vout: 1,
             amountSat: 9999,
             colorable: true,
-            allocations: [{ assetId: 'rgb:asset-1', amount: 42, settled: true }],
+            pendingBlinded: 2,
+            allocations: [
+              {
+                assetId: 'rgb:asset-1',
+                amount: 42,
+                assignment: { kind: 'Fungible', amount: 42 },
+                settled: true,
+              },
+            ],
           },
         ],
       });
@@ -245,14 +331,32 @@ describe('wallet routes', () => {
         headers: authed(),
       });
       expect(response.statusCode).toBe(200);
-      expect(response.json().unspents[0]).toMatchObject({ vout: 1, amountSat: 9999 });
+      // pendingBlinded and the full assignment survive serialization: a client
+      // counting free allocation slots needs both.
+      expect(response.json().unspents[0]).toEqual({
+        txid: 'ab'.repeat(32),
+        vout: 1,
+        amountSat: 9999,
+        colorable: true,
+        pendingBlinded: 2,
+        allocations: [
+          {
+            assetId: 'rgb:asset-1',
+            amount: 42,
+            assignment: { kind: 'Fungible', amount: 42 },
+            settled: true,
+          },
+        ],
+      });
     });
 
     it('aggregates transfers across assets, and filters by assetId when asked', async () => {
       const transfer = (idx: number, assetId: string | null) => ({
         idx,
+        batchTransferIdx: idx + 100,
         assetId,
         amount: 10,
+        assignments: [{ kind: 'Fungible', amount: 10 }],
         kind: 'ReceiveBlind',
         status: 'Settled',
         txid: null,
@@ -268,7 +372,11 @@ describe('wallet routes', () => {
             schema: 'nia',
             ticker: null,
             name: 'A1',
+            details: null,
             precision: 0,
+            issuedSupply: null,
+            timestamp: 0,
+            addedAt: 0,
             balance: EMPTY_BALANCE,
           },
         ],

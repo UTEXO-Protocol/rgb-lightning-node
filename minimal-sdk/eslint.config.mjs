@@ -14,11 +14,6 @@ export default tseslint.config(
       // Build output of the native mobile SDK (rustdoc emits .js under target/,
       // Gradle and SwiftPM emit reports). Gitignored, but flat config does not
       // read .gitignore, so `pnpm lint` after a local build would scan them.
-      'rust-sdk/target/',
-      'android/build/',
-      'android/.gradle/',
-      'apple/.build/',
-      'apple/build/',
     ],
   },
   js.configs.recommended,

@@ -46,16 +46,54 @@ export interface Balance {
   spendable: number;
 }
 
+/**
+ * An rgb-lib Assignment as a variant name plus its fungible value. `kind`
+ * carries the variant verbatim (`Fungible`, `Any`, `InflationRight`, ...), so a
+ * variant this SDK predates still arrives named rather than dropped.
+ */
+export interface Assignment {
+  kind: string;
+  amount: number | null;
+}
+
+export interface WalletAsset {
+  assetId: string;
+  schema: string;
+  ticker: string | null;
+  name: string;
+  details: string | null;
+  precision: number;
+  /** Total issued amount; null for schemas without one (UDA). */
+  issuedSupply: number | null;
+  /** Unix seconds of asset genesis. */
+  timestamp: number;
+  /** Unix seconds the gateway wallet imported the asset. */
+  addedAt: number;
+  balance: Balance;
+}
+
 export interface WalletBalances {
   btc: { vanilla: Balance; colored: Balance };
-  assets: {
-    assetId: string;
-    schema: string;
-    ticker: string | null;
-    name: string;
-    precision: number;
-    balance: Balance;
-  }[];
+  assets: WalletAsset[];
+}
+
+/**
+ * Derivation an address came from. Re-derive it from your own keys
+ * (`deriveTaproot`) and compare before showing it as a deposit target: the
+ * gateway holds the xpubs and could otherwise return any address. Null means the
+ * gateway could not attribute it — treat that as unproven, not as safe.
+ */
+export interface AddressDerivation {
+  account: 'vanilla';
+  keychain: number;
+  index: number;
+  derivationPath: string;
+  scriptHex: string;
+}
+
+export interface WalletAddress {
+  address: string;
+  derivation: AddressDerivation | null;
 }
 
 export interface WalletUnspent {
@@ -63,13 +101,23 @@ export interface WalletUnspent {
   vout: number;
   amountSat: number;
   colorable: boolean;
-  allocations: { assetId: string | null; amount: number | null; settled: boolean }[];
+  /** Blind receives already promised against this UTXO (reserved slots). */
+  pendingBlinded: number;
+  allocations: {
+    assetId: string | null;
+    amount: number | null;
+    assignment: Assignment;
+    settled: boolean;
+  }[];
 }
 
 export interface WalletTransfer {
   idx: number;
+  /** Batch this transfer belongs to; rgb-lib keys refresh/fail/delete by it. */
+  batchTransferIdx: number | null;
   assetId: string | null;
   amount: number | null;
+  assignments: Assignment[];
   kind: string;
   status: string;
   txid: string | null;
@@ -77,6 +125,15 @@ export interface WalletTransfer {
   expiration: number | null;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface FeeEstimate {
+  /** Confirmation target asked for. */
+  blocks: number;
+  /** Whole sat/vB, ready to pass back as `feeRateSatPerVb`. */
+  feeRateSatPerVb: number;
+  /** Indexer ladder target the estimate came from (at or below `blocks`). */
+  sourceBlocks: number;
 }
 
 export interface ReceiveParams {
@@ -91,6 +148,8 @@ export interface ReceiveResult {
   invoice: string;
   recipientId: string;
   expirationTimestamp: number | null;
+  /** Batch index of the created receive; null only on rgb-lib shape drift. */
+  batchTransferIdx: number | null;
   mode: 'blind' | 'witness';
 }
 
@@ -402,8 +461,19 @@ export class GatewayClient {
     return this.request({ method: 'POST', path: '/v1/wallet/xpubs', body: params });
   }
 
-  getAddress(): Promise<{ address: string }> {
+  getAddress(): Promise<WalletAddress> {
     return this.request({ method: 'GET', path: '/v1/wallet/address' });
+  }
+
+  /**
+   * Fee estimate from the gateway's indexer, which clients cannot reach
+   * directly. Already a whole sat/vB in the range every fee-taking route
+   * accepts, rounded up so signing at exactly this rate never lands below the
+   * estimate.
+   */
+  getFeeEstimate(blocks?: number): Promise<FeeEstimate> {
+    const query = blocks === undefined ? '' : `?blocks=${encodeURIComponent(String(blocks))}`;
+    return this.request({ method: 'GET', path: `/v1/onchain/fee-estimate${query}` });
   }
 
   getBalances(): Promise<WalletBalances> {

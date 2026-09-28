@@ -133,6 +133,40 @@ export const operationGetRouteSchema = {
   },
 } as const;
 
+/**
+ * Fee estimate from the shared indexer. Clients cannot reach esplora directly,
+ * so without this they have no fee source; the answer is a whole sat/vB in the
+ * same 1..1000 range every fee-taking route accepts, so it can be passed
+ * straight back as `feeRateSatPerVb`.
+ */
+export const feeEstimateRouteSchema = {
+  querystring: {
+    type: 'object',
+    properties: {
+      // 1008 is the widest target esplora publishes.
+      blocks: { type: 'integer', minimum: 1, maximum: 1008 },
+    },
+    additionalProperties: false,
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        blocks: { type: 'integer' },
+        feeRateSatPerVb: feeRateSchema,
+        /** Esplora ladder target the estimate was read from (≤ `blocks`). */
+        sourceBlocks: { type: 'integer' },
+      },
+      required: ['blocks', 'feeRateSatPerVb', 'sourceBlocks'],
+      additionalProperties: false,
+    },
+    400: errorBodySchema,
+    401: errorBodySchema,
+    502: errorBodySchema,
+    504: errorBodySchema,
+  },
+} as const;
+
 export const sendBtcPrepareRouteSchema = {
   body: {
     type: 'object',

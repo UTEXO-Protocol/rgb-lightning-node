@@ -3,6 +3,7 @@
  * idempotency hooks. Later tasks register RLN, wallet, on-chain and LN routes
  * on top of the decorators wired here.
  */
+import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { GatewayConfig } from './config.js';
 import { openDb, type GatewayDb } from './db.js';
@@ -28,6 +29,8 @@ import { RlnClient, type RlnApi } from './rln/client.js';
 import { LnFlows, registerLnRoutes } from './routes/ln.js';
 import { DepositsWorker } from './workers/deposits.js';
 import { Reconciler } from './workers/reconciler.js';
+import { CompletionsWorker } from './workers/completions.js';
+import { FeeEstimator } from './fees.js';
 
 export interface RouteSchemaEntry {
   method: string | string[];
@@ -51,6 +54,8 @@ declare module 'fastify' {
     ln: LnFlows;
     depositsWorker: DepositsWorker;
     reconciler: Reconciler;
+    completionsWorker: CompletionsWorker;
+    fees: FeeEstimator;
   }
   interface FastifyRequest {
     userId?: string;
@@ -69,7 +74,7 @@ export interface BuildServerOptions {
   walletBackend?: WalletBackend;
   /** RLN client override (unit tests inject a fake; defaults to RlnClient). */
   rlnClient?: RlnApi;
-  /** Esplora fetch override for the deposits watcher (tests inject a stub). */
+  /** Esplora fetch override for the deposits watcher and fee estimator. */
   esploraFetch?: typeof fetch;
   /** Start the background workers (deposits watcher + reconciler). Off in tests. */
   startWorkers?: boolean;
@@ -80,6 +85,14 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   const db = options.db ?? openDb(config.sqlitePath);
 
   const app = Fastify({
+    // Random request ids: the value is echoed to the client as `x-request-id`
+    // (below), so it must not be a guessable per-process counter — it is the
+    // only handle a client has on a failure whose detail stays server-side.
+    genReqId: () => randomUUID(),
+    // Never adopt a caller-supplied id: it would let a client choose the value
+    // that ties together every log line for its own requests. Fastify v5
+    // already defaults this off; pinning it keeps that true across upgrades.
+    requestIdHeader: false,
     logger: {
       level: options.loggerLevel ?? 'info',
       // Safety net: these headers carry credentials and must never be logged.
@@ -100,6 +113,17 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   const routeSchemas: RouteSchemaEntry[] = [];
   app.addHook('onRoute', (route) => {
     routeSchemas.push({ method: route.method, url: route.url, schema: route.schema });
+  });
+
+  // Correlation handle. Client-facing error bodies carry only `code` and
+  // `message` (invariant I4) — the RLN or wallet failure they were mapped from
+  // is logged under this same id and nowhere else. Without the header a client
+  // holding a 502 COMPLETE_AMBIGUOUS or WITHDRAWAL_UNRESOLVED has nothing an
+  // operator can grep for. Set on the request hook so it is present on error
+  // replies and on idempotency replays alike (the replay path re-runs hooks and
+  // caches only status/content-type/body, so a replay gets a fresh id).
+  app.addHook('onRequest', async (request, reply) => {
+    void reply.header('x-request-id', request.id);
   });
 
   app.decorate('db', db);
@@ -128,7 +152,15 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   app.decorate('walletPool', walletPool);
   const walletService = new WalletService(db, walletPool, config);
   app.decorate('wallets', walletService);
-  app.decorate('onchain', new OnchainService(db, walletPool, walletService, config));
+  const onchainService = new OnchainService(db, walletPool, walletService, config);
+  app.decorate('onchain', onchainService);
+  app.decorate(
+    'fees',
+    new FeeEstimator({
+      esploraUrl: config.esploraUrl,
+      ...(options.esploraFetch !== undefined ? { fetchImpl: options.esploraFetch } : {}),
+    }),
+  );
 
   const rln =
     options.rlnClient ??
@@ -155,6 +187,13 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     log: app.log,
   });
   app.decorate('reconciler', reconciler);
+  const completionsWorker = new CompletionsWorker({
+    db,
+    onchain: onchainService,
+    maxAttempts: config.completionsMaxAttempts,
+    log: app.log,
+  });
+  app.decorate('completionsWorker', completionsWorker);
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof QueueFullError) {
@@ -231,11 +270,13 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   if (options.startWorkers === true) {
     depositsWorker.start(config.depositsIntervalMs);
     reconciler.start(config.reconcilerIntervalMs);
+    completionsWorker.start(config.completionsIntervalMs);
   }
 
   app.addHook('onClose', async () => {
     depositsWorker.stop();
     reconciler.stop();
+    completionsWorker.stop();
     await walletPool.closeAll();
     db.close();
   });
