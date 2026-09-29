@@ -122,8 +122,13 @@ describe('wallet routes', () => {
       expect(short.statusCode).toBe(400);
     });
 
-    it('maps wallet-construction failure to 400 INVALID_XPUBS and persists nothing', async () => {
-      backend.openError = new WalletBackendError('wallet construction failed', 'bad xpub');
+    it('maps a REJECTED xpub to 400 INVALID_XPUBS and persists nothing', async () => {
+      backend.openError = new WalletBackendError(
+        'wallet construction failed',
+        'RgbLib(InvalidBitcoinKeys)',
+        false,
+        true,
+      );
       const response = await register();
       expect(response.statusCode).toBe(400);
       expect(response.json().error.code).toBe('INVALID_XPUBS');
@@ -131,6 +136,63 @@ describe('wallet routes', () => {
       backend.openError = undefined;
       const retry = await register();
       expect(retry.statusCode).toBe(201);
+    });
+
+    it('does NOT blame the xpubs for a deployment failure, and logs the cause', async () => {
+      // A missing rgb-lib native module or an unreachable indexer also fails the
+      // smoke-open. Answering 400 INVALID_XPUBS sent an operator hunting for a
+      // client bug — and, because the central handler logs a 400 only when it
+      // carries a cause, left the most common bring-up failure with no trace at
+      // all. Both halves are asserted here.
+      const lines: string[] = [];
+      const logged = await testServer({
+        walletBackend: backend,
+        loggerStream: { write: (msg) => lines.push(msg) },
+      });
+      const loggedUser = await createTestUser(logged);
+      backend.openError = new WalletBackendError(
+        'wallet construction failed',
+        'rgb-lib native module unavailable: no platform package for linux-x64',
+      );
+      const response = await logged.inject({
+        method: 'POST',
+        url: '/v1/wallet/xpubs',
+        headers: { authorization: `Bearer ${loggedUser.token}` },
+        payload: XPUBS,
+      });
+      expect(response.statusCode).toBe(500);
+      expect(response.json().error.code).toBe('INTERNAL');
+      // Opaque to the client (I4) but present in the log for the operator.
+      expect(response.body).not.toContain('rgb-lib');
+      expect(lines.join('\n')).toContain('no platform package for linux-x64');
+      backend.openError = undefined;
+      await logged.close();
+    });
+
+    it('records the cause of a rejected xpub so a 400 is still diagnosable', async () => {
+      const lines: string[] = [];
+      const logged = await testServer({
+        walletBackend: backend,
+        loggerStream: { write: (msg) => lines.push(msg) },
+      });
+      const loggedUser = await createTestUser(logged);
+      backend.openError = new WalletBackendError(
+        'wallet construction failed',
+        'RgbLib(InvalidFingerprint)',
+        false,
+        true,
+      );
+      const response = await logged.inject({
+        method: 'POST',
+        url: '/v1/wallet/xpubs',
+        headers: { authorization: `Bearer ${loggedUser.token}` },
+        payload: XPUBS,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.body).not.toContain('RgbLib');
+      expect(lines.join('\n')).toContain('InvalidFingerprint');
+      backend.openError = undefined;
+      await logged.close();
     });
 
     it('evicts the smoke-opened wallet when persisting the xpubs fails', async () => {

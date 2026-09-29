@@ -160,7 +160,7 @@ function toDetail(error: unknown): string {
  * variant degrades to 500, never to a wrong 400.
  */
 const CLIENT_ERROR_VARIANTS =
-  /\b(AssetNotFound|BitcoinNetworkMismatch|Invalid(Address|AmountZero|Assignment|BitcoinNetwork|Expiration|FeeRate|ProxyProtocol|RecipientData|RecipientID|RecipientMap|RecipientNetwork|TransportEndpoints?|Txid|WitnessVersion)|MaxFeeExceeded|MinFeeNotMet|NoValidTransportEndpoint|OutputBelowDustLimit|RecipientIDAlreadyUsed|RecipientIDDuplicated|UnknownRgbSchema|UnsupportedSchema|UnsupportedTransportType)\b/;
+  /\b(AssetNotFound|BitcoinNetworkMismatch|Invalid(Address|AmountZero|Assignment|BitcoinKeys|BitcoinNetwork|Expiration|FeeRate|Fingerprint|ProxyProtocol|Pubkey|RecipientData|RecipientID|RecipientMap|RecipientNetwork|TransportEndpoints?|Txid|VanillaKeychain|WitnessVersion)|MaxFeeExceeded|MinFeeNotMet|NoValidTransportEndpoint|OutputBelowDustLimit|RecipientIDAlreadyUsed|RecipientIDDuplicated|UnknownRgbSchema|UnsupportedSchema|UnsupportedTransportType)\b/;
 
 /** Wrap a native failure; rgb-lib errors are Rust debug strings. Exported for unit tests. */
 export function wrapNativeError(operation: string, error: unknown): WalletBackendError {

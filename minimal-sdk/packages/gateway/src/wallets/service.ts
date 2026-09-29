@@ -125,8 +125,17 @@ export class WalletService {
     try {
       address = await this.pool.withWallet({ userId, xpubs }, (wallet) => wallet.getAddress());
     } catch (error) {
-      if (error instanceof WalletBackendError) {
-        throw new HttpError(400, 'INVALID_XPUBS', 'wallet construction from these xpubs failed');
+      // Only a rejection rgb-lib pinned on the REQUEST may be answered 400.
+      // Everything else here — a missing rgb-lib native module, an unreachable
+      // indexer — is the deployment's fault, not the caller's, and blaming the
+      // xpubs sends an operator hunting for a client bug. Either way the cause
+      // must travel with the error: the central handler logs a 400 ONLY when it
+      // carries one, so dropping it left the single most common bring-up
+      // failure with no server-side trace at all.
+      if (error instanceof WalletBackendError && error.clientError) {
+        throw new HttpError(400, 'INVALID_XPUBS', 'wallet construction from these xpubs failed', {
+          cause: error,
+        });
       }
       throw error;
     }

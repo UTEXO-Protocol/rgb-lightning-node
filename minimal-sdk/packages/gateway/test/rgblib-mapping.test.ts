@@ -41,6 +41,13 @@ describe('wrapNativeError', () => {
     'RgbLib(InvalidTransportEndpoint { details: "bad scheme" })',
     'RgbLib(RecipientIDDuplicated)',
     'RgbLib(InvalidFeeRate { details: "below minimum" })',
+    // Key material the caller registered: their request, their 400. Without
+    // these, a genuinely bad xpub was indistinguishable from a missing rgb-lib
+    // module or an unreachable indexer at the registration route.
+    'RgbLib(InvalidBitcoinKeys)',
+    'RgbLib(InvalidFingerprint)',
+    'RgbLib(InvalidPubkey { details: "bad point" })',
+    'RgbLib(InvalidVanillaKeychain)',
   ])('classifies %s as a client error, not insufficient funds', (detail) => {
     const wrapped = wrapNativeError('sendAssetBegin', new Error(detail));
     expect(wrapped.insufficientFunds).toBe(false);
