@@ -504,7 +504,7 @@ jobs:
           # Temporarily disabled: repeated CI failures and local flaky repros.
           # - org.rgblightningnode.RestartTest
           # - org.rgblightningnode.MultiOpenCloseTest
-          # - org.rgblightningnode.ConcurrentBtcPaymentsTest
+          - org.rgblightningnode.ConcurrentBtcPaymentsTest
           # - org.rgblightningnode.SwapRoundtripBuyTest
     steps:
       - name: Checkout repository
