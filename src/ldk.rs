@@ -6493,7 +6493,8 @@ async fn start_lightning(
     let unlocked_state = Arc::new(LightningState {
         common: Arc::clone(&common),
         channel_manager: Arc::clone(&channel_manager),
-        gossip_source: Arc::clone(&gossip_source),
+gossip_source: Arc::clone(&gossip_source),
+        fee_estimator: Arc::clone(&fee_estimator),
         inbound_payments,
         network_graph,
         chain_monitor: chain_monitor.clone(),

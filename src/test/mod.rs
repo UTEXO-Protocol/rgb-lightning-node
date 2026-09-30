@@ -72,7 +72,8 @@ use crate::routes::{
     Channel, ChannelStatus, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest,
     ConnectPeerRequest, CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse,
     DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse, DecodeSwapstringRequest,
-    DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
+    DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, EstimateFeeRequest,
+    EstimateFeeResponse, FailTransfersRequest,
     FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
     GetChannelIdResponse, GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest,
     GetPaymentResponse, GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse,
@@ -1624,6 +1625,22 @@ async fn list_swaps(node_address: SocketAddr) -> ListSwapsResponse {
         .await
         .unwrap();
     check_response_is_ok(res).await.json().await.unwrap()
+}
+
+async fn estimate_fee(node_address: SocketAddr, blocks: u16) -> EstimateFeeResponse {
+    println!("estimating fee for {blocks} blocks on node {node_address}");
+    let payload = EstimateFeeRequest { blocks };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/estimatefee"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<EstimateFeeResponse>()
+        .await
+        .unwrap()
 }
 
 async fn get_swap(node_address: SocketAddr, payment_hash: &str, taker: bool) -> Swap {

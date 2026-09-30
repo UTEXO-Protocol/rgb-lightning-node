@@ -40,6 +40,7 @@ use crate::asset_link::AssetLinkMessageHandler;
 use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
 use crate::crypto::{decrypt_mnemonic, encrypt_mnemonic};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
+use crate::ldk_chain_backend::DynFeeEstimator;
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
 use crate::rgb_file_transfer::RgbFileTransferHandler;
 use crate::signer::{
@@ -218,7 +219,8 @@ pub(crate) struct CommonState {
 pub(crate) struct LightningState {
     pub(crate) common: Arc<CommonState>,
     pub(crate) channel_manager: Arc<ChannelManager>,
-    pub(crate) gossip_source: Arc<crate::gossip::GossipSource>,
+pub(crate) gossip_source: Arc<crate::gossip::GossipSource>,
+    pub(crate) fee_estimator: Arc<DynFeeEstimator>,
     pub(crate) inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
     pub(crate) network_graph: Arc<NetworkGraph>,
     pub(crate) chain_monitor: Arc<ChainMonitor>,
