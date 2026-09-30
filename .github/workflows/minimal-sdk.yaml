@@ -1,0 +1,78 @@
+name: Minimal SDK
+
+# CI for the minimal-sdk pnpm workspace: the REST gateway
+# (minimal-sdk/packages/gateway), the TypeScript client SDK that is the in-repo
+# reference for its contract, and the e2e package's infra-free smoke test.
+#
+# This matters more than it looks. The gateway's HTTP surface has an
+# out-of-repo consumer — the rgb-sdk-kotlin-light Android SDK — and its response
+# schemas are strict, so removing or retyping a field is a breaking change for a
+# client this repository cannot test against. The unit suites are the only guard
+# on that contract, and they need nothing but Node.
+#
+# Deliberately NOT here: the regtest e2e journey (`pnpm e2e`) and the two
+# WALLET_REGTEST gateway suites, which need bitcoind, electrs and an RLN
+# instance. They stay a local/manual step, as documented in minimal-sdk/README.md.
+#
+# It shares no code with the node, so it runs only when its own inputs change.
+
+on:
+  push:
+    branches: ["master", "dev", "stage"]
+    paths:
+      - "minimal-sdk/**"
+      - ".github/workflows/minimal-sdk.yaml"
+  pull_request:
+    branches: ["master", "dev", "stage"]
+    paths:
+      - "minimal-sdk/**"
+      - ".github/workflows/minimal-sdk.yaml"
+  workflow_dispatch:
+
+# A newer push to the same ref makes an in-flight run obsolete.
+concurrency:
+  group: minimal-sdk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    name: Build, lint and test the minimal-sdk workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: minimal-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `version`: the action reads `packageManager` from
+      # minimal-sdk/package.json, so CI uses the same pnpm that wrote the lockfile.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: minimal-sdk/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # minimal-sdk/package.json engines and the gateway README require 20+.
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: minimal-sdk/pnpm-lock.yaml
+
+      # --frozen-lockfile so a dependency change that was not committed to the
+      # lockfile fails here rather than silently resolving to something else.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Lint and format check
+        run: pnpm lint
+
+      - name: Unit tests
+        run: pnpm test

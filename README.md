@@ -64,6 +64,10 @@ docker build -t rgb-lightning-node .
 See [UniFFI SDK documentation](src/uniffi_api/README.md) for setup, runtime
 model, binding generation, test commands, and artifact packaging details.
 
+Native mobile clients are no longer built here: the Android SDK lives in its own
+`rgb-sdk-kotlin-light` repository with its own signing core, and talks to
+[`minimal-sdk/packages/gateway`](minimal-sdk/packages/gateway/README.md) over REST.
+
 ## AI code review
 The repository supports AI-assisted pull request reviews.
 Setup details for Claude, Codex, and extendable provider onboarding are documented in

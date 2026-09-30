@@ -1,0 +1,58 @@
+{
+  "generatedBy": "scripts/generate-rgblib-fixtures.mjs (@utexo/rgb-lib 0.3.0-beta.18)",
+  "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "otherMnemonic": "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
+  "networks": {
+    "Regtest": {
+      "xpub": "tpubD6NzVbkrYhZ4XYa9MoLt4BiMZ4gkt2faZ4BcmKu2a9te4LDpQmvEz2L2yDERivHxFPnxXXhqDRkUNnQCpZggCyEZLBktV7VaSmwayqMJy1s",
+      "accountXpubVanilla": "tpubDDfvzhdVV4unsoKt5aE6dcsNsfeWbTgmLZPi8LQDYU2xixrYemMfWJ3BaVneH3u7DBQePdTwhpybaKRU95pi6PMUtLPBJLVQRpzEnjfjZzX",
+      "accountXpubColored": "tpubDCtpoJs6YJcjLnr9gq6jYriYNMuWEu8mSDvEQU5st3ZkJbFqqzwpHUiPvxqD2366ciFAfpehk1k2d7Tyk7AJEr8uZva7KfnX4RpsiVSoEcZ",
+      "masterFingerprint": "73c5da0a"
+    },
+    "Testnet": {
+      "xpub": "tpubD6NzVbkrYhZ4XYa9MoLt4BiMZ4gkt2faZ4BcmKu2a9te4LDpQmvEz2L2yDERivHxFPnxXXhqDRkUNnQCpZggCyEZLBktV7VaSmwayqMJy1s",
+      "accountXpubVanilla": "tpubDDfvzhdVV4unsoKt5aE6dcsNsfeWbTgmLZPi8LQDYU2xixrYemMfWJ3BaVneH3u7DBQePdTwhpybaKRU95pi6PMUtLPBJLVQRpzEnjfjZzX",
+      "accountXpubColored": "tpubDCtpoJs6YJcjLnr9gq6jYriYNMuWEu8mSDvEQU5st3ZkJbFqqzwpHUiPvxqD2366ciFAfpehk1k2d7Tyk7AJEr8uZva7KfnX4RpsiVSoEcZ",
+      "masterFingerprint": "73c5da0a"
+    },
+    "Signet": {
+      "xpub": "tpubD6NzVbkrYhZ4XYa9MoLt4BiMZ4gkt2faZ4BcmKu2a9te4LDpQmvEz2L2yDERivHxFPnxXXhqDRkUNnQCpZggCyEZLBktV7VaSmwayqMJy1s",
+      "accountXpubVanilla": "tpubDDfvzhdVV4unsoKt5aE6dcsNsfeWbTgmLZPi8LQDYU2xixrYemMfWJ3BaVneH3u7DBQePdTwhpybaKRU95pi6PMUtLPBJLVQRpzEnjfjZzX",
+      "accountXpubColored": "tpubDCtpoJs6YJcjLnr9gq6jYriYNMuWEu8mSDvEQU5st3ZkJbFqqzwpHUiPvxqD2366ciFAfpehk1k2d7Tyk7AJEr8uZva7KfnX4RpsiVSoEcZ",
+      "masterFingerprint": "73c5da0a"
+    },
+    "Mainnet": {
+      "xpub": "xpub661MyMwAqRbcFkPHucMnrGNzDwb6teAX1RbKQmqtEF8kK3Z7LZ59qafCjB9eCRLiTVG3uxBxgKvRgbubRhqSKXnGGb1aoaqLrpMBDrVxga8",
+      "accountXpubVanilla": "xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ",
+      "accountXpubColored": "xpub6CP2DfFuXBYGQsbdgnDhN42ceF42pSPRm6o8SsWXv2kRxNR1xvYBbhTwKWEzYMPtRGCfmGWm3jbUYhre1Fk8bR1SA35RP18o2sHSM7LE17L",
+      "masterFingerprint": "73c5da0a"
+    }
+  },
+  "regtest": {
+    "vanillaAddresses": [
+      "bcrt1p8wpt9v4frpf3tkn0srd97pksgsxc5hs52lafxwru9kgeephvs7rqjeprhg",
+      "bcrt1p90h6z3p36n9hrzy7580h5l429uwchyg8uc9sz4jwzhdtuhqdl5eqkcyx0f",
+      "bcrt1p40qqa84kpphe5vtcwd8zv7v6w7p62cmupf6f60mf8pxdkcv2455qgtw98j",
+      "bcrt1p5z45vylh6vue39806mze8wl7z360ynn0uhxd8cnr5p4swe6n5gts4pf74z",
+      "bcrt1p759ss4nwlk93nmljrpp24mqdtcc5e4f6u3nyteq2577m68ryas0qzc3amn"
+    ],
+    "coloredAddresses": [
+      "bcrt1pame6a0kt2n84z0a9ayz3g8de3ehgc6alm34tzca5ea8yuknwjuaqzxjx7j",
+      "bcrt1pucnkkqp50ll47err5ljaqms6qxktkeveysfx7zjy4s3kgf4f20nsfpw2g4",
+      "bcrt1puxtnfghd9px7wmvg0f4yhsv0zua3x7z8pgxw5jh82mx8h744qmpql000vs",
+      "bcrt1pzjseymhunwkuz2t4mevh4keufjg9mchsz83evvvxyvvydsurulqqfa59qk",
+      "bcrt1px5x33scxkhgnjg4ldrwry62dsk3h07jtzl7n3kzf34s825pvhxks54ve2p"
+    ]
+  },
+  "signing": {
+    "unsignedPsbt": "cHNidP8BAJkCAAAAASsaD56NfGtaTz4tHAuaj35tXEs+LRoPfGtOnYofPCteAQAAAAD/////A0CcAAAAAAAAIlEgp/BL/9hgrX1ypZEVNU9TJaLCAdEzLQBFn5DYK/Qg1bV45gAAAAAAACJRICvvoUQx1MtxiJ6h33p+qi8di5EH5gsBVk4V2r5cDf0yAAAAAAAAAAAHagUBAgMEBQAAAAAAAQEroIYBAAAAAAAiUSA7grKyqRhTFdpvgNpfBtBEDYpeFFf6kzh8LZGchuyHhiEWVTVcqDyXPx2Xzg44Q8hdeJBa8WtNxTG8SI5XIS0jARYZAHPF2gpWAACAAQAAgAAAAIAAAAAAAAAAAAEXIFU1XKg8lz8dl84OOEPIXXiQWvFrTcUxvEiOVyEtIwEWAAABBSAwWGefbWC4fvkh2Yoqmh8eB3na4nvtvRzbLxR6B4NaySEHMFhnn21guH75IdmKKpofHgd52uJ77b0c2y8UegeDWskZAHPF2gpWAACAAQAAgAAAAIAAAAAAAQAAAAAA",
+    "signedPsbt": "cHNidP8BAJkCAAAAASsaD56NfGtaTz4tHAuaj35tXEs+LRoPfGtOnYofPCteAQAAAAD/////A0CcAAAAAAAAIlEgp/BL/9hgrX1ypZEVNU9TJaLCAdEzLQBFn5DYK/Qg1bV45gAAAAAAACJRICvvoUQx1MtxiJ6h33p+qi8di5EH5gsBVk4V2r5cDf0yAAAAAAAAAAAHagUBAgMEBQAAAAAAAQEroIYBAAAAAAAiUSA7grKyqRhTFdpvgNpfBtBEDYpeFFf6kzh8LZGchuyHhgEIQgFA3Y6QnOK1brnmVDgx8z9SBeO6YK5zJPMAGjO5GlTzNgzJ+uueMei42KYHATBBOU9pCUzFrE5lU8piqVI1+6QrvwAAAQUgMFhnn21guH75IdmKKpofHgd52uJ77b0c2y8UegeDWskAAA==",
+    "txid": "ae72cb6b290010a54273798811c8b7d3f727f794c65e861ae73336689fff6a8f",
+    "witnessSignature": "dd8e909ce2b56eb9e6543831f33f5205e3ba60ae7324f3001a33b91a54f3360cc9faeb9e31e8b8d8a607013041394f69094cc5ac4e6553ca62a95235fba42bbf"
+  },
+  "witnessReceive": {
+    "invoice": "rgb:~/~/~/bcrt:wvout:Be7zrr7L-VM9RP6X-pBRQduY-5ujGu~3-GqxY7TP-Tk5abpc-6cGRkrQ?expiry=2000000000&endpoints=rpc://localhost:3000/json-rpc",
+    "recipientId": "bcrt:wvout:Be7zrr7L-VM9RP6X-pBRQduY-5ujGu~3-GqxY7TP-Tk5abpc-6cGRkrQ",
+    "expirationTimestamp": 2000000000
+  }
+}

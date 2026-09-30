@@ -1,0 +1,33 @@
+{
+  "name": "@utexo/minimal-sdk-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "e2e": "pnpm -r run build && pnpm --filter @utexo/minimal-e2e run e2e",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write ."
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@utexo/rgb-lib-darwin-arm64",
+      "@utexo/rgb-lib-linux-arm64",
+      "@utexo/rgb-lib-linux-x64",
+      "better-sqlite3"
+    ]
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "eslint": "^9.39.0",
+    "eslint-config-prettier": "^10.1.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^3.2.0"
+  }
+}
