@@ -20,12 +20,21 @@ export interface GatewayConfig {
   /** Gateway-owned directory holding one watch-only wallet data-dir per user. */
   walletsDir: string;
   /**
-   * Indexer URL passed to rgb-lib goOnline (electrum host:port — the variant
-   * verified in Preflight A; the shipped rgb-lib build has no esplora feature).
+   * Indexer URL passed to rgb-lib `goOnline`. Either an Electrum server
+   * (`host:port`, `ssl://host:port`) or an esplora REST base URL
+   * (`https://…`) — the published rgb-lib native module is built with BOTH the
+   * `electrum` and `esplora` features, and rgb-lib picks the client by probing
+   * Electrum first and falling back to esplora.
+   *
+   * They are NOT equivalent. rgb-lib's Electrum resolver additionally requires
+   * verbose-transaction support and, on the default signet, the presence of a
+   * specific probe transaction; its esplora resolver checks only the genesis
+   * hash. So a Blockstream/mempool `electrs` is rejected over its Electrum port
+   * but works over its esplora REST port. See the README's indexer section.
    */
   walletIndexerUrl: string;
   /** rgb-lib BitcoinNetwork for user wallets. */
-  bitcoinNetwork: 'Mainnet' | 'Testnet' | 'Signet' | 'Regtest';
+  bitcoinNetwork: 'Mainnet' | 'Testnet' | 'Testnet4' | 'Signet' | 'SignetCustom' | 'Regtest';
   /** LRU capacity of the open-wallet pool. */
   walletMaxOpen: number;
   /** Seconds an unsigned prepare-step PSBT stays completable before expiring. */
@@ -113,7 +122,22 @@ function intWithDefault(
   return value;
 }
 
-const BITCOIN_NETWORKS = ['Mainnet', 'Testnet', 'Signet', 'Regtest'] as const;
+/**
+ * Every rgb-lib `BitcoinNetwork` variant (src/utils.rs). `Signet` means Bitcoin's
+ * DEFAULT signet; a signet with its own challenge is `SignetCustom` and is a
+ * different chain to RGB, even though every signet shares the same genesis block
+ * hash. Telling the gateway `Signet` for a custom signet fails at first wallet
+ * use with an `InvalidIndexer`/"resolver is for another chain-network pair" that
+ * names neither the network nor the fix, so the option has to exist here.
+ */
+const BITCOIN_NETWORKS = [
+  'Mainnet',
+  'Testnet',
+  'Testnet4',
+  'Signet',
+  'SignetCustom',
+  'Regtest',
+] as const;
 
 function bitcoinNetwork(
   env: Record<string, string | undefined>,

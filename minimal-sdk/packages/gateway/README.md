@@ -249,7 +249,7 @@ Optional (default in parentheses):
 | `GATEWAY_HOST` (`127.0.0.1`)                     | Interface the gateway listens on.                                                                                                                                                                                                                    |
 | `GATEWAY_PORT` (`8480`)                          | Gateway HTTP port.                                                                                                                                                                                                                                   |
 | `RLN_ADMIN_TOKEN` (empty)                        | Biscuit admin token; empty when RLN runs with `--disable-authentication` on localhost. Never logged, never echoed (I4).                                                                                                                              |
-| `GATEWAY_BITCOIN_NETWORK` (`Regtest`)            | rgb-lib network for user wallets: `Mainnet`, `Testnet`, `Signet`, `Regtest`.                                                                                                                                                                         |
+| `GATEWAY_BITCOIN_NETWORK` (`Regtest`)            | rgb-lib network for user wallets: `Mainnet`, `Testnet`, `Testnet4`, `Signet`, `SignetCustom`, `Regtest`. **`Signet` means Bitcoin's _default_ signet** — see the indexer note below.                                                                 |
 | `GATEWAY_WALLET_MAX_OPEN` (`32`)                 | LRU capacity of the open-wallet pool.                                                                                                                                                                                                                |
 | `GATEWAY_ONCHAIN_OP_TTL_SECONDS` (`600`)         | Seconds an unsigned prepare-step PSBT stays completable before expiring.                                                                                                                                                                             |
 | `GATEWAY_FLOAT_CAP_PER_USER_MSAT` (`1000000000`) | Per-user ceiling on the custodial LN float.                                                                                                                                                                                                          |
@@ -283,6 +283,59 @@ one payment credit several users' ledgers. The gateway refuses such an intent wi
 `DEPOSIT_ADDRESS_CONFLICT` — seeing that code means RLN is misconfigured. RGB deposit
 intents are held to the same rule on the `recipient_id` the node blinds for them, for
 the same reason (the watcher attributes RGB by recipient id).
+
+## Indexer requirements
+
+`GATEWAY_WALLET_INDEXER_URL` accepts **either** an Electrum server (`host:port`,
+`ssl://host:port`) **or** an esplora REST base URL (`https://…`). The published rgb-lib
+native module carries both the `electrum` and `esplora` features, and rgb-lib picks the
+client by probing Electrum first and falling back to esplora.
+
+The two are not equivalent, and esplora is the more forgiving:
+
+|                                                        | Electrum resolver | esplora resolver |
+| ------------------------------------------------------ | ----------------- | ---------------- |
+| genesis hash matches the configured network            | required          | required         |
+| a known probe transaction exists (default signet only) | required          | —                |
+| verbose transactions supported                         | required          | —                |
+
+So Blockstream/mempool `electrs` — the binary behind the esplora REST API — is **rejected
+over its Electrum port** (`verbose transactions are currently unsupported`) while working
+fine over its **esplora REST port**. Pointing this variable at the same esplora URL as
+`ESPLORA_URL` is a valid and usually simpler deployment; a full Electrum server
+(romanz/electrs, Fulcrum) is the alternative.
+
+### `Signet` vs `SignetCustom`
+
+`GATEWAY_BITCOIN_NETWORK=Signet` means Bitcoin's **default, public** signet. A signet
+running its own challenge is `SignetCustom`. Every signet shares the same genesis block
+hash, so the indexer check alone will NOT catch the difference when using esplora — but
+the two are distinct chains to RGB and they tag invoices differently: `sb` for `Signet`,
+`sbc` for `SignetCustom`. Getting this wrong yields a wallet that opens cleanly and then
+produces RGB invoices no counterparty on the real chain will accept. Match whatever RLN
+is running (`--network signetcustom`).
+
+### Diagnosing a failed `POST /v1/wallet/xpubs`
+
+Both mistakes surface as a wallet-open failure that names neither the variable nor the
+fix:
+
+```
+RgbLib(InvalidIndexer { details: "resolver is for another chain-network pair" })
+RgbLib(InvalidIndexer { details: "... verbose transactions are unsupported ..." })
+```
+
+If that route fails on a fresh deployment while every other route works, check these two
+first. Two commands settle it:
+
+```sh
+# 1. Electrum URL only: does it support verbose transactions?
+#    (result = usable, error = use the esplora URL instead, or a full Electrum server)
+printf '{"jsonrpc":"2.0","id":1,"method":"blockchain.transaction.get","params":["<a txid on your chain>",true]}\n' | nc <host> <port>
+
+# 2. Is this the DEFAULT signet? (404 = custom signet, so use SignetCustom)
+curl -s -o /dev/null -w '%{http_code}\n' "$ESPLORA_URL/tx/8153034f45e695453250a8fb7225a5e545144071d8ed7b0d3211efa1f3c92ad8"
+```
 
 ## Float-cap tuning
 

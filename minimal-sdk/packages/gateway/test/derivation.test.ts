@@ -129,6 +129,20 @@ describe('attributeVanillaAddress', () => {
     });
   });
 
+  it('treats both signet variants like every other non-mainnet chain', () => {
+    // SignetCustom differs from Signet only in which chain RGB thinks it is; the
+    // address encoding and the vanilla coin type (1) are identical, so
+    // attribution must work the same for both.
+    const expected = derive(VANILLA_TPUB, VANILLA_KEYCHAIN, 0, TESTNET_ADDRESS);
+    for (const network of ['Signet', 'SignetCustom', 'Testnet4'] as const) {
+      expect(attributeVanillaAddress(VANILLA_TPUB, network, expected.address, 5)).toMatchObject({
+        index: 0,
+        derivationPath: "m/86'/1'/0'/0/0",
+        scriptHex: expected.scriptHex,
+      });
+    }
+  });
+
   it('exposes a scan window wide enough to be useful', () => {
     expect(ATTRIBUTION_WINDOW).toBeGreaterThanOrEqual(100);
   });

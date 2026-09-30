@@ -95,4 +95,21 @@ describe('loadConfig', () => {
     delete (env as Record<string, string | undefined>)['RLN_ADMIN_TOKEN'];
     expect(loadConfig(env).rlnAdminToken).toBe('');
   });
+
+  it('accepts every rgb-lib network, including the two signet variants', () => {
+    // `Signet` is Bitcoin's DEFAULT signet. A signet with its own challenge is a
+    // different chain to RGB even though every signet shares one genesis block
+    // hash, so a deployment on a custom signet MUST be able to say so — telling
+    // it `Signet` fails at first wallet use with an opaque "resolver is for
+    // another chain-network pair".
+    for (const network of ['Mainnet', 'Testnet', 'Testnet4', 'Signet', 'SignetCustom', 'Regtest']) {
+      const config = loadConfig(testEnv({ GATEWAY_BITCOIN_NETWORK: network }));
+      expect(config.bitcoinNetwork).toBe(network);
+    }
+    // Case-insensitive, as before.
+    expect(loadConfig(testEnv({ GATEWAY_BITCOIN_NETWORK: 'signetcustom' })).bitcoinNetwork).toBe(
+      'SignetCustom',
+    );
+    expect(() => loadConfig(testEnv({ GATEWAY_BITCOIN_NETWORK: 'Liquid' }))).toThrow(ConfigError);
+  });
 });
