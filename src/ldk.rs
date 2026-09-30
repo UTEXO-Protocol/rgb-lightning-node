@@ -4046,7 +4046,7 @@ impl RgbOutputSpender {
                 .map_err(|()| s!("cannot spend vanilla spendable outputs"));
         }
 
-let (psbt, _expected_max_weight) =
+        let (psbt, _expected_max_weight) =
             SpendableOutputDescriptor::create_spendable_outputs_psbt(
                 secp_ctx,
                 descriptors,
@@ -6493,7 +6493,7 @@ async fn start_lightning(
     let unlocked_state = Arc::new(LightningState {
         common: Arc::clone(&common),
         channel_manager: Arc::clone(&channel_manager),
-gossip_source: Arc::clone(&gossip_source),
+        gossip_source: Arc::clone(&gossip_source),
         fee_estimator: Arc::clone(&fee_estimator),
         inbound_payments,
         network_graph,

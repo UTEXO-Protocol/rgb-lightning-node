@@ -14,6 +14,7 @@ use lightning::routing::router::{
 };
 use lightning::sign::NodeSigner;
 use lightning::{
+    chain::chaininterface::ConfirmationTarget,
     onion_message::packet::OnionMessageContents,
     types::payment::{PaymentHash, PaymentPreimage},
     util::persist::KVStoreSync,
@@ -219,7 +220,7 @@ pub(crate) struct CommonState {
 pub(crate) struct LightningState {
     pub(crate) common: Arc<CommonState>,
     pub(crate) channel_manager: Arc<ChannelManager>,
-pub(crate) gossip_source: Arc<crate::gossip::GossipSource>,
+    pub(crate) gossip_source: Arc<crate::gossip::GossipSource>,
     pub(crate) fee_estimator: Arc<DynFeeEstimator>,
     pub(crate) inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
     pub(crate) network_graph: Arc<NetworkGraph>,
@@ -325,6 +326,21 @@ impl LightningState {
             params.address_sig = Some(address_sig);
         }
         Ok(params)
+    }
+
+    // Resolves the per-vByte fee a spend API should use: the caller's explicit rate wins,
+    // and an absent or 0 value falls back to the output-spending tier (1 sat/vB = 250 sat/kWu),
+    // the same tier that prices channel funding.
+    pub(crate) fn resolve_fee_sat_per_vb(&self, requested: Option<u64>) -> u64 {
+        match requested {
+            Some(fee_rate) if fee_rate > 0 => fee_rate,
+            _ => {
+                self.fee_estimator
+                    .get_est_sat_per_1000_weight(ConfirmationTarget::OutputSpendingFee)
+                    as u64
+                    / 250
+            }
+        }
     }
 
     pub(crate) fn get_inbound_payments(&self) -> MutexGuard<'_, InboundPaymentInfoStorage> {
