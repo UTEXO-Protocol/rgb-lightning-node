@@ -39,5 +39,8 @@ jobs:
         with:
           toolchain: ${{matrix.toolchain}}
           rustflags: ""
+      - name: Verify C-FFI lockfile
+        if: matrix.name == 'linux' && matrix.toolchain == '1.94.0'
+        run: cargo metadata --locked --manifest-path bindings/c-ffi/Cargo.toml --format-version 1 > /dev/null
       - name: Build
         run: cargo build --release --features "uniffi,vls,vss"
