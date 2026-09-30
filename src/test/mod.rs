@@ -3479,6 +3479,7 @@ mod colored_channel_electrum;
 mod concurrent_btc_payments;
 mod concurrent_openchannel;
 mod drop_funding_signed;
+mod dynamic_fee;
 #[cfg(all(feature = "transaction-sync", feature = "electrum"))]
 mod electrum_opret_confirm;
 mod esplora_indexer_defaults;
