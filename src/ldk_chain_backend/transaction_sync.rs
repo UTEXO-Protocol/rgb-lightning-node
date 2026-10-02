@@ -537,9 +537,11 @@ fn poll_esplora_fee_estimates(
                     );
                 }
                 Ok(Err(e)) => {
-                    log_warn!(logger, "Error getting fee estimate from esplora: {}", e)
+                    log_warn!(logger, "Error getting fee estimate from esplora: {}", e);
                 }
-                Err(e) => log_warn!(logger, "Error polling esplora fee estimates: {}", e),
+                Err(e) => {
+                    log_warn!(logger, "Error polling esplora fee estimates: {}", e);
+                }
             }
 
             tokio::time::sleep(Duration::from_secs(refresh_interval_secs)).await;
