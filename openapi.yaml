@@ -4510,6 +4510,7 @@ components:
         - Send
         - Inflation
         - Burn
+        - Link
     TransferStatus:
       type: string
       enum:
