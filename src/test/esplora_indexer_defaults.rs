@@ -1,10 +1,10 @@
-#[cfg(feature = "esplora")]
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
 use std::collections::BTreeMap;
 
 use lightning::chain::chaininterface::ConfirmationTarget;
 
 use crate::ldk_chain_backend::default_fee_buckets;
-#[cfg(feature = "esplora")]
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
 use crate::ldk_chain_backend::transaction_sync::{
     estimate_fee_rate_sat_per_kw, interpolate_fee_rate,
 };
@@ -29,7 +29,7 @@ fn default_fee_buckets_populates_all_targets() {
     }
 }
 
-#[cfg(feature = "esplora")]
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
 #[test]
 fn interpolation_handles_exact_match() {
     let mut m = BTreeMap::new();
@@ -37,7 +37,7 @@ fn interpolation_handles_exact_match() {
     assert_eq!(interpolate_fee_rate(&m, 6), Some(12.0));
 }
 
-#[cfg(feature = "esplora")]
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
 #[test]
 fn interpolation_linearly_interpolates_between_buckets() {
     let mut m = BTreeMap::new();
@@ -47,7 +47,7 @@ fn interpolation_linearly_interpolates_between_buckets() {
     assert!((v - 60.0).abs() < 0.001, "got {v}");
 }
 
-#[cfg(feature = "esplora")]
+#[cfg(all(feature = "esplora", feature = "transaction-sync"))]
 #[test]
 fn interpolation_falls_back_to_default_when_empty() {
     let m: BTreeMap<u16, f64> = BTreeMap::new();
