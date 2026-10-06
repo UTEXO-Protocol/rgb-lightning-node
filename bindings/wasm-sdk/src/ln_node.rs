@@ -428,6 +428,7 @@ pub struct RlnWasmNode {
     lightning: Rc<RefCell<Option<Rc<NodeLightningRuntime>>>>,
     live_node_seed: [u8; 32],
     auto_hooks_installed: Cell<bool>,
+    runtime_views_restored: Cell<bool>,
     peers: Rc<RefCell<HashMap<String, PeerEntry>>>,
     channels: Rc<RefCell<HashMap<String, ChannelEntry>>>,
     payments: Rc<RefCell<HashMap<String, PaymentEntry>>>,
@@ -531,7 +532,31 @@ impl RlnWasmNode {
             *self.configured_network.borrow_mut() = resolved.to_string();
             *self.network.borrow_mut() = resolved.to_string();
         }
+        self.restore_runtime_views();
         Ok(())
+    }
+
+    fn restore_runtime_views(&self) {
+        if self.runtime_views_restored.replace(true) {
+            return;
+        }
+        // Cold/mainnet construction must not consume deferred Lightning hydration. Restore
+        // each handle's views only after a supported network has been selected.
+        if let Some(snapshot) =
+            load_runtime_event_log_snapshot(&self.persistence_keys.runtime_events_storage_key)
+        {
+            *self.runtime_events.borrow_mut() = snapshot.events;
+            *self.next_runtime_event_seq.borrow_mut() = snapshot.next_seq;
+        }
+        if let Some(snapshot) = load_runtime_rgb_ln_transfer_snapshot(
+            &self.persistence_keys.rgb_ln_transfers_storage_key,
+        ) {
+            *self.rgb_ln_transfers.borrow_mut() = snapshot
+                .transfers
+                .into_iter()
+                .map(|entry| (entry.payment_hash.clone(), entry))
+                .collect();
+        }
     }
 
     fn ensure_runtime_ready(&self) -> Result<(), JsValue> {
@@ -650,9 +675,6 @@ impl RlnWasmNode {
         let network_label = network
             .map(|n| rgb_network_label(n.as_rgb()))
             .unwrap_or("unknown");
-        if network_label == "mainnet" {
-            crate::runtime_store::check_mainnet_runtime_state(&persistence_keys)?;
-        }
         let live_node_seed =
             derive_node_signing_identity(&proxy_url, normalized_runtime_id.as_deref())?
                 .0
@@ -675,9 +697,6 @@ impl RlnWasmNode {
                     ));
                 }
                 let previous = scope.network.borrow().clone();
-                if previous == "mainnet" && network_label == "unknown" {
-                    crate::runtime_store::check_mainnet_runtime_state(&persistence_keys)?;
-                }
                 if previous != "unknown" && network_label != "unknown" && previous != network_label
                 {
                     return Err(JsValue::from_str(
@@ -714,28 +733,6 @@ impl RlnWasmNode {
             } else {
                 None
             };
-        let runtime_event_snapshot =
-            load_runtime_event_log_snapshot(&persistence_keys.runtime_events_storage_key);
-        let runtime_events = runtime_event_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.events.clone())
-            .unwrap_or_default();
-        let next_runtime_event_seq = runtime_event_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.next_seq)
-            .unwrap_or(0);
-        let rgb_ln_transfer_snapshot =
-            load_runtime_rgb_ln_transfer_snapshot(&persistence_keys.rgb_ln_transfers_storage_key);
-        let rgb_ln_transfers = rgb_ln_transfer_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                snapshot
-                    .transfers
-                    .iter()
-                    .map(|entry| (entry.payment_hash.clone(), entry.clone()))
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
         let restored_network = runtime_scope.network.borrow().clone();
         let node = Self {
             lightning: Rc::clone(&runtime_scope.lightning),
@@ -744,6 +741,7 @@ impl RlnWasmNode {
             runtime_scope,
             live_node_seed,
             auto_hooks_installed: Cell::new(false),
+            runtime_views_restored: Cell::new(false),
             proxy_url,
             node_runtime_id: normalized_runtime_id,
             persistence_keys,
@@ -752,12 +750,12 @@ impl RlnWasmNode {
             channels: Rc::new(RefCell::new(HashMap::new())),
             payments: Rc::new(RefCell::new(HashMap::new())),
             pending_peer_hook_events: Rc::new(RefCell::new(Vec::new())),
-            runtime_events: Rc::new(RefCell::new(runtime_events)),
-            rgb_ln_transfers: Rc::new(RefCell::new(rgb_ln_transfers)),
+            runtime_events: Rc::new(RefCell::new(Vec::new())),
+            rgb_ln_transfers: Rc::new(RefCell::new(HashMap::new())),
             next_channel_seq: RefCell::new(0),
             next_payment_seq: RefCell::new(0),
             node_instance_nonce: Self::next_node_instance_nonce(),
-            next_runtime_event_seq: Rc::new(RefCell::new(next_runtime_event_seq)),
+            next_runtime_event_seq: Rc::new(RefCell::new(0)),
             network: RefCell::new(restored_network),
             wallet: RefCell::new(None),
             relay_session_auth: RefCell::new(None),
@@ -847,9 +845,6 @@ impl RlnWasmNode {
             return Err(JsValue::from_str(
                 "runtime scope already uses a different wallet identity",
             ));
-        }
-        if wallet_label == "mainnet" {
-            crate::runtime_store::check_mainnet_runtime_state(&self.persistence_keys)?;
         }
         // All validation precedes policy, wallet and global registry changes.
         *self.configured_network.borrow_mut() = wallet_label.to_string();
@@ -2206,6 +2201,12 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = listRuntimeEventsValue)]
     pub fn list_runtime_events_value(&self) -> Result<JsValue, JsValue> {
+        if !matches!(
+            self.configured_network.borrow().as_str(),
+            "unknown" | "mainnet"
+        ) {
+            self.restore_runtime_views();
+        }
         let mut events = self.runtime_events.borrow().clone();
         events.sort_by(|a, b| a.seq.cmp(&b.seq));
         crate::js_obj(&events)

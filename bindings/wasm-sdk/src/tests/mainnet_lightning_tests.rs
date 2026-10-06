@@ -319,7 +319,7 @@ async fn mainnet_wallet_remains_available_and_adopted_network_restricts_lightnin
 }
 
 #[wasm_bindgen_test(async)]
-async fn mainnet_refuses_saved_running_chain_state_without_resuming_or_changing_it() {
+async fn mainnet_preserves_saved_running_chain_state_without_resuming_it() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
     crate::runtime_store::preload_runtime_state_from_persistent_store()
         .await
@@ -337,11 +337,9 @@ async fn mainnet_refuses_saved_running_chain_state_without_resuming_or_changing_
         runtime_id.to_string(),
         "mainnet".to_string(),
     );
-    let error = result.err().expect("protected saved state must refuse");
-    assert!(error
-        .as_string()
-        .unwrap()
-        .starts_with("MainnetLightningState:"));
+    let node = result.expect("mainnet accepts inactive historical state");
+    assert!(node.lightning.borrow().is_none());
+    drop(node);
     assert_eq!(
         storage
             .get_item(&keys.chain_sync_storage_key)
@@ -556,37 +554,23 @@ async fn mainnet_constructor_and_shared_calls_never_enter_lightning_factories() 
 }
 
 #[wasm_bindgen_test(async)]
-async fn mainnet_preload_is_required_before_constructor_or_adoption_mutates_scope() {
+async fn mainnet_constructor_and_adoption_need_no_lightning_preload() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
     let wallet = mainnet_wallet().await;
     crate::runtime_store::reset_preload_readiness_for_tests();
     let before = test_utils::startup_calls();
     let bare = RlnWasmNode::new("ws://mainnet-preload-adoption.invalid".into()).unwrap();
-    assert!(bare
-        .attach_wallet(&wallet)
-        .unwrap_err()
-        .as_string()
-        .unwrap()
-        .contains("preloadPersistentRuntimeState"));
-    assert_eq!(bare.configured_network.borrow().as_str(), "unknown");
-    assert!(bare.wallet.borrow().is_none());
+    bare.attach_wallet(&wallet).unwrap();
+    assert_eq!(bare.configured_network.borrow().as_str(), "mainnet");
     assert!(bare.lightning.borrow().is_none());
-    let proxy = "ws://mainnet-preload.invalid".to_string();
-    let result =
-        RlnWasmNode::new_with_node_runtime_id(proxy.clone(), "preload".into(), "mainnet".into());
-    assert!(result
-        .err()
-        .unwrap()
-        .as_string()
-        .unwrap()
-        .contains("preloadPersistentRuntimeState"));
-    assert_eq!(test_utils::startup_calls(), before);
-    crate::runtime_store::preload_runtime_state_from_persistent_store()
-        .await
-        .unwrap();
-    let node =
-        RlnWasmNode::new_with_node_runtime_id(proxy, "preload".into(), "mainnet".into()).unwrap();
+    let node = RlnWasmNode::new_with_node_runtime_id(
+        "ws://mainnet-no-preload.invalid".into(),
+        "no-preload".into(),
+        "mainnet".into(),
+    )
+    .unwrap();
     assert!(node.lightning.borrow().is_none());
+    assert_eq!(test_utils::startup_calls(), before);
 }
 
 #[wasm_bindgen_test(async)]
@@ -627,7 +611,7 @@ async fn mainnet_unknown_scope_adoption_and_failed_vss_setup_stay_cold() {
 }
 
 #[wasm_bindgen_test(async)]
-async fn mainnet_legacy_protected_namespaces_refuse_without_modification() {
+async fn mainnet_legacy_protected_namespaces_remain_inactive_and_unchanged() {
     crate::test_utils::reset_wasm_runtime_state_for_tests();
     crate::runtime_store::preload_runtime_state_from_persistent_store()
         .await
@@ -654,23 +638,17 @@ async fn mainnet_legacy_protected_namespaces_refuse_without_modification() {
             .unwrap();
         let result =
             RlnWasmNode::new_with_node_runtime_id(proxy.into(), id.into(), "mainnet".into());
-        assert!(result
-            .err()
-            .unwrap()
-            .as_string()
-            .unwrap()
-            .starts_with("MainnetLightningState:"));
+        let node = result.expect("legacy bytes do not prevent mainnet construction");
+        assert!(node.lightning.borrow().is_none());
+        drop(node);
         assert_eq!(
             storage.get_item(&key).unwrap().as_deref(),
             Some("unknown-or-corrupt-legacy-state")
         );
         let inherited = RlnWasmNode::new_with_runtime_id_opt(proxy.into(), Some(id.into()), None);
-        assert!(inherited
-            .err()
-            .unwrap()
-            .as_string()
-            .unwrap()
-            .starts_with("MainnetLightningState:"));
+        let inherited = inherited.expect("compatible mainnet handle");
+        assert!(inherited.lightning.borrow().is_none());
+        drop(inherited);
         storage.remove_item(&key).unwrap();
     }
     assert_eq!(test_utils::startup_calls(), before);

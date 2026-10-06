@@ -30,240 +30,306 @@ mod browser {
     use super::super::*;
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    fn scope(name: &str) -> crate::wasm_node_persistence::RuntimeScopeKeys {
-        crate::wasm_node_persistence::RuntimeScopeKeys::from_runtime_scope_key(format!(
-            "ws://runtime-inventory-{name}.invalid#runtime:identity"
-        ))
-    }
-
-    fn snapshot_value(keys: &[&str]) -> JsValue {
-        let raw_keys = Array::new();
-        let entries = Array::new();
-        for key in keys {
-            raw_keys.push(&JsValue::from_str(key));
-            let pair = Array::new();
-            pair.push(&JsValue::from_str(key));
-            pair.push(&JsValue::from_str("preserved bytes"));
-            entries.push(&pair);
-        }
-        let value = js_sys::Object::new();
-        js_sys::Reflect::set(&value, &"keys".into(), &raw_keys).unwrap();
-        js_sys::Reflect::set(&value, &"entries".into(), &entries).unwrap();
-        js_sys::Reflect::set(&value, &"complete".into(), &JsValue::TRUE).unwrap();
-        value.into()
-    }
-
-    fn mainnet_error(keys: &crate::wasm_node_persistence::RuntimeScopeKeys) -> String {
-        check_mainnet_runtime_state(keys)
-            .unwrap_err()
-            .as_string()
-            .unwrap()
+    fn entries(values: &[(&str, &str)]) -> Vec<JsValue> {
+        values
+            .iter()
+            .map(|(key, value)| {
+                let pair = Array::new();
+                pair.push(&JsValue::from_str(key));
+                pair.push(&JsValue::from_str(value));
+                pair.into()
+            })
+            .collect()
     }
 
     #[wasm_bindgen_test(async)]
-    async fn mainnet_preflight_detects_durable_kv_and_sweeps_without_hydrating_them() {
-        let keys = scope("protected");
-        let protected = [
-            format!(
-                "rln:ldk-kv:{}:monitors:monitor_updates:pending",
-                keys.ldk_manager_registry_key
-            ),
-            format!("rln:wasm:ldk-sweeps:{}", keys.ldk_manager_registry_key),
-        ];
+    async fn preload_preserves_inactive_lightning_cache_and_durable_bytes() {
+        let key = "rln:wasm:chain-sync:node-runtime:preserved-upgrade";
         let storage = web_sys::window().unwrap().local_storage().unwrap().unwrap();
-        for key in &protected {
-            indexed_db_set_item(key, "preserve-remote-format-bytes")
-                .await
-                .unwrap();
+        indexed_db_set_item(key, "durable Lightning bytes")
+            .await
+            .unwrap();
+        storage
+            .set_item(key, "different local Lightning bytes")
+            .unwrap();
+        reset_preload_readiness_for_tests();
+        preload_runtime_state_from_persistent_store().await.unwrap();
+        let actual = storage.get_item(key).unwrap();
+        let durable = indexed_db_list_entries().await.unwrap();
+        storage.remove_item(key).unwrap();
+        indexed_db_delete_item(key).await.unwrap();
+        assert_eq!(actual.as_deref(), Some("different local Lightning bytes"));
+        assert!(durable.iter().any(|entry| {
+            let pair = Array::from(entry);
+            pair.get(0).as_string().as_deref() == Some(key)
+                && pair.get(1).as_string().as_deref() == Some("durable Lightning bytes")
+        }));
+    }
+
+    #[wasm_bindgen_test]
+    fn preload_defers_lightning_per_key_and_retains_common_best_effort_copy() {
+        reset_preload_readiness_for_tests();
+        let storage = web_sys::window().unwrap().local_storage().unwrap().unwrap();
+        let supported = "rln:wasm:runtime-events:supported-hydration";
+        let mainnet = "rln:wasm:runtime-events:mainnet-hydration";
+        let swap = "rln:wasm:swap-runtime:inactive-hydration";
+        let common = "rln:wasm:media:common-hydration";
+        for key in [supported, mainnet, swap] {
+            storage.set_item(key, "local").unwrap();
+        }
+        let mut copies = Vec::new();
+        finish_preload(
+            entries(&[
+                (supported, "durable"),
+                (mainnet, "durable"),
+                (swap, "durable"),
+                (common, "media"),
+            ]),
+            RUNTIME_STATE_HYDRATE_PREFIXES,
+            0,
+            |key, _| {
+                copies.push(key.to_string());
+                Err(JsValue::from_str("simulated quota error"))
+            },
+        );
+        assert_eq!(copies, [common]);
+        assert_eq!(
+            storage.get_item(supported).unwrap().as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            browser_persistent_state_store()
+                .get(supported)
+                .unwrap()
+                .as_deref(),
+            Some("durable")
+        );
+        assert_eq!(storage.get_item(mainnet).unwrap().as_deref(), Some("local"));
+        assert_eq!(storage.get_item(swap).unwrap().as_deref(), Some("local"));
+        storage.set_item(supported, "new local").unwrap();
+        assert_eq!(
+            browser_persistent_state_store()
+                .get(supported)
+                .unwrap()
+                .as_deref(),
+            Some("new local")
+        );
+        finish_preload(
+            entries(&[(supported, "obsolete")]),
+            RUNTIME_STATE_HYDRATE_PREFIXES,
+            0,
+            |_, _| panic!("one-shot preload"),
+        );
+        assert_eq!(
+            browser_persistent_state_store()
+                .get(supported)
+                .unwrap()
+                .as_deref(),
+            Some("new local")
+        );
+        for key in [supported, mainnet, swap] {
             storage.remove_item(key).unwrap();
         }
         reset_preload_readiness_for_tests();
-        preload_runtime_state_from_persistent_store().await.unwrap();
-        for key in &protected {
-            assert_eq!(storage.get_item(key).unwrap(), None);
-        }
-        assert!(mainnet_error(&keys).starts_with("MainnetLightningState:"));
-        let durable = indexed_db_list_entries().await.unwrap();
-        for key in &protected {
-            assert!(durable.entries.iter().any(|entry| {
-                let pair = Array::from(entry);
-                pair.get(0).as_string().as_ref() == Some(key)
-                    && pair.get(1).as_string().as_deref() == Some("preserve-remote-format-bytes")
-            }));
-            indexed_db_delete_item(key).await.unwrap();
-        }
-        check_mainnet_runtime_state(&keys).unwrap();
-    }
-
-    #[wasm_bindgen_test]
-    fn mainnet_preflight_uses_inventory_when_best_effort_copy_fails() {
-        let keys = scope("copy-error");
-        let protected = keys.chain_sync_storage_key.clone();
-        let allowed = "rln:wasm:media:mainnet-copy-error";
-        let value = snapshot_value(&[allowed, &protected]);
-        reset_preload_readiness_for_tests();
-        let mut attempted = Vec::new();
-        finish_preload(
-            parse_indexed_db_snapshot(&value),
-            RUNTIME_STATE_HYDRATE_PREFIXES,
-            false,
-            0,
-            |key, _| {
-                attempted.push(key.to_owned());
-                Err(JsValue::from_str("simulated quota failure"))
-            },
-        );
-        assert_eq!(attempted, [allowed.to_owned(), protected]);
-        assert!(RUNTIME_STATE_PRELOADED.with(|loaded| *loaded.borrow()));
-        assert!(mainnet_error(&keys).contains("protected browser runtime state"));
-
-        // Copy failures for unrelated data must not become a new Mainnet refusal.
-        reset_preload_readiness_for_tests();
-        finish_preload(
-            parse_indexed_db_snapshot(&snapshot_value(&[allowed])),
-            RUNTIME_STATE_HYDRATE_PREFIXES,
-            false,
-            0,
-            |_, _| Err(JsValue::from_str("simulated quota failure")),
-        );
-        check_mainnet_runtime_state(&keys).unwrap();
-    }
-
-    #[wasm_bindgen_test]
-    fn mainnet_preflight_rejects_malformed_or_incomplete_inventory() {
-        let keys = scope("invalid-inventory");
-        let missing = js_sys::Object::new().into();
-        let incomplete = snapshot_value(&[]);
-        js_sys::Reflect::set(&incomplete, &"complete".into(), &JsValue::FALSE).unwrap();
-        let mismatched_count = snapshot_value(&["valid-key"]);
-        js_sys::Reflect::set(&mismatched_count, &"entries".into(), &Array::new()).unwrap();
-        let non_string_key = snapshot_value(&["valid-key"]);
-        let raw_keys = Array::new();
-        raw_keys.push(&JsValue::from_f64(7.0));
-        js_sys::Reflect::set(&non_string_key, &"keys".into(), &raw_keys).unwrap();
-        let malformed_entry = snapshot_value(&["valid-key"]);
-        let entries = Array::new();
-        entries.push(&JsValue::NULL);
-        js_sys::Reflect::set(&malformed_entry, &"entries".into(), &entries).unwrap();
-        let inconsistent_key = snapshot_value(&["valid-key"]);
-        let raw_keys = Array::new();
-        raw_keys.push(&JsValue::from_str("different-key"));
-        js_sys::Reflect::set(&inconsistent_key, &"keys".into(), &raw_keys).unwrap();
-        for value in [
-            missing,
-            incomplete,
-            mismatched_count,
-            non_string_key,
-            malformed_entry,
-            inconsistent_key,
-        ] {
-            reset_preload_readiness_for_tests();
-            finish_preload(
-                parse_indexed_db_snapshot(&value),
-                RUNTIME_STATE_HYDRATE_PREFIXES,
-                false,
-                0,
-                |_, _| Ok(()),
-            );
-            assert!(RUNTIME_STATE_PRELOADED.with(|loaded| *loaded.borrow()));
-            assert!(mainnet_error(&keys).contains("incomplete durable browser state inventory"));
-        }
-        reset_preload_readiness_for_tests();
-        assert!(mainnet_error(&keys).contains("preloadPersistentRuntimeState"));
     }
 
     #[wasm_bindgen_test(async)]
-    async fn mainnet_inventory_tracks_successful_durable_writes_and_deletes() {
-        let keys = scope("mutations");
-        let key = format!("rln:ldk-kv:{}:manager", keys.ldk_manager_registry_key);
+    async fn deferred_hydration_never_resurrects_written_or_deleted_values() {
         reset_preload_readiness_for_tests();
-        preload_runtime_state_from_persistent_store().await.unwrap();
-        check_mainnet_runtime_state(&keys).unwrap();
-        indexed_db_set_durable(key.clone(), "new durable state".into())
-            .await
-            .unwrap();
-        assert!(mainnet_error(&keys).contains("protected browser runtime state"));
-        indexed_db_delete_item(&key).await.unwrap();
-        check_mainnet_runtime_state(&keys).unwrap();
-    }
-
-    #[wasm_bindgen_test(async)]
-    async fn mainnet_inventory_merges_mutations_during_overlapping_preloads() {
-        let keys = scope("concurrent-write");
-        let key = format!("rln:ldk-kv:{}:manager", keys.ldk_manager_registry_key);
-        reset_preload_readiness_for_tests();
-        let first = InventoryRead::begin();
-        let first_snapshot = indexed_db_list_entries().await.unwrap();
-        indexed_db_set_durable(key.clone(), "first committed write".into())
-            .await
-            .unwrap();
-        let second = InventoryRead::begin();
-        let second_snapshot = indexed_db_list_entries().await.unwrap();
-        indexed_db_delete_item(&key).await.unwrap();
+        let changed = "rln:wasm:ldk-runtime:deferred-write";
+        let deleted = "rln:wasm:ldk-runtime:deferred-delete";
         finish_preload(
-            second_snapshot,
+            entries(&[(changed, "old"), (deleted, "old")]),
             RUNTIME_STATE_HYDRATE_PREFIXES,
-            false,
-            second.revision,
+            0,
             |_, _| Ok(()),
         );
-        drop(second);
-        // The write-then-delete overlay removes the key from the second snapshot.
-        check_mainnet_runtime_state(&keys).unwrap();
-        assert_eq!(
-            DURABLE_STATE_INVENTORY.with(|inventory| inventory.borrow().reads_in_flight),
-            1
-        );
+        let store = browser_persistent_state_store();
+        store.set(changed, "new").unwrap();
+        store.delete(deleted).unwrap();
+        assert_eq!(store.get(changed).unwrap().as_deref(), Some("new"));
+        assert_eq!(store.get(deleted).unwrap(), None);
+        // Drain prior background mutations before removing the fixture from both stores.
+        indexed_db_set_item(changed, "new").await.unwrap();
+        indexed_db_delete_item(changed).await.unwrap();
+        indexed_db_delete_item(deleted).await.unwrap();
+        local_storage_remove_item(changed).unwrap();
+    }
 
-        indexed_db_set_durable(key.clone(), "write after deletion".into())
+    #[wasm_bindgen_test(async)]
+    async fn mutations_during_overlapping_preloads_cannot_stage_stale_values() {
+        reset_preload_readiness_for_tests();
+        let changed = "rln:wasm:ldk-runtime:inflight-write";
+        let deleted = "rln:wasm:ldk-runtime:inflight-delete";
+        let read = "rln:wasm:ldk-runtime:inflight-read";
+        let durable_write = "rln:wasm:ldk-runtime:inflight-durable-write";
+        let durable_delete = "rln:wasm:ldk-runtime:inflight-durable-delete";
+        let first = PreloadRead::begin();
+        let second = PreloadRead::begin();
+        let store = browser_persistent_state_store();
+        store.set(changed, "current").unwrap();
+        store.delete(deleted).unwrap();
+        local_storage_set_item(read, "already restored").unwrap();
+        assert_eq!(
+            store.get(read).unwrap().as_deref(),
+            Some("already restored")
+        );
+        local_storage_set_item(durable_write, "current cache").unwrap();
+        local_storage_remove_item(durable_delete).unwrap();
+        indexed_db_set_durable(durable_write.into(), "committed".into())
             .await
             .unwrap();
+        indexed_db_delete_item(durable_delete).await.unwrap();
+        let snapshot = || {
+            entries(&[
+                (changed, "old"),
+                (deleted, "old"),
+                (read, "old"),
+                (durable_write, "old"),
+                (durable_delete, "old"),
+            ])
+        };
         finish_preload(
-            first_snapshot,
+            snapshot(),
             RUNTIME_STATE_HYDRATE_PREFIXES,
-            true,
             first.revision,
-            |_, _| panic!("an inventory-only refresh must not hydrate again"),
+            |_, _| Ok(()),
         );
         drop(first);
-        // The delete-then-write overlay preserves the latest committed protected key,
-        // even though the first snapshot predates both writes.
-        assert!(mainnet_error(&keys).contains("protected browser runtime state"));
-        DURABLE_STATE_INVENTORY.with(|inventory| {
-            let inventory = inventory.borrow();
-            assert_eq!(inventory.reads_in_flight, 0);
-            assert!(
-                inventory.mutations.is_empty(),
-                "completed reads must not retain tombstones"
-            );
+        finish_preload(
+            snapshot(),
+            RUNTIME_STATE_HYDRATE_PREFIXES,
+            second.revision,
+            |_, _| panic!("late preload must not republish"),
+        );
+        drop(second);
+        assert_eq!(store.get(changed).unwrap().as_deref(), Some("current"));
+        assert_eq!(store.get(deleted).unwrap(), None);
+        assert_eq!(
+            store.get(read).unwrap().as_deref(),
+            Some("already restored")
+        );
+        assert_eq!(
+            store.get(durable_write).unwrap().as_deref(),
+            Some("current cache")
+        );
+        assert_eq!(store.get(durable_delete).unwrap(), None);
+        DEFERRED_RUNTIME_STATE.with(|state| {
+            assert!(state.borrow().touched.is_empty());
+            assert_eq!(state.borrow().reads_in_flight, 0);
         });
-        indexed_db_delete_item(&key).await.unwrap();
-        check_mainnet_runtime_state(&keys).unwrap();
+        indexed_db_set_item(changed, "current").await.unwrap();
+        for key in [changed, deleted, read, durable_write, durable_delete] {
+            indexed_db_delete_item(key).await.unwrap();
+            local_storage_remove_item(key).unwrap();
+        }
     }
 
     #[wasm_bindgen_test]
-    fn mainnet_preflight_checks_current_local_storage_and_scope_boundaries() {
-        let keys = scope("local-state");
-        let protected = format!("rln:ldk-kv:{}", keys.ldk_manager_registry_key);
-        let neighbor = format!("{protected}-other-scope:manager");
+    fn standalone_chain_driver_and_runtime_core_restore_deferred_snapshots() {
+        crate::test_utils::reset_wasm_runtime_state_for_tests();
         reset_preload_readiness_for_tests();
+        let key = "standalone-deferred";
+        let chain_key = format!("rln:wasm:chain-sync:{key}");
+        let core_key = format!("rln:wasm:ln-runtime-core:{key}:committed");
+        let chain = serde_json::json!({"schema_version":1,"network":"regtest","indexer_url":null,
+            "running":false,"poll_interval_ms":1000,"latest_tip_height":42,"last_tip_at":null,
+            "last_tick_at":null,"last_error":null,"rebroadcast_queue":[]})
+        .to_string();
+        let core = serde_json::json!({"revision":1,"schema_version":1,"lifecycle_state":"stopped",
+            "storage_initialized":true,"queued_events":[{"seq":7,"event_kind":"saved","payload_hex":"00","received_at":1}],
+            "next_event_seq":8}).to_string();
+        local_storage_set_item(&chain_key, "invalid older cache").unwrap();
+        local_storage_set_item(&core_key, "invalid older cache").unwrap();
         finish_preload(
-            parse_indexed_db_snapshot(&snapshot_value(&[&neighbor])),
+            entries(&[(&chain_key, &chain), (&core_key, &core)]),
             RUNTIME_STATE_HYDRATE_PREFIXES,
-            false,
             0,
             |_, _| Ok(()),
         );
-        check_mainnet_runtime_state(&keys).unwrap();
-        let storage = web_sys::window().unwrap().local_storage().unwrap().unwrap();
-        storage
-            .set_item(&protected, "new local-only state")
-            .unwrap();
-        assert!(mainnet_error(&keys).contains("protected browser runtime state"));
+        let driver = crate::chain_sync::WasmChainSyncDriver::new_without_resume(
+            key.into(),
+            "regtest".into(),
+        )
+        .unwrap();
+        assert_eq!(driver.latest_tip_height(), Some(42));
+        let restored = crate::NativeLnRuntimeCore::new(key.into());
+        assert_eq!(restored.status().queued_events, 1);
+        assert_eq!(restored.status().lifecycle_state, "stopped");
         assert_eq!(
-            storage.get_item(&protected).unwrap().as_deref(),
-            Some("new local-only state")
+            local_storage_get_item(&chain_key).unwrap().as_deref(),
+            Some(chain.as_str())
         );
-        storage.remove_item(&protected).unwrap();
+        local_storage_remove_item(&chain_key).unwrap();
+        local_storage_remove_item(&core_key).unwrap();
+    }
+    #[wasm_bindgen_test(async)]
+    async fn cold_supported_handles_restore_deferred_views_when_each_activates() {
+        crate::test_utils::reset_wasm_runtime_state_for_tests();
+        reset_preload_readiness_for_tests();
+        let proxy = "ws://deferred-node-views.invalid";
+        let id = "supported";
+        let keys = crate::wasm_node_persistence::RuntimeScopeKeys::from_runtime_scope_key(format!(
+            "{proxy}#runtime:{id}"
+        ));
+        let events = serde_json::json!({"events":[{"seq":7,"source":"saved","event_kind":"saved",
+            "payload_hex":"00","payment_hash":null,"status":null,"applied":true,"error":null,"received_at":1}],"next_seq":8}).to_string();
+        let transfers = serde_json::json!({"transfers":[{"payment_hash":"saved-payment","inbound":true,
+            "asset_id":"saved-asset","asset_amount":3,"status":"succeeded","created_at":1,"updated_at":2}]}).to_string();
+        local_storage_set_item(&keys.runtime_events_storage_key, "invalid old cache").unwrap();
+        local_storage_set_item(&keys.rgb_ln_transfers_storage_key, "invalid old cache").unwrap();
+        finish_preload(
+            entries(&[
+                (&keys.runtime_events_storage_key, &events),
+                (&keys.rgb_ln_transfers_storage_key, &transfers),
+            ]),
+            RUNTIME_STATE_HYDRATE_PREFIXES,
+            0,
+            |_, _| Ok(()),
+        );
+        let first =
+            crate::RlnWasmNode::new_with_runtime_id_opt(proxy.into(), Some(id.into()), None)
+                .unwrap();
+        let second =
+            crate::RlnWasmNode::new_with_runtime_id_opt(proxy.into(), Some(id.into()), None)
+                .unwrap();
+        assert_eq!(first.list_runtime_events_json().unwrap(), "[]");
+        assert_eq!(
+            local_storage_get_item(&keys.runtime_events_storage_key)
+                .unwrap()
+                .as_deref(),
+            Some("invalid old cache")
+        );
+        let wallet = crate::RlnWasmWallet::create(&crate::test_utils::test_wallet_data_json())
+            .await
+            .unwrap();
+        let before = crate::ln_node::test_utils::startup_calls();
+        first.attach_wallet(&wallet).unwrap();
+        let passive_events: serde_json::Value =
+            serde_json::from_str(&second.list_runtime_events_json().unwrap()).unwrap();
+        assert_eq!(passive_events[0]["seq"], 7);
+        assert_eq!(
+            first.list_runtime_events_json().unwrap(),
+            second.list_runtime_events_json().unwrap()
+        );
+        assert_eq!(crate::ln_node::test_utils::startup_calls(), before);
+        let restored: serde_json::Value =
+            serde_json::from_str(&second.list_rgb_ln_transfers_json().unwrap()).unwrap();
+        assert_eq!(restored[0]["payment_hash"], "saved-payment");
+        let logs: serde_json::Value =
+            serde_json::from_str(&second.list_runtime_events_json().unwrap()).unwrap();
+        assert_eq!(logs[0]["seq"], 7);
+        assert_eq!(
+            first.list_rgb_ln_transfers_json().unwrap(),
+            second.list_rgb_ln_transfers_json().unwrap()
+        );
+        assert_eq!(
+            first.list_runtime_events_json().unwrap(),
+            second.list_runtime_events_json().unwrap()
+        );
+        drop(first);
+        drop(second);
+        local_storage_remove_item(&keys.runtime_events_storage_key).unwrap();
+        local_storage_remove_item(&keys.rgb_ln_transfers_storage_key).unwrap();
     }
 }

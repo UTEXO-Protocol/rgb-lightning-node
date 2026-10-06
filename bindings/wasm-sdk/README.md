@@ -18,7 +18,7 @@ For endpoint-level status, see [SDK_WASM_ENDPOINT_MATRIX.md](SDK_WASM_ENDPOINT_M
 
 ## Mainnet: on-chain only, without a Lightning runtime
 
-A Mainnet `RlnWasmNode` does not construct an LDK manager, object graph, chain-sync
+A Mainnet `RlnWasmNode` does not construct an LDK runtime manager, object graph, chain-sync
 driver, peer hooks or background Lightning workers. This applies to explicit
 `newWithNodeRuntimeId(..., "mainnet")` and to a networkless node that adopts a Mainnet
 wallet. Constructing or inspecting a networkless node leaves it dormant. Its first
@@ -27,31 +27,30 @@ the wallet first when another network is intended. A scope already bound to a
 network or identity cannot be reused with a conflicting one. Compatible handles
 share the existing runtime without reseeding it.
 
-Before constructing a Mainnet node or attaching its wallet, call
-`await sdk.preloadPersistentRuntimeState()` (SDK `init`/`unlock` already preload).
-Construction and adoption check the scope's localStorage and durable key inventory
-from the preload. An incomplete inventory refuses Mainnet initialization. Any
-protected Lightning snapshot, monitor, queue, sweep, RGB Lightning KV or peer state
-refuses with `MainnetLightningState`, without decoding, resuming or deleting it:
+Existing mainnet wallets may contain idle Lightning snapshots written by older
+on-chain-only releases. Mainnet construction and wallet attachment accept those
+records without decoding, resuming, deleting or replacing them. No Lightning-state
+preload or empty-history check is required to construct or attach a Mainnet node.
 
-```text
-MainnetLightningState: Existing Lightning state requires recovery review before starting this mainnet wallet without Lightning: protected browser runtime state is present
-```
+SDK `init`/`unlock` and `preloadPersistentRuntimeState` still preload browser state.
+Lightning snapshots, queues, peer/transfer/event records and standalone swap state
+are staged in memory; their existing best-effort IndexedDB-to-localStorage copy is
+performed only when a Lightning consumer restores the particular key. Mainnet and
+unresolved nodes do not restore those views. Supported non-mainnet activation and
+standalone runtimes continue restoring their saved state. This also preserves
+inactive records when localStorage and IndexedDB contain different bytes. Media,
+RGB proxy settings and the shared virtual-channel preference keep their existing
+hydration behavior; explicit administrative changes to that preference are allowed.
 
-This conservative check also refuses historical snapshots from a previously
-on-chain-only node. It checks the current browser's IndexedDB inventory and localStorage.
-The inventory includes writes made through this SDK after preload, but does not
-discover later writes from another tab. It cannot inspect remote-only
-`<store_id>-ldk` VSS recovery state. Neither the
-synchronous constructor nor SDK `init`/`unlock` accepts that store's credentials.
-Before reusing an identity that previously used remote Lightning storage, an
-operator must review the exact VSS server, LDK store and signing identity configured
-on the previous device. Wallet `configureVssBackup` configures a separate backup
-stream and does not establish that the LDK store is empty. The pinned browser VSS
-client cannot list all keys; an absent or empty manifest is insufficient because a
-successful object write can precede a failed manifest update. The local check does
-not certify remote recovery state. Independent wallet objects remain directly
-usable; this node check is not a process-wide wallet restriction.
+This policy assumes no unresolved historical mainnet Lightning obligations in the
+supported rollout. Preserving records does not monitor or recover old channels,
+certify other devices/tabs or make a future Lightning-enablement/downgrade safe.
+Normal mainnet wallet use does not restore or replicate the separate `<store_id>-ldk`
+VSS stream. Wallet `configureVssBackup` remains independent. The browser cannot
+certify remote history: SDK `init`/`unlock` do not take LDK store credentials, and
+the pinned VSS client lacks complete key listing. An absent manifest is not proof
+of empty state. Independent wallet objects and explicitly invoked standalone
+transports/administration retain their own behavior.
 
 Mainnet rejects peer/connect/reconnect, channel/funding, Lightning invoice/payment,
 async-payment and event-processing methods, including `chainSyncTick*`,
