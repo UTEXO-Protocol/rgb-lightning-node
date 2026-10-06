@@ -43,21 +43,21 @@ wallet indexer's current height on demand and returns an error if it cannot be r
 the indexer is on another network. Non-mainnet `networkinfo` continues to use LDK's height.
 Lightning and wallet/signing policies on supported non-mainnet networks are unchanged.
 
-An existing mainnet wallet with persisted Lightning state returns HTTP 409
-`MainnetLightningState` during unlock, with a message beginning:
+Mainnet startup permits records left by older releases, including empty Lightning snapshots
+from wallets that only used on-chain methods. These records remain inactive: RLN does not
+decode or recover them, replay their pending replication, or start LDK to inspect them.
+Native persistence may update only the six existing common configuration mirrors in the
+node KV store; historical Lightning records and their pending writes/deletes remain
+untouched locally and in VSS. RGB wallet backup and restore keep their existing separate
+store and ownership requirements.
 
-> Existing Lightning state requires recovery review before starting this mainnet wallet without Lightning:
-
-This check is conservative: even empty channel-manager or sweeper snapshots from an
-earlier on-chain-only installation require review. It also checks local pending
-replication, peer history and the configured remote Lightning store. RLN preserves
-these records and does not start LDK to inspect them. Do not delete records or clear
-remote stores to bypass the check. An operator must review any channel, funding or
-sweep obligations and arrange recovery with a release that can monitor them before
-upgrading that wallet. Refusing unlock does not keep existing channels monitored.
-Fresh mainnet wallets and wallets previously unlocked by this implementation can
-unlock normally. RGB VSS restore and backup continue using the existing wallet store;
-mainnet does not restore or replicate Lightning snapshots.
+This release assumes the supported mainnet rollout has no unresolved historical Lightning
+channel, funding, HTLC, claim, sweep or RGB Lightning obligations. Successful unlock does
+not verify that assumption, discover other devices or remote histories, or monitor old
+channels. A wallet with such obligations needs a separately reviewed recovery path before
+using this release. Preserving records is not a migration or a guarantee of compatibility
+with a future LDK version. Future mainnet Lightning enablement must address restoration,
+channel monitoring, ownership and downgrade handling before accepting activity.
 
 Please be careful, this software is early alpha, we do not take any
 responsibility for loss of funds or any other issue you may encounter.
@@ -569,7 +569,7 @@ the node behaves exactly as before.
 
 Two independent data streams are backed up:
 
-- **Node KV state** — channel manager, channel monitors, payment info, swap data and RGB channel info. Every update is written to both the local SQLite database and the remote VSS server; channel-monitor updates are persisted remote-first, completing only once the VSS server has durably stored them.
+- **Node KV state** — on supported non-mainnet networks, channel manager, channel monitors, payment info, swap data and RGB channel info. Every update is written to both the local SQLite database and the remote VSS server; channel-monitor updates are persisted remote-first, completing only once the VSS server has durably stored them. Mainnet replicates only the existing common wallet configuration mirrors; historical Lightning records and their pending replication remain inactive.
 - **RGB wallet data** — the wallet files managed by rgb-lib, backed up
   automatically after every state-changing wallet operation.
 
@@ -614,18 +614,18 @@ read and restored by a node initialized with the same mnemonic.
 
 ### Recovery
 
-On a fresh start `unlock` restores both replicated streams from VSS before
+On a fresh start `unlock` restores the applicable streams from VSS before
 the node finishes coming up:
 
 - the **KV stream** (channel manager, monitors, payments, scorer, swap data,
-  RGB channel info) is restored when the local database has no
-  channel-manager state;
+  RGB channel info) is restored on supported non-mainnet networks when the local
+  database has no channel-manager state. Mainnet does not restore this stream;
 - the **RGB wallet directory** (assets, transfers, allocations) is restored
   when the local wallet directory for this mnemonic's fingerprint is absent.
 
-Together these recover BTC balance, channels, and RGB assets without any extra calls — `unlock` is the only entry point, provided the node was initialized (`/init`) with the same mnemonic as the original device and started with the same `--vss-url` and `--network`. A different mnemonic maps to a different VSS store, so the node finds no backup and starts fresh without an error. Each VSS store is owned by a single running node instance, so a second node pointed at the same store refuses to start to avoid corrupting state. A graceful teardown (lock, shutdown, signal) releases the fence; after a crash or hard kill it is left behind and the operator must call `POST /vssclearfence` (or `SdkNode::vss_clear_fence`) once between `init` and `unlock` to take over the store. In internal-mnemonic mode this is authenticated by the wallet password; in external-signer mode (no mnemonic on the node) the password is ignored and the VSS identity is reconstructed from the persisted `key_source.json`, matching the identity the node acquires the fence under.
+These recover the on-chain wallet, including BTC and RGB assets, and on supported non-mainnet networks also Lightning state, without any extra calls — `unlock` is the only entry point, provided the node was initialized (`/init`) with the same mnemonic as the original device and started with the same `--vss-url` and `--network`. A different mnemonic maps to a different VSS store, so the node finds no backup and starts fresh without an error. Each VSS store is owned by a single running node instance, so a second node pointed at the same store refuses to start to avoid corrupting state. A graceful teardown (lock, shutdown, signal) releases the fence; after a crash or hard kill it is left behind and the operator must call `POST /vssclearfence` (or `SdkNode::vss_clear_fence`) once between `init` and `unlock` to take over the store. In internal-mnemonic mode this is authenticated by the wallet password; in external-signer mode (no mnemonic on the node) the password is ignored and the VSS identity is reconstructed from the persisted `key_source.json`, matching the identity the node acquires the fence under.
 
-Replication guarantees differ per stream. Channel-monitor writes are remote-first: each write completes only after the VSS server durably stores it, and transient server failures are retried with capped exponential backoff until the server recovers. All other KV writes land in the local database first and are replicated to VSS best-effort: a write that fails to reach the server is queued and retried on later successful writes. The number of pending best-effort writes is reported by `GET /vssbackupinfo` so monitoring can alert on persistent staleness.
+Replication guarantees differ per stream. On supported non-mainnet networks, channel-monitor writes are remote-first: each write completes only after the VSS server durably stores it, and transient server failures are retried with capped exponential backoff until the server recovers. All other KV writes land in the local database first and are replicated to VSS best-effort: a write that fails to reach the server is queued and retried on later successful writes. The number of pending best-effort writes is reported by `GET /vssbackupinfo` so monitoring can alert on persistent staleness. On mainnet this counts only active common configuration retries; preserved historical Lightning intents are not loaded into the retry queue or included in this count.
 
 ### API endpoints (when VSS is enabled)
 - `POST /vssbackup` — trigger a manual RGB wallet backup

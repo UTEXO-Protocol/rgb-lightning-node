@@ -53,9 +53,11 @@ When the node is configured for mainnet, Lightning operations return a failed
 `CResultString` whose error is prefixed with `Rln(LightningUnsupportedOnMainnet):` and
 contains: "RLN on mainnet currently supports only on-chain methods. Lightning APIs
 are not supported." On-chain and shared administrative APIs retain their existing
-requirements. Mainnet unlock does not start the Lightning runtime. Existing Lightning state
-returns `Rln(MainnetLightningState):` and requires operator review, including empty
-snapshots created by older releases. See the [native SDK availability documentation](../../src/uniffi_api/README.md#mainnet-api-availability).
+requirements. Mainnet unlock does not start the Lightning runtime and allows historical
+Lightning records to remain inactive without replaying or recovering them. This assumes
+no unresolved historical mainnet Lightning obligations in the supported rollout;
+successful unlock does not establish that fact. See the [native SDK availability
+documentation](../../src/uniffi_api/README.md#mainnet-api-availability).
 
 ## Memory ownership
 

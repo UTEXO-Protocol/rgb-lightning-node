@@ -460,23 +460,76 @@ async fn mainnet_rest_unlock_rejects_wrong_indexer_then_serves_wallet() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn mainnet_legacy_state_refusal_preserves_bytes_and_does_not_contact_indexer() {
+async fn mainnet_legacy_state_stays_inactive_across_wallet_unlock_and_reopen() {
     use lightning::util::persist::KVStoreSync;
+    use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait};
     let fixture = Fixture::new().await;
     let store = crate::kv_store::SeaOrmKvStore::from_connection(fixture.state.db());
-    store
-        .write("", "", "manager", b"opaque previous snapshot".to_vec())
-        .unwrap();
+    // Older on-chain-only starts wrote the replay marker and could persist empty manager/scorer
+    // snapshots. Opaque/unknown records must stay equally inert; never deserialize to classify them.
+    let records: &[(&str, &str, &str, &[u8])] = &[
+        ("", "", "manager", b"opaque previous manager"),
+        ("", "", "scorer", b"opaque previous scorer"),
+        ("", "", "output_sweeper", b"opaque previous sweeper"),
+        ("reimport_marker", "", "fascia_replay", &[1]),
+        ("monitors", "", "old_channel", b"opaque previous monitor"),
+        ("rgb_sender_funding", "", "old_channel", b"old consignment"),
+        ("vss_pending", "", "_/_/manager", b"\x01queued snapshot"),
+        ("vss_pending", "", "_/_/scorer", &[0]),
+        ("vss_pending", "", "unknown", b"malformed intent"),
+    ];
+    for &(primary, secondary, key, value) in records {
+        store
+            .write(primary, secondary, key, value.to_vec())
+            .unwrap();
+    }
+    let file = fixture.state.static_state.ldk_data_dir.join("old_snapshot");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"untouched historical file").unwrap();
+    crate::database::entities::ChannelPeerActMod {
+        pubkey: ActiveValue::Set("historical peer".into()),
+        address: ActiveValue::Set("127.0.0.1:9735".into()),
+        created_at: ActiveValue::Set(chrono::Utc::now()),
+    }
+    .insert(fixture.state.db().as_ref())
+    .await
+    .unwrap();
+    let mut identity = None;
     for _ in 0..2 {
-        let result = sdk::unlock(fixture.state.clone(), fixture.request()).await;
-        assert!(matches!(result, Err(APIError::MainnetLightningState(_))));
+        sdk::unlock(fixture.state.clone(), fixture.request())
+            .await
+            .unwrap();
+        fixture.assert_no_lightning().await;
+        let info = sdk::node_info(fixture.state.clone()).await.unwrap();
+        assert_eq!((info.num_peers, info.num_channels), (0, 0));
+        let address = sdk::address(fixture.state.clone()).await.unwrap().address;
+        assert!(address.starts_with("bc1"));
+        if let Some((pubkey, previous_address)) = &identity {
+            assert_eq!(&info.pubkey, pubkey);
+            // Address reuse is disabled in this fixture; persisted derivation advances.
+            assert_ne!(&address, previous_address);
+        } else {
+            identity = Some((info.pubkey, address));
+        }
+        assert!(matches!(
+            sdk::list_peers(fixture.state.clone()).await,
+            Err(APIError::LightningUnsupportedOnMainnet)
+        ));
+        let _ = routes::lock(axum::extract::State(fixture.state.clone()))
+            .await
+            .unwrap();
         assert!(fixture.state.unlocked_app_state.lock().await.is_none());
         assert!(!*fixture.state.changing_state.lock().unwrap());
-        assert_eq!(
-            store.read("", "", "manager").unwrap(),
-            b"opaque previous snapshot"
-        );
-        assert!(fixture.indexer.requests.lock().unwrap().is_empty());
+        for &(primary, secondary, key, value) in records {
+            assert_eq!(store.read(primary, secondary, key).unwrap(), value);
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"untouched historical file");
+        let peers = crate::database::entities::ChannelPeerEntity::find()
+            .all(fixture.state.db().as_ref())
+            .await
+            .unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].pubkey, "historical peer");
     }
 }
 

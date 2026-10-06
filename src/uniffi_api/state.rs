@@ -130,7 +130,6 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
     stash_api_error_detail(msg.clone());
     match err {
         APIError::LightningUnsupportedOnMainnet => RlnError::LightningUnsupportedOnMainnet(msg),
-        APIError::MainnetLightningState(_) => RlnError::MainnetLightningState(msg),
         APIError::LockedNode | APIError::NotInitialized => RlnError::NotInitialized(msg),
         APIError::PaymentNotFound(_)
         | APIError::SwapNotFound(_)

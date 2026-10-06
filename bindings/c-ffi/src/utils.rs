@@ -126,7 +126,6 @@ fn rln_variant_tag(e: &RlnError) -> &'static str {
         RlnError::FailedVssInit(_) => "FailedVssInit",
         RlnError::Internal(_) => "Internal",
         RlnError::LightningUnsupportedOnMainnet(_) => "LightningUnsupportedOnMainnet",
-        RlnError::MainnetLightningState(_) => "MainnetLightningState",
     }
 }
 
@@ -264,17 +263,6 @@ pub(crate) fn require_signer(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mainnet_legacy_state_error_preserves_category_and_message() {
-        let _ = rgb_lightning_node::take_last_api_error_detail();
-        let message = "Existing Lightning state requires recovery review before starting this mainnet wallet without Lightning: local manager snapshot";
-        let err = Error::from(RlnError::MainnetLightningState(message.into()));
-        assert_eq!(
-            format_error_for_ffi(&err),
-            format!("Rln(MainnetLightningState): {message}")
-        );
-    }
 
     #[test]
     fn mainnet_lightning_error_preserves_category_and_message() {

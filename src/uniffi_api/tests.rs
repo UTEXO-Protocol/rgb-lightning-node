@@ -458,19 +458,6 @@ mod uniffi_smoke_tests {
     }
 
     #[test]
-    fn uniffi_mainnet_legacy_state_error_preserves_category_and_message() {
-        let error = crate::error::APIError::MainnetLightningState("local manager snapshot".into());
-        let message = error.to_string();
-        let mapped = super::super::state::map_api_error(error);
-        assert!(matches!(mapped, RlnError::MainnetLightningState(_)));
-        assert_eq!(mapped.to_string(), message);
-        assert_eq!(
-            super::super::state::take_last_api_error_detail(),
-            Some(message)
-        );
-    }
-
-    #[test]
     fn uniffi_errors_preserve_category_and_message() {
         let err = super::super::state::map_api_error(crate::error::APIError::Unexpected(
             "backup file corrupted".to_string(),

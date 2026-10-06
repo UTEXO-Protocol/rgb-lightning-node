@@ -4733,24 +4733,6 @@ struct NodeStartup {
     fence_guard: Option<crate::vss_kv_store::FenceReleaseGuard>,
 }
 
-async fn check_mainnet_startup_state(
-    app_state: &Arc<AppState>,
-    #[cfg(feature = "vss")] remote: Option<Arc<crate::vss_kv_store::VssKvStore>>,
-) -> Result<(), APIError> {
-    let database = app_state.db();
-    let data_dir = app_state.static_state.ldk_data_dir.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::mainnet_state::check_mainnet_legacy_state(
-            database.as_ref(),
-            &data_dir,
-            #[cfg(feature = "vss")]
-            remote.as_deref(),
-        )
-    })
-    .await
-    .map_err(|e| APIError::Unexpected(format!("mainnet state inspection failed: {e}")))?
-}
-
 impl NodeStartup {
     fn create_signer(&self) -> ActiveSignerRef {
         let external_signer = &self.external_signer;
@@ -5226,16 +5208,19 @@ async fn prepare_node(
             }
         }));
 
-        if mainnet {
-            check_mainnet_startup_state(&app_state, Some(Arc::clone(&vss_kv_store))).await?;
-        }
         let monitor_kv_store = (!mainnet).then(|| {
             Arc::new(RemoteFirstKvStore::new(
                 Arc::clone(&local_kv_store),
                 Some(Arc::clone(&vss_kv_store)),
             ))
         });
-        let synced = Arc::new(SyncedKvStore::with_vss(local_kv_store, vss_kv_store));
+        // Mainnet retains old Lightning records without loading or replaying them. Only the
+        // existing common configuration mirrors may be changed or replicated by this session.
+        let synced = Arc::new(if mainnet {
+            SyncedKvStore::with_vss_common_config_only(local_kv_store, vss_kv_store)
+        } else {
+            SyncedKvStore::with_vss(local_kv_store, vss_kv_store)
+        });
 
         if !mainnet {
             // Auto-restore from VSS if local DB has no channel manager data.
@@ -5282,22 +5267,22 @@ async fn prepare_node(
 
         (synced, monitor_kv_store)
     } else {
-        if mainnet {
-            check_mainnet_startup_state(&app_state, None).await?;
-        }
         let monitor_kv_store = (!mainnet)
             .then(|| Arc::new(RemoteFirstKvStore::new(Arc::clone(&local_kv_store), None)));
-        let synced = Arc::new(SyncedKvStore::local_only(local_kv_store));
+        let synced = Arc::new(if mainnet {
+            SyncedKvStore::local_common_config_only(local_kv_store)
+        } else {
+            SyncedKvStore::local_only(local_kv_store)
+        });
         (synced, monitor_kv_store)
     };
 
     #[cfg(not(feature = "vss"))]
-    let kv_store = {
-        if mainnet {
-            check_mainnet_startup_state(&app_state).await?;
-        }
-        Arc::new(SyncedKvStore::local_only(local_kv_store))
-    };
+    let kv_store = Arc::new(if mainnet {
+        SyncedKvStore::local_common_config_only(local_kv_store)
+    } else {
+        SyncedKvStore::local_only(local_kv_store)
+    });
 
     // Sync config from database to KVStore
     sync_config_to_kvstore(&static_state.db(), kv_store.as_ref())?;

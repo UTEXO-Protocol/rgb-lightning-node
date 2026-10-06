@@ -524,35 +524,47 @@ async fn mainnet_vss_wallet_backup_reopen_and_fresh_device_restore() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn mainnet_vss_remote_only_manager_on_later_page_is_preserved_and_fence_released() {
+async fn mainnet_vss_preserves_legacy_records_and_intents_while_wallet_backup_works() {
+    use lightning::util::persist::KVStoreSync;
     let server = Server::new().await;
     let wallet = Wallet::new(&server).await;
     let node_store = store_id();
+    let local = crate::kv_store::SeaOrmKvStore::from_connection(wallet.state.db());
+    let legacy_keys = ["_/_/manager", "_/_/scorer", "monitors/_/remote_only"];
     {
         let mut state = server.state.lock().unwrap();
         let store = state.stores.entry(node_store.clone()).or_default();
-        for key in [
-            "rgb/wallet_config/indexer_url",
-            "rgb/wallet_config/bitcoin_network",
-            "_/_/manager",
-        ] {
+        for key in legacy_keys {
             store.values.insert(
                 key.into(),
                 KeyValue {
                     key: key.into(),
-                    version: 1,
-                    value: b"opaque bytes must remain untouched".to_vec(),
+                    version: 7,
+                    value: b"remote historical bytes".to_vec(),
                 },
             );
         }
     }
+    local
+        .write("", "", "manager", b"different local manager".to_vec())
+        .unwrap();
+    let pending = [
+        ("_/_/manager", b"\x01queued manager replacement".as_slice()),
+        ("_/_/scorer", &[0]),
+        ("monitors/_/remote_only", b"malformed intent".as_slice()),
+        ("invalid-key", &[255]),
+    ];
+    for (key, value) in pending {
+        local.write("vss_pending", "", key, value.to_vec()).unwrap();
+    }
     let before = server.rows(&node_store);
-    let result = sdk::unlock(wallet.state.clone(), wallet.request()).await;
-    assert!(
-        matches!(&result, Err(APIError::MainnetLightningState(detail)) if detail.contains("remote") && detail.contains("manager")),
-        "{result:?}"
-    );
-    assert_eq!(server.rows(&node_store), before);
+    let wrong_indexer = Indexer::new(bitcoin::Network::Regtest).await;
+    let mut wrong_request = wallet.request();
+    wrong_request.indexer_url = Some(wrong_indexer.url.clone());
+    assert!(matches!(
+        sdk::unlock(wallet.state.clone(), wrong_request).await,
+        Err(APIError::InvalidIndexer(_))
+    ));
     assert!(wallet.state.unlocked_app_state.lock().await.is_none());
     assert!(wallet
         .state
@@ -561,14 +573,71 @@ async fn mainnet_vss_remote_only_manager_on_later_page_is_preserved_and_fence_re
         .unwrap()
         .is_none());
     assert!(!*wallet.state.changing_state.lock().unwrap());
+    let after_failed_unlock = server.rows(&node_store);
+    assert!(!after_failed_unlock.contains_key(FENCE));
+    for key in legacy_keys {
+        assert_eq!(after_failed_unlock[key], before[key]);
+    }
+    for (key, value) in pending {
+        assert_eq!(local.read("vss_pending", "", key).unwrap(), value);
+    }
+    assert_eq!(
+        local.read("", "", "manager").unwrap(),
+        b"different local manager"
+    );
+    for _ in 0..2 {
+        sdk::unlock(wallet.state.clone(), wallet.request())
+            .await
+            .unwrap();
+        let common = {
+            let state = wallet.state.unlocked_app_state.lock().await;
+            assert!(state.as_ref().unwrap().lightning.is_none());
+            state.as_ref().unwrap().common.clone()
+        };
+        assert!(wallet
+            .state
+            .ldk_background_services
+            .lock()
+            .unwrap()
+            .is_none());
+        // Exercise explicit drain as well as automatic drains caused by config writes and stop.
+        common.kv_store.drain_pending();
+        assert!(sdk::address(wallet.state.clone())
+            .await
+            .unwrap()
+            .address
+            .starts_with("bc1"));
+        sdk::vss_backup(wallet.state.clone()).await.unwrap();
+        wallet.lock().await;
+        let after = server.rows(&node_store);
+        assert!(!after.contains_key(FENCE));
+        for key in legacy_keys {
+            assert_eq!(after[key], before[key]);
+        }
+        assert_eq!(
+            local.read("", "", "manager").unwrap(),
+            b"different local manager"
+        );
+        assert!(local.read("monitors", "", "remote_only").is_err());
+        for (key, value) in pending {
+            assert_eq!(local.read("vss_pending", "", key).unwrap(), value);
+        }
+    }
+    assert!(!server.rows(&format!("{node_store}_rgb"))["backup/data"]
+        .value
+        .is_empty());
     let state = server.state.lock().unwrap();
-    assert!(state.requests.iter().filter(|r| r.method == "list").count() >= 2);
-    assert!(state.requests.iter().all(|r| r.store == node_store));
     assert!(state
         .requests
         .iter()
-        .filter(|r| r.method != "list")
-        .all(|r| r.keys.iter().chain(&r.deletes).all(|key| key == FENCE)));
+        .filter(|r| r.store == node_store)
+        .all(|r| {
+            r.method != "list"
+                && r.keys
+                    .iter()
+                    .chain(&r.deletes)
+                    .all(|key| key == FENCE || key.starts_with("rgb/wallet_config/"))
+        }));
 }
 
 /// The second stop has no session ownership while the first is still stopping its store.

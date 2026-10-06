@@ -45,12 +45,14 @@ required `ldk_chain_sync` payload is retained but its backend is unused on mainn
 queries the wallet indexer on demand and can fail if that indexer is unavailable.
 Identity, signing and configured RGB VSS backup keep their existing keys and stores.
 
-Persisted mainnet Lightning state causes `RlnError::MainnetLightningState` during unlock.
-The appended error variant preserves existing error ordinals. This includes opaque
-empty snapshots from older on-chain-only wallets; no state is deleted or resumed.
-See [mainnet startup and recovery requirements](../../README.md) before upgrading an
-existing wallet. Lightning remains available on supported non-mainnet networks with
-the same wallet and signing policies.
+Existing Lightning records do not prevent mainnet unlock; they remain inactive and are
+not decoded, replayed or recovered. Mainnet node-store persistence updates only common
+configuration, while RGB wallet backup/restore retains its existing separate store.
+This assumes no unresolved historical mainnet Lightning obligations in the supported
+rollout; unlock is not a history audit or channel recovery. See the [mainnet startup
+assumption and limitations](../../README.md) before upgrading an existing wallet.
+Lightning remains available on supported non-mainnet networks with the same wallet and
+signing policies.
 
 On all networks, canceling an asynchronous Rust SDK unlock caller does not abandon
 the unlock operation. Shutdown waits for an in-progress unlock to complete before

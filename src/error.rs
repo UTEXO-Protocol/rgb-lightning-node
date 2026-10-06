@@ -329,9 +329,6 @@ pub enum APIError {
     #[error("RLN on mainnet currently supports only on-chain methods. Lightning APIs are not supported.")]
     LightningUnsupportedOnMainnet,
 
-    #[error("Existing Lightning state requires recovery review before starting this mainnet wallet without Lightning: {0}")]
-    MainnetLightningState(String),
-
     #[error("Node is locked (hint: call unlock)")]
     LockedNode,
 
@@ -719,7 +716,7 @@ impl IntoResponse for APIError {
             APIError::FailedBitcoindConnection(_) | APIError::NetworkMismatch(_, _) => {
                 (StatusCode::FORBIDDEN, self.to_string(), self.name())
             }
-            APIError::InvoiceAlreadyClaimed | APIError::MainnetLightningState(_) => {
+            APIError::InvoiceAlreadyClaimed => {
                 (StatusCode::CONFLICT, self.to_string(), self.name())
             }
             APIError::ExternalSignerMismatch => {
@@ -836,25 +833,6 @@ mod tests {
                 "code": 403,
                 "name": "LightningUnsupportedOnMainnet",
                 "error": "RLN on mainnet currently supports only on-chain methods. Lightning APIs are not supported."
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn mainnet_legacy_state_response_preserves_name_and_message() {
-        let response =
-            APIError::MainnetLightningState("local manager snapshot".into()).into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "code": 409,
-                "name": "MainnetLightningState",
-                "error": "Existing Lightning state requires recovery review before starting this mainnet wallet without Lightning: local manager snapshot"
             })
         );
     }
