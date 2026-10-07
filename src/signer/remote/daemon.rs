@@ -16,6 +16,7 @@ use lightning_signer::persist::Persist;
 use signer_external::contract::{ExternalSignerBackend, SignerRequest, SignerResponse};
 use tokio::net::TcpListener;
 
+use super::auth::{self, AuthToken};
 use super::framing;
 use crate::signer::in_process_vls::{self, InProcessVlsTransport};
 use crate::signer::types::{BootstrapData, SignerIdentity};
@@ -148,12 +149,65 @@ pub struct DaemonConfig {
     /// Directory for the daemon's persisted VLS node/channel state (created if missing). Must survive
     /// process restarts — see [`DaemonSigner::new`].
     pub data_dir: PathBuf,
-    /// `None` = plaintext TCP (localhost / trusted link only).
+    /// `None` = plaintext TCP (localhost / trusted link only). Note that plaintext never means
+    /// *unauthenticated*: every caller must still present the shared token (see [`AuthToken`]).
     pub tls: Option<DaemonTlsConfig>,
+    /// Shared-secret file authenticating the node to this daemon, generated (0600) if absent.
+    /// `None` = [`AuthToken::daemon_default_path`] under `data_dir`. There is no way to switch
+    /// authentication off: loopback is not an authentication boundary, so without it any local
+    /// process could request seed-backed signatures.
+    pub auth_token_file: Option<PathBuf>,
     /// Allow a non-loopback `listen_addr` without mTLS. Dangerous for a seed-holding signer:
     /// anyone who can reach the port can request signatures (server-auth TLS does not authenticate
     /// the caller). Only for links already secured by other means, e.g. a WireGuard tunnel.
     pub allow_unauthenticated_remote: bool,
+}
+
+/// How [`serve`] authenticates callers. Production always carries a [`AuthToken`]: the daemon holds
+/// the seed and answers whatever it accepts, so reaching the port must not be enough to be served —
+/// see [`super::auth`] for why loopback alone is not an authentication boundary. The unauthenticated
+/// variant is `cfg(test)`-only by design, so no production path can construct it.
+pub enum DaemonAuth {
+    Token(AuthToken),
+    /// Test-only: serve any caller. Never reachable from a real daemon.
+    #[cfg(test)]
+    Disabled,
+}
+
+impl DaemonAuth {
+    /// The token a caller must present, or `None` when authentication is disabled (tests only).
+    fn token(&self) -> Option<&AuthToken> {
+        match self {
+            Self::Token(token) => Some(token),
+            #[cfg(test)]
+            Self::Disabled => None,
+        }
+    }
+}
+
+/// Authenticate a freshly-accepted connection before it can ask for anything: the caller's first
+/// frame must carry the shared token. A rejected caller gets the 0-length sentinel (so a
+/// misconfigured node reports "token rejected" instead of an opaque EOF) and is then dropped without
+/// a single signer op being served.
+async fn authenticate<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    auth: &DaemonAuth,
+) -> anyhow::Result<()> {
+    let Some(token) = auth.token() else {
+        return Ok(());
+    };
+    let frame = framing::read_frame_async(stream)
+        .await
+        .context("read auth frame")?
+        .ok_or_else(|| anyhow::anyhow!("caller closed the connection before authenticating"))?;
+    if !token.matches_handshake(&frame) {
+        let _ = framing::write_frame_async(stream, &[]).await;
+        anyhow::bail!("caller presented an invalid auth token");
+    }
+    framing::write_frame_async(stream, auth::ack_frame())
+        .await
+        .context("write auth ack")?;
+    Ok(())
 }
 
 /// A non-loopback listener accepts signing requests from anything that can reach the port, so it
@@ -193,6 +247,17 @@ pub async fn run(config: DaemonConfig) -> anyhow::Result<()> {
             .is_some_and(|t| t.client_ca_path.is_some()),
         config.allow_unauthenticated_remote,
     )?;
+    // The token lives in the (0700) data dir by default, so create/verify that dir first. Loading it
+    // before the signer keeps a bad token file a fast, obvious failure rather than one that surfaces
+    // after VLS initialization.
+    crate::signer::key_source::create_or_check_restricted_dir(&config.data_dir)
+        .with_context(|| format!("signer data dir {}", config.data_dir.display()))?;
+    let token_path = config
+        .auth_token_file
+        .clone()
+        .unwrap_or_else(|| AuthToken::daemon_default_path(&config.data_dir));
+    let token = AuthToken::load_or_generate(&token_path)
+        .with_context(|| format!("remote signer auth token {}", token_path.display()))?;
     let signer = Arc::new(
         DaemonSigner::new(
             config.seed,
@@ -219,9 +284,17 @@ pub async fn run(config: DaemonConfig) -> anyhow::Result<()> {
         network = %config.network,
         tls = acceptor.is_some(),
         mtls = config.tls.as_ref().is_some_and(|t| t.client_ca_path.is_some()),
-        "remote signer daemon listening"
+        auth_token_file = %token_path.display(),
+        "remote signer daemon listening; copy the auth token file to the node's storage dir as \
+         `remote-signer-auth-token` (mode 0600)"
     );
-    serve(listener, signer, acceptor).await
+    serve(
+        listener,
+        signer,
+        acceptor,
+        Arc::new(DaemonAuth::Token(token)),
+    )
+    .await
 }
 
 /// Backoff bounds for [`retry_with_backoff`]. A transient `accept()` failure (e.g. a peer resetting
@@ -261,21 +334,23 @@ pub async fn serve(
     listener: TcpListener,
     signer: Arc<DaemonSigner>,
     acceptor: Option<tokio_rustls::TlsAcceptor>,
+    auth: Arc<DaemonAuth>,
 ) -> anyhow::Result<()> {
     loop {
-        let (tcp, _peer) = retry_with_backoff(|| listener.accept()).await;
+        let (tcp, peer) = retry_with_backoff(|| listener.accept()).await;
         let signer = Arc::clone(&signer);
         let acceptor = acceptor.clone();
+        let auth = Arc::clone(&auth);
         tokio::spawn(async move {
             let result = match acceptor {
                 Some(acceptor) => match acceptor.accept(tcp).await {
-                    Ok(tls_stream) => serve_connection(tls_stream, signer).await,
+                    Ok(tls_stream) => serve_connection(tls_stream, signer, &auth, peer).await,
                     Err(e) => Err(anyhow::anyhow!("TLS handshake failed: {e}")),
                 },
-                None => serve_connection(tcp, signer).await,
+                None => serve_connection(tcp, signer, &auth, peer).await,
             };
             if let Err(e) = result {
-                tracing::debug!(error = ?e, "remote signer daemon connection closed");
+                tracing::debug!(error = ?e, %peer, "remote signer daemon connection closed");
             }
         });
     }
@@ -284,7 +359,16 @@ pub async fn serve(
 async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     mut stream: S,
     signer: Arc<DaemonSigner>,
+    auth: &DaemonAuth,
+    peer: std::net::SocketAddr,
 ) -> anyhow::Result<()> {
+    // Before anything else: an unauthenticated caller is never served a single op. Logged at `warn`
+    // because on a correctly configured link this does not happen — it is either a misconfigured node
+    // or something probing the port for seed-backed signatures.
+    if let Err(e) = authenticate(&mut stream, auth).await {
+        tracing::warn!(error = %e, %peer, "rejected unauthenticated remote signer caller");
+        return Err(e);
+    }
     loop {
         let buf = match framing::read_frame_async(&mut stream)
             .await
