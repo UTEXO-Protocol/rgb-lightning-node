@@ -16,6 +16,81 @@ mod uniffi_smoke_tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
+    fn external_unlock_request_preserves_bfa_and_node_settings() {
+        let request: sdk::UnlockRequest = SdkExternalUnlockRequest {
+            ldk_chain_sync: SdkLdkChainSync::TransactionSync {
+                indexer_url: "ssl://ldk-indexer.example:50002".to_string(),
+            },
+            indexer_url: Some("ssl://rgb-indexer.example:50002".to_string()),
+            proxy_endpoint: Some("rpcs://proxy.example/json-rpc".to_string()),
+            announce_addresses: vec!["node.example:9735".to_string()],
+            announce_alias: Some("external-bfa".to_string()),
+            eth_rpc_url: Some("https://ethereum.example/rpc".to_string()),
+        }
+        .into();
+
+        assert!(request.password.is_empty());
+        assert!(matches!(request.ldk_chain_sync,
+            crate::core_types::LdkChainSync::TransactionSync { indexer_url }
+                if indexer_url == "ssl://ldk-indexer.example:50002"));
+        assert_eq!(
+            request.indexer_url.as_deref(),
+            Some("ssl://rgb-indexer.example:50002")
+        );
+        assert_eq!(
+            request.proxy_endpoint.as_deref(),
+            Some("rpcs://proxy.example/json-rpc")
+        );
+        assert_eq!(request.announce_addresses, ["node.example:9735"]);
+        assert_eq!(request.announce_alias.as_deref(), Some("external-bfa"));
+        assert_eq!(
+            request.eth_rpc_url.as_deref(),
+            Some("https://ethereum.example/rpc")
+        );
+        assert!(request.gossip_rgs_server_url.is_none());
+    }
+
+    #[test]
+    fn external_unlock_request_preserves_absent_eth_rpc_and_block_sync() {
+        let request: sdk::UnlockRequest = SdkExternalUnlockRequest {
+            ldk_chain_sync: SdkLdkChainSync::BlockSync {
+                bitcoind_rpc_username: "user".to_string(),
+                bitcoind_rpc_password: "password".to_string(),
+                bitcoind_rpc_host: "localhost".to_string(),
+                bitcoind_rpc_port: 18443,
+            },
+            indexer_url: None,
+            proxy_endpoint: None,
+            announce_addresses: vec![],
+            announce_alias: None,
+            eth_rpc_url: None,
+        }
+        .into();
+
+        assert!(request.password.is_empty());
+        assert!(request.eth_rpc_url.is_none());
+        assert!(request.indexer_url.is_none());
+        assert!(request.proxy_endpoint.is_none());
+        assert!(request.announce_addresses.is_empty());
+        assert!(request.announce_alias.is_none());
+        assert!(request.gossip_rgs_server_url.is_none());
+        match request.ldk_chain_sync {
+            crate::core_types::LdkChainSync::BlockSync {
+                bitcoind_rpc_username,
+                bitcoind_rpc_password,
+                bitcoind_rpc_host,
+                bitcoind_rpc_port,
+            } => {
+                assert_eq!(bitcoind_rpc_username, "user");
+                assert_eq!(bitcoind_rpc_password, "password");
+                assert_eq!(bitcoind_rpc_host, "localhost");
+                assert_eq!(bitcoind_rpc_port, 18443);
+            }
+            _ => panic!("expected block sync"),
+        }
+    }
+
+    #[test]
     #[serial(uniffi_state)]
     fn uniffi_entrypoints_require_initialized_state() {
         clear_uniffi_app_state();

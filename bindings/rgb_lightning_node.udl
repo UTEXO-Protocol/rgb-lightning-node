@@ -666,6 +666,15 @@ dictionary SdkExternalSignerBootstrap {
     u32 api_level;
 };
 
+dictionary SdkExternalUnlockRequest {
+    SdkLdkChainSync ldk_chain_sync;
+    string? indexer_url = null;
+    string? proxy_endpoint = null;
+    sequence<string> announce_addresses = [];
+    string? announce_alias = null;
+    string? eth_rpc_url = null;
+};
+
 dictionary SdkVssClearFenceRequest {
     string password;
 };

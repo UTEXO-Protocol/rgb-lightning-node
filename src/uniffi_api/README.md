@@ -25,6 +25,44 @@ Native external signer note:
 - Usage guide:
   - `src/uniffi_api/native-external-signer.md`
 
+## BFA validation with an external signer
+
+Use `SdkExternalUnlockRequest` to supply the Ethereum RPC endpoint when unlocking.
+The request contains no wallet password or private keys. For an initialized node
+and a `NativeExternalSigner` named `signer`, the generated Python API is:
+
+```python
+request = SdkExternalUnlockRequest(
+    ldk_chain_sync=SdkLdkChainSync.TRANSACTION_SYNC(
+        indexer_url="ssl://bitcoin-indexer.example:50002",
+    ),
+    indexer_url="ssl://bitcoin-indexer.example:50002",
+    proxy_endpoint="rpcs://rgb-proxy.example/json-rpc",
+    eth_rpc_url="https://ethereum-rpc.example",
+)
+node.unlock_with_native_external_signer_request(signer, request)
+```
+
+For a previously attached signer, call
+`node.unlock_with_attached_external_signer_request(request)`. A foreign signer is
+attached with `attach_external_signer(host, bootstrap)`; an in-process native
+signer can be attached with `attach_native_external_signer(signer)`.
+
+The Ethereum URL is forwarded to the existing RLN/rgb-lib BFA validation path.
+An explicit endpoint overrides the node's chain configuration. An omitted or
+null endpoint leaves that fallback unchanged; without either source, BFA remains
+disabled. Embedded `SdkNode.create(...)` instances use the default node config,
+so they must pass the endpoint in the request. Endpoint errors fail unlock.
+Use an RPC service for the Ethereum network backing the asset; this API does not
+add Ethereum chain-ID or finality checks.
+
+The existing flat unlock methods remain available with their original arguments
+and behavior. Existing generated clients do not need to adopt the new request
+methods unless they need BFA validation. Burn support is unchanged.
+
+Node.js/Bare bindings use the existing C entrypoints with an optional JSON field;
+see the [C binding request example](../../bindings/c-ffi/README.md#external-signer-unlock).
+
 ## Mainnet API availability
 
 For a node configured for mainnet, Lightning channel/peer operations, invoices

@@ -164,6 +164,18 @@ jobs:
           EXTERNAL_SIGNER_SCENARIO: "regular-flow-real"
         run: ./scripts/ci/external_signer_real_e2e.sh
 
+      - name: Test external-signer BFA unlock through UniFFI
+        env:
+          PYTHONPATH: ${{ github.workspace }}/target/uniffi/python
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
+        run: python3 test/python-e2e/external_signer_bfa.py
+
+      - name: Test external-signer BFA unlock through C ABI
+        run: |
+          cargo test --locked --manifest-path bindings/c-ffi/Cargo.toml --lib
+          cargo rustc --locked --release --manifest-path bindings/c-ffi/Cargo.toml --lib --crate-type cdylib
+          python3 test/python-e2e/external_signer_bfa.py --cffi-library bindings/c-ffi/target/release/librlncffi.so
+
       - name: Stop regtest services
         if: always()
         run: ./regtest.sh stop

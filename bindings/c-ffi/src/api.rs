@@ -811,14 +811,7 @@ pub(crate) fn sdk_node_unlock_with_native_external_signer(
     let node = require_handle(node)?;
     let signer = require_signer(signer)?;
     let r: JsonSdkExternalUnlockRequest = parse_req(request_json)?;
-    node.unlock_with_native_external_signer(
-        Arc::clone(signer),
-        r.ldk_chain_sync.into(),
-        r.indexer_url,
-        r.proxy_endpoint,
-        r.announce_addresses,
-        r.announce_alias,
-    )?;
+    node.unlock_with_native_external_signer_request(Arc::clone(signer), r.into())?;
     ok_void()
 }
 
@@ -844,12 +837,6 @@ pub(crate) fn sdk_node_unlock_with_attached_external_signer(
 ) -> Result<String, Error> {
     let node = require_handle(node)?;
     let r: JsonSdkExternalUnlockRequest = parse_req(request_json)?;
-    node.unlock_with_attached_external_signer(
-        r.ldk_chain_sync.into(),
-        r.indexer_url,
-        r.proxy_endpoint,
-        r.announce_addresses,
-        r.announce_alias,
-    )?;
+    node.unlock_with_attached_external_signer_request(r.into())?;
     ok_void()
 }
