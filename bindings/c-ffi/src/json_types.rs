@@ -26,17 +26,18 @@ use rgb_lightning_node::{
     NodeInfo, Payment, PaymentHash, PaymentType, Peer, ProofOfReserves, PublicKey, RecipientId,
     RgbAllocation, RgbOutpoint, RgbRecipient, SdkAssetLinkRequest, SdkCloseChannelRequest,
     SdkCreateUtxosRequest, SdkDisconnectPeerRequest, SdkExternalSignerBootstrap,
-    SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest, SdkIssueAssetCfaRequest,
-    SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest, SdkIssueAssetUdaRequest, SdkKeysendRequest,
-    SdkKeysendResponse, SdkLdkChainSync, SdkMakerExecuteRequest, SdkMakerInitRequest,
-    SdkMakerInitResponse, SdkOpenChannelRequest, SdkOpenChannelResponse, SdkPostAssetMediaRequest,
-    SdkPostAssetMediaResponse, SdkRefreshTransfersRequest, SdkRefreshTransfersResponse,
-    SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
-    SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
-    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
-    SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
-    TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
-    VerifyMessageResponse, WitnessData,
+    SdkExternalUnlockRequest, SdkFailTransfersRequest, SdkFailTransfersResponse, SdkInitRequest,
+    SdkIssueAssetCfaRequest, SdkIssueAssetIfaRequest, SdkIssueAssetNiaRequest,
+    SdkIssueAssetUdaRequest, SdkKeysendRequest, SdkKeysendResponse, SdkLdkChainSync,
+    SdkMakerExecuteRequest, SdkMakerInitRequest, SdkMakerInitResponse, SdkOpenChannelRequest,
+    SdkOpenChannelResponse, SdkPostAssetMediaRequest, SdkPostAssetMediaResponse,
+    SdkRefreshTransfersRequest, SdkRefreshTransfersResponse, SdkRgbInvoiceRequest,
+    SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse, SdkSendOnionMessageRequest,
+    SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest, SdkUnlockRequest,
+    SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse, SignMessageResponse, Swap, SwapList,
+    SwapStatus, Token, TokenLight, Transaction, TransactionType, Transfer,
+    TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo, VerifyMessageResponse,
+    WitnessData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -272,6 +273,21 @@ pub(crate) struct JsonSdkExternalUnlockRequest {
     pub announce_addresses: Vec<String>,
     #[serde(default)]
     pub announce_alias: Option<String>,
+    #[serde(default)]
+    pub eth_rpc_url: Option<String>,
+}
+
+impl From<JsonSdkExternalUnlockRequest> for SdkExternalUnlockRequest {
+    fn from(request: JsonSdkExternalUnlockRequest) -> Self {
+        Self {
+            ldk_chain_sync: request.ldk_chain_sync.into(),
+            indexer_url: request.indexer_url,
+            proxy_endpoint: request.proxy_endpoint,
+            announce_addresses: request.announce_addresses,
+            announce_alias: request.announce_alias,
+            eth_rpc_url: request.eth_rpc_url,
+        }
+    }
 }
 
 // Bidirectional: Serialize for native-signer output, Deserialize for a host
@@ -2404,6 +2420,73 @@ pub(crate) struct JsonChannelIdResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn external_unlock_json() -> serde_json::Value {
+        serde_json::json!({
+            "ldk_chain_sync": {
+                "mode": "TransactionSync",
+                "config": {"indexer_url": "tcp://127.0.0.1:50001"}
+            }
+        })
+    }
+
+    #[test]
+    fn external_unlock_preserves_eth_rpc_url() {
+        let mut json = external_unlock_json();
+        json["eth_rpc_url"] = "https://ethereum.example/rpc".into();
+        json["indexer_url"] = "tcp://127.0.0.1:50002".into();
+        json["proxy_endpoint"] = "rpc://127.0.0.1:3000/json-rpc".into();
+        json["announce_addresses"] = serde_json::json!(["node.example:9735"]);
+        json["announce_alias"] = "external-bfa".into();
+        let request: JsonSdkExternalUnlockRequest = serde_json::from_value(json).unwrap();
+        let typed: SdkExternalUnlockRequest = request.into();
+
+        assert_eq!(
+            typed.eth_rpc_url.as_deref(),
+            Some("https://ethereum.example/rpc")
+        );
+        assert_eq!(typed.indexer_url.as_deref(), Some("tcp://127.0.0.1:50002"));
+        assert_eq!(
+            typed.proxy_endpoint.as_deref(),
+            Some("rpc://127.0.0.1:3000/json-rpc")
+        );
+        assert_eq!(typed.announce_addresses, ["node.example:9735"]);
+        assert_eq!(typed.announce_alias.as_deref(), Some("external-bfa"));
+        assert!(matches!(typed.ldk_chain_sync,
+            SdkLdkChainSync::TransactionSync { indexer_url }
+                if indexer_url == "tcp://127.0.0.1:50001"));
+    }
+
+    #[test]
+    fn external_unlock_accepts_omitted_and_null_eth_rpc_url() {
+        for explicit_null in [false, true] {
+            let mut json = external_unlock_json();
+            if explicit_null {
+                json["eth_rpc_url"] = serde_json::Value::Null;
+            }
+            let request: JsonSdkExternalUnlockRequest = serde_json::from_value(json).unwrap();
+            let typed: SdkExternalUnlockRequest = request.into();
+            assert!(typed.eth_rpc_url.is_none());
+            assert!(typed.indexer_url.is_none());
+            assert!(typed.proxy_endpoint.is_none());
+            assert!(typed.announce_addresses.is_empty());
+            assert!(typed.announce_alias.is_none());
+        }
+    }
+
+    #[test]
+    fn external_unlock_rejects_non_string_eth_rpc_url() {
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(123),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let mut json = external_unlock_json();
+            json["eth_rpc_url"] = value;
+            assert!(serde_json::from_value::<JsonSdkExternalUnlockRequest>(json).is_err());
+        }
+    }
 
     const ASSET_ID: &str = "rgb:CJkb4YZw-jRiz2sk-~PARPio-wtVYI1c-XAEYCqO-wTfvRZ8";
 

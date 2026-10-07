@@ -586,6 +586,32 @@ pub struct SdkExternalSignerBootstrap {
     pub api_level: u32,
 }
 
+/// Unlock parameters for an external signer; no private key or password is accepted.
+pub struct SdkExternalUnlockRequest {
+    pub ldk_chain_sync: SdkLdkChainSync,
+    pub indexer_url: Option<String>,
+    pub proxy_endpoint: Option<String>,
+    pub announce_addresses: Vec<String>,
+    pub announce_alias: Option<String>,
+    /// Ethereum RPC used for BFA validation. None preserves the node config fallback.
+    pub eth_rpc_url: Option<String>,
+}
+
+impl From<SdkExternalUnlockRequest> for crate::sdk::UnlockRequest {
+    fn from(request: SdkExternalUnlockRequest) -> Self {
+        Self {
+            password: String::new(),
+            ldk_chain_sync: request.ldk_chain_sync.into(),
+            indexer_url: request.indexer_url,
+            eth_rpc_url: request.eth_rpc_url,
+            proxy_endpoint: request.proxy_endpoint,
+            announce_addresses: request.announce_addresses,
+            announce_alias: request.announce_alias,
+            gossip_rgs_server_url: None,
+        }
+    }
+}
+
 pub struct SdkVssClearFenceRequest {
     pub password: String,
 }

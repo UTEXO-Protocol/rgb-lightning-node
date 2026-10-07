@@ -1702,7 +1702,8 @@ impl SdkNode {
         self.handle.app_state().set_attached_external_signer(None);
     }
 
-    #[allow(clippy::too_many_arguments)] // Mirrors `UnlockRequest`; UniFFI keeps a flat argument list.
+    /// Compatibility entrypoint. Use the request-based variant to configure BFA validation.
+    #[allow(clippy::too_many_arguments)]
     pub fn unlock_with_attached_external_signer(
         &self,
         ldk_chain_sync: SdkLdkChainSync,
@@ -1711,20 +1712,24 @@ impl SdkNode {
         announce_addresses: Vec<String>,
         announce_alias: Option<String>,
     ) -> Result<(), RlnError> {
+        self.unlock_with_attached_external_signer_request(SdkExternalUnlockRequest {
+            ldk_chain_sync,
+            indexer_url,
+            proxy_endpoint,
+            announce_addresses,
+            announce_alias,
+            eth_rpc_url: None,
+        })
+    }
+
+    pub fn unlock_with_attached_external_signer_request(
+        &self,
+        request: SdkExternalUnlockRequest,
+    ) -> Result<(), RlnError> {
         let state = self.handle.app_state();
         block_on_sdk(sdk::unlock_with_attached_external_signer(
             state,
-            sdk::UnlockRequest {
-                password: String::new(),
-                ldk_chain_sync: ldk_chain_sync.into(),
-                indexer_url,
-                // the flat external-signer unlock has no slot for it; the config file still applies
-                eth_rpc_url: None,
-                proxy_endpoint,
-                announce_addresses,
-                announce_alias,
-                gossip_rgs_server_url: None,
-            },
+            request.into(),
         ))?;
         Ok(())
     }
@@ -1760,14 +1765,26 @@ impl SdkNode {
         announce_addresses: Vec<String>,
         announce_alias: Option<String>,
     ) -> Result<(), RlnError> {
-        self.attach_native_external_signer(signer.clone())?;
-        self.unlock_with_attached_external_signer(
-            ldk_chain_sync,
-            indexer_url,
-            proxy_endpoint,
-            announce_addresses,
-            announce_alias,
+        self.unlock_with_native_external_signer_request(
+            signer,
+            SdkExternalUnlockRequest {
+                ldk_chain_sync,
+                indexer_url,
+                proxy_endpoint,
+                announce_addresses,
+                announce_alias,
+                eth_rpc_url: None,
+            },
         )
+    }
+
+    pub fn unlock_with_native_external_signer_request(
+        &self,
+        signer: Arc<NativeExternalSigner>,
+        request: SdkExternalUnlockRequest,
+    ) -> Result<(), RlnError> {
+        self.attach_native_external_signer(signer)?;
+        self.unlock_with_attached_external_signer_request(request)
     }
 }
 

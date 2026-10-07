@@ -55,6 +55,29 @@ contains: "RLN on mainnet currently supports only on-chain methods. Lightning AP
 are not supported." On-chain and shared administrative APIs retain their existing
 requirements. See the [native SDK availability documentation](../../src/uniffi_api/README.md#mainnet-api-availability).
 
+## External-signer unlock
+
+Both `rln_sdk_node_unlock_with_native_external_signer` and
+`rln_sdk_node_unlock_with_attached_external_signer` accept `eth_rpc_url` in the
+existing JSON request. Their C signatures and generated headers are unchanged.
+
+```json
+{
+  "ldk_chain_sync": {
+    "mode": "TransactionSync",
+    "config": { "indexer_url": "ssl://bitcoin-indexer.example:50002" }
+  },
+  "indexer_url": "ssl://bitcoin-indexer.example:50002",
+  "proxy_endpoint": "rpcs://rgb-proxy.example/json-rpc",
+  "eth_rpc_url": "https://ethereum-rpc.example"
+}
+```
+
+An omitted or null `eth_rpc_url` retains the existing node-config fallback.
+A supplied URL enables the existing BFA validation path; an unusable endpoint
+fails unlock. The attached-signer entrypoint still requires a signer to have
+been attached first. No seed or password belongs in this request.
+
 ## Memory ownership
 
 - Strings returned in the `inner` field of `CResultString` are heap-allocated

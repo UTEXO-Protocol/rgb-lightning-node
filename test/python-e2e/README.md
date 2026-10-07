@@ -54,6 +54,33 @@ export LD_LIBRARY_PATH="$PWD/target/release:${LD_LIBRARY_PATH:-}"
 RESET_DATA=1 PYTHON_E2E_SCENARIO=all python3 test/python-e2e/PythonUniffiE2e.py
 ```
 
+## External-signer BFA unlock regression
+
+`external_signer_bfa.py` tests both attached and native external signers through
+the real RLN/rgb-lib unlock path. It uses fresh, unfunded regtest wallets and a
+local Ethereum JSON-RPC fixture. It checks endpoint forwarding, legacy calls,
+omitted/null endpoints, malformed endpoints, RPC failure and retry, and signer
+identity mismatch. It does not test funded BFA transfers or Ethereum finality.
+
+With the regtest services running:
+
+```sh
+cargo build --locked --release --features uniffi,vls,vss --lib
+./scripts/ci/uniffi_generate_python.sh
+PYTHONPATH=target/uniffi/python python3 test/python-e2e/external_signer_bfa.py
+
+cargo test --locked --manifest-path bindings/c-ffi/Cargo.toml --lib
+cargo rustc --locked --release --manifest-path bindings/c-ffi/Cargo.toml --lib --crate-type cdylib
+python3 test/python-e2e/external_signer_bfa.py --cffi-library bindings/c-ffi/target/release/librlncffi.so
+```
+
+Use `librlncffi.dylib` on macOS. With a shared `CARGO_TARGET_DIR`, locate the C
+library under that directory instead. Set `RLN_BFA_TEST_INDEXER` and
+`RLN_BFA_TEST_PROXY` to reuse another regtest stack; defaults are
+`tcp://127.0.0.1:50001` and `rpc://127.0.0.1:3000/json-rpc`. The test never starts,
+stops, funds, or resets the stack. CI runs both bindings in the existing Python
+external-signer job.
+
 ## CI Usage
 
 Recommended CI shape:
