@@ -461,6 +461,7 @@ async fn mainnet_rest_unlock_rejects_wrong_indexer_then_serves_wallet() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mainnet_legacy_state_stays_inactive_across_wallet_unlock_and_reopen() {
+    use crate::runtime::block_on;
     use lightning::util::persist::KVStoreSync;
     use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait};
     let fixture = Fixture::new().await;
@@ -486,13 +487,16 @@ async fn mainnet_legacy_state_stays_inactive_across_wallet_unlock_and_reopen() {
     let file = fixture.state.static_state.ldk_data_dir.join("old_snapshot");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, b"untouched historical file").unwrap();
-    crate::database::entities::ChannelPeerActMod {
-        pubkey: ActiveValue::Set("historical peer".into()),
-        address: ActiveValue::Set("127.0.0.1:9735".into()),
-        created_at: ActiveValue::Set(chrono::Utc::now()),
-    }
-    .insert(fixture.state.db().as_ref())
-    .await
+    // Keep peer queries on the KVStoreSync runtime so SQLx can return the pool's single
+    // connection before the next query.
+    block_on(
+        crate::database::entities::ChannelPeerActMod {
+            pubkey: ActiveValue::Set("historical peer".into()),
+            address: ActiveValue::Set("127.0.0.1:9735".into()),
+            created_at: ActiveValue::Set(chrono::Utc::now()),
+        }
+        .insert(fixture.state.db().as_ref()),
+    )
     .unwrap();
     let mut identity = None;
     for _ in 0..2 {
@@ -524,10 +528,10 @@ async fn mainnet_legacy_state_stays_inactive_across_wallet_unlock_and_reopen() {
             assert_eq!(store.read(primary, secondary, key).unwrap(), value);
         }
         assert_eq!(std::fs::read(&file).unwrap(), b"untouched historical file");
-        let peers = crate::database::entities::ChannelPeerEntity::find()
-            .all(fixture.state.db().as_ref())
-            .await
-            .unwrap();
+        let peers = block_on(
+            crate::database::entities::ChannelPeerEntity::find().all(fixture.state.db().as_ref()),
+        )
+        .unwrap();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].pubkey, "historical peer");
     }
