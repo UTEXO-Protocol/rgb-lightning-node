@@ -3137,7 +3137,7 @@ pub(crate) async fn open_channel(
         let mut fake_p2wsh: [u8; 34] = [0; 34];
         fake_p2wsh[1] = 32;
         let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
-        let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network);
+        let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network)?;
         let asset_id = contract_id.to_string();
         let schema = unlocked_state
             .rgb_get_asset_metadata(*contract_id)?

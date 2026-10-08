@@ -4754,7 +4754,7 @@ pub(crate) async fn open_channel(
                 fake_p2wsh[1] = 32;
                 let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
                 let recipient_id =
-                    recipient_id_from_script_buf(script_buf, state.static_state.network);
+                    recipient_id_from_script_buf(script_buf, state.static_state.network)?;
                 let asset_id = contract_id.to_string();
                 let assignment = match schema {
                     RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa => {

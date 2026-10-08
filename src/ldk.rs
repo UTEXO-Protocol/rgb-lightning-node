@@ -2089,7 +2089,13 @@ async fn handle_ldk_events(
                         AssetSchema::Uda => Assignment::NonFungible,
                     };
                     let recipient_id =
-                        recipient_id_from_script_buf(script_buf, static_state.network);
+                        match recipient_id_from_script_buf(script_buf, static_state.network) {
+                            Ok(recipient_id) => recipient_id,
+                            Err(e) => {
+                                reject_virtual_open(format!("invalid funding recipient: {e}"));
+                                return Ok(());
+                            }
+                        };
                     let recipient_map = map! {
                         asset_id.clone() => vec![Recipient {
                             recipient_id,
@@ -2387,7 +2393,17 @@ async fn handle_ldk_events(
                 };
 
                 let recipient_id =
-                    recipient_id_from_script_buf(script_buf.clone(), static_state.network);
+                    match recipient_id_from_script_buf(script_buf.clone(), static_state.network) {
+                        Ok(recipient_id) => recipient_id,
+                        Err(e) => {
+                            return handle_funding_prepare_err(
+                                e,
+                                &unlocked_state.channel_manager,
+                                &temporary_channel_id,
+                                &counterparty_node_id,
+                            );
+                        }
+                    };
 
                 let recipient_map = map! {
                     asset_id.clone() => vec![Recipient {
@@ -3834,6 +3850,18 @@ impl RgbOutputSpender {
         if let Some(tx) = txes.get(&descriptors_hash) {
             return Ok(tx.clone());
         }
+        let sweep_key = descriptors_hash.to_string();
+        if let Some(prepared) =
+            crate::rgb_sweep::PreparedRgbSweep::read(self.kv_store.as_ref(), &sweep_key)?
+        {
+            return self.finish_prepared_rgb_sweep(
+                descriptors,
+                descriptors_hash,
+                &mut txes,
+                secp_ctx,
+                prepared,
+            );
+        }
 
         let mut vout = 0;
         let mut vanilla_descriptor = true;
@@ -4003,17 +4031,70 @@ impl RgbOutputSpender {
         };
 
         let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).expect("valid PSBT");
-        let consignments = self
+        let prepared = self
             .rgb_wallet_wrapper
-            .color_psbt_and_consume(&mut psbt, coloring_info)
+            .color_psbt_and_prepare_consume(&mut psbt, coloring_info)
             .map_err(|e| format!("cannot color the sweep PSBT: {e}"))?;
+        let batch_transfer_idx = prepared.batch_transfer_idx;
+        let prepared = crate::rgb_sweep::PreparedRgbSweep::new(psbt.to_string(), prepared)
+            .and_then(|prepared| {
+                prepared.persist(self.kv_store.as_ref(), &sweep_key)?;
+                Ok(prepared)
+            })
+            .inspect_err(|_| {
+                // The transaction has not been signed or handed to LDK for broadcast.
+                if let Err(cleanup) =
+                    self.rgb_wallet_wrapper
+                        .fail_transfers(Some(batch_transfer_idx), false, true)
+                {
+                    tracing::error!(batch_transfer_idx, error = %cleanup,
+                        "cannot fail unpersisted RGB sweep preparation");
+                }
+            })?;
+        self.finish_prepared_rgb_sweep(descriptors, descriptors_hash, &mut txes, secp_ctx, prepared)
+    }
 
-        let mut psbt = Psbt::from_str(&psbt.to_string()).expect("valid transaction");
+    fn finish_prepared_rgb_sweep(
+        &self,
+        descriptors: &[&SpendableOutputDescriptor],
+        descriptors_hash: u64,
+        txes: &mut OutputSpenderTxes,
+        secp_ctx: &Secp256k1<All>,
+        prepared: crate::rgb_sweep::PreparedRgbSweep,
+    ) -> Result<bitcoin::Transaction, String> {
+        let mut psbt = Psbt::from_str(&prepared.psbt)
+            .map_err(|e| format!("invalid prepared sweep PSBT: {e}"))?;
+        let unsigned_tx = psbt.unsigned_tx.clone();
+        let batch_is_active = self
+            .rgb_wallet_wrapper
+            .list_transfers(
+                rgb_lib::wallet::AssetFilter::AnyOrNone,
+                Some(unsigned_tx.compute_txid().to_string()),
+            )
+            .map_err(|e| format!("cannot inspect prepared sweep: {e}"))?
+            .iter()
+            .any(|transfer| {
+                transfer.batch_transfer_idx == prepared.batch_transfer_idx
+                    && matches!(
+                        transfer.status,
+                        TransferStatus::Initiated
+                            | TransferStatus::WaitingConfirmations
+                            | TransferStatus::Settled
+                    )
+            });
+        if !batch_is_active {
+            return Err(s!(
+                "prepared RGB sweep batch is missing or no longer active"
+            ));
+        }
 
         psbt = self
             .signer
             .sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)
             .map_err(|e| format!("cannot sign the sweep PSBT: {e:?}"))?;
+        if psbt.unsigned_tx != unsigned_tx {
+            return Err(s!("signer changed the prepared RGB sweep transaction"));
+        }
 
         let spending_tx = match psbt.extract_tx() {
             Ok(tx) => tx,
@@ -4022,20 +4103,39 @@ impl RgbOutputSpender {
         };
 
         let closing_txid = spending_tx.compute_txid().to_string();
+        if closing_txid != prepared.txid()? {
+            return Err(s!("signing changed the prepared RGB sweep transaction ID"));
+        }
 
         let handle = Handle::current();
         let _ = handle.enter();
 
-        for consignment in consignments {
-            let contract_id = consignment.contract_id();
+        for (asset_id, consignment) in prepared.consignments {
+            // A retry after a failed KV write must not provide an already accepted consignment.
+            let received = self
+                .rgb_wallet_wrapper
+                .list_transfers(
+                    rgb_lib::wallet::AssetFilter::Id(asset_id.clone()),
+                    Some(closing_txid.clone()),
+                )
+                .map_err(|e| format!("cannot inspect sweep receive: {e}"))?
+                .iter()
+                .any(|transfer| {
+                    transfer.txid.as_deref() == Some(closing_txid.as_str())
+                        && transfer.kind == rgb_lib::wallet::TransferKind::ReceiveWitness
+                        && transfer.status != TransferStatus::Failed
+                        && transfer.status != TransferStatus::WaitingCounterparty
+                });
+            if received {
+                continue;
+            }
 
             // persist consignment and hand it to rgb-lib (out-of-band)
             let consignment_path = self
                 .static_state
                 .ldk_data_dir
-                .join(format!("consignment_{closing_txid}_{contract_id}"));
-            consignment
-                .save_file(&consignment_path)
+                .join(format!("consignment_{closing_txid}_{asset_id}"));
+            fs::write(&consignment_path, consignment)
                 .map_err(|e| format!("cannot save consignment: {e}"))?;
             let consignment_path_str = consignment_path.to_string_lossy().to_string();
             let rgb_wallet_wrapper_copy = self.rgb_wallet_wrapper.clone();
