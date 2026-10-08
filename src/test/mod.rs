@@ -3021,8 +3021,7 @@ fn default_ldk_chain_sync() -> LdkChainSync {
     return LdkChainSync::BlockSync {
         bitcoind_rpc_username: s!("user"),
         bitcoind_rpc_password: s!("password"),
-        // compose.yaml publishes RPC on IPv4; LDK uses only the first resolved address.
-        bitcoind_rpc_host: s!("127.0.0.1"),
+        bitcoind_rpc_host: s!("localhost"),
         bitcoind_rpc_port: 18443,
     };
     #[cfg(not(feature = "block-sync"))]
