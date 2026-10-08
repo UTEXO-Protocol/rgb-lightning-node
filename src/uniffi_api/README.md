@@ -406,3 +406,36 @@ CI artifact packaging workflow:
   - Swift: `RGBLightningNode.xcframework`
   - Kotlin JVM host bundle: generated Kotlin sources + Linux `librgb_lightning_node.so`
   - Kotlin Android: `jniLibs` + generated Kotlin sources
+
+## External-signer burn
+
+`SdkNode.burn` accepts the same request for password and external signers. For an
+external signer, RLN prepares the burn with rgb-lib, persists an `Initiated`
+transfer to reserve its inputs, signs through `sign_rgb_psbt`, checks that the
+transaction is unchanged and finalized, then completes it through `burn_end`.
+The native external signer and attached signer host use this same path. The
+HTTP `/burn` and C `rln_burn` entry points share the implementation.
+
+BFA burns require a 32-byte `burn_recipient` and a node unlocked with the
+appropriate `eth_rpc_url`. Successful completion returns `txid` and
+`batch_transfer_idx`; use the existing consignment APIs to retrieve the burn
+proof. This burns the RGB assets, not an automatic Ethereum payout.
+
+Do not automatically retry a failed or interrupted burn. A completion error
+identifies the pending batch transfer; its reservation is deliberately retained.
+Inspect transfer history and the transaction on-chain before explicitly failing
+an unbroadcast transfer or requesting another burn. Applications still need
+durable operation tracking for lost responses and process crashes.
+
+Local funded regression (regtest services must already be running):
+
+```sh
+cargo test --locked --features uniffi,vls,test-utils --test lib_sdk \
+  external_burn_funded_and_recovery -- --nocapture
+```
+
+`RLN_BURN_BITCOIND`, `RLN_BURN_INDEXER` and `RLN_BURN_PROXY` override the default
+local regtest endpoints. The test checks the Bitcoin chain identity before
+funding and never resets or deletes the existing stack.
+
+For the funded BFA proof scenario, see [external-burn.md](../../test/external-burn.md).
