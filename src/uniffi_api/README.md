@@ -63,15 +63,6 @@ methods unless they need BFA validation. Burn support is unchanged.
 Node.js/Bare bindings use the existing C entrypoints with an optional JSON field;
 see the [C binding request example](../../bindings/c-ffi/README.md#external-signer-unlock).
 
-## RGB sweep recovery
-
-`SdkNode.list_rgb_sweep_quarantine()` lists quarantined receipts. Pass the returned
-`key` and `record_id` to `SdkNode.recover_rgb_sweep(RgbSweepRecoveryRequest)` with
-`RgbSweepRecoveryAction::Resume`, `Reprepare` or `Resolve`. These methods require
-an unlocked Lightning node and preserve the original receipt in an archive.
-See [recovery requirements](../../README.md#rgb-sweep-quarantine-and-recovery)
-for each action; a missing transaction alone does not permit re-preparation.
-
 ## Mainnet API availability
 
 For a node configured for mainnet, Lightning channel/peer operations, invoices

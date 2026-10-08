@@ -1243,45 +1243,6 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 >;
 
 pub(crate) type OutputSpenderTxes = LdkHashMap<u64, bitcoin::Transaction>;
-
-pub(crate) fn check_sweep_not_broadcast(
-    store: &impl KVStoreSync,
-    tracked: &[ldk_sweep::TrackedSpendableOutput],
-    prepared: &crate::rgb_sweep::PreparedRgbSweep,
-) -> Result<(), String> {
-    let psbt = Psbt::from_str(&prepared.psbt).map_err(|e| e.to_string())?;
-    let inputs: HashSet<_> = psbt
-        .unsigned_tx
-        .input
-        .iter()
-        .map(|i| i.previous_output)
-        .collect();
-    let txes = match store.read("", "", OUTPUT_SPENDER_TXES_KEY) {
-        Ok(bytes) => OutputSpenderTxes::read(&mut &bytes[..])
-            .map_err(|e| format!("invalid persisted sweep transactions: {e:?}"))?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => new_hash_map(),
-        Err(e) => return Err(format!("cannot inspect persisted sweep transactions: {e}")),
-    };
-    if txes
-        .values()
-        .any(|tx| tx.input.iter().any(|i| inputs.contains(&i.previous_output)))
-    {
-        return Err("a signed transaction for these inputs has already been handed to LDK".into());
-    }
-    for input in inputs {
-        let output = tracked
-            .iter()
-            .find(|o| o.descriptor.spendable_outpoint().into_bitcoin_outpoint() == input)
-            .ok_or("sweep input is not tracked by LDK; cannot prove it was never broadcast")?;
-        if !matches!(
-            output.status,
-            ldk_sweep::OutputSpendStatus::PendingInitialBroadcast { .. }
-        ) {
-            return Err("LDK has already broadcast a transaction for these inputs".into());
-        }
-    }
-    Ok(())
-}
 // (descriptors hash, contract) -> (recipient id, expiration)
 type SweepRecipients = HashMap<(u64, ContractId), (String, u64)>;
 
@@ -3906,27 +3867,31 @@ impl RgbOutputSpender {
         locktime: Option<LockTime>,
         secp_ctx: &Secp256k1<All>,
     ) -> Result<bitcoin::Transaction, String> {
-        let _sweep_guard = self
-            .rgb_wallet_wrapper
-            .sweep_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let mut hasher = DefaultHasher::new();
         descriptors.hash(&mut hasher);
         let descriptors_hash = hasher.finish();
-        let sweep_key = descriptors_hash.to_string();
-        crate::rgb_sweep::ensure_spend_allowed(self.kv_store.as_ref(), &sweep_key)?;
-        let inputs = descriptors
-            .iter()
-            .map(|d| d.spendable_outpoint().into_bitcoin_outpoint())
-            .collect();
-        crate::rgb_sweep::ensure_inputs_spend_allowed(self.kv_store.as_ref(), &inputs)?;
         let mut txes = self.txes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = txes.get(&descriptors_hash) {
             return Ok(tx.clone());
         }
+        let sweep_key = descriptors_hash.to_string();
+        let inputs: HashSet<_> = descriptors
+            .iter()
+            .map(|d| d.spendable_outpoint().into_bitcoin_outpoint())
+            .collect();
+        // The descriptor order and batch can change between LDK attempts. Check cached
+        // transactions too: their active receipt may already have been consumed and removed.
+        for tx in txes.values() {
+            let saved: HashSet<_> = tx.input.iter().map(|i| i.previous_output).collect();
+            if saved == inputs {
+                return Ok(tx.clone());
+            }
+            if !saved.is_disjoint(&inputs) {
+                return Err("inputs overlap a previously signed sweep".into());
+            }
+        }
         if let Some(prepared) =
-            crate::rgb_sweep::PreparedRgbSweep::read(self.kv_store.as_ref(), &sweep_key)?
+            crate::rgb_sweep::find_prepared_sweep(self.kv_store.as_ref(), &inputs)?
         {
             return self.finish_prepared_rgb_sweep(
                 descriptors,
@@ -4112,7 +4077,7 @@ impl RgbOutputSpender {
         let batch_transfer_idx = prepared.batch_transfer_idx;
         let prepared = crate::rgb_sweep::PreparedRgbSweep::new(psbt.to_string(), prepared)
             .and_then(|prepared| {
-                prepared.persist_new(self.kv_store.as_ref(), &sweep_key)?;
+                prepared.persist(self.kv_store.as_ref(), &sweep_key)?;
                 Ok(prepared)
             })
             .inspect_err(|_| {
@@ -4162,10 +4127,6 @@ impl RgbOutputSpender {
             ));
         }
 
-        crate::rgb_sweep::PreparedRgbSweep::begin_signing(
-            self.kv_store.as_ref(),
-            &descriptors_hash.to_string(),
-        )?;
         psbt = self
             .signer
             .sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)
@@ -5936,14 +5897,6 @@ async fn start_lightning(
         .await?;
     let rgb_wallet_wrapper = Arc::clone(&common.rgb_wallet_wrapper);
 
-    #[cfg(feature = "vss")]
-    if vss_restored_keys > 0 {
-        // Node KV and RGB wallet backups are independent. A restored pre-sign marker cannot
-        // prove that a later signing attempt never happened on the previous device.
-        crate::rgb_sweep::invalidate_unsigned_proofs(kv_store.as_ref())
-            .map_err(APIError::Unexpected)?;
-    }
-
     reimport_funding_consignments(&rgb_wallet_wrapper, &kv_store, &ldk_data_dir).await;
 
     // Initialize the OutputSweeper.
@@ -7215,6 +7168,110 @@ pub(crate) fn clear_rgb_payment_pending(
             }
         }
     }
+}
+
+// Exercise the real signer, rgb-lib batch lookup and duplicate-consignment path on a closed
+// regtest channel, before wallet refresh consumes/removes the prepared receipt.
+#[cfg(test)]
+pub(crate) async fn test_retry_prepared_rgb_sweep(state: Arc<AppState>) -> String {
+    let unlocked = state.get_unlocked_app_state().await.clone().unwrap();
+    let lightning = unlocked.lightning().unwrap().clone();
+    for _ in 0..30 {
+        // Drive the public sweeper entry point instead of waiting for the background timer.
+        lightning
+            .output_sweeper
+            .regenerate_and_broadcast_spend_if_necessary()
+            .await
+            .unwrap();
+        let state = state.clone();
+        let lightning = lightning.clone();
+        if let Some(txid) = tokio::task::spawn_blocking(move || {
+            let tracked = lightning.output_sweeper.tracked_spendable_outputs();
+            let store = lightning.kv_store.as_ref();
+            let mut txes = match store.read("", "", OUTPUT_SPENDER_TXES_KEY) {
+                Ok(bytes) => OutputSpenderTxes::read(&mut &bytes[..]).unwrap(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+                Err(e) => panic!("cannot inspect sweep tx cache: {e}"),
+            };
+            for key in store.list("rgb_sweeps", "").unwrap() {
+                let raw = store.read("rgb_sweeps", "", &key).unwrap();
+                let prepared: crate::rgb_sweep::PreparedRgbSweep =
+                    bincode::deserialize(&raw).unwrap();
+                let txid = prepared.txid().unwrap();
+                let Some(original) = txes
+                    .values()
+                    .find(|tx| tx.compute_txid().to_string() == txid)
+                    .cloned()
+                else {
+                    continue;
+                };
+                let mut descriptors: Vec<_> = tracked
+                    .iter()
+                    .filter(|o| {
+                        original.input.iter().any(|i| {
+                            i.previous_output
+                                == o.descriptor.spendable_outpoint().into_bitcoin_outpoint()
+                        })
+                    })
+                    .map(|o| &o.descriptor)
+                    .collect();
+                assert_eq!(descriptors.len(), original.input.len());
+                descriptors.reverse();
+                let spender = RgbOutputSpender {
+                    static_state: state.static_state.clone(),
+                    rgb_wallet_wrapper: lightning.rgb_wallet_wrapper.clone(),
+                    signer: lightning.signer.clone(),
+                    kv_store: lightning.kv_store.clone(),
+                    txes: Arc::new(Mutex::new(txes.clone())),
+                    sweep_recipients: Arc::new(Mutex::new(HashMap::new())),
+                };
+                let lookup = || {
+                    lightning
+                        .rgb_wallet_wrapper
+                        .list_transfers(rgb_lib::wallet::AssetFilter::AnyOrNone, Some(txid.clone()))
+                        .unwrap()
+                };
+                let before = lookup();
+                let retried = spender
+                    .finish_prepared_rgb_sweep(
+                        &descriptors,
+                        key.parse().unwrap(),
+                        &mut txes,
+                        &Secp256k1::new(),
+                        prepared,
+                    )
+                    .unwrap();
+                assert_eq!(retried.compute_txid(), original.compute_txid());
+                assert_eq!(
+                    lookup().len(),
+                    before.len(),
+                    "retry must not create another receive"
+                );
+                let mut missing_batch: crate::rgb_sweep::PreparedRgbSweep =
+                    bincode::deserialize(&raw).unwrap();
+                missing_batch.batch_transfer_idx = i32::MAX;
+                assert!(spender
+                    .finish_prepared_rgb_sweep(
+                        &descriptors,
+                        key.parse().unwrap(),
+                        &mut txes,
+                        &Secp256k1::new(),
+                        missing_batch
+                    )
+                    .unwrap_err()
+                    .contains("no longer active"));
+                return Some(txid);
+            }
+            None
+        })
+        .await
+        .unwrap()
+        {
+            return txid;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    panic!("no completed RGB sweep preparation available to retry");
 }
 
 #[cfg(test)]

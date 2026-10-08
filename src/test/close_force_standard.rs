@@ -44,8 +44,19 @@ async fn close_force_standard() {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     close_channel(node1_addr, &channel.channel_id, &node2_pubkey, true).await;
+    let sweep_txid =
+        crate::ldk::test_retry_prepared_rgb_sweep(test_get_app_state(node1_addr)).await;
     wait_for_balance(node1_addr, &asset_id, 900).await;
     wait_for_balance(node2_addr, &asset_id, 100).await;
+    // Receiving uses zero confirmations; explicitly confirm before checking the prepared batch.
+    mine(false);
+    refresh_transfers(node1_addr).await;
+    let sweep_transfers = list_transfers_by_txid(node1_addr, &sweep_txid).await;
+    assert!(!sweep_transfers.is_empty());
+    assert!(sweep_transfers
+        .iter()
+        .all(|t| t.status == TransferStatus::Settled));
+    assert_eq!(asset_balance(node1_addr, &asset_id).await.settled, 900);
 
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;
     send_asset(

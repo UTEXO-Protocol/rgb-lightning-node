@@ -663,10 +663,6 @@ pub struct SdkRefreshTransfersRequest {
     pub skip_sync: bool,
 }
 
-pub use crate::rgb_sweep::{
-    RgbSweepQuarantineInfo, RgbSweepRecoveryAction, RgbSweepRecoveryRequest,
-};
-
 pub struct SdkFailTransfersRequest {
     pub batch_transfer_idx: Option<i32>,
     pub no_asset_only: bool,

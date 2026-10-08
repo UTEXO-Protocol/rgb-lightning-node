@@ -376,25 +376,6 @@ pub extern "C" fn rln_refresh_transfers(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rln_list_rgb_sweep_quarantine(node: &COpaqueStruct) -> CResultString {
-    ffi_call!(
-        "rln_list_rgb_sweep_quarantine",
-        api::list_rgb_sweep_quarantine(node)
-    )
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rln_recover_rgb_sweep(
-    node: &COpaqueStruct,
-    request_json: *const c_char,
-) -> CResultString {
-    ffi_call!(
-        "rln_recover_rgb_sweep",
-        api::recover_rgb_sweep(node, request_json)
-    )
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn rln_fail_transfers(
     node: &COpaqueStruct,
     request_json: *const c_char,

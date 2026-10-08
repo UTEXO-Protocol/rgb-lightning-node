@@ -3515,8 +3515,6 @@ pub(crate) async fn send_payment(
     })
 }
 
-pub(crate) use crate::rgb_sweep::{list_rgb_sweep_quarantine, recover_rgb_sweep};
-
 pub(crate) async fn fail_transfers(
     state: Arc<AppState>,
     request: FailTransfersRequestData,

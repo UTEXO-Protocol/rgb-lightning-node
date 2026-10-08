@@ -458,42 +458,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/FailTransfersResponse'
-  /rgbsweeps/quarantine:
-    get:
-      tags: [RGB]
-      summary: List quarantined RGB channel sweeps
-      description: Requires an unlocked Lightning node and admin or explicit endpoint permission.
-      responses:
-        '200':
-          description: Quarantine records, including a record_id required for recovery
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/RgbSweepQuarantineInfo'
-  /rgbsweeps/recover:
-    post:
-      tags: [RGB]
-      summary: Recover a quarantined RGB channel sweep
-      description: >-
-        Archives the receipt before recovery. Resume retries the original preparation after
-        restoring its batch/files. Reprepare requires a Failed batch, durable evidence that
-        signing never started, no cached signed transaction and unbroadcast LDK inputs.
-        Resolve requires an already consumed batch and a confirmed transaction and keeps
-        the inputs blocked from new preparation. Requires an unlocked Lightning node and
-        admin or explicit endpoint permission. Corrupt receipts must be restored from backup.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RgbSweepRecoveryRequest'
-      responses:
-        '200':
-          description: Recovery completed; the original receipt remains archived
-        '400':
-          description: Stale record_id, unsafe action or unavailable recovery prerequisite
   /getassetmedia:
     post:
       tags:
@@ -2687,33 +2651,6 @@ components:
         fee_rate:
           type: number
           example: 9.3
-    RgbSweepQuarantineInfo:
-      type: object
-      required: [key, record_id, reason]
-      properties:
-        key:
-          type: string
-          description: Decimal descriptor hash identifying the stored sweep
-        record_id:
-          type: string
-          description: SHA-256 of the original receipt; echo unchanged in recovery requests
-        batch_transfer_idx:
-          type: [integer, 'null']
-        txid:
-          type: [string, 'null']
-        reason:
-          type: string
-    RgbSweepRecoveryRequest:
-      type: object
-      required: [key, record_id, action]
-      properties:
-        key:
-          type: string
-        record_id:
-          type: string
-        action:
-          type: string
-          enum: [resume, reprepare, resolve]
     FailTransfersRequest:
       type: object
       required:

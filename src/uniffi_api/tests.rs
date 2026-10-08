@@ -16,30 +16,6 @@ mod uniffi_smoke_tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn uniffi_sweep_recovery_requires_unlocked_lightning_node() {
-        for network in [BitcoinNetwork::Mainnet, BitcoinNetwork::Regtest] {
-            let node = SdkNode {
-                handle: crate::NodeHandle::from_app_state(mock_locked_state_for_network(network)),
-            };
-            let list = node.list_rgb_sweep_quarantine().map(|_| ());
-            let recover = node.recover_rgb_sweep(RgbSweepRecoveryRequest {
-                key: "1".into(),
-                record_id: "abc".into(),
-                action: RgbSweepRecoveryAction::Reprepare,
-            });
-            for result in [list, recover] {
-                match network {
-                    BitcoinNetwork::Mainnet => assert!(matches!(
-                        result,
-                        Err(RlnError::LightningUnsupportedOnMainnet(_))
-                    )),
-                    _ => assert!(matches!(result, Err(RlnError::NotInitialized(_)))),
-                }
-            }
-        }
-    }
-
-    #[test]
     fn external_unlock_request_preserves_bfa_and_node_settings() {
         let request: sdk::UnlockRequest = SdkExternalUnlockRequest {
             ldk_chain_sync: SdkLdkChainSync::TransactionSync {

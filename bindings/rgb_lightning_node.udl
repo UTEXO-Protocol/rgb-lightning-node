@@ -93,10 +93,6 @@ interface SdkNode {
     [Throws=RlnError]
     SdkFailTransfersResponse failtransfers(SdkFailTransfersRequest request);
     [Throws=RlnError]
-    sequence<RgbSweepQuarantineInfo> list_rgb_sweep_quarantine();
-    [Throws=RlnError]
-    void recover_rgb_sweep(RgbSweepRecoveryRequest request);
-    [Throws=RlnError]
     void sync();
     [Throws=RlnError]
     EstimateFeeResponse estimate_fee(u16 blocks);
@@ -714,26 +710,6 @@ dictionary SdkCloseChannelRequest {
 
 dictionary SdkRefreshTransfersRequest {
     boolean skip_sync;
-};
-
-dictionary RgbSweepQuarantineInfo {
-    string key;
-    string record_id;
-    i32? batch_transfer_idx;
-    string? txid;
-    string reason;
-};
-
-enum RgbSweepRecoveryAction {
-    "Resume",
-    "Reprepare",
-    "Resolve"
-};
-
-dictionary RgbSweepRecoveryRequest {
-    string key;
-    string record_id;
-    RgbSweepRecoveryAction action;
 };
 
 dictionary SdkFailTransfersRequest {
