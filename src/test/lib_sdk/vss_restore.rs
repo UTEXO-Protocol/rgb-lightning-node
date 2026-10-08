@@ -3,7 +3,7 @@
 //! every piece of state came back through VSS.
 //!
 //! This guards the "VSS should restore everything" invariant. If anyone
-//! removes the RGB-restore call from `start_ldk`, the asset/balance/channel
+//! removes the RGB-restore call from `start_node`, the asset/balance/channel
 //! assertions below fail.
 //!
 //! Requires the regtest stack (`./regtest.sh start`) and the VSS server

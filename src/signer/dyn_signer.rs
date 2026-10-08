@@ -249,7 +249,7 @@ impl EntropySource for DynRlnSigner {
         match self {
             Self::Internal(km) => km.get_secure_random_bytes(),
             // External matches `ExternalSigner` policy: LDK trait entropy is system-only (see
-            // `crate::ldk::start_ldk` / `UnlockedAppState::entropy_source`).
+            // `crate::ldk::start_node` / `CommonState::entropy_source`).
             Self::External(es) => es.get_secure_random_bytes(),
         }
     }

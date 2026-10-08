@@ -144,3 +144,48 @@ fn drain_inbound_queue_gap_replay_seq_disconnects_when_cursor_present() {
 fn commit_last_applied_seq_is_noop_for_empty_session_id() {
     commit_last_applied_seq("", 9);
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn automatic_owner_release_preserves_other_node_hooks_but_explicit_clear_disables_them() {
+    use super::*;
+    fn hooks(label: &'static str) -> RlnLdkPeerManagerHooks {
+        RlnLdkPeerManagerHooks {
+            new_outbound_connection: Rc::new(move |_| Ok(label.to_string())),
+            read_event: Rc::new(|_, _| Ok(())),
+            process_events: Rc::new(|| Ok(())),
+            take_outbound_frames: Rc::new(|_| Ok(Vec::new())),
+            socket_disconnected: Rc::new(|_| Ok(())),
+            report_error: Rc::new(|_| Ok(())),
+        }
+    }
+    let first = RlnWasmRustPeerManagerBridge::new(None).unwrap();
+    let second = RlnWasmRustPeerManagerBridge::new(None).unwrap();
+    first.install_node_hooks(hooks("first"), Rc::new(|| Ok(())));
+    second.install_node_hooks(hooks("second"), Rc::new(|| Ok(())));
+    second.release_node_hooks();
+    assert_eq!(first.connection_hooks_ready().unwrap(), (true, true));
+    let selected = first
+        .hooks_for_connection()
+        .unwrap()
+        .expect("surviving owner hooks");
+    assert_eq!(
+        (selected.hooks.new_outbound_connection)("").unwrap(),
+        "first"
+    );
+    assert!(RlnWasmRustPeerManagerBridge::new(None)
+        .unwrap()
+        .hooks_for_connection()
+        .unwrap()
+        .is_none());
+    clear_rln_ldk_peer_manager_hooks();
+    assert!(first.hooks_for_connection().unwrap().is_none());
+    assert_eq!(first.connection_hooks_ready().unwrap(), (false, false));
+    install_rln_ldk_peer_manager_hooks(hooks("custom"));
+    first.release_node_hooks();
+    let selected = get_rln_ldk_peer_manager_hooks().expect("unrelated custom hooks preserved");
+    assert_eq!(
+        (selected.hooks.new_outbound_connection)("").unwrap(),
+        "custom"
+    );
+    clear_rln_ldk_peer_manager_hooks();
+}

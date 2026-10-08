@@ -4,7 +4,7 @@ use rgb_lib::BitcoinNetwork;
 
 use crate::args::UserArgs;
 use crate::error::AppError;
-use crate::ldk::stop_ldk;
+use crate::ldk::stop_node;
 use crate::utils::{start_daemon, AppState};
 
 pub struct NodeConfig {
@@ -79,7 +79,12 @@ impl NodeHandle {
 
     pub async fn shutdown(&self) {
         self.state.cancel_token.cancel();
-        stop_ldk(self.state.clone()).await;
+        // An unlock in progress owns resources that have not been published yet. Its state-change
+        // guard finishes publication/rollback before shutdown takes the session for teardown.
+        while *self.state.get_changing_state() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        stop_node(self.state.clone()).await;
     }
 
     #[cfg(feature = "uniffi")]

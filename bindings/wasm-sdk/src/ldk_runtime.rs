@@ -1102,6 +1102,8 @@ impl LdkRuntimeManager for WasmNativeRuntimeManager {
     }
 
     fn set_live_node_seed_hex(&self, seed_hex: String) -> Result<(), JsValue> {
+        #[cfg(test)]
+        crate::ln_node::test_utils::record_startup_call("seed_assignment");
         let seed_hex = seed_hex.trim();
         if seed_hex.is_empty() {
             return Err(JsValue::from_str("seed_hex cannot be empty"));
@@ -1862,6 +1864,8 @@ fn runtime_key_fingerprint(runtime_key: &str) -> String {
 const WASM_NATIVE_LDK_BACKEND_LABEL: &str = "wasm_native_ldk";
 
 pub fn ldk_runtime_manager(runtime_key: String) -> Result<Rc<dyn LdkRuntimeManager>, JsValue> {
+    #[cfg(test)]
+    crate::ln_node::test_utils::record_startup_call("manager");
     let runtime_key = canonicalize_runtime_key(&runtime_key);
     let manager_registry_key = runtime_key.clone();
     if let Some(manager) = RUNTIME_MANAGER_REGISTRY.with(|registry| {
@@ -1883,6 +1887,40 @@ pub fn ldk_runtime_manager(runtime_key: String) -> Result<Rc<dyn LdkRuntimeManag
             .insert(manager_registry_key, Rc::downgrade(&manager));
     });
     Ok(manager)
+}
+
+/// A node scope owns this lease until its last compatible handle is dropped. Refuse
+/// a pre-existing owner instead of reseeding and replacing its live backend.
+pub(crate) fn claim_node_runtime_manager(
+    runtime_key: String,
+) -> Result<Rc<dyn LdkRuntimeManager>, JsValue> {
+    let key = canonicalize_runtime_key(&runtime_key);
+    if RUNTIME_MANAGER_REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .is_some()
+    }) {
+        return Err(JsValue::from_str(
+            "runtime scope is already owned by another Lightning runtime",
+        ));
+    }
+    ldk_runtime_manager(runtime_key)
+}
+
+pub(crate) fn release_node_runtime_manager(runtime_key: &str, manager: &Rc<dyn LdkRuntimeManager>) {
+    RUNTIME_MANAGER_REGISTRY.with(|registry| {
+        let key = canonicalize_runtime_key(runtime_key);
+        let mut registry = registry.borrow_mut();
+        if registry
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|existing| Rc::ptr_eq(&existing, manager))
+        {
+            registry.remove(&key);
+        }
+    });
 }
 
 /// Returns `true` when this was the last live handle for `runtime_key` (the registry

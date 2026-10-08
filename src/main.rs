@@ -28,6 +28,8 @@ mod gossip;
 mod kv_store;
 mod ldk;
 mod ldk_chain_backend;
+mod mainnet_state;
+mod node_info;
 mod rgb;
 mod rgb_file_transfer;
 mod rgb_import;
@@ -76,7 +78,7 @@ use tracing_subscriber::{
 use crate::args::UserArgs;
 use crate::auth::conditional_auth_middleware;
 use crate::error::AppError;
-use crate::ldk::stop_ldk;
+use crate::ldk::stop_node;
 use crate::rgb_file_transfer::MAX_CONSIGNMENT_SIZE;
 use crate::rgb_import::MAX_RGB_IMPORT_BODY_BYTES;
 #[cfg(feature = "remote-signer")]
@@ -359,7 +361,7 @@ async fn shutdown_signal(app_state: Arc<AppState>) {
         tracing::info!("Will shutdown after change state is complete");
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    stop_ldk(app_state.clone()).await;
+    stop_node(app_state.clone()).await;
 }
 
 // workaround for https://github.com/tokio-rs/tracing/issues/1372

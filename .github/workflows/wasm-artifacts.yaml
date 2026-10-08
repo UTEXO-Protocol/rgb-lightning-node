@@ -28,6 +28,12 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
+      - name: Test browser SDK
+        working-directory: bindings/wasm-sdk
+        env:
+          WASM_BINDGEN_TEST_TIMEOUT: 120
+        run: |
+          wasm-pack test --headless --chrome --chromedriver "$(command -v chromedriver)" --locked
       - name: Build wasm-sdk package (web target)
         run: |
           cd bindings/wasm-sdk

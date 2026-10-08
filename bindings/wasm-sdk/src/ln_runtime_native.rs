@@ -99,6 +99,8 @@ pub struct NativeLnRuntimeCore {
 
 impl NativeLnRuntimeCore {
     pub fn new(runtime_key: String) -> Self {
+        #[cfg(test)]
+        crate::ln_node::test_utils::record_startup_call("runtime_core");
         let storage_key_base = format!("{WASM_LN_RUNTIME_CORE_STORAGE_PREFIX}{runtime_key}");
         let snapshot = load_snapshot_with_recovery(&storage_key_base).unwrap_or_default();
         Self {

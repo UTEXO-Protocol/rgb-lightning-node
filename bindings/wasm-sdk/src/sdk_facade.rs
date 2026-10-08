@@ -1480,8 +1480,8 @@ impl RlnWasmSdk {
     }
 
     #[wasm_bindgen(js_name = installAutoPeerManagerHooks)]
-    pub fn install_auto_peer_manager_hooks(&self, node: &RlnWasmNode) {
-        node.install_auto_peer_manager_hooks();
+    pub fn install_auto_peer_manager_hooks(&self, node: &RlnWasmNode) -> Result<(), JsValue> {
+        node.install_auto_peer_manager_hooks()
     }
 
     #[wasm_bindgen(js_name = clearAutoPeerManagerHooks)]

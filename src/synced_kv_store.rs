@@ -67,10 +67,11 @@ pub(crate) const PENDING_NS: &str = "vss_pending";
 
 /// KVStore wrapper that writes to the local SeaORM store and (optionally)
 /// replicates to a remote VSS server. Reads always go to the local store for
-/// latency. When `remote` is `None`, this behaves identically to a plain
-/// `SeaOrmKvStore`.
+/// latency. Mainnet uses the common-config-only constructors so historical Lightning
+/// records and their replication intents remain inert.
 pub struct SyncedKvStore {
     local: Arc<SeaOrmKvStore>,
+    common_config_only: bool,
     #[cfg(feature = "vss")]
     remote: Option<Arc<crate::vss_kv_store::VssKvStore>>,
     /// Every local mutation is represented here before VSS is contacted. Each successful VSS
@@ -105,6 +106,7 @@ impl SyncedKvStore {
     pub fn local_only(local: Arc<SeaOrmKvStore>) -> Self {
         Self {
             local,
+            common_config_only: false,
             #[cfg(feature = "vss")]
             remote: None,
             #[cfg(feature = "vss")]
@@ -124,6 +126,14 @@ impl SyncedKvStore {
         }
     }
 
+    /// Opens shared mainnet persistence without permitting Lightning-state mutations.
+    pub(crate) fn local_common_config_only(local: Arc<SeaOrmKvStore>) -> Self {
+        Self {
+            common_config_only: true,
+            ..Self::local_only(local)
+        }
+    }
+
     /// Creates a SyncedKvStore with local storage and VSS replication,
     /// reloading queued replications persisted by a previous run.
     #[cfg(feature = "vss")]
@@ -131,7 +141,17 @@ impl SyncedKvStore {
         local: Arc<SeaOrmKvStore>,
         remote: Arc<crate::vss_kv_store::VssKvStore>,
     ) -> Self {
-        Self::with_vss_capacity_inner(local, remote, PENDING_QUEUE_CAP)
+        Self::with_vss_capacity_inner(local, remote, PENDING_QUEUE_CAP, false)
+    }
+
+    /// Replicates only the existing wallet configuration mirrors. Historical Lightning
+    /// retry intents are neither loaded nor cleaned up, even if they are malformed.
+    #[cfg(feature = "vss")]
+    pub(crate) fn with_vss_common_config_only(
+        local: Arc<SeaOrmKvStore>,
+        remote: Arc<crate::vss_kv_store::VssKvStore>,
+    ) -> Self {
+        Self::with_vss_capacity_inner(local, remote, PENDING_QUEUE_CAP, true)
     }
 
     #[cfg(all(feature = "vss", test))]
@@ -140,7 +160,7 @@ impl SyncedKvStore {
         remote: Arc<crate::vss_kv_store::VssKvStore>,
         pending_capacity: usize,
     ) -> Self {
-        Self::with_vss_capacity_inner(local, remote, pending_capacity)
+        Self::with_vss_capacity_inner(local, remote, pending_capacity, false)
     }
 
     #[cfg(feature = "vss")]
@@ -148,6 +168,7 @@ impl SyncedKvStore {
         local: Arc<SeaOrmKvStore>,
         remote: Arc<crate::vss_kv_store::VssKvStore>,
         pending_capacity: usize,
+        common_config_only: bool,
     ) -> Self {
         assert!(
             pending_capacity > 0,
@@ -156,7 +177,15 @@ impl SyncedKvStore {
         let mut pending = std::collections::HashMap::new();
         if let Ok(keys) = local.list(PENDING_NS, "") {
             for key in keys {
+                if common_config_only && !crate::mainnet_state::is_common_remote_key(&key) {
+                    continue;
+                }
                 match local.read(PENDING_NS, "", &key) {
+                    Ok(row) if common_config_only && !Self::is_common_config_intent(&row) => {
+                        // Keep uninterpretable bytes until an explicit write to this same
+                        // common-config target supersedes its retry intent.
+                        tracing::warn!(key, "leaving malformed common-config VSS intent unchanged");
+                    }
                     Ok(row) => match row.split_first() {
                         Some((1, buf)) => {
                             pending.insert(key, Some(buf.to_vec()));
@@ -187,6 +216,7 @@ impl SyncedKvStore {
         }
         Self {
             local,
+            common_config_only,
             remote: Some(remote),
             pending: Arc::new(std::sync::Mutex::new(pending)),
             pending_capacity,
@@ -198,6 +228,38 @@ impl SyncedKvStore {
             #[cfg(test)]
             before_stop_gate_hook: std::sync::Mutex::new(None),
         }
+    }
+
+    fn check_mutation(&self, primary: &str, secondary: &str, key: &str) -> Result<(), io::Error> {
+        if self.common_config_only
+            && !crate::mainnet_state::is_common_config(primary, secondary, key)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Mainnet persistence permits only common wallet configuration mutations",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "vss")]
+    fn is_common_config_intent(row: &[u8]) -> bool {
+        match row.split_first() {
+            Some((0, payload)) => payload.is_empty(),
+            Some((1, payload)) => std::str::from_utf8(payload).is_ok(),
+            _ => false,
+        }
+    }
+
+    #[cfg(feature = "vss")]
+    fn check_bulk_sync(&self) -> Result<(), io::Error> {
+        if self.common_config_only {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Mainnet persistence does not restore or replicate historical Lightning state",
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(all(test, feature = "vss"))]
@@ -346,13 +408,14 @@ impl SyncedKvStore {
     /// the local store is already populated.
     #[cfg(feature = "vss")]
     pub(crate) fn restore_from_vss(&self, force: bool) -> Result<usize, io::Error> {
+        self.check_bulk_sync()?;
         let Some(ref remote) = self.remote else {
             return Ok(0);
         };
 
         if !force {
             // Guard: refuse to clobber an already-populated local store.
-            // The caller in `start_ldk` also performs this check, but a
+            // The non-mainnet startup path also performs this check, but a
             // belt-and-suspenders guard makes this API hard to misuse.
             use lightning::util::persist::{
                 CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -409,6 +472,7 @@ impl SyncedKvStore {
     /// Refills a VSS store that was wiped or is otherwise incomplete.
     #[cfg(feature = "vss")]
     pub(crate) fn push_missing_to_vss(&self) -> Result<usize, io::Error> {
+        self.check_bulk_sync()?;
         let Some(ref remote) = self.remote else {
             return Ok(0);
         };
@@ -441,6 +505,7 @@ impl SyncedKvStore {
         key: &str,
         buf: Vec<u8>,
     ) -> Result<(), io::Error> {
+        self.check_mutation(primary_namespace, secondary_namespace, key)?;
         self.local
             .write(primary_namespace, secondary_namespace, key, buf)
     }
@@ -453,8 +518,14 @@ impl SyncedKvStore {
         secondary_namespace: &str,
         key: &str,
     ) -> Result<(), io::Error> {
+        self.check_mutation(primary_namespace, secondary_namespace, key)?;
         self.local
             .remove(primary_namespace, secondary_namespace, key, false)
+    }
+
+    #[cfg(feature = "vss")]
+    pub(crate) fn has_remote(&self) -> bool {
+        self.remote.is_some()
     }
 
     /// Returns the number of pending VSS-replication entries that failed and
@@ -572,6 +643,7 @@ impl SyncedKvStore {
         key: &str,
         buf: Vec<u8>,
     ) -> Result<(), io::Error> {
+        self.check_mutation(primary_namespace, secondary_namespace, key)?;
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
             let drain_gate = self.drain_gate.lock().unwrap();
@@ -686,6 +758,7 @@ impl KVStoreSync for SyncedKvStore {
         key: &str,
         lazy: bool,
     ) -> Result<(), io::Error> {
+        self.check_mutation(primary_namespace, secondary_namespace, key)?;
         #[cfg(feature = "vss")]
         if let Some(ref remote) = self.remote {
             let drain_gate = self.drain_gate.lock().unwrap();
@@ -769,6 +842,218 @@ impl KVStoreSync for SyncedKvStore {
     ) -> Result<Vec<String>, io::Error> {
         // Always list from local store
         self.local.list(primary_namespace, secondary_namespace)
+    }
+}
+
+#[cfg(test)]
+mod common_config_tests {
+    use super::*;
+    use rln_migration::MigratorTrait;
+
+    fn local_store() -> (Arc<SeaOrmKvStore>, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let database =
+            crate::runtime::block_on(crate::utils::open_database_pool(directory.path())).unwrap();
+        crate::runtime::block_on(rln_migration::Migrator::up(&database, None)).unwrap();
+        (
+            Arc::new(SeaOrmKvStore::from_connection(Arc::new(database))),
+            directory,
+        )
+    }
+
+    const PROTECTED_KEYS: [(&str, &str, &str); 7] = [
+        ("", "", "manager"),
+        ("", "", "output_sweeper"),
+        ("monitors", "", "channel"),
+        ("monitor_updates", "channel", "1"),
+        ("rgb", "wallet_config", "unknown"),
+        ("reimport_marker", "", "fascia_replay"),
+        ("vss_pending", "", "_/_/manager"),
+    ];
+
+    fn assert_protected_mutations_rejected(store: &SyncedKvStore) {
+        for (primary, secondary, key) in PROTECTED_KEYS {
+            for result in [
+                store.write(primary, secondary, key, b"replacement".to_vec()),
+                store.remove(primary, secondary, key, false),
+                store.write_local_only(primary, secondary, key, b"replacement".to_vec()),
+            ] {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            }
+            #[cfg(feature = "vss")]
+            assert_eq!(
+                store
+                    .remove_local_only(primary, secondary, key)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(store.read(primary, secondary, key).unwrap(), b"legacy");
+        }
+    }
+
+    #[test]
+    fn common_only_local_store_preserves_legacy_records_across_reopen() {
+        let (local, _directory) = local_store();
+        for (primary, secondary, key) in PROTECTED_KEYS {
+            local
+                .write(primary, secondary, key, b"legacy".to_vec())
+                .unwrap();
+        }
+        for _ in 0..2 {
+            let store = SyncedKvStore::local_common_config_only(Arc::clone(&local));
+            assert_protected_mutations_rejected(&store);
+            store
+                .write("rgb", "wallet_config", "indexer_url", b"indexer".to_vec())
+                .unwrap();
+            assert_eq!(
+                store.read("rgb", "wallet_config", "indexer_url").unwrap(),
+                b"indexer"
+            );
+            store
+                .remove("rgb", "wallet_config", "indexer_url", false)
+                .unwrap();
+            assert_eq!(
+                store
+                    .read("rgb", "wallet_config", "indexer_url")
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::NotFound
+            );
+        }
+    }
+
+    #[test]
+    fn unrestricted_local_store_retains_existing_mutation_behavior() {
+        let (local, _directory) = local_store();
+        let store = SyncedKvStore::local_only(local);
+        for (primary, secondary, key) in PROTECTED_KEYS {
+            store
+                .write(primary, secondary, key, b"legacy".to_vec())
+                .unwrap();
+            assert_eq!(store.read(primary, secondary, key).unwrap(), b"legacy");
+            store.remove(primary, secondary, key, false).unwrap();
+        }
+    }
+
+    #[cfg(feature = "vss")]
+    fn unreachable_remote() -> Arc<crate::vss_kv_store::VssKvStore> {
+        Arc::new(
+            crate::vss_kv_store::VssKvStore::new_with_retry(
+                "http://127.0.0.1:0/vss".into(),
+                "mainnet-common-config-test".into(),
+                bitcoin::secp256k1::SecretKey::from_slice(&[1; 32]).unwrap(),
+                &crate::config::VssSection {
+                    retry_max_attempts: 1,
+                    retry_backoff_ms: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    #[cfg(feature = "vss")]
+    #[test]
+    fn common_only_remote_store_rejects_legacy_mutation_and_bulk_sync_before_io() {
+        let (local, _directory) = local_store();
+        for (primary, secondary, key) in PROTECTED_KEYS {
+            local
+                .write(primary, secondary, key, b"legacy".to_vec())
+                .unwrap();
+        }
+        let store = SyncedKvStore::with_vss_common_config_only(local, unreachable_remote());
+        assert_protected_mutations_rejected(&store);
+        for result in [
+            store.restore_from_vss(false),
+            store.restore_from_vss(true),
+            store.push_missing_to_vss(),
+        ] {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+        assert_eq!(store.pending_remote_writes(), 0);
+        store.drain_pending();
+        assert_eq!(store.flush_pending_until(std::time::Instant::now()), 0);
+        assert_protected_mutations_rejected(&store);
+    }
+
+    #[cfg(feature = "vss")]
+    #[test]
+    fn common_only_retry_queue_preserves_excluded_and_malformed_intents() {
+        let (local, _directory) = local_store();
+        let preserved = [
+            ("_/_/manager", b"\x01manager".as_slice()),
+            ("_/_/output_sweeper", &[0][..]),
+            ("monitors/_/channel", &[][..]),
+            ("monitor_updates/channel/1", &[0, 1][..]),
+            ("unknown/_/key", &[2][..]),
+            ("not-a-vss-key", &[1, 255][..]),
+            ("rgb/wallet_config/wallet_fingerprint", &[0, 1][..]),
+            (
+                "rgb/wallet_config/wallet_account_xpub_vanilla",
+                &[1, 255][..],
+            ),
+        ];
+        for (key, row) in preserved {
+            local.write(PENDING_NS, "", key, row.to_vec()).unwrap();
+        }
+        local
+            .write(
+                PENDING_NS,
+                "",
+                "rgb/wallet_config/indexer_url",
+                b"\x01indexer".to_vec(),
+            )
+            .unwrap();
+        local
+            .write(PENDING_NS, "", "rgb/wallet_config/bitcoin_network", vec![0])
+            .unwrap();
+
+        for _ in 0..2 {
+            let store = SyncedKvStore::with_vss_common_config_only(
+                Arc::clone(&local),
+                unreachable_remote(),
+            );
+            let expected = std::collections::HashMap::from([
+                (
+                    "rgb/wallet_config/indexer_url".into(),
+                    Some(b"indexer".to_vec()),
+                ),
+                ("rgb/wallet_config/bitcoin_network".into(), None),
+            ]);
+            assert_eq!(*store.pending.lock().unwrap(), expected);
+            store.drain_pending();
+            assert_eq!(*store.pending.lock().unwrap(), expected);
+            for (key, row) in preserved {
+                assert_eq!(local.read(PENDING_NS, "", key).unwrap(), row);
+            }
+        }
+    }
+
+    #[cfg(feature = "vss")]
+    #[test]
+    fn common_config_write_supersedes_its_own_malformed_retry_without_touching_others() {
+        let (local, _directory) = local_store();
+        let config_key = "rgb/wallet_config/indexer_url";
+        local.write(PENDING_NS, "", config_key, vec![2]).unwrap();
+        local.write(PENDING_NS, "", "_/_/manager", vec![2]).unwrap();
+        let store =
+            SyncedKvStore::with_vss_common_config_only(Arc::clone(&local), unreachable_remote());
+        assert_eq!(store.pending_remote_writes(), 0);
+        store
+            .write(
+                "rgb",
+                "wallet_config",
+                "indexer_url",
+                b"new-indexer".to_vec(),
+            )
+            .unwrap();
+        assert_eq!(
+            local.read(PENDING_NS, "", config_key).unwrap(),
+            b"\x01new-indexer"
+        );
+        assert_eq!(local.read(PENDING_NS, "", "_/_/manager").unwrap(), [2]);
+        assert_eq!(store.pending_remote_writes(), 1);
     }
 }
 

@@ -76,7 +76,26 @@ and propagates through the C ABI used by Node.js/Bare integrations. It runs befo
 Lightning execution, including while locked; binding argument conversion still applies.
 Bitcoin/RGB on-chain methods (including `rgbinvoice`, `decode_rgb_invoice`, asset linking,
 and transfers) and shared administration/identity methods keep their existing requirements.
-Supported non-mainnet networks retain their existing behavior.
+Mainnet unlock initializes the wallet and signer without the Lightning runtime. This
+applies to internal, attached-external and native-external signer entry points. The
+required `ldk_chain_sync` payload is retained but its backend is unused on mainnet.
+`node_info` reports zero active Lightning values and no RGS timestamp; `network_info`
+queries the wallet indexer on demand and can fail if that indexer is unavailable.
+Identity, signing and configured RGB VSS backup keep their existing keys and stores.
+
+Existing Lightning records do not prevent mainnet unlock; they remain inactive and are
+not decoded, replayed or recovered. Mainnet node-store persistence updates only common
+configuration, while RGB wallet backup/restore retains its existing separate store.
+This assumes no unresolved historical mainnet Lightning obligations in the supported
+rollout; unlock is not a history audit or channel recovery. See the [mainnet startup
+assumption and limitations](../../README.md) before upgrading an existing wallet.
+Lightning remains available on supported non-mainnet networks with the same wallet and
+signing policies.
+
+On all networks, canceling an asynchronous Rust SDK unlock caller does not abandon
+the unlock operation. Shutdown waits for an in-progress unlock to complete before
+stopping the node, and a shut-down handle cannot unlock again. Lock and shutdown also
+wait for an already admitted manual wallet backup before releasing its storage fence.
 
 ## Dependency layering
 
@@ -89,7 +108,7 @@ Important notes:
 
 - UniFFI does not call HTTP route handlers; it calls SDK methods directly.
 - SDK is expected to depend on LDK core logic (it is a wrapper, not a separate node implementation).
-- `ldk::start_ldk` now accepts `core_types::UnlockRequest` and SDK unlock uses `sdk::UnlockRequest`, so unlock flow is not typed against route-layer DTOs.
+- `ldk::start_node` accepts `core_types::UnlockRequest` and SDK unlock uses `sdk::UnlockRequest`, so unlock flow is not typed against route-layer DTOs.
 - A small `routes` diff remains for shared `AppState` transition helpers (`pub(crate)` visibility), used by SDK unlock lifecycle handling.
 
 ## E2E and parity harnesses

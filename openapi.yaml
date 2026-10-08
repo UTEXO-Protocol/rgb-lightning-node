@@ -14,7 +14,12 @@ info:
     Authentication and request extraction still apply before handler execution.
     Bitcoin/RGB on-chain APIs (including RGB invoices, transfers and asset linking)
     and shared administration/identity APIs retain their existing requirements.
-    Lightning APIs on supported non-mainnet networks are unchanged.
+    Mainnet unlock starts the wallet and signer without a Lightning runtime.
+    Historical Lightning records remain inactive and do not prevent unlock. They
+    are not decoded, replayed or recovered. The supported mainnet rollout assumes
+    no unresolved historical Lightning obligations; unlock does not verify that
+    assumption or monitor old channels. Lightning APIs on supported non-mainnet
+    networks are unchanged.
   license:
     name: MIT
     url: https://mit-license.org/
@@ -1012,7 +1017,10 @@ paths:
       tags:
         - Other
       summary: Get network info
-      description: Get info on the Bitcoin network where the LN is running
+      description: >-
+        Get the configured Bitcoin network and height. On mainnet the height is
+        read from the wallet indexer on demand; an unavailable or wrong-network
+        indexer returns an error. Other networks report the LDK best-block height.
       responses:
         '200':
           description: Successful operation
@@ -1025,7 +1033,10 @@ paths:
       tags:
         - Other
       summary: Get node info
-      description: Get the LN node's info
+      description: >-
+        Get node identity, wallet account keys and Lightning information. On mainnet,
+        active Lightning counts and amounts are zero and the RGS timestamp is null.
+        Lightning amounts do not represent the on-chain BTC wallet balance.
       responses:
         '200':
           description: Successful operation
@@ -1345,7 +1356,16 @@ paths:
       tags:
         - Other
       summary: Unlock the node
-      description: Unlock a locked node
+      description: >-
+        Unlock a locked node. Mainnet starts wallet, signer and configured RGB backup
+        services without constructing or starting LDK. The required ldk_chain_sync
+        payload is parsed but its backend and gossip settings are unused on mainnet.
+        Existing Lightning records remain inactive without preventing wallet unlock.
+        Node-store persistence updates only common configuration; historical Lightning
+        records and their pending replication are preserved. RGB wallet backup and
+        restore retain their separate store. The supported rollout assumes no unresolved
+        historical mainnet Lightning obligations. Unlock does not verify that assumption,
+        inspect other devices or remote histories, or monitor old channels.
       requestBody:
         content:
           application/json:
@@ -1366,8 +1386,9 @@ paths:
       description: >
         Builds a zip of the current RGB wallet directory and uploads it to the
         configured VSS server. Only available when the node was started with
-        --vss-url. The node's KV state is replicated automatically on every
-        persistence event and is not affected by this endpoint.
+        --vss-url. The node's active KV state is replicated automatically on every
+        persistence event and is not affected by this endpoint. On mainnet only
+        common configuration is replicated; historical Lightning state remains inactive.
       responses:
         '200':
           description: Successful operation
@@ -1393,7 +1414,9 @@ paths:
         Returns whether a backup exists on the server, its server-side version,
         whether the local wallet has changes since the last backup, and how
         many KV-stream writes are queued for retry after a replication
-        failure. Read-only; callable by tokens with the read-only role.
+        failure. On mainnet this counts common configuration retries only, excluding
+        preserved historical Lightning intents. Read-only; callable by tokens with
+        the read-only role.
       responses:
         '200':
           description: Successful operation
@@ -1429,7 +1452,8 @@ paths:
                     description: >
                       Number of KV writes that failed to replicate and are
                       queued for retry. A persistently non-zero value
-                      indicates VSS replication is degraded.
+                      indicates VSS replication is degraded. On mainnet this excludes
+                      inactive historical Lightning intents.
         '503':
           description: VSS is not configured or unreachable
   /vssclearfence:

@@ -16,31 +16,75 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the consolidated WASM stack overview 
 
 For endpoint-level status, see [SDK_WASM_ENDPOINT_MATRIX.md](SDK_WASM_ENDPOINT_MATRIX.md).
 
-## Mainnet Lightning restriction
+## Mainnet: on-chain only, without a Lightning runtime
 
-A `RlnWasmNode` configured for mainnet rejects Lightning peer (including reconnect
-start/resume), channel, invoice,
-payment and async-payment operations, including channel funding and manual Lightning
-event processing (`chainSyncTick*` included), before starting those operations. The network comes from
-`newWithNodeRuntimeId(..., "mainnet")` or the wallet attached to a node without an
-explicit network. `RlnWasmSdk` and node-handle wrappers propagate the same error.
-The dedicated wallet `buildLightningFundingTx*` methods also reject mainnet. The
-peer-manager bridge checks the configured node's hooks before opening a socket;
-custom hooks without a configured node retain their existing behavior.
+A Mainnet `RlnWasmNode` does not construct an LDK runtime manager, object graph, chain-sync
+driver, peer hooks or background Lightning workers. This applies to explicit
+`newWithNodeRuntimeId(..., "mainnet")` and to a networkless node that adopts a Mainnet
+wallet. Constructing or inspecting a networkless node leaves it dormant. Its first
+successful Lightning initialization selects the historical Regtest default; attach
+the wallet first when another network is intended. A scope already bound to a
+network or identity cannot be reused with a conflicting one. Compatible handles
+share the existing runtime without reseeding it.
 
-The stable error string is:
+Existing mainnet wallets may contain idle Lightning snapshots written by older
+on-chain-only releases. Mainnet construction and wallet attachment accept those
+records without decoding, resuming, deleting or replacing them. No Lightning-state
+preload or empty-history check is required to construct or attach a Mainnet node.
+
+SDK `init`/`unlock` and `preloadPersistentRuntimeState` still preload browser state.
+Lightning snapshots, queues, peer/transfer/event records and standalone swap state
+are staged in memory; their existing best-effort IndexedDB-to-localStorage copy is
+performed only when a Lightning consumer restores the particular key. Mainnet and
+unresolved nodes do not restore those views. Supported non-mainnet activation and
+standalone runtimes continue restoring their saved state. This also preserves
+inactive records when localStorage and IndexedDB contain different bytes. Media,
+RGB proxy settings and the shared virtual-channel preference keep their existing
+hydration behavior; explicit administrative changes to that preference are allowed.
+
+This policy assumes no unresolved historical mainnet Lightning obligations in the
+supported rollout. Preserving records does not monitor or recover old channels,
+certify other devices/tabs or make a future Lightning-enablement/downgrade safe.
+Normal mainnet wallet use does not restore or replicate the separate `<store_id>-ldk`
+VSS stream. Wallet `configureVssBackup` remains independent. The browser cannot
+certify remote history: SDK `init`/`unlock` do not take LDK store credentials, and
+the pinned VSS client lacks complete key listing. An absent manifest is not proof
+of empty state. Independent wallet objects and explicitly invoked standalone
+transports/administration retain their own behavior.
+
+Mainnet rejects peer/connect/reconnect, channel/funding, Lightning invoice/payment,
+async-payment and event-processing methods, including `chainSyncTick*`,
+`chainSyncStart*`, `chainSyncEnqueueRebroadcastTx`, `installAutoPeerManagerHooks`,
+`persistLdkRuntimeState` and `configureLdkVssReplication`. The chain driver combines
+manual rebroadcasts with Lightning broadcasts, so its manual enqueue method is also
+restricted. Use the on-chain wallet's sync/send methods for on-chain work. The
+node-owned bridge rejects before opening a socket. A Mainnet node does not replace
+another node's global hooks; standalone transports and custom hooks without a
+configured node retain their independent behavior. SDK facades/handles propagate:
 
 ```text
 LightningUnsupportedOnMainnet: RLN on mainnet currently supports only on-chain methods. Lightning APIs are not supported.
 ```
 
-On-chain wallet APIs, RGB on-chain invoice decoding, node/network information,
-identity signing, lifecycle, runtime status and persistence retain their existing
-requirements. Supported non-mainnet networks retain their existing behavior.
+On-chain wallet APIs, RGB invoices and message signing retain their requirements and
+identity derivation. `nodePubkey*` derives the historical live KeysManager public
+key when an online wallet is attached, without constructing LDK. Without an online
+wallet it retains the existing raw signing identity. Previously, a failed LDK graph
+initialization could also make `nodePubkey*` fall back to the raw identity despite
+an online wallet; that error-dependent fallback is no longer attempted. Message
+signing continues to use its existing raw signing key in either case.
 
-The standalone SDK swap bookkeeping and onion-request validation helpers have no
-node/network association and do not execute node Lightning operations. They are
-separate from the configured-node APIs covered by this restriction.
+Shared node/status calls do not start Lightning. An absent
+runtime reports `disabled` on Mainnet (`cold` before activation otherwise), no active components
+and zero active peers/channels. `chainSyncStop*` is an inactive no-op. Synchronous
+`networkInfo*` returns `NetworkInfoUnavailable` when no chain driver exists; it does
+not invent a chain height. Query the wallet's on-chain indexer for chain information.
+Wallet backups/VSS remain independent of the restricted LDK VSS stream; LDK VSS
+health, disable and fence administration remain available.
+
+Explicit supported non-mainnet constructors retain runtime preparation and saved
+chain-driver resumption. Standalone swap bookkeeping and onion-request validation
+have no configured node and do not execute node Lightning operations.
 
 ## Build
 
@@ -187,9 +231,12 @@ selection and validation in `new_with_runtime_id_opt` / `attach_wallet_shared` i
 WASM checks run in `.github/workflows/test.yaml`: the `feature-matrix` job's
 `wasm-without-vls` mode runs `cargo check --target wasm32-unknown-unknown` against
 `bindings/wasm-sdk/Cargo.toml`. The package `pkg/` artifact is built separately by
-`.github/workflows/wasm-artifacts.yaml` via `wasm-pack build`.
+`.github/workflows/wasm-artifacts.yaml` via `wasm-pack build`. That job also runs
+the browser unit suite, including startup and storage regressions, in headless
+Chrome with the existing `wasm-bindgen-test` harness. The default suite does not
+require funded wallets or live Lightning services.
 
-Run the browser unit tests locally (not run in CI):
+Run the complete browser unit suite locally:
 
 ```sh
 WASM_BINDGEN_TEST_TIMEOUT=300 WASM_TEST_BROWSER=chrome ./bindings/wasm-sdk/scripts/run-browser-tests.sh

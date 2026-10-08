@@ -8,6 +8,10 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 #[path = "tests/runtime_store_tests.rs"]
 mod tests;
 
+#[cfg(all(test, target_arch = "wasm32"))]
+#[path = "tests/mainnet_preservation_tests.rs"]
+mod preservation_tests;
+
 pub(crate) trait RuntimeStateStore {
     fn get(&self, key: &str) -> Result<Option<String>, JsValue>;
     fn set(&self, key: &str, value: &str) -> Result<(), JsValue>;
@@ -19,17 +23,20 @@ pub(crate) struct BrowserPersistentStateStore;
 
 impl RuntimeStateStore for BrowserPersistentStateStore {
     fn get(&self, key: &str) -> Result<Option<String>, JsValue> {
+        hydrate_deferred_key(key);
         local_storage_get_item(key)
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), JsValue> {
         local_storage_set_item(key, value)?;
+        discard_deferred_key(key);
         persist_to_indexed_db_background(key.to_string(), value.to_string());
         Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<(), JsValue> {
         local_storage_remove_item(key)?;
+        discard_deferred_key(key);
         remove_from_indexed_db_background(key.to_string());
         Ok(())
     }
@@ -58,38 +65,148 @@ pub(crate) async fn preload_runtime_state_from_persistent_store() -> Result<(), 
     hydrate_local_storage_from_indexed_db_prefixes(RUNTIME_STATE_HYDRATE_PREFIXES).await
 }
 
+// Preload has no selected network. Keep Lightning bytes untouched until a consumer
+// actually restores that key; mainnet/cold node paths never perform those reads.
 #[cfg(target_arch = "wasm32")]
-thread_local! {
-    static RUNTIME_STATE_PRELOADED: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+#[derive(Default)]
+struct DeferredRuntimeState {
+    entries: std::collections::BTreeMap<String, String>,
+    revision: u64,
+    reads_in_flight: usize,
+    touched: std::collections::BTreeMap<String, u64>,
 }
 
 #[cfg(target_arch = "wasm32")]
+struct PreloadRead {
+    revision: u64,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl PreloadRead {
+    fn begin() -> Self {
+        DEFERRED_RUNTIME_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.reads_in_flight += 1;
+            Self {
+                revision: state.revision,
+            }
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for PreloadRead {
+    fn drop(&mut self) {
+        DEFERRED_RUNTIME_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.reads_in_flight -= 1;
+            if state.reads_in_flight == 0 {
+                state.touched.clear();
+            }
+        });
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static RUNTIME_STATE_PRELOADED: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+    static DEFERRED_RUNTIME_STATE: std::cell::RefCell<DeferredRuntimeState> =
+        std::cell::RefCell::new(DeferredRuntimeState::default());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_deferred_runtime_key(key: &str) -> bool {
+    RUNTIME_STATE_HYDRATE_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+        && !key.starts_with("rln:wasm:media:")
+        && !key.starts_with("rln:wasm:wallet-rgb-proxy:")
+        // This is shared configuration, not Lightning recovery state.
+        && !key.starts_with(crate::wasm_node_persistence::WASM_VIRTUAL_CHANNELS_V0_STORAGE_PREFIX)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn take_deferred_key(key: &str) -> Option<String> {
+    DEFERRED_RUNTIME_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        // A write/delete or restore while preload awaits must win over its older listing.
+        if state.reads_in_flight != 0 {
+            state.revision = state.revision.wrapping_add(1);
+            let revision = state.revision;
+            state.touched.insert(key.to_owned(), revision);
+        }
+        state.entries.remove(key)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn hydrate_deferred_key(key: &str) {
+    if let Some(value) = take_deferred_key(key) {
+        // Retain historical best-effort copying and then read actual localStorage.
+        let _ = local_storage_set_item(key, &value);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn hydrate_deferred_key(_key: &str) {}
+
+#[cfg(target_arch = "wasm32")]
+fn discard_deferred_key(key: &str) {
+    let _ = take_deferred_key(key);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn discard_deferred_key(_key: &str) {}
+
+#[cfg(target_arch = "wasm32")]
 async fn hydrate_local_storage_from_indexed_db_prefixes(prefixes: &[&str]) -> Result<(), JsValue> {
-    let already = RUNTIME_STATE_PRELOADED.with(|loaded| *loaded.borrow());
-    if already {
+    if RUNTIME_STATE_PRELOADED.with(|loaded| *loaded.borrow()) {
         return Ok(());
     }
-
+    let read = PreloadRead::begin();
     let entries = indexed_db_list_entries().await?;
+    finish_preload(entries, prefixes, read.revision, local_storage_set_item);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn finish_preload(
+    entries: Vec<JsValue>,
+    prefixes: &[&str],
+    revision: u64,
+    mut write: impl FnMut(&str, &str) -> Result<(), JsValue>,
+) {
+    // Concurrent or repeated calls must not restore a consumed stale snapshot.
+    if RUNTIME_STATE_PRELOADED.with(|loaded| loaded.replace(true)) {
+        return;
+    }
     for entry in entries {
+        if !Array::is_array(&entry) {
+            continue;
+        }
         let pair = Array::from(&entry);
         if pair.length() != 2 {
             continue;
         }
-        let key = pair.get(0).as_string();
-        let value = pair.get(1).as_string();
-        let (Some(key), Some(value)) = (key, value) else {
+        let (Some(key), Some(value)) = (pair.get(0).as_string(), pair.get(1).as_string()) else {
             continue;
         };
-        if prefixes.iter().any(|prefix| key.starts_with(prefix)) {
-            let _ = local_storage_set_item(&key, &value);
+        if !prefixes.iter().any(|prefix| key.starts_with(prefix)) {
+            continue;
+        }
+        if is_deferred_runtime_key(&key) {
+            DEFERRED_RUNTIME_STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                if !state
+                    .touched
+                    .get(&key)
+                    .is_some_and(|changed_at| *changed_at > revision)
+                {
+                    state.entries.insert(key, value);
+                }
+            });
+        } else {
+            let _ = write(&key, &value);
         }
     }
-
-    RUNTIME_STATE_PRELOADED.with(|loaded| {
-        *loaded.borrow_mut() = true;
-    });
-    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -267,6 +384,7 @@ extern "C" {
 async fn indexed_db_set_item(key: &str, value: &str) -> Result<(), JsValue> {
     let promise = __rln_runtime_idb_set(key, value);
     let _ = JsFuture::from(promise).await?;
+    discard_deferred_key(key);
     Ok(())
 }
 
@@ -281,5 +399,12 @@ async fn indexed_db_list_entries() -> Result<Vec<JsValue>, JsValue> {
 async fn indexed_db_delete_item(key: &str) -> Result<(), JsValue> {
     let promise = __rln_runtime_idb_delete(key);
     let _ = JsFuture::from(promise).await?;
+    discard_deferred_key(key);
     Ok(())
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+pub(crate) fn reset_preload_readiness_for_tests() {
+    RUNTIME_STATE_PRELOADED.with(|loaded| *loaded.borrow_mut() = false);
+    DEFERRED_RUNTIME_STATE.with(|state| *state.borrow_mut() = DeferredRuntimeState::default());
 }

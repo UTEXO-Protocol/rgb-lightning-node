@@ -14,7 +14,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf};
 use hex::DisplayHex;
-use lightning::chain::channelmonitor::Balance;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
@@ -92,7 +91,7 @@ use crate::core_types::async_order::{
 };
 use crate::error::error_name;
 use crate::ldk::{
-    clear_rgb_payment_pending, peer_has_live_channel, start_ldk, stop_ldk, LdkBackgroundServices,
+    clear_rgb_payment_pending, peer_has_live_channel, start_node, stop_node, LdkBackgroundServices,
     VirtualChannelSessionStatus,
 };
 #[cfg(feature = "vss")]
@@ -1769,6 +1768,7 @@ impl AppState {
     ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
         self.check_changing_state()?;
         let unlocked_app_state = self.get_unlocked_app_state().await;
+        self.check_changing_state()?;
         if unlocked_app_state.is_some() {
             Err(APIError::UnlockedNode)
         } else {
@@ -1781,6 +1781,7 @@ impl AppState {
     ) -> Result<TokioMutexGuard<'_, Option<Arc<UnlockedAppState>>>, APIError> {
         self.check_changing_state()?;
         let unlocked_app_state = self.get_unlocked_app_state().await;
+        self.check_changing_state()?;
         if unlocked_app_state.is_none() {
             Err(APIError::LockedNode)
         } else {
@@ -1852,7 +1853,7 @@ pub(crate) async fn async_order_new(
 ) -> Result<Json<AsyncOrderNewResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = Arc::clone(guard.as_ref().unwrap());
+    let unlocked_state = Arc::clone(guard.as_ref().unwrap().lightning()?);
     drop(guard);
 
     let host_node_id =
@@ -1962,7 +1963,7 @@ pub(crate) async fn async_order_outbound_invoice(
 ) -> Result<Json<AsyncOrderOutboundInvoiceResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = Arc::clone(guard.as_ref().unwrap());
+    let unlocked_state = Arc::clone(guard.as_ref().unwrap().lightning()?);
     drop(guard);
 
     let peer_node_id =
@@ -2046,7 +2047,11 @@ pub(crate) async fn asset_balance(
 
     let mut offchain_outbound = 0;
     let mut offchain_inbound = 0;
-    for chan_info in unlocked_state.channel_manager.list_channels() {
+    for chan_info in unlocked_state
+        .lightning
+        .iter()
+        .flat_map(|lightning| lightning.channel_manager.list_channels())
+    {
         let channel_id_str = chan_info.channel_id.0.as_hex().to_string();
 
         let rgb_info = match unlocked_state
@@ -2215,7 +2220,7 @@ pub(crate) async fn cancel_hodl_invoice(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let payment_hash = validate_and_parse_payment_hash(&payload.payment_hash)?;
         let payment_info = unlocked_state
@@ -2293,7 +2298,7 @@ pub(crate) async fn claim_hodl_invoice(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let payment_hash = validate_and_parse_payment_hash(&payload.payment_hash)?;
         let preimage =
@@ -2378,7 +2383,7 @@ pub(crate) async fn close_channel(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let channel_id_vec = hex_str_to_vec(&payload.channel_id);
         if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
@@ -2565,7 +2570,7 @@ pub(crate) async fn connect_peer(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let (peer_pubkey, peer_addr) = parse_peer_info(payload.peer_pubkey_and_addr.to_string())?;
 
@@ -2709,7 +2714,7 @@ pub(crate) async fn disconnect_peer(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let peer_pubkey = match PublicKey::from_str(&payload.peer_pubkey) {
             Ok(pubkey) => pubkey,
@@ -2815,7 +2820,13 @@ pub(crate) async fn get_channel_id(
 ) -> Result<Json<GetChannelIdResponse>, APIError> {
     state.check_lightning_supported()?;
     let tmp_chan_id = check_channel_id(&payload.temporary_channel_id)?;
-    let channel_ids = state.check_unlocked().await?.clone().unwrap().channel_ids();
+    let channel_ids = state
+        .check_unlocked()
+        .await?
+        .as_ref()
+        .unwrap()
+        .lightning()?
+        .channel_ids();
     let channel_id = if let Some(channel_id) = channel_ids.get(&tmp_chan_id) {
         channel_id.0.as_hex().to_string()
     } else {
@@ -2863,7 +2874,7 @@ pub(crate) async fn get_payment(
 ) -> Result<Json<GetPaymentResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
     let requested_ph = validate_and_parse_payment_hash(&payload.payment_hash)?;
 
@@ -2942,7 +2953,7 @@ pub(crate) async fn get_swap(
 ) -> Result<Json<GetSwapResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
     let requested_ph = validate_and_parse_payment_hash(&payload.payment_hash)?;
 
@@ -3168,7 +3179,7 @@ pub(crate) async fn invoice_status(
 ) -> Result<Json<InvoiceStatusResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
     let invoice = match Bolt11Invoice::from_str(&payload.invoice) {
         Err(e) => return Err(APIError::InvalidInvoice(e.to_string())),
@@ -3335,7 +3346,7 @@ pub(crate) async fn keysend(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let dest_pubkey = match hex_str_to_compressed_pubkey(&payload.dest_pubkey) {
             Some(pk) => pk,
@@ -3456,7 +3467,11 @@ pub(crate) async fn list_assets(
     )?;
 
     let mut offchain_balances = HashMap::new();
-    for chan_info in unlocked_state.channel_manager.list_channels() {
+    for chan_info in unlocked_state
+        .lightning
+        .iter()
+        .flat_map(|lightning| lightning.channel_manager.list_channels())
+    {
         let channel_id_str = chan_info.channel_id.0.as_hex().to_string();
 
         let rgb_info = match unlocked_state
@@ -3557,7 +3572,7 @@ pub(crate) async fn list_channels(
 ) -> Result<Json<ListChannelsResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
     let mut channels = vec![];
     let virtual_sessions = unlocked_state.virtual_channel_session_store();
@@ -3643,7 +3658,7 @@ pub(crate) async fn list_payments(
 ) -> Result<Json<ListPaymentsResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
     let inbound_payments = unlocked_state.list_updated_inbound_payments();
     let outbound_payments = unlocked_state.outbound_payments();
@@ -3736,7 +3751,7 @@ pub(crate) async fn list_peers(
 ) -> Result<Json<ListPeersResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
     let mut peers = vec![];
     for peer_details in unlocked_state.peer_manager.list_peers() {
@@ -3753,7 +3768,7 @@ pub(crate) async fn list_swaps(
 ) -> Result<Json<ListSwapsResponse>, APIError> {
     state.check_lightning_supported()?;
     let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
     let map_swap = |payment_hash: &PaymentHash, swap_data: &SwapData, taker: bool| {
         let mut status = swap_data.status;
@@ -4002,7 +4017,7 @@ pub(crate) async fn ln_invoice(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let contract_id = if let Some(asset_id) = &payload.asset_id {
             Some(
@@ -4115,9 +4130,9 @@ pub(crate) async fn lock(
             }
         };
 
-        tracing::debug!("Stopping LDK...");
-        stop_ldk(state.clone()).await;
-        tracing::debug!("LDK stopped");
+        tracing::debug!("Stopping node...");
+        stop_node(state.clone()).await;
+        tracing::debug!("Node stopped");
 
         state.update_unlocked_app_state(None).await;
 
@@ -4136,7 +4151,7 @@ pub(crate) async fn maker_execute(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let swapstring = SwapString::from_str(&payload.swapstring)
             .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
@@ -4358,7 +4373,7 @@ pub(crate) async fn maker_init(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let from_asset = match &payload.from_asset {
             None => None,
@@ -4438,11 +4453,17 @@ pub(crate) async fn network_info(
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let best_block = unlocked_state.channel_manager.current_best_block();
+    let height = if let Some(lightning) = &unlocked_state.lightning {
+        lightning.channel_manager.current_best_block().height
+    } else {
+        let indexer_url = unlocked_state.indexer_url.clone();
+        drop(guard);
+        crate::node_info::mainnet_height(indexer_url).await?
+    };
 
     Ok(Json(NetworkInfoResponse {
         network: state.static_state.network.into(),
-        height: best_block.height,
+        height,
     }))
 }
 
@@ -4452,51 +4473,16 @@ pub(crate) async fn node_info(
     let guard = state.check_unlocked().await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let chans = unlocked_state.channel_manager.list_channels();
-
-    let balances = unlocked_state.chain_monitor.get_claimable_balances(&[]);
-    let local_balance_sat = balances
-        .iter()
-        .map(|b| b.claimable_amount_satoshis())
-        .sum::<u64>();
-
-    let close_fees_map = |b| match b {
-        &Balance::ClaimableOnChannelClose {
-            ref balance_candidates,
-            confirmed_balance_candidate_index,
-            ..
-        } => balance_candidates[confirmed_balance_candidate_index].transaction_fee_satoshis,
-        _ => 0,
-    };
-    let eventual_close_fees_sat = balances.iter().map(close_fees_map).sum::<u64>();
-
-    let pending_payments_map = |b| match b {
-        &Balance::MaybeTimeoutClaimableHTLC {
-            amount_satoshis,
-            outbound_payment,
-            ..
-        } if outbound_payment => amount_satoshis,
-        _ => 0,
-    };
-    let pending_outbound_payments_sat = balances.iter().map(pending_payments_map).sum::<u64>();
-
-    let graph_lock = unlocked_state.network_graph.read_only();
-    let network_nodes = graph_lock.nodes().len();
-    let network_channels = graph_lock.channels().len();
-
-    let latest_rgs_snapshot_timestamp = unlocked_state
-        .network_graph
-        .get_last_rapid_gossip_sync_timestamp()
-        .map(|val| val as u64);
+    let lightning = crate::node_info::LightningInfo::from_state(unlocked_state);
 
     Ok(Json(NodeInfoResponse {
         pubkey: unlocked_state.runtime_node_pubkey(),
-        num_channels: chans.len(),
-        num_usable_channels: chans.iter().filter(|c| c.is_usable).count(),
-        local_balance_sat,
-        eventual_close_fees_sat,
-        pending_outbound_payments_sat,
-        num_peers: unlocked_state.peer_manager.list_peers().len(),
+        num_channels: lightning.num_channels,
+        num_usable_channels: lightning.num_usable_channels,
+        local_balance_sat: lightning.local_balance_sat,
+        eventual_close_fees_sat: lightning.eventual_close_fees_sat,
+        pending_outbound_payments_sat: lightning.pending_outbound_payments_sat,
+        num_peers: lightning.num_peers,
         account_xpub_vanilla: unlocked_state.rgb_get_keys().account_xpub_vanilla,
         account_xpub_colored: unlocked_state.rgb_get_keys().account_xpub_colored,
         max_media_upload_size_mb: state.static_state.max_media_upload_size_mb,
@@ -4506,19 +4492,22 @@ pub(crate) async fn node_info(
         channel_capacity_max_sat: unlocked_state.config.channels.open_max_sat,
         channel_asset_min_amount: unlocked_state.config.channels.open_min_rgb_amount,
         channel_asset_max_amount: u64::MAX,
-        network_nodes,
-        network_channels,
-        latest_rgs_snapshot_timestamp,
+        network_nodes: lightning.network_nodes,
+        network_channels: lightning.network_channels,
+        latest_rgs_snapshot_timestamp: lightning.latest_rgs_snapshot_timestamp,
     }))
 }
 
 struct OpenChannelVirtualIntentGuard {
-    unlocked_state: Arc<UnlockedAppState>,
+    unlocked_state: Arc<crate::utils::LightningState>,
     temporary_channel_id: Option<ChannelId>,
 }
 
 impl OpenChannelVirtualIntentGuard {
-    fn new(unlocked_state: Arc<UnlockedAppState>, temporary_channel_id: ChannelId) -> Self {
+    fn new(
+        unlocked_state: Arc<crate::utils::LightningState>,
+        temporary_channel_id: ChannelId,
+    ) -> Self {
         Self {
             unlocked_state,
             temporary_channel_id: Some(temporary_channel_id),
@@ -4546,7 +4535,7 @@ pub(crate) async fn open_channel(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         // Channel persistence is remote-first: without VSS the open would
         // accept and then stall silently, so refuse it up front.
@@ -5249,7 +5238,7 @@ pub(crate) async fn send_onion_message(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         if payload.node_ids.is_empty() {
             return Err(APIError::InvalidNodeIds(s!(
@@ -5315,7 +5304,7 @@ pub(crate) async fn send_payment(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
 
         let mut status = HTLCStatus::Pending;
         let created_at = get_current_timestamp();
@@ -5683,7 +5672,7 @@ pub(crate) async fn taker(
     state.check_lightning_supported()?;
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
-        let unlocked_state = guard.as_ref().unwrap();
+        let unlocked_state = guard.as_ref().unwrap().lightning()?;
         let swapstring = SwapString::from_str(&payload.swapstring)
             .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
 
@@ -5722,7 +5711,7 @@ async fn external_signer_key_source(
 ) -> Result<crate::core_types::NodeKeySource, APIError> {
     // Remote external signer (Option A): the daemon holds the seed and answers all signing
     // (identity/scripts/channel/node-crypto/RGB PSBT) over framed TCP. The persisted
-    // key_source.json is validated against the daemon's bootstrap inside start_ldk.
+    // key_source.json is validated against the daemon's bootstrap inside start_node.
     let attachment = crate::signer::remote::connect_daemon_attachment(state).await?;
     Ok(crate::core_types::NodeKeySource::External(
         crate::core_types::ExternalKeySource {
@@ -5777,16 +5766,16 @@ pub(crate) async fn unlock(
             crate::core_types::NodeKeySource::InternalMnemonic(mnemonic)
         };
 
-        tracing::debug!("Starting LDK...");
+        tracing::debug!("Starting node...");
         let (new_ldk_background_services, new_unlocked_app_state) =
-            start_ldk(state.clone(), key_source, payload.into()).await?;
-        tracing::debug!("LDK started");
+            start_node(state.clone(), key_source, payload.into()).await?;
+        tracing::debug!("Node started");
 
         state
             .update_unlocked_app_state(Some(new_unlocked_app_state))
             .await;
 
-        state.update_ldk_background_services(Some(new_ldk_background_services));
+        state.update_ldk_background_services(new_ldk_background_services);
 
         tracing::info!("Unlock completed");
         Ok(Json(EmptyResponse {}))
@@ -5798,26 +5787,28 @@ pub(crate) async fn unlock(
 pub(crate) async fn vss_backup(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, APIError> {
-    let guard = state.check_unlocked().await?;
-    let unlocked_state = guard.as_ref().unwrap().clone();
-    drop(guard);
+    crate::utils::no_cancel(async move {
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap().clone();
 
-    let vss_client = unlocked_state
-        .rgb_wallet_wrapper
-        .vss_client()
-        .ok_or_else(|| APIError::Unexpected("VSS is not configured".to_string()))?;
+        let vss_client = unlocked_state
+            .rgb_wallet_wrapper
+            .vss_client()
+            .ok_or_else(|| APIError::Unexpected("VSS is not configured".to_string()))?;
 
-    let wrapper = unlocked_state.rgb_wallet_wrapper.clone();
-    let version = tokio::task::spawn_blocking(move || {
-        let wallet = wrapper.get_rgb_wallet();
-        let rt = vss_client.handle().clone();
-        rt.block_on(wallet.vss_backup(&vss_client))
+        let wrapper = unlocked_state.rgb_wallet_wrapper.clone();
+        let version = tokio::task::spawn_blocking(move || {
+            let wallet = wrapper.get_rgb_wallet();
+            let rt = vss_client.handle().clone();
+            rt.block_on(wallet.vss_backup(&vss_client))
+        })
+        .await
+        .map_err(|e| APIError::Unexpected(format!("VSS backup task failed: {e}")))?
+        .map_err(|e| APIError::Unexpected(format!("VSS backup failed: {e}")))?;
+
+        Ok(Json(serde_json::json!({ "version": version })))
     })
     .await
-    .map_err(|e| APIError::Unexpected(format!("VSS backup task failed: {e}")))?
-    .map_err(|e| APIError::Unexpected(format!("VSS backup failed: {e}")))?;
-
-    Ok(Json(serde_json::json!({ "version": version })))
 }
 
 #[cfg(feature = "vss")]
@@ -5874,7 +5865,7 @@ pub(crate) async fn vss_clear_fence(
         // Internal-mnemonic mode authenticates with the password and derives
         // the `m/535'/1'` identity. External-signer mode holds no mnemonic, so
         // it reconstructs the bootstrap identity from the persisted
-        // key_source.json — the same store id start_ldk acquired the fence
+        // key_source.json — the same store id start_node acquired the fence
         // under. Without this branch, external-signer nodes could never clear
         // a leftover fence and would be wedged after their first shutdown.
         // [[derive_vss_identity_from_key_source]]
@@ -6136,6 +6127,33 @@ mod state_mocks {
 mod changing_state_guard_tests {
     use super::state_mocks::mock_state_with_auth;
     use super::ChangingStateGuard;
+
+    // Poll the actual admission helper behind the session mutex; no sleep or spawned-task race.
+    #[tokio::test]
+    async fn queued_locked_admission_rechecks_transition() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+        let state = mock_state_with_auth(None).await;
+        let storage_dir = state.static_state.storage_dir_path.clone();
+        let guard = state.unlocked_app_state.lock().await;
+        assert!(guard.is_none());
+        let mut waiting = std::pin::pin!(state.check_locked());
+        poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        *state.get_changing_state() = true;
+        drop(guard);
+        assert!(matches!(
+            waiting.await,
+            Err(crate::error::APIError::ChangingState)
+        ));
+        assert!(state.unlocked_app_state.lock().await.is_none());
+        assert!(state.ldk_background_services.lock().unwrap().is_none());
+        *state.get_changing_state() = false;
+        std::fs::remove_dir_all(storage_dir).unwrap();
+    }
 
     #[tokio::test]
     async fn sets_and_clears_the_flag() {

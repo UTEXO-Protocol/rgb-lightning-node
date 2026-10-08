@@ -177,10 +177,10 @@ mod tests {
 /// Bootstrap currently carries only public signer identity/config, while runtime signer
 /// operations fetch all signing-capable material through the external signer backend.
 ///
-/// Production unlock builds this via [`ExternalSigner::from_attachment`]. `crate::ldk::start_ldk`
+/// Production unlock builds this via [`ExternalSigner::from_attachment`]. `crate::ldk::start_node`
 /// does not construct a local [`lightning::sign::KeysManager`] when the active signer is external.
 /// When LDK passes this type as [`lightning::sign::EntropySource`], randomness is drawn from
-/// [`SystemEntropySource`] (same OsRng path as `start_ldk`'s `ldk_entropy_source`) so channel-scoped
+/// [`SystemEntropySource`] (same OsRng path as `start_lightning`'s `ldk_entropy_source`) so channel-scoped
 /// randomness never depends on host RPC latency or policy. Host-backed signing uses [`NodeSigner`],
 /// [`SignerProvider`], and related traits only.
 #[derive(Clone)]

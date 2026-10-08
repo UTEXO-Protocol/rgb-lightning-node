@@ -42,9 +42,15 @@ mod gossip;
 mod kv_store;
 mod ldk;
 mod ldk_chain_backend;
+#[cfg(all(test, feature = "electrum"))]
+mod mainnet_startup_tests;
+mod mainnet_state;
 #[cfg(test)]
 mod mainnet_tests;
+#[cfg(all(test, feature = "vss", feature = "electrum"))]
+mod mainnet_vss_tests;
 mod node;
+mod node_info;
 mod rgb;
 mod rgb_file_transfer;
 mod rgb_import;

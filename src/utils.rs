@@ -167,7 +167,7 @@ pub(crate) struct StaticState {
     pub(crate) lsp_base_url: Option<String>,
     pub(crate) lsp_bearer_token: Option<String>,
     /// VSS server URL (None = VSS disabled). Populated regardless of the
-    /// `vss` feature flag; only the consumer in `start_ldk` is feature-gated.
+    /// `vss` feature flag; only the consumer in `start_node` is feature-gated.
     #[cfg_attr(not(feature = "vss"), allow(dead_code))]
     pub(crate) vss_url: Option<String>,
     /// When true, a failed VSS restore on a fresh device logs a warning and
@@ -195,13 +195,31 @@ impl StaticState {
     }
 }
 
-pub(crate) struct UnlockedAppState {
+/// Wallet, signing and persistence state shared by every supported network.
+pub(crate) struct CommonState {
     pub(crate) config: Arc<crate::config::Config>,
+    pub(crate) signer: ActiveSignerRef,
+    pub(crate) entropy_source: Arc<dyn RlnEntropySource>,
+    pub(crate) kv_store: Arc<SyncedKvStore>,
+    pub(crate) rgb_wallet_wrapper: Arc<RgbLibWalletWrapper>,
+    pub(crate) proxy_endpoint: String,
+    pub(crate) external_signer_mode: bool,
+    pub(crate) external_signer: Option<Arc<ExternalSigner>>,
+    pub(crate) external_node_id: Option<String>,
+    pub(crate) node_id: PublicKey,
+    pub(crate) indexer_url: String,
+    #[cfg(feature = "vss")]
+    pub(crate) persistence_shutdown: CancellationToken,
+    #[cfg(feature = "vss")]
+    pub(crate) persistence_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// A complete Lightning runtime, present only on supported non-mainnet networks.
+pub(crate) struct LightningState {
+    pub(crate) common: Arc<CommonState>,
     pub(crate) channel_manager: Arc<ChannelManager>,
     pub(crate) gossip_source: Arc<crate::gossip::GossipSource>,
     pub(crate) inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
-    pub(crate) signer: ActiveSignerRef,
-    pub(crate) entropy_source: Arc<dyn RlnEntropySource>,
     pub(crate) network_graph: Arc<NetworkGraph>,
     pub(crate) chain_monitor: Arc<ChainMonitor>,
     pub(crate) onion_messenger: Arc<OnionMessenger>,
@@ -210,27 +228,57 @@ pub(crate) struct UnlockedAppState {
     pub(crate) asset_link_handler: Arc<AssetLinkMessageHandler>,
     pub(crate) async_order_handler: Arc<AsyncOrderMessageHandler>,
     pub(crate) async_payments_preimage_root: Arc<AsyncPaymentsPreimageRoot>,
-    pub(crate) kv_store: Arc<SyncedKvStore>,
     #[cfg(feature = "vss")]
     pub(crate) monitor_kv_store: Arc<crate::async_kv_store::RemoteFirstKvStore>,
     pub(crate) rgb_file_transfer_handler: Arc<RgbFileTransferHandler>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,
-    pub(crate) rgb_wallet_wrapper: Arc<RgbLibWalletWrapper>,
     pub(crate) router: Arc<Router>,
     pub(crate) output_sweeper: Arc<OutputSweeper>,
     pub(crate) channel_ids_map: Arc<Mutex<ChannelIdsMap>>,
-    pub(crate) proxy_endpoint: String,
-    pub(crate) external_signer_mode: bool,
-    pub(crate) external_signer: Option<Arc<ExternalSigner>>,
-    pub(crate) external_node_id: Option<String>,
     pub(crate) virtual_channel_draft_store: Arc<Mutex<VirtualChannelDraftStore>>,
     pub(crate) virtual_channel_session_store: Arc<Mutex<VirtualChannelSessionStore>>,
     pub(crate) next_payment_idx: Arc<std::sync::atomic::AtomicU64>,
 }
 
+pub(crate) struct UnlockedAppState {
+    pub(crate) common: Arc<CommonState>,
+    pub(crate) lightning: Option<Arc<LightningState>>,
+}
+
+impl std::ops::Deref for UnlockedAppState {
+    type Target = CommonState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
+impl std::ops::Deref for LightningState {
+    type Target = CommonState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
 impl UnlockedAppState {
+    pub(crate) fn lightning(&self) -> Result<&Arc<LightningState>, APIError> {
+        self.lightning
+            .as_ref()
+            .ok_or_else(|| APIError::Unexpected("Lightning runtime is not available".to_string()))
+    }
+}
+
+#[cfg(feature = "vss")]
+impl Drop for CommonState {
+    fn drop(&mut self) {
+        self.persistence_shutdown.cancel();
+    }
+}
+
+impl LightningState {
     pub(crate) fn attach_apay_signatures(
         &self,
         mut params: crate::async_order::AsyncOrderNewParamsWire,
@@ -376,7 +424,9 @@ impl UnlockedAppState {
                 .map_err(|err| APIError::InvalidRequest(err.message))
         }
     }
+}
 
+impl CommonState {
     pub(crate) fn sign_node_message(&self, message: &[u8]) -> Result<String, APIError> {
         self.signer
             .sign_message(message)
@@ -386,16 +436,11 @@ impl UnlockedAppState {
     pub(crate) fn runtime_node_pubkey(&self) -> String {
         self.external_node_id
             .clone()
-            .unwrap_or_else(|| self.channel_manager.get_our_node_id().to_string())
+            .unwrap_or_else(|| self.node_id.to_string())
     }
 
     pub(crate) fn runtime_node_id(&self) -> PublicKey {
-        if let Some(node_id) = &self.external_node_id {
-            if let Ok(pubkey) = PublicKey::from_str(node_id) {
-                return pubkey;
-            }
-        }
-        self.channel_manager.get_our_node_id()
+        self.node_id
     }
 }
 
@@ -422,7 +467,7 @@ impl Writeable for UserOnionMessageContents {
 
 /// Whether external-signer mode has been configured (a `key_source.json` exists in the storage
 /// dir). Presence-only by design: the parsed contents are validated where they are actually
-/// consumed, inside `start_ldk`.
+/// consumed, inside `start_node`.
 pub(crate) fn is_external_signer_mode_configured(state: &Arc<AppState>) -> Result<bool, APIError> {
     Ok(read_key_source_file(&state.static_state.storage_dir_path)
         .map_err(|e| APIError::ExternalSignerProtocolError(e.to_string()))?

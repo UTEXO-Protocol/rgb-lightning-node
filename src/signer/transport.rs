@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Health of a remote signer link, shared between the transport (which reports transitions) and the
-/// `signer_unblocked` driver loop in `start_ldk` (which watches them). State-based rather than a bare
+/// `signer_unblocked` driver loop in `start_lightning` (which watches them). State-based rather than a bare
 /// notification so the watcher can always re-check `is_connected` after a wake-up — `Notify` permits
 /// cap at one, so a bare notification cannot by itself distinguish "went down" from "went down and
 /// came back" while the watcher slept.
@@ -13,7 +13,7 @@ pub(crate) struct SignerLinkWatch {
 }
 
 // The producer side (`new_connected`/`mark_*`) is only exercised by the remote-signer transport;
-// the consumer side (`is_connected`/`changed`) is used unconditionally by `start_ldk`.
+// the consumer side (`is_connected`/`changed`) is used by `start_lightning`.
 #[cfg_attr(not(feature = "remote-signer"), allow(dead_code))]
 impl SignerLinkWatch {
     /// A link that starts out connected (transports establish their connection eagerly).

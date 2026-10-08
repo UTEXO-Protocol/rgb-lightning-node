@@ -147,10 +147,16 @@ pub(crate) fn parse_startup_args() -> Result<UserArgs, AppError> {
     let toml = load_startup_toml(&args)?;
     let user_args = resolve_user_args(args, &matches, toml)?;
 
-    check_port_is_available(user_args.daemon_listening_port)?;
-    check_port_is_available(user_args.ldk_peer_listening_port)?;
-
+    check_startup_ports(&user_args)?;
     Ok(user_args)
+}
+
+fn check_startup_ports(args: &UserArgs) -> Result<(), AppError> {
+    check_port_is_available(args.daemon_listening_port)?;
+    if args.network != BitcoinNetwork::Mainnet {
+        check_port_is_available(args.ldk_peer_listening_port)?;
+    }
+    Ok(())
 }
 
 fn load_startup_toml(args: &Args) -> Result<TomlConfig, AppError> {
@@ -201,7 +207,7 @@ fn resolve_user_args(
         node.ldk_peer_listening_port
             .unwrap_or(args.ldk_peer_listening_port)
     };
-    if daemon_listening_port == ldk_peer_listening_port {
+    if network != BitcoinNetwork::Mainnet && daemon_listening_port == ldk_peer_listening_port {
         return Err(AppError::InvalidConfig(format!(
             "daemon_listening_port and ldk_peer_listening_port cannot both be {daemon_listening_port}"
         )));
@@ -378,6 +384,37 @@ mod tests {
             "[node]\ndaemon_listening_port = 4000\nldk_peer_listening_port = 4000\n",
         );
         assert!(matches!(res, Err(AppError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn mainnet_ignores_the_unused_peer_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let peer_port = listener.local_addr().unwrap().port();
+        let mut args = resolve(
+            &base(&["--network", "mainnet"]),
+            &format!("[node]\ndaemon_listening_port = 0\nldk_peer_listening_port = {peer_port}\n"),
+        )
+        .unwrap();
+        check_startup_ports(&args).unwrap();
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+
+        args.network = BitcoinNetwork::Regtest;
+        assert!(
+            matches!(check_startup_ports(&args), Err(AppError::UnavailablePort(port)) if port == peer_port)
+        );
+    }
+
+    #[test]
+    fn mainnet_allows_unused_peer_port_equal_to_rest_port() {
+        let args = resolve(
+            &base(&["--network", "mainnet"]),
+            "[node]\ndaemon_listening_port = 4000\nldk_peer_listening_port = 4000\n",
+        )
+        .unwrap();
+        assert_eq!(args.daemon_listening_port, 4000);
     }
 
     #[test]

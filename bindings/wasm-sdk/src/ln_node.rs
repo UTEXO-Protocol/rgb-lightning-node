@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -9,6 +9,7 @@ use bitcoin_hashes::sha256::Hash as Sha256;
 use bitcoin_hashes::Hash as _;
 #[cfg(target_arch = "wasm32")]
 use gloo_net::http::Request;
+use lightning::bitcoin;
 use lightning_invoice::Bolt11Invoice;
 use lightning_invoice::Currency;
 use lightning_invoice::InvoiceBuilder;
@@ -33,8 +34,8 @@ use crate::ldk_runtime::{
 use crate::ln_runtime_native::{NativeLnRuntimeCore, NativeLnRuntimeCoreStatusData};
 use crate::ln_transport::RlnWasmLnSocketConnectOptionsData;
 use crate::peer_session::{
-    clear_rln_ldk_peer_manager_hooks, has_peer_manager_hooks, has_peer_manager_hooks_v2,
-    RlnLdkPeerManagerHooks, RlnWasmPeerSession, RlnWasmRustPeerManagerBridge,
+    clear_rln_ldk_peer_manager_hooks, RlnLdkPeerManagerHooks, RlnWasmPeerSession,
+    RlnWasmRustPeerManagerBridge,
 };
 use crate::runtime_store::{browser_persistent_state_store, RuntimeStateStore};
 use crate::wasm_node_persistence::{JsonRuntimeStateStore, RuntimeScopeKeys};
@@ -372,15 +373,62 @@ const AUTO_DRIVE_MIN_INTERVAL_MS: u32 = 200;
 #[path = "tests/ln_node_test_utils.rs"]
 pub(crate) mod test_utils;
 
+struct NodeLightningRuntime {
+    runtime_key: String,
+    vss_owned: Rc<Cell<bool>>,
+    ldk_runtime: Rc<dyn LdkRuntimeManager>,
+    runtime_core: NativeLnRuntimeCore,
+    chain_sync: WasmChainSyncDriver,
+}
+
+impl Drop for NodeLightningRuntime {
+    fn drop(&mut self) {
+        let _ = self.chain_sync.stop();
+        let _ = self.ldk_runtime.stop();
+        self.runtime_core.stop();
+        crate::ldk_runtime::release_node_runtime_manager(&self.runtime_key, &self.ldk_runtime);
+        crate::ldk_live_backend::unregister_node_runtime(&self.runtime_key);
+        if self.vss_owned.replace(false) {
+            crate::vss_replicator::teardown_vss_replication(&self.runtime_key);
+        }
+    }
+}
+
+struct NodeRuntimeScope {
+    network: Rc<RefCell<String>>,
+    identity_seed: [u8; 32],
+    lightning: Rc<RefCell<Option<Rc<NodeLightningRuntime>>>>,
+    wallet_identity: RefCell<Option<String>>,
+    identity_wallet: RefCell<Option<Rc<RefCell<rgb_lib_wasm::Wallet>>>>,
+    enable_virtual_channels_v0: Rc<RefCell<bool>>,
+    network_transition: Cell<bool>,
+    vss_owned: Rc<Cell<bool>>,
+}
+
+struct NodeNetworkTransition(Rc<NodeRuntimeScope>);
+
+impl Drop for NodeNetworkTransition {
+    fn drop(&mut self) {
+        self.0.network_transition.set(false);
+    }
+}
+
+thread_local! {
+    static NODE_RUNTIME_SCOPES: RefCell<HashMap<String, Weak<NodeRuntimeScope>>> =
+        RefCell::new(HashMap::new());
+}
+
 #[wasm_bindgen]
 pub struct RlnWasmNode {
     proxy_url: String,
     node_runtime_id: Option<String>,
     persistence_keys: RuntimeScopeKeys,
     bridge: RlnWasmRustPeerManagerBridge,
-    ldk_runtime: Rc<dyn LdkRuntimeManager>,
-    runtime_core: NativeLnRuntimeCore,
-    chain_sync: WasmChainSyncDriver,
+    runtime_scope: Rc<NodeRuntimeScope>,
+    lightning: Rc<RefCell<Option<Rc<NodeLightningRuntime>>>>,
+    live_node_seed: [u8; 32],
+    auto_hooks_installed: Cell<bool>,
+    runtime_views_restored: Cell<bool>,
     peers: Rc<RefCell<HashMap<String, PeerEntry>>>,
     channels: Rc<RefCell<HashMap<String, ChannelEntry>>>,
     payments: Rc<RefCell<HashMap<String, PaymentEntry>>>,
@@ -395,13 +443,9 @@ pub struct RlnWasmNode {
     /// Authoritative configured/adopted network for API policy. Keep this separate from mutable
     /// chain-sync diagnostics, and readable while an async on-chain operation borrows the wallet.
     configured_network: Rc<RefCell<String>>,
-    /// Whether the network was explicitly selected at construction (native-style `--network`).
-    /// When `true`, `attach_wallet_shared` validates the wallet's network against it and errors on
-    /// mismatch. When `false` (bare `new`/facade path), the node adopts the attached wallet's network.
-    network_configured: Cell<bool>,
     wallet: RefCell<Option<std::rc::Rc<RefCell<rgb_lib_wasm::Wallet>>>>,
     relay_session_auth: RefCell<Option<RlnWasmNodeRelaySessionAuthData>>,
-    enable_virtual_channels_v0: RefCell<bool>,
+    enable_virtual_channels_v0: Rc<RefCell<bool>>,
     reconnect_manager_running: Rc<RefCell<bool>>,
     reconnect_manager_backoff_ms: Rc<RefCell<u32>>,
     auto_drive_running: Rc<RefCell<bool>>,
@@ -422,14 +466,132 @@ impl RlnWasmNode {
         crate::check_lightning_supported(&self.configured_network.borrow())
     }
 
+    fn prepare_lightning_runtime(&self, start: bool) -> Result<(), JsValue> {
+        self.check_lightning_supported()?;
+        if self.runtime_scope.network_transition.get() {
+            return Err(JsValue::from_str(
+                "runtime network selection is in progress",
+            ));
+        }
+        let network = self.configured_network.borrow().clone();
+        self.prepare_lightning_runtime_for_network(start, &network)
+    }
+
+    // A promoting constructor holds the scope transition while staging its requested network.
+    // Publish that selection only after all fallible runtime preparation succeeds.
+    fn prepare_lightning_runtime_for_network(
+        &self,
+        start: bool,
+        network: &str,
+    ) -> Result<(), JsValue> {
+        crate::check_lightning_supported(network)?;
+        if self.lightning.borrow().is_none() {
+            let resolved = if network == "unknown" {
+                "regtest"
+            } else {
+                network
+            };
+            let selected = crate::WasmRlnNetwork::parse(resolved)?.as_rgb();
+            let runtime_key = self.runtime_manager_key();
+            let ldk_runtime = crate::ldk_runtime::claim_node_runtime_manager(runtime_key.clone())?;
+            ldk_runtime.set_live_node_seed_hex(hex::encode(self.live_node_seed))?;
+            // Prepare locally before registering any backend or resuming saved workers.
+            let chain_sync =
+                WasmChainSyncDriver::new_without_resume(runtime_key.clone(), resolved.to_string())?;
+            chain_sync.select_network(resolved);
+            let runtime_core = NativeLnRuntimeCore::new(runtime_key.clone());
+            if start {
+                ldk_runtime.ensure_started()?;
+            }
+            crate::ldk_live_backend::set_network_for_runtime(
+                &runtime_key,
+                crate::ldk_live_backend::rgb_network_to_bitcoin_network(selected),
+            );
+            if let Some(wallet) = self.runtime_scope.identity_wallet.borrow().as_ref() {
+                crate::ldk_live_backend::register_rgb_wallet_for_runtime(
+                    &runtime_key,
+                    Rc::clone(wallet),
+                );
+            }
+            crate::ldk_live_backend::set_virtual_channels_v0_for_runtime(
+                &runtime_key,
+                *self.enable_virtual_channels_v0.borrow(),
+            );
+            self.lightning.replace(Some(Rc::new(NodeLightningRuntime {
+                vss_owned: Rc::clone(&self.runtime_scope.vss_owned),
+                runtime_key,
+                ldk_runtime,
+                runtime_core,
+                chain_sync,
+            })));
+            KNOWN_RUNTIME_SCOPE_KEYS.with(|keys| {
+                keys.borrow_mut()
+                    .insert(self.persistence_keys.runtime_scope_key.clone());
+            });
+            // A failed preparation never commits the legacy Regtest fallback.
+            *self.configured_network.borrow_mut() = resolved.to_string();
+            *self.network.borrow_mut() = resolved.to_string();
+        }
+        self.restore_runtime_views();
+        Ok(())
+    }
+
+    fn restore_runtime_views(&self) {
+        if self.runtime_views_restored.replace(true) {
+            return;
+        }
+        // Cold/mainnet construction must not consume deferred Lightning hydration. Restore
+        // each handle's views only after a supported network has been selected.
+        if let Some(snapshot) =
+            load_runtime_event_log_snapshot(&self.persistence_keys.runtime_events_storage_key)
+        {
+            *self.runtime_events.borrow_mut() = snapshot.events;
+            *self.next_runtime_event_seq.borrow_mut() = snapshot.next_seq;
+        }
+        if let Some(snapshot) = load_runtime_rgb_ln_transfer_snapshot(
+            &self.persistence_keys.rgb_ln_transfers_storage_key,
+        ) {
+            *self.rgb_ln_transfers.borrow_mut() = snapshot
+                .transfers
+                .into_iter()
+                .map(|entry| (entry.payment_hash.clone(), entry))
+                .collect();
+        }
+    }
+
     fn ensure_runtime_ready(&self) -> Result<(), JsValue> {
         crate::ensure_sdk_node_runtime_allowed()?;
-        self.runtime_core.ensure_started();
-        self.ldk_runtime.ensure_started()?;
-        self.ldk_runtime.virtual_channel_reconcile_sessions();
-        self.ldk_runtime
+        self.prepare_lightning_runtime(true)?;
+        let runtime = self.lightning_runtime()?;
+        runtime.ldk_runtime.ensure_started()?;
+        runtime.runtime_core.ensure_started();
+        runtime.ldk_runtime.virtual_channel_reconcile_sessions();
+        runtime
+            .ldk_runtime
             .set_identity_stable(self.identity_stable_for_channel_operations());
+        if !self.auto_hooks_installed.get() {
+            self.install_auto_peer_manager_hooks_inner();
+        }
+        self.register_runtime_scope_for_local_pubkey();
+        runtime.chain_sync.resume_if_running();
         Ok(())
+    }
+
+    fn inactive_runtime_state(&self) -> &'static str {
+        if self.configured_network.borrow().as_str() == "mainnet" {
+            "disabled"
+        } else {
+            "cold"
+        }
+    }
+
+    fn lightning_runtime(&self) -> Result<Rc<NodeLightningRuntime>, JsValue> {
+        self.check_lightning_supported()?;
+        self.lightning
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("Lightning runtime is not initialized"))
     }
 
     fn has_stable_runtime_id(&self) -> bool {
@@ -510,59 +672,76 @@ impl RlnWasmNode {
         let runtime_scope_key =
             runtime_scope_key(proxy_url.trim(), normalized_runtime_id.as_deref());
         let persistence_keys = RuntimeScopeKeys::from_runtime_scope_key(runtime_scope_key.clone());
-        KNOWN_RUNTIME_SCOPE_KEYS.with(|keys| {
-            keys.borrow_mut().insert(runtime_scope_key.clone());
-        });
-        let runtime_event_snapshot =
-            load_runtime_event_log_snapshot(&persistence_keys.runtime_events_storage_key);
-        let runtime_events = runtime_event_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.events.clone())
-            .unwrap_or_default();
-        let next_runtime_event_seq = runtime_event_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.next_seq)
-            .unwrap_or(0);
-        let rgb_ln_transfer_snapshot =
-            load_runtime_rgb_ln_transfer_snapshot(&persistence_keys.rgb_ln_transfers_storage_key);
-        let rgb_ln_transfers = rgb_ln_transfer_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                snapshot
-                    .transfers
-                    .iter()
-                    .map(|entry| (entry.payment_hash.clone(), entry.clone()))
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let ldk_runtime = crate::ldk_runtime::ldk_runtime_manager(
-            persistence_keys.ldk_manager_registry_key.clone(),
-        )?;
-        let runtime_core =
-            NativeLnRuntimeCore::new(persistence_keys.ldk_manager_registry_key.clone());
-        // When a network is explicitly selected it becomes the node's single source of truth (like
-        // the native node's `--network`); otherwise fall back to the historical `regtest` default and
-        // let the first attached wallet supply the network.
-        let configured_rgb_network = network.map(|n| n.as_rgb());
-        let default_network_label = configured_rgb_network
-            .map(rgb_network_label)
-            .unwrap_or("regtest");
-        let chain_sync = WasmChainSyncDriver::new(
-            persistence_keys.ldk_manager_registry_key.clone(),
-            default_network_label.to_string(),
-        )?;
-        let restored_network = if configured_rgb_network.is_some() {
-            default_network_label.to_string()
-        } else {
-            chain_sync.status().network
-        };
-        let enable_virtual_channels_v0 =
-            load_virtual_channels_v0_flag(&persistence_keys.virtual_channels_v0_storage_key)
-                .unwrap_or_else(crate::sdk_default_enable_virtual_channels_v0);
+        let network_label = network
+            .map(|n| rgb_network_label(n.as_rgb()))
+            .unwrap_or("unknown");
+        let live_node_seed =
+            derive_node_signing_identity(&proxy_url, normalized_runtime_id.as_deref())?
+                .0
+                .secret_bytes();
+        let runtime_scope = NODE_RUNTIME_SCOPES.with(|registry| {
+            let mut registry = registry.borrow_mut();
+            registry.retain(|_, scope| scope.strong_count() > 0);
+            if let Some(scope) = registry
+                .get(&persistence_keys.ldk_manager_registry_key)
+                .and_then(Weak::upgrade)
+            {
+                if scope.network_transition.get() {
+                    return Err(JsValue::from_str(
+                        "runtime network selection is in progress",
+                    ));
+                }
+                if scope.identity_seed != live_node_seed {
+                    return Err(JsValue::from_str(
+                        "runtime scope already uses a different node identity",
+                    ));
+                }
+                let previous = scope.network.borrow().clone();
+                if previous != "unknown" && network_label != "unknown" && previous != network_label
+                {
+                    return Err(JsValue::from_str(
+                        "runtime scope already uses a different Bitcoin network",
+                    ));
+                }
+                return Ok(scope);
+            }
+            let scope = Rc::new(NodeRuntimeScope {
+                network: Rc::new(RefCell::new(network_label.to_string())),
+                identity_seed: live_node_seed,
+                lightning: Rc::new(RefCell::new(None)),
+                wallet_identity: RefCell::new(None),
+                identity_wallet: RefCell::new(None),
+                enable_virtual_channels_v0: Rc::new(RefCell::new(
+                    load_virtual_channels_v0_flag(
+                        &persistence_keys.virtual_channels_v0_storage_key,
+                    )
+                    .unwrap_or_else(crate::sdk_default_enable_virtual_channels_v0),
+                )),
+                network_transition: Cell::new(false),
+                vss_owned: Rc::new(Cell::new(false)),
+            });
+            registry.insert(
+                persistence_keys.ldk_manager_registry_key.clone(),
+                Rc::downgrade(&scope),
+            );
+            Ok(scope)
+        })?;
+        let network_selection =
+            if runtime_scope.network.borrow().as_str() == "unknown" && network_label != "unknown" {
+                runtime_scope.network_transition.set(true);
+                Some(NodeNetworkTransition(Rc::clone(&runtime_scope)))
+            } else {
+                None
+            };
+        let restored_network = runtime_scope.network.borrow().clone();
         let node = Self {
-            ldk_runtime,
-            runtime_core,
-            chain_sync,
+            lightning: Rc::clone(&runtime_scope.lightning),
+            configured_network: Rc::clone(&runtime_scope.network),
+            enable_virtual_channels_v0: Rc::clone(&runtime_scope.enable_virtual_channels_v0),
+            runtime_scope,
+            live_node_seed,
+            auto_hooks_installed: Cell::new(false),
+            runtime_views_restored: Cell::new(false),
             proxy_url,
             node_runtime_id: normalized_runtime_id,
             persistence_keys,
@@ -571,42 +750,37 @@ impl RlnWasmNode {
             channels: Rc::new(RefCell::new(HashMap::new())),
             payments: Rc::new(RefCell::new(HashMap::new())),
             pending_peer_hook_events: Rc::new(RefCell::new(Vec::new())),
-            runtime_events: Rc::new(RefCell::new(runtime_events)),
-            rgb_ln_transfers: Rc::new(RefCell::new(rgb_ln_transfers)),
+            runtime_events: Rc::new(RefCell::new(Vec::new())),
+            rgb_ln_transfers: Rc::new(RefCell::new(HashMap::new())),
             next_channel_seq: RefCell::new(0),
             next_payment_seq: RefCell::new(0),
             node_instance_nonce: Self::next_node_instance_nonce(),
-            next_runtime_event_seq: Rc::new(RefCell::new(next_runtime_event_seq)),
-            configured_network: Rc::new(RefCell::new(restored_network.clone())),
+            next_runtime_event_seq: Rc::new(RefCell::new(0)),
             network: RefCell::new(restored_network),
-            network_configured: Cell::new(configured_rgb_network.is_some()),
             wallet: RefCell::new(None),
             relay_session_auth: RefCell::new(None),
-            enable_virtual_channels_v0: RefCell::new(enable_virtual_channels_v0),
             reconnect_manager_running: Rc::new(RefCell::new(false)),
             reconnect_manager_backoff_ms: Rc::new(RefCell::new(RECONNECT_MANAGER_INITIAL_DELAY_MS)),
             auto_drive_running: Rc::new(RefCell::new(false)),
             auto_drive_interval_ms: Rc::new(RefCell::new(AUTO_DRIVE_DEFAULT_INTERVAL_MS)),
         };
-        // For an explicitly-selected network, register it with the LDK backend now — before the
-        // object graph (ChannelManager/NetworkGraph) is first built — so the handshake advertises the
-        // configured chain even if a wallet is never attached.
-        if let Some(rgb_network) = configured_rgb_network {
-            crate::ldk_live_backend::set_network_for_runtime(
-                &node.persistence_keys.ldk_manager_registry_key,
-                crate::ldk_live_backend::rgb_network_to_bitcoin_network(rgb_network),
-            );
+        let configured_network = Rc::clone(&node.configured_network);
+        node.bridge.set_node_policy(Rc::new(move || {
+            crate::check_lightning_supported(&configured_network.borrow())
+        }));
+        if network.is_some() && network_label != "mainnet" {
+            if network_selection.is_some() {
+                node.prepare_lightning_runtime_for_network(false, network_label)?;
+            } else {
+                node.prepare_lightning_runtime(false)?;
+            }
+            node.install_auto_peer_manager_hooks_inner();
+            node.register_runtime_scope_for_local_pubkey();
+            node.lightning_runtime()?.chain_sync.resume_if_running();
+        } else if network_selection.is_some() {
+            *node.configured_network.borrow_mut() = network_label.to_string();
+            *node.network.borrow_mut() = network_label.to_string();
         }
-        // Keep live LDK backend identity aligned with node_signing_identity pubkey.
-        let (node_secret_key, _) = node.node_signing_identity()?;
-        node.ldk_runtime
-            .set_live_node_seed_hex(hex::encode(node_secret_key.secret_bytes()))?;
-        node.ldk_runtime
-            .set_identity_stable(node.identity_stable_for_channel_operations());
-        // Native-only interop default: wire real runtime peer-manager hooks on node creation,
-        // so connectPeer/openChannel never depends on scaffold bridge callbacks.
-        node.install_auto_peer_manager_hooks();
-        node.register_runtime_scope_for_local_pubkey();
         Ok(node)
     }
 
@@ -635,46 +809,54 @@ impl RlnWasmNode {
         &self,
         wallet: Rc<RefCell<rgb_lib_wasm::Wallet>>,
     ) -> Result<(), JsValue> {
-        // Reconcile the wallet's network with the node's.
-        //
-        // - Network selected explicitly at construction (`network_configured`): the node owns the
-        //   network (like the native `--network`), so the wallet MUST match. A mismatch is a
-        //   configuration error and is rejected up front — mirroring the native node's
-        //   `NetworkMismatch`, and preventing the LDK side from advertising a chain the wallet can't
-        //   actually operate on.
-        // - Otherwise: adopt the wallet's network as the node's, and propagate it to the LDK backend
-        //   (so the `ChannelManager`/`NetworkGraph`, and thus the `networks` field of the `Init`
-        //   handshake, advertise the right chain) and to the node's own network string (invoice
-        //   currency, chain-sync status).
-        let bitcoin_network = wallet.borrow().get_wallet_data().bitcoin_network;
-        let wallet_label = rgb_network_label(bitcoin_network);
-        if self.network_configured.get() {
-            let node_label = self.network.borrow().clone();
-            if wallet_label != node_label {
-                return Err(JsValue::from_str(&format!(
-                    "wallet network ({wallet_label}) does not match the node's configured network ({node_label})"
-                )));
-            }
-        } else {
-            *self.network.borrow_mut() = wallet_label.to_string();
-            *self.configured_network.borrow_mut() = wallet_label.to_string();
-            let _ = self.chain_sync.set_network(wallet_label);
+        if self.runtime_scope.network_transition.get() {
+            return Err(JsValue::from_str(
+                "runtime network selection is in progress",
+            ));
         }
-        crate::ldk_live_backend::set_network_for_runtime(
-            &self.persistence_keys.ldk_manager_registry_key,
-            crate::ldk_live_backend::rgb_network_to_bitcoin_network(bitcoin_network),
+        let wallet_data = wallet
+            .try_borrow()
+            .map_err(|_| {
+                JsValue::from_str("RGB wallet is busy; retry after the current operation")
+            })?
+            .get_wallet_data();
+        let wallet_identity = format!(
+            "{}:{}:{}:{}",
+            wallet_data.master_fingerprint,
+            wallet_data.account_xpub_vanilla,
+            wallet_data.account_xpub_colored,
+            wallet_data.vanilla_keychain.unwrap_or(0)
         );
-        crate::ldk_live_backend::register_rgb_wallet_for_runtime(
-            &self.persistence_keys.ldk_manager_registry_key,
-            Rc::clone(&wallet),
-        );
-        // Seed the live-backend virtual-channels flag registry with this node's current value
-        // (default/persisted) before the LDK object graph is first built, so the
-        // `Event::OpenChannelRequest` handler sees the right gate even if the setter is never called.
-        crate::ldk_live_backend::set_virtual_channels_v0_for_runtime(
-            &self.persistence_keys.ldk_manager_registry_key,
-            *self.enable_virtual_channels_v0.borrow(),
-        );
+        let bitcoin_network = wallet_data.bitcoin_network;
+        let wallet_label = rgb_network_label(bitcoin_network);
+        let previous = self.configured_network.borrow().clone();
+        if previous != "unknown" && previous != wallet_label {
+            return Err(JsValue::from_str(&format!(
+                "wallet network ({wallet_label}) does not match the node's configured network ({previous})"
+            )));
+        }
+        if self
+            .runtime_scope
+            .wallet_identity
+            .borrow()
+            .as_ref()
+            .is_some_and(|identity| identity != &wallet_identity)
+        {
+            return Err(JsValue::from_str(
+                "runtime scope already uses a different wallet identity",
+            ));
+        }
+        // All validation precedes policy, wallet and global registry changes.
+        *self.configured_network.borrow_mut() = wallet_label.to_string();
+        *self.network.borrow_mut() = wallet_label.to_string();
+        *self.runtime_scope.wallet_identity.borrow_mut() = Some(wallet_identity);
+        *self.runtime_scope.identity_wallet.borrow_mut() = Some(Rc::clone(&wallet));
+        if let Some(runtime) = self.lightning.borrow().as_ref() {
+            crate::ldk_live_backend::register_rgb_wallet_for_runtime(
+                &runtime.runtime_key,
+                Rc::clone(&wallet),
+            );
+        }
         *self.wallet.borrow_mut() = Some(wallet);
         Ok(())
     }
@@ -744,10 +926,12 @@ impl RlnWasmNode {
         // Mirror the flag into the live-backend registry so the `Event::OpenChannelRequest` handler
         // (which decides whether to accept inbound scid-privacy channels as 0-conf virtual channels)
         // can read it by runtime key.
-        crate::ldk_live_backend::set_virtual_channels_v0_for_runtime(
-            &self.persistence_keys.ldk_manager_registry_key,
-            enabled,
-        );
+        if self.lightning.borrow().is_some() {
+            crate::ldk_live_backend::set_virtual_channels_v0_for_runtime(
+                &self.persistence_keys.ldk_manager_registry_key,
+                enabled,
+            );
+        }
     }
 
     #[wasm_bindgen(js_name = enableVirtualChannelsV0Value)]
@@ -766,7 +950,7 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = issueAssetNiaValue)]
     pub fn issue_asset_nia_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
+        crate::ensure_sdk_node_runtime_allowed()?;
         let request: WasmIssueAssetNiaRequest = serde_wasm_bindgen::from_value(request_js)
             .map_err(|e| JsValue::from_str(&format!("Invalid issue_asset_nia request: {e}")))?;
         if request.amounts.is_empty() {
@@ -800,7 +984,7 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = issueAssetCfaValue)]
     pub fn issue_asset_cfa_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
+        crate::ensure_sdk_node_runtime_allowed()?;
         let request: WasmIssueAssetCfaRequest = serde_wasm_bindgen::from_value(request_js)
             .map_err(|e| JsValue::from_str(&format!("Invalid issue_asset_cfa request: {e}")))?;
         if request.amounts.is_empty() {
@@ -845,7 +1029,7 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = issueAssetIfaValue)]
     pub fn issue_asset_ifa_value(&self, request_js: JsValue) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
+        crate::ensure_sdk_node_runtime_allowed()?;
         let request: WasmIssueAssetIfaRequest = serde_wasm_bindgen::from_value(request_js)
             .map_err(|e| JsValue::from_str(&format!("Invalid issue_asset_ifa request: {e}")))?;
         if request.amounts.is_empty() {
@@ -904,12 +1088,13 @@ impl RlnWasmNode {
         if SecpPublicKey::from_str(peer_pubkey.trim()).is_err() {
             return Err(JsValue::from_str(sdk_contracts::ERR_PEER_PUBKEY_INVALID));
         }
-        if !has_peer_manager_hooks() {
+        let (hooks_available, hooks_v2_ready) = self.bridge.connection_hooks_ready()?;
+        if !hooks_available {
             return Err(JsValue::from_str(
                 "peer-manager hooks are not installed; install real peer-manager hooks before connectPeer",
             ));
         }
-        if !has_peer_manager_hooks_v2() {
+        if !hooks_v2_ready {
             return Err(JsValue::from_str(
                 "peer-manager hooks are not V2-ready; installPeerManagerHooksFromJsV2 with take_outbound_frames is required",
             ));
@@ -933,9 +1118,13 @@ impl RlnWasmNode {
         self.peers.borrow_mut().remove(&peer_pubkey);
         if self.use_runtime_state_for_ln_views() {
             let _ = self
+                .lightning_runtime()?
                 .ldk_runtime
                 .peer_socket_disconnected_for_peer(&peer_pubkey);
-            let _ = self.ldk_runtime.remove_peer(&peer_pubkey);
+            let _ = self
+                .lightning_runtime()?
+                .ldk_runtime
+                .remove_peer(&peer_pubkey);
         }
 
         if !self.use_runtime_state_for_ln_views() && self.peers.borrow().contains_key(&peer_pubkey)
@@ -991,11 +1180,12 @@ impl RlnWasmNode {
         let mut handshake_complete = false;
         for _ in 0..300 {
             if self
+                .lightning_runtime()?
                 .ldk_runtime
                 .peer_is_handshake_complete(&peer_pubkey)
                 .unwrap_or(false)
             {
-                let _ = self.ldk_runtime.peer_process_events();
+                let _ = self.lightning_runtime()?.ldk_runtime.peer_process_events();
                 handshake_complete = true;
                 break;
             }
@@ -1019,17 +1209,22 @@ impl RlnWasmNode {
         );
         self.persist_peer_session_state();
         if self.use_runtime_state_for_ln_views() {
-            let runtime_connected = self.ldk_runtime.has_connected_peer(&peer_pubkey);
-            self.ldk_runtime.upsert_peer(LdkRuntimePeerStateData {
-                pubkey: peer_pubkey.clone(),
-                peer_addr: self
-                    .peers
-                    .borrow()
-                    .get(&peer_pubkey)
-                    .map(|entry| entry.peer_addr.clone())
-                    .unwrap_or_default(),
-                started: runtime_connected,
-            });
+            let runtime_connected = self
+                .lightning_runtime()?
+                .ldk_runtime
+                .has_connected_peer(&peer_pubkey);
+            self.lightning_runtime()?
+                .ldk_runtime
+                .upsert_peer(LdkRuntimePeerStateData {
+                    pubkey: peer_pubkey.clone(),
+                    peer_addr: self
+                        .peers
+                        .borrow()
+                        .get(&peer_pubkey)
+                        .map(|entry| entry.peer_addr.clone())
+                        .unwrap_or_default(),
+                    started: runtime_connected,
+                });
         }
         let applied = self
             .apply_and_record_transport_event(
@@ -1048,7 +1243,7 @@ impl RlnWasmNode {
             "[rln-wasm-sdk connectPeer] done peer_pubkey={} peers={} runtime_peers={}",
             peer_pubkey,
             self.peers.borrow().len(),
-            self.ldk_runtime.list_peers().len()
+            self.lightning_runtime()?.ldk_runtime.list_peers().len()
         ));
         self.persist_runtime_event_log_state();
         Ok(())
@@ -1074,7 +1269,7 @@ impl RlnWasmNode {
         if let Some(session) = session {
             session.close().await?;
         } else if !(self.use_runtime_state_for_ln_views()
-            && self.ldk_runtime.has_peer(&peer_pubkey))
+            && self.lightning_runtime()?.ldk_runtime.has_peer(&peer_pubkey))
         {
             return Err(JsValue::from_str(sdk_contracts::ERR_PEER_NOT_CONNECTED));
         }
@@ -1142,19 +1337,30 @@ impl RlnWasmNode {
         if *self.reconnect_manager_running.borrow() {
             return self.reconnect_manager_status_value();
         }
-        *self.reconnect_manager_running.borrow_mut() = true;
-        *self.reconnect_manager_backoff_ms.borrow_mut() = RECONNECT_MANAGER_INITIAL_DELAY_MS;
+        // Bare nodes are dormant until a Lightning operation selects their runtime.
+        // Preserve constructor-equivalent preparation before publishing a running loop.
+        self.prepare_lightning_runtime(false)?;
+        let runtime = self.lightning_runtime()?;
+        if !self.auto_hooks_installed.get() {
+            self.install_auto_peer_manager_hooks_inner();
+        }
+        self.register_runtime_scope_for_local_pubkey();
+        runtime.chain_sync.resume_if_running();
 
         let proxy_url = self.proxy_url.clone();
         let runtime_scope_key = self.persistence_keys.runtime_scope_key.clone();
         let peer_session_store_key = self.persistence_keys.peer_sessions_storage_key.clone();
         let relay_session_auth = self.relay_session_auth.borrow().clone();
         let peers = Rc::clone(&self.peers);
-        let ldk_runtime = Rc::clone(&self.ldk_runtime);
+        let ldk_runtime = Rc::clone(&runtime.ldk_runtime);
         let running = Rc::clone(&self.reconnect_manager_running);
         let backoff_ms = Rc::clone(&self.reconnect_manager_backoff_ms);
         let bridge = self.bridge.clone();
 
+        *self.reconnect_manager_running.borrow_mut() = true;
+        *self.reconnect_manager_backoff_ms.borrow_mut() = RECONNECT_MANAGER_INITIAL_DELAY_MS;
+        #[cfg(test)]
+        crate::ln_node::test_utils::record_startup_call("reconnect_task");
         spawn_local(async move {
             let _ = reconnect_persisted_peers_once(
                 &proxy_url,
@@ -1253,9 +1459,9 @@ impl RlnWasmNode {
         *self.auto_drive_running.borrow_mut() = true;
         *self.auto_drive_interval_ms.borrow_mut() = interval;
 
-        let chain_sync = self.chain_sync.clone();
-        let ldk_runtime = Rc::clone(&self.ldk_runtime);
-        let runtime_core = self.runtime_core.clone();
+        let chain_sync = self.lightning_runtime()?.chain_sync.clone();
+        let ldk_runtime = Rc::clone(&self.lightning_runtime()?.ldk_runtime);
+        let runtime_core = self.lightning_runtime()?.runtime_core.clone();
         let peers = Rc::clone(&self.peers);
         let channels = Rc::clone(&self.channels);
         let payments = Rc::clone(&self.payments);
@@ -1346,7 +1552,7 @@ impl RlnWasmNode {
         let peer_session_store_key = self.persistence_keys.peer_sessions_storage_key.clone();
         let relay_session_auth = self.relay_session_auth.borrow().clone();
         let peers = Rc::clone(&self.peers);
-        let ldk_runtime = Rc::clone(&self.ldk_runtime);
+        let ldk_runtime = Rc::clone(&self.lightning_runtime()?.ldk_runtime);
         let backoff_ms = Rc::clone(&self.reconnect_manager_backoff_ms);
         let bridge = self.bridge.clone();
         spawn_local(async move {
@@ -1372,7 +1578,8 @@ impl RlnWasmNode {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
         let mut data = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .list_peers()
                 .into_iter()
                 .map(|peer| RlnWasmNodePeerData {
@@ -1409,6 +1616,7 @@ impl RlnWasmNode {
         self.ensure_runtime_ready()?;
         let mut data = if self.use_runtime_state_for_ln_views() {
             let mut runtime = self
+                .lightning_runtime()?
                 .ldk_runtime
                 .list_channels()
                 .into_iter()
@@ -1417,8 +1625,12 @@ impl RlnWasmNode {
             // Listing must not be a destructive poll. Reconcile is driven by open/funding,
             // peer processing, and chain-sync ticks; only try it here when runtime is empty.
             if runtime.is_empty() {
-                let _ = self.ldk_runtime.reconcile_channels_from_live();
+                let _ = self
+                    .lightning_runtime()?
+                    .ldk_runtime
+                    .reconcile_channels_from_live();
                 runtime = self
+                    .lightning_runtime()?
                     .ldk_runtime
                     .list_channels()
                     .into_iter()
@@ -1436,6 +1648,7 @@ impl RlnWasmNode {
         for channel in &mut data {
             if channel.virtual_open_mode.is_none()
                 && self
+                    .lightning_runtime()?
                     .ldk_runtime
                     .virtual_channel_session_get(&channel.channel_id)
                     .is_some()
@@ -1457,37 +1670,29 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = nodeInfoValue)]
     pub fn node_info_value(&self) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
-        let (num_channels, num_usable_channels) = if self.use_runtime_state_for_ln_views() {
-            let channels = self.ldk_runtime.list_channels();
-            let num_channels = channels.len();
-            let num_usable_channels = channels.iter().filter(|entry| entry.is_usable).count();
-            (num_channels, num_usable_channels)
+        crate::ensure_sdk_node_runtime_allowed()?;
+        let runtime = self.lightning.borrow();
+        let (runtime_label, peers, channels) = if let Some(runtime) = runtime.as_ref() {
+            let status = runtime.ldk_runtime.status();
+            (
+                format!("{}:{}", status.backend, status.lifecycle_state),
+                runtime.ldk_runtime.list_peers().len(),
+                runtime.ldk_runtime.list_channels(),
+            )
         } else {
-            let channels = self.channels.borrow();
-            let num_channels = channels.len();
-            let num_usable_channels = channels
-                .values()
-                .filter(|entry| entry.data.is_usable)
-                .count();
-            (num_channels, num_usable_channels)
+            (
+                format!("wasm_native_ldk:{}", self.inactive_runtime_state()),
+                0,
+                Vec::new(),
+            )
         };
-        let runtime_status = self.ldk_runtime.status();
-        let data = RlnWasmNodeInfoData {
-            runtime: format!(
-                "wasm32-unknown-unknown/{}:{}",
-                runtime_status.backend, runtime_status.lifecycle_state
-            ),
-            ldk_over_websocket: true,
-            num_peers: if self.use_runtime_state_for_ln_views() {
-                self.ldk_runtime.list_peers().len()
-            } else {
-                self.peers.borrow().len()
-            },
-            num_channels,
-            num_usable_channels,
-        };
-        crate::js_obj(&data)
+        crate::js_obj(&RlnWasmNodeInfoData {
+            runtime: format!("wasm32-unknown-unknown/{runtime_label}"),
+            ldk_over_websocket: runtime.is_some(),
+            num_peers: peers,
+            num_channels: channels.len(),
+            num_usable_channels: channels.iter().filter(|ch| ch.is_usable).count(),
+        })
     }
 
     #[wasm_bindgen(js_name = nodeInfoJson)]
@@ -1499,7 +1704,7 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = nodePubkeyValue)]
     pub fn node_pubkey_value(&self) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
+        crate::ensure_sdk_node_runtime_allowed()?;
         let pubkey = self
             .local_node_pubkey_string()
             .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_NODE_PUBKEY_DERIVE_FAILED))?;
@@ -1515,10 +1720,13 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = networkInfoValue)]
     pub fn network_info_value(&self) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
+        crate::ensure_sdk_node_runtime_allowed()?;
+        let runtime = self.lightning.borrow();
+        let runtime = runtime.as_ref().ok_or_else(|| JsValue::from_str(
+            "NetworkInfoUnavailable: no chain height is available without an initialized Lightning chain driver; use the on-chain wallet indexer"))?;
         crate::js_obj(&RlnWasmNodeNetworkInfoData {
-            network: self.network.borrow().clone(),
-            height: self.chain_sync.latest_tip_height().unwrap_or(0),
+            network: self.configured_network.borrow().clone(),
+            height: runtime.chain_sync.latest_tip_height().unwrap_or(0),
         })
     }
 
@@ -1529,8 +1737,10 @@ impl RlnWasmNode {
         poll_interval_ms: Option<u32>,
     ) -> Result<JsValue, JsValue> {
         self.ensure_runtime_ready()?;
-        self.chain_sync.start(indexer_url, poll_interval_ms)?;
-        let status: RlnWasmChainSyncStatusData = self.chain_sync.status();
+        self.lightning_runtime()?
+            .chain_sync
+            .start(indexer_url, poll_interval_ms)?;
+        let status: RlnWasmChainSyncStatusData = self.lightning_runtime()?.chain_sync.status();
         *self.network.borrow_mut() = status.network.clone();
         crate::js_obj(&status)
     }
@@ -1548,9 +1758,11 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = chainSyncStopValue)]
     pub fn chain_sync_stop_value(&self) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
-        self.chain_sync.stop()?;
-        crate::js_obj(&self.chain_sync.status())
+        crate::ensure_sdk_node_runtime_allowed()?;
+        if let Some(runtime) = self.lightning.borrow().as_ref() {
+            runtime.chain_sync.stop()?;
+        }
+        self.chain_sync_status_value()
     }
 
     #[wasm_bindgen(js_name = chainSyncStopJson)]
@@ -1562,8 +1774,16 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = chainSyncStatusValue)]
     pub fn chain_sync_status_value(&self) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
-        crate::js_obj(&self.chain_sync.status())
+        crate::ensure_sdk_node_runtime_allowed()?;
+        let status = self
+            .lightning
+            .borrow()
+            .as_ref()
+            .map(|runtime| runtime.chain_sync.status())
+            .unwrap_or_else(|| {
+                WasmChainSyncDriver::inactive_status(self.configured_network.borrow().clone())
+            });
+        crate::js_obj(&status)
     }
 
     #[wasm_bindgen(js_name = chainSyncStatusJson)]
@@ -1581,9 +1801,9 @@ impl RlnWasmNode {
         // The autonomous loop (`autoDriveStart`) runs the exact same `node_drive_tick_once`, so a
         // manually-ticked and a self-driven node progress identically.
         node_drive_tick_once(
-            &self.chain_sync,
-            &self.ldk_runtime,
-            &self.runtime_core,
+            &self.lightning_runtime()?.chain_sync,
+            &self.lightning_runtime()?.ldk_runtime,
+            &self.lightning_runtime()?.runtime_core,
             &self.peers,
             &self.channels,
             &self.payments,
@@ -1594,7 +1814,7 @@ impl RlnWasmNode {
             "chain_sync_tick",
         )
         .await?;
-        crate::js_obj(&self.chain_sync.status())
+        crate::js_obj(&self.lightning_runtime()?.chain_sync.status())
     }
 
     #[wasm_bindgen(js_name = chainSyncTickJson)]
@@ -1611,14 +1831,30 @@ impl RlnWasmNode {
         tx_hex: String,
     ) -> Result<(), JsValue> {
         self.ensure_runtime_ready()?;
-        self.chain_sync.enqueue_rebroadcast_tx(txid, tx_hex)
+        self.lightning_runtime()?
+            .chain_sync
+            .enqueue_rebroadcast_tx(txid, tx_hex)
     }
 
     #[wasm_bindgen(js_name = ldkRuntimeStatusValue)]
     pub fn ldk_runtime_status_value(&self) -> Result<JsValue, JsValue> {
-        self.ldk_runtime
-            .set_identity_stable(self.identity_stable_for_channel_operations());
-        let status: LdkRuntimeStatusData = self.ldk_runtime.status();
+        let status = if let Some(runtime) = self.lightning.borrow().as_ref() {
+            runtime
+                .ldk_runtime
+                .set_identity_stable(self.identity_stable_for_channel_operations());
+            runtime.ldk_runtime.status()
+        } else {
+            LdkRuntimeStatusData {
+                backend: "wasm_native_ldk".to_string(),
+                lifecycle_state: self.inactive_runtime_state().to_string(),
+                ready: false,
+                identity_stable: self.identity_stable_for_channel_operations(),
+                channel_manager_restored: false,
+                monitors_restored: false,
+                storage_initialized: false,
+                schema_version: 1,
+            }
+        };
         crate::js_obj(&status)
     }
 
@@ -1631,8 +1867,29 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = ldkRuntimeComponentsValue)]
     pub fn ldk_runtime_components_value(&self) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
-        let status: LdkRuntimeComponentsStatusData = self.ldk_runtime.component_status();
+        crate::ensure_sdk_node_runtime_allowed()?;
+        let status = self
+            .lightning
+            .borrow()
+            .as_ref()
+            .map(|runtime| runtime.ldk_runtime.component_status())
+            .unwrap_or_else(|| LdkRuntimeComponentsStatusData {
+                backend: "wasm_native_ldk".to_string(),
+                started: false,
+                fee_estimator_ready: false,
+                broadcaster_ready: false,
+                logger_ready: false,
+                persister_ready: false,
+                key_manager_ready: false,
+                payment_engine_ready: false,
+                channel_engine_ready: false,
+                key_manager_fingerprint: String::new(),
+                invoices_created: 0,
+                payments_initiated: 0,
+                keysends_initiated: 0,
+                channels_opened: 0,
+                channels_closed: 0,
+            });
         crate::js_obj(&status)
     }
 
@@ -1645,7 +1902,10 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = persistLdkRuntimeState)]
     pub fn persist_ldk_runtime_state(&self) -> Result<(), JsValue> {
-        self.ldk_runtime.persist_live_state()?;
+        self.check_lightning_supported()?;
+        if let Some(runtime) = self.lightning.borrow().as_ref() {
+            runtime.ldk_runtime.persist_live_state()?;
+        }
         Ok(())
     }
 
@@ -1653,7 +1913,12 @@ impl RlnWasmNode {
     pub fn list_pending_funding_requests_value(&self) -> Result<JsValue, JsValue> {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
-        crate::js_obj(&self.ldk_runtime.list_pending_funding_requests()?)
+        crate::js_obj(
+            &self
+                .lightning_runtime()?
+                .ldk_runtime
+                .list_pending_funding_requests()?,
+        )
     }
 
     #[wasm_bindgen(js_name = listPendingFundingRequestsJson)]
@@ -1681,7 +1946,8 @@ impl RlnWasmNode {
                 "temporary_channel_id, counterparty_node_id and funding_tx_hex are required",
             ));
         }
-        self.ldk_runtime
+        self.lightning_runtime()?
+            .ldk_runtime
             .submit_funding_transaction(LdkRuntimeFundingTxSubmissionData {
                 temporary_channel_id: submission.temporary_channel_id,
                 counterparty_node_id: submission.counterparty_node_id,
@@ -1723,7 +1989,7 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = signMessageValue)]
     pub fn sign_message_value(&self, message: String) -> Result<JsValue, JsValue> {
-        self.ensure_runtime_ready()?;
+        crate::ensure_sdk_node_runtime_allowed()?;
         let signed_message = self.sign_node_message(message.trim())?;
         crate::js_obj(&RlnWasmNodeSignMessageData { signed_message })
     }
@@ -1740,7 +2006,8 @@ impl RlnWasmNode {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
         let peer_pubkeys: Vec<String> = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .list_peers()
                 .into_iter()
                 .map(|peer| peer.pubkey)
@@ -1751,14 +2018,25 @@ impl RlnWasmNode {
         for pubkey in peer_pubkeys {
             self.disconnect_peer(pubkey).await?;
         }
-        self.ldk_runtime.stop()?;
-        self.runtime_core.stop();
+        self.lightning_runtime()?.ldk_runtime.stop()?;
+        self.lightning_runtime()?.runtime_core.stop();
         Ok(())
     }
 
     #[wasm_bindgen(js_name = nativeRuntimeCoreStatusValue)]
     pub fn native_runtime_core_status_value(&self) -> Result<JsValue, JsValue> {
-        let status: NativeLnRuntimeCoreStatusData = self.runtime_core.status();
+        let status = self
+            .lightning
+            .borrow()
+            .as_ref()
+            .map(|runtime| runtime.runtime_core.status())
+            .unwrap_or_else(|| NativeLnRuntimeCoreStatusData {
+                lifecycle_state: self.inactive_runtime_state().to_string(),
+                ready: false,
+                storage_initialized: false,
+                schema_version: 1,
+                queued_events: 0,
+            });
         crate::js_obj(&status)
     }
 
@@ -1773,7 +2051,7 @@ impl RlnWasmNode {
     pub fn drain_native_runtime_queue_value(&self) -> Result<JsValue, JsValue> {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
-        let drained = self.runtime_core.drain_events();
+        let drained = self.lightning_runtime()?.runtime_core.drain_events();
         crate::js_obj(&drained)
     }
 
@@ -1788,10 +2066,10 @@ impl RlnWasmNode {
     pub fn process_native_runtime_queue_value(&self) -> Result<JsValue, JsValue> {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
-        let drained = self.runtime_core.drain_events();
+        let drained = self.lightning_runtime()?.runtime_core.drain_events();
         for queued in drained.iter() {
             apply_runtime_hook_payload(
-                &self.ldk_runtime,
+                &self.lightning_runtime()?.ldk_runtime,
                 self.use_runtime_state_for_ln_views(),
                 &self.peers,
                 &self.channels,
@@ -1816,7 +2094,20 @@ impl RlnWasmNode {
     }
 
     #[wasm_bindgen(js_name = installAutoPeerManagerHooks)]
-    pub fn install_auto_peer_manager_hooks(&self) {
+    pub fn install_auto_peer_manager_hooks(&self) -> Result<(), JsValue> {
+        self.prepare_lightning_runtime(false)?;
+        self.install_auto_peer_manager_hooks_inner();
+        Ok(())
+    }
+
+    fn install_auto_peer_manager_hooks_inner(&self) {
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return;
+        };
+
+        #[cfg(test)]
+        crate::ln_node::test_utils::record_startup_call("peer_hooks");
+        self.auto_hooks_installed.set(true);
         let payments = self.payments.clone();
         let peers = self.peers.clone();
         let channels = self.channels.clone();
@@ -1824,7 +2115,7 @@ impl RlnWasmNode {
         let runtime_events = self.runtime_events.clone();
         let next_runtime_event_seq = self.next_runtime_event_seq.clone();
         let runtime_event_store_key = self.persistence_keys.runtime_events_storage_key.clone();
-        let ldk_runtime = self.ldk_runtime.clone();
+        let ldk_runtime = runtime.ldk_runtime.clone();
         let use_runtime_state_for_ln_views = self.use_runtime_state_for_ln_views();
         let configured_network = Rc::clone(&self.configured_network);
         let check_lightning_supported =
@@ -1910,6 +2201,12 @@ impl RlnWasmNode {
 
     #[wasm_bindgen(js_name = listRuntimeEventsValue)]
     pub fn list_runtime_events_value(&self) -> Result<JsValue, JsValue> {
+        if !matches!(
+            self.configured_network.borrow().as_str(),
+            "unknown" | "mainnet"
+        ) {
+            self.restore_runtime_views();
+        }
         let mut events = self.runtime_events.borrow().clone();
         events.sort_by(|a, b| a.seq.cmp(&b.seq));
         crate::js_obj(&events)
@@ -1929,6 +2226,7 @@ impl RlnWasmNode {
         ensure_manual_status_update_allowed(self.use_runtime_state_for_ln_views())?;
         if self.use_runtime_state_for_ln_views() {
             let pending_hashes = self
+                .lightning_runtime()?
                 .ldk_runtime
                 .list_payments()
                 .into_iter()
@@ -2032,7 +2330,12 @@ impl RlnWasmNode {
             .unwrap_or_else(|| parsed.recover_payee_pub_key())
             .to_string();
         let has_connected_peer = if self.use_runtime_state_for_ln_views() {
-            if self.ldk_runtime.get_peer(&payee_pubkey).is_some() {
+            if self
+                .lightning_runtime()?
+                .ldk_runtime
+                .get_peer(&payee_pubkey)
+                .is_some()
+            {
                 self.has_connected_peer(&payee_pubkey)
             } else {
                 self.has_any_connected_peer()
@@ -2067,7 +2370,9 @@ impl RlnWasmNode {
         {
             self.register_rgb_ln_transfer_from_payment(&payment);
         }
-        self.ldk_runtime.record_payment_initiated();
+        self.lightning_runtime()?
+            .ldk_runtime
+            .record_payment_initiated();
         if self.use_runtime_state_for_ln_views() {
             let runtime_payment = self
                 .payments
@@ -2077,7 +2382,9 @@ impl RlnWasmNode {
                 .ok_or_else(|| {
                     JsValue::from_str(sdk_contracts::ERR_PAYMENT_NOT_FOUND_AFTER_CREATION)
                 })?;
-            self.ldk_runtime.upsert_payment(runtime_payment);
+            self.lightning_runtime()?
+                .ldk_runtime
+                .upsert_payment(runtime_payment);
         }
         if !has_connected_peer {
             let _ =
@@ -2087,7 +2394,8 @@ impl RlnWasmNode {
         }
         self.persist_runtime_event_log_state();
         let final_status = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .get_payment(&payment_hash)
                 .map(|payment| payment.status)
                 .ok_or_else(|| {
@@ -2201,7 +2509,9 @@ impl RlnWasmNode {
         {
             self.register_rgb_ln_transfer_from_payment(&payment);
         }
-        self.ldk_runtime.record_keysend_initiated();
+        self.lightning_runtime()?
+            .ldk_runtime
+            .record_keysend_initiated();
         if self.use_runtime_state_for_ln_views() {
             let runtime_payment = self
                 .payments
@@ -2211,7 +2521,9 @@ impl RlnWasmNode {
                 .ok_or_else(|| {
                     JsValue::from_str(sdk_contracts::ERR_PAYMENT_NOT_FOUND_AFTER_KEYSEND)
                 })?;
-            self.ldk_runtime.upsert_payment(runtime_payment);
+            self.lightning_runtime()?
+                .ldk_runtime
+                .upsert_payment(runtime_payment);
         }
         if !has_connected_peer {
             let _ =
@@ -2221,7 +2533,8 @@ impl RlnWasmNode {
         }
         self.persist_runtime_event_log_state();
         let final_status = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .get_payment(&payment_hash)
                 .map(|payment| payment.status)
                 .ok_or_else(|| {
@@ -2296,9 +2609,12 @@ impl RlnWasmNode {
         if let Some(id) = &asset_id {
             validate_asset_id_format(id)?;
         }
-        let record =
-            self.ldk_runtime
-                .keysend_live(&dest_pubkey, amt_msat, asset_id, asset_amount)?;
+        let record = self.lightning_runtime()?.ldk_runtime.keysend_live(
+            &dest_pubkey,
+            amt_msat,
+            asset_id,
+            asset_amount,
+        )?;
         crate::js_obj(&record)
     }
 
@@ -2345,9 +2661,12 @@ impl RlnWasmNode {
         if amt_msat == Some(0) {
             return Err(JsValue::from_str(sdk_contracts::ERR_AMT_MSAT_NONPOSITIVE));
         }
-        let record =
-            self.ldk_runtime
-                .send_bolt11_live(&invoice, amt_msat, asset_id, asset_amount)?;
+        let record = self.lightning_runtime()?.ldk_runtime.send_bolt11_live(
+            &invoice,
+            amt_msat,
+            asset_id,
+            asset_amount,
+        )?;
         crate::js_obj(&RlnWasmNodeSendPaymentResult {
             payment_id: record.payment_hash.clone(),
             payment_hash: Some(record.payment_hash),
@@ -2374,7 +2693,11 @@ impl RlnWasmNode {
     pub fn live_payment_value(&self, payment_hash: String) -> Result<JsValue, JsValue> {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
-        match self.ldk_runtime.live_payment(payment_hash.trim()) {
+        match self
+            .lightning_runtime()?
+            .ldk_runtime
+            .live_payment(payment_hash.trim())
+        {
             Some(record) => crate::js_obj(&record),
             None => Ok(JsValue::NULL),
         }
@@ -2385,7 +2708,7 @@ impl RlnWasmNode {
     pub fn live_payments_value(&self) -> Result<JsValue, JsValue> {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
-        let data = self.ldk_runtime.live_payments();
+        let data = self.lightning_runtime()?.ldk_runtime.live_payments();
         crate::js_obj(&data)
     }
 
@@ -2394,7 +2717,8 @@ impl RlnWasmNode {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
         let mut data = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .list_payments()
                 .into_iter()
                 .map(Self::payment_data_from_runtime_state)
@@ -2455,7 +2779,8 @@ impl RlnWasmNode {
             return Err(JsValue::from_str(sdk_contracts::ERR_PAYMENT_HASH_EMPTY));
         }
         let data = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .get_payment(&payment_hash)
                 .map(Self::payment_data_from_runtime_state)
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_PAYMENT_NOT_FOUND))?
@@ -2610,7 +2935,12 @@ impl RlnWasmNode {
             let payment_hash_bytes =
                 decode_fixed_hex::<32>(&payment_hash_hex, "invalid payment_hash")?;
             if self.use_runtime_state_for_ln_views() {
-                if self.ldk_runtime.get_payment(&payment_hash_hex).is_some() {
+                if self
+                    .lightning_runtime()?
+                    .ldk_runtime
+                    .get_payment(&payment_hash_hex)
+                    .is_some()
+                {
                     return Err(JsValue::from_str(
                         sdk_contracts::ERR_PAYMENT_HASH_ALREADY_USED,
                     ));
@@ -2677,7 +3007,9 @@ impl RlnWasmNode {
         {
             self.register_rgb_ln_transfer_from_payment(&payment);
         }
-        self.ldk_runtime.record_invoice_created();
+        self.lightning_runtime()?
+            .ldk_runtime
+            .record_invoice_created();
         if self.use_runtime_state_for_ln_views() {
             let runtime_payment = self
                 .payments
@@ -2687,7 +3019,9 @@ impl RlnWasmNode {
                 .ok_or_else(|| {
                     JsValue::from_str(sdk_contracts::ERR_PAYMENT_NOT_FOUND_AFTER_INVOICE_CREATION)
                 })?;
-            self.ldk_runtime.upsert_payment(runtime_payment);
+            self.lightning_runtime()?
+                .ldk_runtime
+                .upsert_payment(runtime_payment);
         }
 
         crate::js_obj(&RlnWasmNodeCreateLnInvoiceData {
@@ -2753,13 +3087,13 @@ impl RlnWasmNode {
         if let Some(id) = &asset_id {
             validate_asset_id_format(id)?;
         }
-        let invoice = self.ldk_runtime.create_bolt11_invoice_live(
-            amt_msat,
-            expiry_sec,
-            asset_id,
-            asset_amount,
-        )?;
-        self.ldk_runtime.record_invoice_created();
+        let invoice = self
+            .lightning_runtime()?
+            .ldk_runtime
+            .create_bolt11_invoice_live(amt_msat, expiry_sec, asset_id, asset_amount)?;
+        self.lightning_runtime()?
+            .ldk_runtime
+            .record_invoice_created();
         crate::js_obj(&RlnWasmNodeCreateLnInvoiceData { invoice })
     }
 
@@ -2812,14 +3146,19 @@ impl RlnWasmNode {
             }
             let payment_hash = payment_hash.trim().to_string();
             decode_fixed_hex::<32>(&payment_hash, "invalid payment_hash")?;
-            let invoice = self.ldk_runtime.create_hodl_bolt11_invoice_live(
-                amt_msat,
-                expiry_sec,
-                asset_id,
-                asset_amount,
-                &payment_hash,
-            )?;
-            self.ldk_runtime.record_invoice_created();
+            let invoice = self
+                .lightning_runtime()?
+                .ldk_runtime
+                .create_hodl_bolt11_invoice_live(
+                    amt_msat,
+                    expiry_sec,
+                    asset_id,
+                    asset_amount,
+                    &payment_hash,
+                )?;
+            self.lightning_runtime()?
+                .ldk_runtime
+                .record_invoice_created();
             return crate::js_obj(&RlnWasmNodeCreateLnInvoiceData { invoice });
         }
         self.create_ln_invoice_value_internal(
@@ -2862,11 +3201,14 @@ impl RlnWasmNode {
         }
         decode_fixed_hex::<32>(&payment_hash, "invalid payment_hash")?;
         if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime.cancel_hodl_invoice_live(&payment_hash)?;
+            self.lightning_runtime()?
+                .ldk_runtime
+                .cancel_hodl_invoice_live(&payment_hash)?;
             return crate::js_obj(&serde_json::json!({}));
         }
         let mut payment = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .get_payment(&payment_hash)
                 .map(Self::payment_data_from_runtime_state)
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN))?
@@ -2898,7 +3240,8 @@ impl RlnWasmNode {
         payment.updated_at = unix_now_secs();
         self.sync_rgb_ln_transfer_from_payment(&payment);
         if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .upsert_payment(Self::payment_runtime_state_from_data(&payment));
         } else {
             self.payments
@@ -2943,13 +3286,15 @@ impl RlnWasmNode {
         }
         if self.use_runtime_state_for_ln_views() {
             let changed = self
+                .lightning_runtime()?
                 .ldk_runtime
                 .claim_hodl_invoice_live(&payment_hash, &payment_preimage)?;
             return crate::js_obj(&RlnWasmNodeClaimHodlInvoiceData { changed });
         }
 
         let mut payment = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .get_payment(&payment_hash)
                 .map(Self::payment_data_from_runtime_state)
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN))?
@@ -2992,7 +3337,8 @@ impl RlnWasmNode {
         self.sync_rgb_ln_transfer_from_payment(&payment);
 
         if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .upsert_payment(Self::payment_runtime_state_from_data(&payment));
         } else {
             self.payments
@@ -3026,7 +3372,8 @@ impl RlnWasmNode {
             .map_err(|e| JsValue::from_str(&format!("invalid invoice: {e}")))?;
         let payment_hash = parsed.payment_hash().to_string();
         let payment = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .get_payment(&payment_hash)
                 .map(Self::payment_data_from_runtime_state)
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN))?
@@ -3047,7 +3394,8 @@ impl RlnWasmNode {
                 self.apply_payment_status_via_event_stream(&payment_hash, "expired", "node_api")?;
         }
         let status = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .get_payment(&payment_hash)
                 .map(|entry| entry.status)
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_LN_INVOICE_UNKNOWN))?
@@ -3302,7 +3650,9 @@ impl RlnWasmNode {
             )));
         }
         let has_peer = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime.has_connected_peer(&peer_pubkey)
+            self.lightning_runtime()?
+                .ldk_runtime
+                .has_connected_peer(&peer_pubkey)
         } else {
             self.peers.borrow().contains_key(&peer_pubkey)
         };
@@ -3349,18 +3699,19 @@ impl RlnWasmNode {
             None
         };
         if !is_virtual_open {
-            let opened =
-                self.ldk_runtime
-                    .open_channel_non_virtual(LdkRuntimeOpenChannelRequestData {
-                        peer_pubkey: peer_pubkey.clone(),
-                        capacity_sat,
-                        public,
-                        asset_id: asset_id.clone(),
-                        asset_local_amount,
-                        contract_id: contract_id.clone(),
-                        consignment_endpoint: consignment_endpoint.clone(),
-                        asset_schema: asset_schema.clone(),
-                    })?;
+            let opened = self
+                .lightning_runtime()?
+                .ldk_runtime
+                .open_channel_non_virtual(LdkRuntimeOpenChannelRequestData {
+                    peer_pubkey: peer_pubkey.clone(),
+                    capacity_sat,
+                    public,
+                    asset_id: asset_id.clone(),
+                    asset_local_amount,
+                    contract_id: contract_id.clone(),
+                    consignment_endpoint: consignment_endpoint.clone(),
+                    asset_schema: asset_schema.clone(),
+                })?;
             let temp = opened.temporary_channel_id.trim().to_string();
             let chan = opened.channel_id.trim().to_string();
             if !temp.is_empty() {
@@ -3377,7 +3728,8 @@ impl RlnWasmNode {
         }
         let reserved_temporary_channel_id = if is_virtual_open {
             Some(
-                self.ldk_runtime
+                self.lightning_runtime()?
+                    .ldk_runtime
                     .virtual_channel_add_intent(&peer_pubkey, Some(temporary_channel_id.clone()))
                     .map_err(|e| JsValue::from_str(&e))?,
             )
@@ -3425,7 +3777,8 @@ impl RlnWasmNode {
         };
 
         if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .upsert_channel(Self::channel_runtime_state_from_data(&data));
         }
         // Also maintain the local channel view as a cache for WASM consumers. In wasm-native mode,
@@ -3439,13 +3792,15 @@ impl RlnWasmNode {
             },
         );
         if is_virtual_open {
-            self.ldk_runtime.virtual_channel_session_add_from_open(
-                &channel_id,
-                reserved_temporary_channel_id
-                    .as_deref()
-                    .unwrap_or(&temporary_channel_id),
-                &data.peer_pubkey,
-            );
+            self.lightning_runtime()?
+                .ldk_runtime
+                .virtual_channel_session_add_from_open(
+                    &channel_id,
+                    reserved_temporary_channel_id
+                        .as_deref()
+                        .unwrap_or(&temporary_channel_id),
+                    &data.peer_pubkey,
+                );
             self.register_trusted_virtual_scope_channel(&channel_id, &peer_pubkey);
             let queued_event = RuntimeTransportEvent::ChannelUsable {
                 channel_id: channel_id.clone(),
@@ -3455,13 +3810,17 @@ impl RlnWasmNode {
             })?;
             let payload_hex = hex::encode(payload_json.as_bytes());
             let _ = self
+                .lightning_runtime()?
                 .runtime_core
                 .enqueue_event("channel_usable".to_string(), payload_hex);
         }
-        self.ldk_runtime.record_channel_opened();
+        self.lightning_runtime()?
+            .ldk_runtime
+            .record_channel_opened();
         self.persist_runtime_event_log_state();
         let channel = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .list_channels()
                 .into_iter()
                 .find(|entry| entry.channel_id == channel_id)
@@ -3556,13 +3915,22 @@ impl RlnWasmNode {
     #[wasm_bindgen(js_name = driveRgbFundingWork)]
     pub async fn drive_rgb_funding_work(&self) -> Result<(), JsValue> {
         self.check_lightning_supported()?;
-        self.ldk_runtime.drive_rgb_funding_work_boxed().await
+        // With no live runtime, preserve the empty-backend no-op without loading saved work.
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return Ok(());
+        };
+        runtime.ldk_runtime.drive_rgb_funding_work_boxed().await
     }
 
     #[wasm_bindgen(js_name = processPendingRgbTransactions)]
     pub async fn process_pending_rgb_transactions(&self) -> Result<(), JsValue> {
         self.check_lightning_supported()?;
-        self.ldk_runtime
+        // With no live runtime, preserve the empty-backend no-op without loading saved work.
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return Ok(());
+        };
+        runtime
+            .ldk_runtime
             .process_pending_rgb_transactions_boxed()
             .await
     }
@@ -3575,6 +3943,7 @@ impl RlnWasmNode {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
         let response = self
+            .lightning_runtime()?
             .ldk_runtime
             .apay_new_boxed(host_node_id, None, None)
             .await?;
@@ -3600,6 +3969,7 @@ impl RlnWasmNode {
         self.check_lightning_supported()?;
         self.ensure_runtime_ready()?;
         let response = self
+            .lightning_runtime()?
             .ldk_runtime
             .apay_new_boxed(host_node_id, Some(username), Some(domain))
             .await?;
@@ -3637,7 +4007,10 @@ impl RlnWasmNode {
         if channel_id.trim().is_empty() {
             return Err(JsValue::from_str(sdk_contracts::ERR_CHANNEL_ID_EMPTY));
         }
-        let virtual_session = self.ldk_runtime.virtual_channel_session_get(&channel_id);
+        let virtual_session = self
+            .lightning_runtime()?
+            .ldk_runtime
+            .virtual_channel_session_get(&channel_id);
         if let Some(session) = virtual_session.as_ref() {
             let Some(peer_pubkey) = peer_pubkey.as_ref() else {
                 return Err(JsValue::from_str(
@@ -3658,7 +4031,8 @@ impl RlnWasmNode {
             }
         }
         let channel = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .list_channels()
                 .into_iter()
                 .find(|channel| channel.channel_id == channel_id)
@@ -3672,10 +4046,13 @@ impl RlnWasmNode {
         let Some(channel) = channel else {
             if let Some(session) = virtual_session.as_ref() {
                 if session.status != LdkRuntimeVirtualChannelSessionStatusData::Abandoned {
-                    let _ = self.ldk_runtime.virtual_channel_session_update_status(
-                        &channel_id,
-                        LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
-                    );
+                    let _ = self
+                        .lightning_runtime()?
+                        .ldk_runtime
+                        .virtual_channel_session_update_status(
+                            &channel_id,
+                            LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+                        );
                 }
                 self.unregister_trusted_virtual_scope_channel(&channel_id);
                 self.persist_runtime_event_log_state();
@@ -3753,11 +4130,16 @@ impl RlnWasmNode {
                     }
                     // `peer_pubkey` was validated and unwrapped to a trimmed `String` above.
                     self.ensure_virtual_cleanup_client_no_local_value(&channel)?;
-                    self.ldk_runtime
+                    self.lightning_runtime()?
+                        .ldk_runtime
                         .virtual_channel_abandon_local(&channel_id, &peer_pubkey)?;
-                    self.ldk_runtime.remove_channel(&channel_id);
+                    self.lightning_runtime()?
+                        .ldk_runtime
+                        .remove_channel(&channel_id);
                     self.unregister_trusted_virtual_scope_channel(&channel_id);
-                    self.ldk_runtime.record_channel_closed();
+                    self.lightning_runtime()?
+                        .ldk_runtime
+                        .record_channel_closed();
                     self.persist_runtime_event_log_state();
                     return Ok(());
                 }
@@ -3779,8 +4161,11 @@ impl RlnWasmNode {
             // Removing optimistically on the request would report the channel as gone while it is
             // still open on-chain (funds locked) whenever the close stalls (e.g. an RGB colored-close
             // negotiation that has not produced `closing_signed` yet).
-            self.ldk_runtime
-                .close_live_channel(&channel_id, &channel.peer_pubkey, force)?;
+            self.lightning_runtime()?.ldk_runtime.close_live_channel(
+                &channel_id,
+                &channel.peer_pubkey,
+                force,
+            )?;
             let mut closing = channel.clone();
             closing.status = if force {
                 "force_closing".to_string()
@@ -3790,21 +4175,27 @@ impl RlnWasmNode {
             closing.ready = false;
             closing.is_usable = false;
             if self.use_runtime_state_for_ln_views() {
-                self.ldk_runtime
+                self.lightning_runtime()?
+                    .ldk_runtime
                     .upsert_channel(Self::channel_runtime_state_from_data(&closing));
             } else if let Some(entry) = self.channels.borrow_mut().get_mut(&channel_id) {
                 entry.data = closing;
             }
-            self.ldk_runtime.record_channel_closed();
+            self.lightning_runtime()?
+                .ldk_runtime
+                .record_channel_closed();
             self.persist_runtime_event_log_state();
             return Ok(());
         }
 
         // ---- trusted virtual channel close (host-authoritative; removal is immediate) ----
-        let _ = self.ldk_runtime.virtual_channel_session_update_status(
-            &channel_id,
-            LdkRuntimeVirtualChannelSessionStatusData::AbandonPending,
-        );
+        let _ = self
+            .lightning_runtime()?
+            .ldk_runtime
+            .virtual_channel_session_update_status(
+                &channel_id,
+                LdkRuntimeVirtualChannelSessionStatusData::AbandonPending,
+            );
         let applied = self
             .apply_and_record_transport_event(
                 RuntimeTransportEvent::ChannelClosed {
@@ -3815,11 +4206,15 @@ impl RlnWasmNode {
             .applied;
         if !applied {
             let live_virtual_channel_still_exists = if self.use_runtime_state_for_ln_views() {
-                self.ldk_runtime.list_channels().into_iter().any(|entry| {
-                    entry.channel_id == channel_id
-                        && entry.virtual_open_mode.as_deref()
-                            == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
-                })
+                self.lightning_runtime()?
+                    .ldk_runtime
+                    .list_channels()
+                    .into_iter()
+                    .any(|entry| {
+                        entry.channel_id == channel_id
+                            && entry.virtual_open_mode.as_deref()
+                                == Some(SDK_VIRTUAL_OPEN_MODE_TRUSTED_NO_BROADCAST)
+                    })
             } else {
                 self.channels.borrow().values().any(|entry| {
                     entry.data.channel_id == channel_id
@@ -3828,26 +4223,37 @@ impl RlnWasmNode {
                 })
             };
             if live_virtual_channel_still_exists {
-                let _ = self.ldk_runtime.virtual_channel_session_update_status(
-                    &channel_id,
-                    LdkRuntimeVirtualChannelSessionStatusData::Active,
-                );
+                let _ = self
+                    .lightning_runtime()?
+                    .ldk_runtime
+                    .virtual_channel_session_update_status(
+                        &channel_id,
+                        LdkRuntimeVirtualChannelSessionStatusData::Active,
+                    );
                 return Err(JsValue::from_str(sdk_contracts::ERR_CHANNEL_NOT_FOUND));
             }
-            let _ = self.ldk_runtime.virtual_channel_session_update_status(
-                &channel_id,
-                LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
-            );
+            let _ = self
+                .lightning_runtime()?
+                .ldk_runtime
+                .virtual_channel_session_update_status(
+                    &channel_id,
+                    LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+                );
             self.unregister_trusted_virtual_scope_channel(&channel_id);
             self.persist_runtime_event_log_state();
             return Ok(());
         }
-        let _ = self.ldk_runtime.virtual_channel_session_update_status(
-            &channel_id,
-            LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
-        );
+        let _ = self
+            .lightning_runtime()?
+            .ldk_runtime
+            .virtual_channel_session_update_status(
+                &channel_id,
+                LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
+            );
         self.unregister_trusted_virtual_scope_channel(&channel_id);
-        self.ldk_runtime.record_channel_closed();
+        self.lightning_runtime()?
+            .ldk_runtime
+            .record_channel_closed();
         self.persist_runtime_event_log_state();
         Ok(())
     }
@@ -3890,7 +4296,8 @@ impl RlnWasmNode {
             .local_node_pubkey_string()
             .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_NODE_IDENTITY_DERIVE_FAILED))?;
         let payments = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .list_payments()
                 .into_iter()
                 .map(Self::payment_data_from_runtime_state)
@@ -4066,7 +4473,8 @@ impl RlnWasmNode {
             ));
         }
         let channel_id = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .find_channel_by_temporary(&temporary_channel_id)
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_TEMPORARY_CHANNEL_ID_UNKNOWN))?
         } else {
@@ -4397,13 +4805,18 @@ impl RlnWasmNode {
     }
 
     fn use_runtime_state_for_ln_views(&self) -> bool {
-        let backend = self.ldk_runtime.status().backend;
-        backend == "wasm_native_ldk"
+        self.lightning
+            .borrow()
+            .as_ref()
+            .is_some_and(|runtime| runtime.ldk_runtime.status().backend == "wasm_native_ldk")
     }
 
     fn has_any_connected_peer(&self) -> bool {
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return false;
+        };
         if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime.has_any_connected_peer()
+            runtime.ldk_runtime.has_any_connected_peer()
         } else {
             self.peers
                 .borrow()
@@ -4413,8 +4826,11 @@ impl RlnWasmNode {
     }
 
     fn has_connected_peer(&self, peer_pubkey: &str) -> bool {
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return false;
+        };
         if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime.has_connected_peer(peer_pubkey)
+            runtime.ldk_runtime.has_connected_peer(peer_pubkey)
         } else {
             self.peers
                 .borrow()
@@ -4446,13 +4862,29 @@ impl RlnWasmNode {
     }
 
     fn local_node_pubkey_string(&self) -> Option<String> {
-        if self.use_runtime_state_for_ln_views() {
-            if let Ok(pubkey) = self.ldk_runtime.live_node_pubkey() {
-                let trimmed = pubkey.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
-                }
-            }
+        // The historical live backend exposes KeysManager's hardened child zero when an
+        // online wallet is attached. Derive that identity without constructing its LDK graph.
+        let identity_wallet = self
+            .wallet
+            .borrow()
+            .clone()
+            .or_else(|| self.runtime_scope.identity_wallet.borrow().clone());
+        let has_online_wallet = match identity_wallet {
+            Some(wallet) => wallet.try_borrow().ok()?.get_online().is_some(),
+            None => false,
+        };
+        if has_online_wallet {
+            let secp = Secp256k1::new();
+            let master =
+                bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Testnet, &self.live_node_seed)
+                    .ok()?;
+            let child = master
+                .derive_priv(
+                    &secp,
+                    &[bitcoin::bip32::ChildNumber::from_hardened_idx(0).ok()?],
+                )
+                .ok()?;
+            return Some(SecpPublicKey::from_secret_key(&secp, &child.private_key).to_string());
         }
         self.node_signing_identity()
             .ok()
@@ -4477,8 +4909,14 @@ impl RlnWasmNode {
     }
 
     fn trusted_virtual_success_eligible(&self, payee_pubkey: &str) -> bool {
-        let has_usable_trusted_virtual_channel =
-            self.ldk_runtime.list_channels().into_iter().any(|entry| {
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return false;
+        };
+        let has_usable_trusted_virtual_channel = runtime
+            .ldk_runtime
+            .list_channels()
+            .into_iter()
+            .any(|entry| {
                 entry.peer_pubkey == payee_pubkey
                     && entry.is_usable
                     && entry.virtual_open_mode.as_deref()
@@ -4500,10 +4938,13 @@ impl RlnWasmNode {
     }
 
     fn routed_success_eligible(&self, payment_hash: &str, payee_pubkey: &str) -> bool {
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return false;
+        };
         if !self.has_any_connected_peer() {
             return false;
         }
-        let has_usable_channel = self
+        let has_usable_channel = runtime
             .ldk_runtime
             .list_channels()
             .into_iter()
@@ -4560,6 +5001,7 @@ impl RlnWasmNode {
         }
         let direct_connected = self.has_connected_peer(payee_pubkey);
         let has_usable_channel = self
+            .lightning_runtime()?
             .ldk_runtime
             .list_channels()
             .into_iter()
@@ -4682,10 +5124,13 @@ impl RlnWasmNode {
         payment_hash: &str,
         payee_pubkey: &str,
     ) {
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return;
+        };
         let Some(local_node_pubkey) = self.local_node_pubkey_string() else {
             return;
         };
-        let Some(payment) = self
+        let Some(payment) = runtime
             .ldk_runtime
             .get_payment(payment_hash)
             .map(Self::payment_data_from_runtime_state)
@@ -4805,12 +5250,17 @@ impl RlnWasmNode {
 
     /// True if this node has a virtual (`trusted_no_broadcast`) channel to `dest_pubkey`.
     fn has_virtual_channel_to(&self, dest_pubkey: &str) -> bool {
-        self.ldk_runtime
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return false;
+        };
+        runtime
+            .ldk_runtime
             .list_channels()
             .into_iter()
             .filter(|c| c.peer_pubkey == dest_pubkey)
             .any(|c| {
-                self.ldk_runtime
+                runtime
+                    .ldk_runtime
                     .virtual_channel_session_get(&c.channel_id)
                     .is_some()
             })
@@ -5010,10 +5460,11 @@ impl RlnWasmNode {
     ) -> Result<RlnWasmNodePaymentData, JsValue> {
         let payload_hex = encode_payment_status_event_payload(payment_hash, status);
         let _ = self
+            .lightning_runtime()?
             .runtime_core
             .enqueue_event("payment_status".to_string(), payload_hex.clone());
         apply_runtime_hook_payload(
-            &self.ldk_runtime,
+            &self.lightning_runtime()?.ldk_runtime,
             self.use_runtime_state_for_ln_views(),
             &self.peers,
             &self.channels,
@@ -5025,7 +5476,8 @@ impl RlnWasmNode {
         )?;
         self.persist_runtime_event_log_state();
         let payment = if self.use_runtime_state_for_ln_views() {
-            self.ldk_runtime
+            self.lightning_runtime()?
+                .ldk_runtime
                 .get_payment(payment_hash)
                 .map(Self::payment_data_from_runtime_state)
                 .ok_or_else(|| JsValue::from_str(sdk_contracts::ERR_PAYMENT_NOT_FOUND))
@@ -5048,13 +5500,18 @@ impl RlnWasmNode {
     ) -> Result<RlnWasmNodePaymentData, JsValue> {
         let payload_hex = encode_payment_status_event_payload(payment_hash, status);
         let _ = self
+            .lightning_runtime()?
             .runtime_core
             .enqueue_event("payment_status".to_string(), payload_hex.clone());
         if self.use_runtime_state_for_ln_views() {
             let received_at = unix_now_secs();
             let seq = next_runtime_event_seq(&self.next_runtime_event_seq);
             let normalized = normalize_payment_status(status)?;
-            let Some(mut payment) = self.ldk_runtime.get_payment(payment_hash) else {
+            let Some(mut payment) = self
+                .lightning_runtime()?
+                .ldk_runtime
+                .get_payment(payment_hash)
+            else {
                 let error = "payment not found".to_string();
                 record_runtime_event(
                     &self.runtime_events,
@@ -5097,7 +5554,9 @@ impl RlnWasmNode {
             }
             payment.status = normalized.clone();
             payment.updated_at = unix_now_secs();
-            self.ldk_runtime.upsert_payment(payment.clone());
+            self.lightning_runtime()?
+                .ldk_runtime
+                .upsert_payment(payment.clone());
             record_runtime_event(
                 &self.runtime_events,
                 RlnWasmNodeRuntimeEventData {
@@ -5149,6 +5608,7 @@ impl RlnWasmNode {
         source: &str,
     ) -> Result<RuntimeTransportEventApplyData, JsValue> {
         let _ = self
+            .lightning_runtime()?
             .runtime_core
             .enqueue_event("transport".to_string(), payload_hex.clone());
         let Some(event) = parse_transport_event_payload(&payload_hex) else {
@@ -5182,6 +5642,7 @@ impl RlnWasmNode {
         source: &str,
     ) -> Result<RuntimeTransportEventApplyData, JsValue> {
         let _ = self
+            .lightning_runtime()?
             .runtime_core
             .enqueue_event(event.event_kind().to_string(), payload_hex.clone());
         let received_at = unix_now_secs();
@@ -5245,20 +5706,7 @@ impl RlnWasmNode {
     }
 
     fn node_signing_identity(&self) -> Result<(SecretKey, SecpPublicKey), JsValue> {
-        let sdk_seed = crate::sdk_node_identity_seed();
-        let secret_hash = Sha256::hash(
-            format!(
-                "node-signing-key:{}:{}:{}",
-                sdk_seed.as_deref().unwrap_or("ephemeral"),
-                self.proxy_url,
-                self.node_runtime_id.as_deref().unwrap_or("")
-            )
-            .as_bytes(),
-        );
-        let secret_key = SecretKey::from_slice(&secret_hash.to_byte_array())
-            .map_err(|e| JsValue::from_str(&format!("failed to derive node signing key: {e}")))?;
-        let pubkey = SecpPublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
-        Ok((secret_key, pubkey))
+        derive_node_signing_identity(&self.proxy_url, self.node_runtime_id.as_deref())
     }
 
     fn sign_node_message(&self, message: &str) -> Result<String, JsValue> {
@@ -5288,11 +5736,14 @@ impl RlnWasmNode {
     }
 
     fn apply_runtime_transport_event(&self, event: &RuntimeTransportEvent) -> bool {
+        let Some(runtime) = self.lightning.borrow().as_ref().cloned() else {
+            return false;
+        };
         if self.use_runtime_state_for_ln_views() {
             return match event {
                 RuntimeTransportEvent::PeerDisconnected { peer_pubkey } => {
-                    let removed_peer = self.ldk_runtime.remove_peer(peer_pubkey);
-                    let removed_virtual_channel_ids = self
+                    let removed_peer = runtime.ldk_runtime.remove_peer(peer_pubkey);
+                    let removed_virtual_channel_ids = runtime
                         .ldk_runtime
                         .list_channels()
                         .into_iter()
@@ -5304,17 +5755,17 @@ impl RlnWasmNode {
                         .map(|entry| entry.channel_id)
                         .collect::<Vec<_>>();
                     let removed_channels =
-                        self.ldk_runtime.remove_channels_by_peer(peer_pubkey) > 0;
+                        runtime.ldk_runtime.remove_channels_by_peer(peer_pubkey) > 0;
                     for channel_id in removed_virtual_channel_ids {
                         self.unregister_trusted_virtual_scope_channel(&channel_id);
                     }
                     removed_peer || removed_channels
                 }
                 RuntimeTransportEvent::PeerReconnected { peer_pubkey } => {
-                    self.ldk_runtime.has_peer(peer_pubkey)
+                    runtime.ldk_runtime.has_peer(peer_pubkey)
                 }
                 RuntimeTransportEvent::ChannelClosed { channel_id } => {
-                    let removed_runtime = self.ldk_runtime.remove_channel(channel_id);
+                    let removed_runtime = runtime.ldk_runtime.remove_channel(channel_id);
                     let mut local_channels = self.channels.borrow_mut();
                     let local_before = local_channels.len();
                     local_channels.retain(|_, entry| {
@@ -5329,10 +5780,10 @@ impl RlnWasmNode {
                     removed
                 }
                 RuntimeTransportEvent::ChannelUsable { channel_id } => {
-                    self.ldk_runtime.set_channel_usable(channel_id, true)
+                    runtime.ldk_runtime.set_channel_usable(channel_id, true)
                 }
                 RuntimeTransportEvent::ChannelUnusable { channel_id } => {
-                    self.ldk_runtime.set_channel_usable(channel_id, false)
+                    runtime.ldk_runtime.set_channel_usable(channel_id, false)
                 }
             };
         }
@@ -5350,7 +5801,7 @@ impl RlnWasmNode {
                 let removed_channels = channels.len() != before;
                 if removed_channels {
                     for channel_id in removed_channel_ids {
-                        let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                        let _ = runtime.ldk_runtime.virtual_channel_session_update_status(
                             &channel_id,
                             LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
                         );
@@ -5365,7 +5816,7 @@ impl RlnWasmNode {
             RuntimeTransportEvent::ChannelClosed { channel_id } => {
                 let removed = self.channels.borrow_mut().remove(channel_id).is_some();
                 if removed {
-                    let _ = self.ldk_runtime.virtual_channel_session_update_status(
+                    let _ = runtime.ldk_runtime.virtual_channel_session_update_status(
                         channel_id,
                         LdkRuntimeVirtualChannelSessionStatusData::Abandoned,
                     );
@@ -5419,6 +5870,13 @@ impl RlnWasmNode {
         store_id: String,
         signing_key_hex: String,
     ) -> Result<u32, JsValue> {
+        self.check_lightning_supported()?;
+        if self.runtime_scope.network_transition.replace(true) {
+            return Err(JsValue::from_str(
+                "runtime network selection is in progress",
+            ));
+        }
+        let _transition = NodeNetworkTransition(Rc::clone(&self.runtime_scope));
         let signing_key =
             crate::vss_kv_store::parse_vss_config(&server_url, &store_id, &signing_key_hex)?;
 
@@ -5455,6 +5913,7 @@ impl RlnWasmNode {
 
         let replicator = crate::vss_replicator::VssReplicator::new(store, instance_id);
         crate::vss_replicator::register_vss_replicator(&runtime_key, replicator);
+        self.runtime_scope.vss_owned.set(true);
 
         // Make sure any IndexedDB-only state is hydrated into localStorage first, so
         // the restore guard sees an already-populated store and doesn't overwrite it.
@@ -5464,13 +5923,20 @@ impl RlnWasmNode {
         }
         .await;
         match restore_result {
-            Ok(restored) => Ok(restored as u32),
+            Ok(restored) => {
+                if self.configured_network.borrow().as_str() == "unknown" {
+                    *self.configured_network.borrow_mut() = "regtest".to_string();
+                    *self.network.borrow_mut() = "regtest".to_string();
+                }
+                Ok(restored as u32)
+            }
             Err(e) => {
                 // Roll back completely: leaving the replicator registered (live
                 // replication over a never-restored store) or the guards held (every
                 // retry failing with "another tab...") after reporting failure would
                 // wedge the caller. The persisted instance id survives, so a retry
                 // re-acquires the same fence.
+                self.runtime_scope.vss_owned.set(false);
                 crate::vss_replicator::teardown_vss_replication(&runtime_key);
                 Err(e)
             }
@@ -5483,6 +5949,7 @@ impl RlnWasmNode {
     /// take over cleanly. Local persistence is unaffected.
     #[wasm_bindgen(js_name = disableLdkVssReplication)]
     pub fn disable_ldk_vss_replication(&self) {
+        self.runtime_scope.vss_owned.set(false);
         crate::vss_replicator::teardown_vss_replication(&self.runtime_manager_key());
     }
 
@@ -5551,20 +6018,44 @@ impl RlnWasmNode {
 
 impl Drop for RlnWasmNode {
     fn drop(&mut self) {
-        let runtime_key = self.runtime_manager_key();
-        let was_last =
-            crate::ldk_runtime::release_runtime_manager_if_last(&runtime_key, &self.ldk_runtime);
-        // Release the VSS single-writer guards so a same-tab restart or a takeover
-        // isn't wedged (fence release is best-effort/async; the Web Lock is freed
-        // synchronously — the browser would also free it on context destruction).
-        // Only when this was the LAST handle for the runtime: multiple RlnWasmNode
-        // handles can share a runtime_key (recreate-in-place, stale JS handles being
-        // GC-finalized), and tearing down on any drop would silently kill a live
-        // node's replication.
-        if was_last {
-            crate::vss_replicator::teardown_vss_replication(&runtime_key);
+        *self.reconnect_manager_running.borrow_mut() = false;
+        *self.auto_drive_running.borrow_mut() = false;
+        self.bridge.release_node_hooks();
+        for (_, peer) in self.peers.borrow_mut().drain() {
+            peer.session.stop();
+            spawn_local(async move {
+                let _ = peer.session.close().await;
+            });
+        }
+        if Rc::strong_count(&self.runtime_scope) == 1
+            && self.lightning.borrow().is_none()
+            && self.runtime_scope.vss_owned.replace(false)
+        {
+            crate::vss_replicator::teardown_vss_replication(&self.runtime_manager_key());
         }
     }
+}
+
+fn derive_node_signing_identity(
+    proxy_url: &str,
+    runtime_id: Option<&str>,
+) -> Result<(SecretKey, SecpPublicKey), JsValue> {
+    let sdk_seed = crate::sdk_node_identity_seed();
+    let secret_hash = Sha256::hash(
+        format!(
+            "node-signing-key:{}:{}:{}",
+            sdk_seed.as_deref().unwrap_or("ephemeral"),
+            proxy_url,
+            runtime_id.unwrap_or("")
+        )
+        .as_bytes(),
+    );
+    let secret_key = SecretKey::from_slice(&secret_hash.to_byte_array())
+        .map_err(|e| JsValue::from_str(&format!("failed to derive node signing key: {e}")))?;
+    Ok((
+        secret_key,
+        SecpPublicKey::from_secret_key(&Secp256k1::new(), &secret_key),
+    ))
 }
 
 fn unix_now_secs() -> u64 {
@@ -6094,7 +6585,7 @@ fn apply_runtime_event_payload(
 /// Free-function form of the chain-sync→LDK bridge so it can be driven from both the manual
 /// `chainSyncTick` (`&self` wrapper) and the autonomous drive loop (cloned `Rc` handles), without
 /// duplicating the confirmation-ordering logic. Behavior is identical to the previous `&self`
-/// method; only `self.chain_sync`/`self.ldk_runtime` became explicit parameters.
+/// method; the runtime components are passed explicitly.
 async fn apply_chain_sync_to_live_ldk(
     chain_sync: &WasmChainSyncDriver,
     ldk_runtime: &Rc<dyn LdkRuntimeManager>,

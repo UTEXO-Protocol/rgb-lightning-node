@@ -56,7 +56,6 @@ use lightning::sign::{KeysManager, OutputSpender, SpendableOutputDescriptor};
 use lightning::chain;
 #[cfg(feature = "vss")]
 use lightning::chain::chainmonitor::AsyncPersister;
-#[cfg(any(not(feature = "vss"), test))]
 use lightning::sign::NodeSigner;
 #[cfg(feature = "vss")]
 use lightning::sign::PeerStorageKey;
@@ -112,7 +111,7 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::ToSocketAddrs;
 use std::net::{SocketAddr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -191,8 +190,8 @@ use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, description_from_invoice,
     description_hash_from_invoice, do_connect_peer, get_current_timestamp,
     get_max_local_rgb_amount, hex_str, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, AppState, StaticState, UnlockedAppState, FATAL_ERROR,
-    PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
+    validate_and_parse_payment_preimage, AppState, CommonState, LightningState, StaticState,
+    UnlockedAppState, FATAL_ERROR, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
 };
 
 const RGB_TRANSFER_CHAN_EXPIRATION_SECS: u64 = 86400;
@@ -517,7 +516,7 @@ fn persist_staged_inbound_payment(
     Ok(())
 }
 
-impl UnlockedAppState {
+impl LightningState {
     pub(crate) fn add_maker_swap(&self, payment_hash: PaymentHash, swap: SwapData) {
         let mut maker_swaps = self.get_maker_swaps();
         maker_swaps.swaps.insert(payment_hash, swap);
@@ -1320,7 +1319,7 @@ impl CustomMsgPeerAccessControl for LiveChannelAccess {
 }
 
 struct NodeAssetLinkAuthorizer {
-    unlocked_state_weak: Weak<UnlockedAppState>,
+    unlocked_state_weak: Weak<LightningState>,
     channel_manager: Arc<ChannelManager>,
     kv_store: Arc<SyncedKvStore>,
     taker_swaps: Arc<Mutex<SwapMap>>,
@@ -1885,7 +1884,7 @@ fn abort_funding(
 /// transaction was broadcast. For colored channels this fails the pending RGB
 /// batch transfer; for vanilla channels it aborts the pending vanilla tx that
 /// was created (and locked the UTXOs) during `FundingGenerationReady`.
-async fn handle_open_chan_fail(channel_id: &ChannelId, unlocked_state: Arc<UnlockedAppState>) {
+async fn handle_open_chan_fail(channel_id: &ChannelId, unlocked_state: Arc<LightningState>) {
     let channel_id_hex = channel_id.0.as_hex().to_string();
     if let Some(rgb_info) =
         get_rgb_channel_info_optional(channel_id, true, unlocked_state.kv_store.as_ref())
@@ -1939,7 +1938,7 @@ async fn handle_open_chan_fail(channel_id: &ChannelId, unlocked_state: Arc<Unloc
 /// the vanilla cleanup later — the staged tx would be unabortable. Best-effort: errors are logged
 /// and the caller still replays the event.
 async fn abort_staged_standard_funding(
-    unlocked_state: Arc<UnlockedAppState>,
+    unlocked_state: Arc<LightningState>,
     temporary_channel_id: &ChannelId,
     unsigned_psbt: &str,
     is_colored: bool,
@@ -2008,7 +2007,7 @@ async fn abort_staged_standard_funding(
 
 async fn handle_ldk_events(
     event: Event,
-    unlocked_state: Arc<UnlockedAppState>,
+    unlocked_state: Arc<LightningState>,
     static_state: Arc<StaticState>,
 ) -> Result<(), ReplayEvent> {
     match event {
@@ -4303,9 +4302,8 @@ mod vss_bootstrap_identity_tests {
 
 /// Restore the RGB wallet directory from VSS if (a) VSS is configured for this
 /// node, (b) the local wallet directory for `expected_fingerprint` is absent,
-/// and (c) VSS has a backup for the given store. Mirrors the KV-side
-/// auto-restore policy at `start_ldk`'s top: silent no-op when nothing is on
-/// VSS, hard error otherwise unless `allow_empty_restore` is set.
+/// and (c) VSS has a backup for the given store. Nothing to restore is a no-op;
+/// other restore failures abort startup unless `allow_empty_restore` is set.
 #[cfg(feature = "vss")]
 pub(crate) async fn maybe_restore_rgb_from_vss(
     vss_url: &str,
@@ -4708,13 +4706,375 @@ fn resolve_indexer_url<'a>(
     request.or(config).ok_or(APIError::MissingIndexerUrl)
 }
 
-pub(crate) async fn start_ldk(
+/// Common startup resources. No Lightning backend or worker is created here.
+struct NodeStartup {
+    app_state: Arc<AppState>,
+    unlock_request: UnlockRequest,
+    internal_mnemonic: Option<rgb_lib::bdk_wallet::keys::bip39::Mnemonic>,
+    external_signer_mode: bool,
+    external_bootstrap: Option<crate::signer::BootstrapData>,
+    external_signer: Option<Arc<ExternalSigner>>,
+    external_node_id: Option<String>,
+    external_signer_link_watch: Option<Arc<crate::signer::transport::SignerLinkWatch>>,
+    kv_store: Arc<SyncedKvStore>,
+    indexer_url: String,
+    #[cfg(feature = "transaction-sync")]
+    indexer_protocol: rgb_lib::wallet::rust_only::IndexerProtocol,
+    proxy_endpoint: String,
+    #[cfg(feature = "vss")]
+    monitor_kv_store: Option<Arc<RemoteFirstKvStore>>,
+    #[cfg(feature = "vss")]
+    bp_local_kv_store: Arc<crate::kv_store::SeaOrmKvStore>,
+    #[cfg(feature = "vss")]
+    vss_identity: Option<VssIdentity>,
+    #[cfg(feature = "vss")]
+    vss_restored_keys: usize,
+    #[cfg(feature = "vss")]
+    fence_guard: Option<crate::vss_kv_store::FenceReleaseGuard>,
+}
+
+impl NodeStartup {
+    fn create_signer(&self) -> ActiveSignerRef {
+        let external_signer = &self.external_signer;
+        let internal_mnemonic = &self.internal_mnemonic;
+        let network: Network = self.app_state.static_state.network.into();
+        let ldk_data_dir_path = self.app_state.static_state.ldk_data_dir.clone();
+        let kv_store = &self.kv_store;
+        // LDK signing: internal mode uses `KeysManager` from the mnemonic-derived LDK seed (BIP32 child
+        // 535 of the master xpriv). External mode uses `ExternalSigner` only; inbound / peer_storage /
+        // receive_auth key material comes from bootstrap hex fields (see `ExternalSigner::from_attachment`).
+        let cur = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+
+        let keys_manager: ActiveSignerRef = if let Some(s) = external_signer.as_ref() {
+            Arc::new(DynRlnSigner::from_external(Arc::clone(s)))
+        } else {
+            let mnemonic = internal_mnemonic
+                .as_ref()
+                .expect("internal mnemonic must be present when external signer is not configured");
+            let ldk_seed: [u8; 32] = {
+                let xkey: ExtendedKey = mnemonic
+                    .clone()
+                    .into_extended_key()
+                    .expect("a valid key should have been provided");
+                let master_xprv = &xkey
+                    .into_xprv(network.into())
+                    .expect("should be possible to get an extended private key");
+                let xprv: Xpriv = master_xprv
+                    .derive_priv(&Secp256k1_30::new(), &ChildNumber::Hardened { index: 535 })
+                    .unwrap();
+                xprv.private_key.secret_bytes()
+            };
+            let internal_keys_manager = Arc::new(KeysManager::new(
+                &ldk_seed,
+                cur.as_secs(),
+                cur.subsec_nanos(),
+                true,
+                ldk_data_dir_path.clone(),
+                Arc::clone(kv_store) as Arc<dyn KVStoreSync + Send + Sync>,
+            ));
+            Arc::new(DynRlnSigner::from_internal(internal_keys_manager))
+        };
+        keys_manager
+    }
+
+    async fn create_common_state(
+        &mut self,
+        signer: ActiveSignerRef,
+        entropy_source: Arc<dyn crate::signer::RlnEntropySource>,
+    ) -> Result<Arc<CommonState>, APIError> {
+        let static_state = &self.app_state.static_state;
+        let external_signer_mode = self.external_signer_mode;
+        let external_bootstrap = &self.external_bootstrap;
+        let internal_mnemonic = &self.internal_mnemonic;
+        let bitcoin_network = static_state.network;
+        let kv_store = &self.kv_store;
+        let indexer_url = &self.indexer_url;
+        let unlock_request = &self.unlock_request;
+        #[cfg(feature = "vss")]
+        let vss_identity = &self.vss_identity;
+        // Prepare the RGB wallet
+        let (account_xpub_vanilla, account_xpub_colored, master_fingerprint, rgb_wallet_mnemonic) =
+            if external_signer_mode {
+                let bootstrap = external_bootstrap.clone().ok_or_else(|| {
+                    APIError::ExternalSignerProtocolError(
+                        "missing external bootstrap in external mode".to_string(),
+                    )
+                })?;
+                (
+                    bootstrap.identity.account_xpub_vanilla,
+                    bootstrap.identity.account_xpub_colored,
+                    bootstrap.identity.master_fingerprint,
+                    None,
+                )
+            } else {
+                let mnemonic_str = internal_mnemonic
+                    .as_ref()
+                    .ok_or_else(|| {
+                        APIError::ExternalSignerProtocolError(
+                            "missing internal mnemonic in internal mode".to_string(),
+                        )
+                    })?
+                    .to_string();
+                let (_, account_xpub_vanilla, _) = get_account_data(
+                    &bitcoin_network,
+                    &mnemonic_str,
+                    false,
+                    WitnessVersion::Taproot,
+                )
+                .unwrap();
+                let (_, account_xpub_colored, master_fingerprint) = get_account_data(
+                    &bitcoin_network,
+                    &mnemonic_str,
+                    true,
+                    WitnessVersion::Taproot,
+                )
+                .unwrap();
+                (
+                    account_xpub_vanilla.to_string(),
+                    account_xpub_colored.to_string(),
+                    master_fingerprint.to_string(),
+                    Some(mnemonic_str.clone()),
+                )
+            };
+        let data_dir = static_state
+            .storage_dir_path
+            .clone()
+            .to_string_lossy()
+            .to_string();
+
+        // Pull the RGB wallet down from VSS before constructing it locally, when
+        // VSS is configured and the local wallet directory for this identity's
+        // fingerprint is absent. This wallet stream is shared by both network paths;
+        // Lightning KV recovery is separately restricted to supported networks.
+        #[cfg(feature = "vss")]
+        if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
+            let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
+            maybe_restore_rgb_from_vss(
+                vss_url,
+                rgb_store_id,
+                identity.signing_key,
+                &static_state.storage_dir_path,
+                &master_fingerprint.to_string(),
+                static_state.vss_allow_empty_restore,
+            )
+            .await?;
+        }
+
+        let keys = SinglesigKeys {
+            account_xpub_vanilla: account_xpub_vanilla.clone(),
+            account_xpub_colored: account_xpub_colored.clone(),
+            vanilla_keychain: None,
+            master_fingerprint: master_fingerprint.clone(),
+            mnemonic: rgb_wallet_mnemonic,
+            witness_version: WitnessVersion::Taproot,
+        };
+        let reuse_addresses = static_state.reuse_addresses;
+        let indexer_url_owned = indexer_url.to_string();
+        let eth_rpc_url = unlock_request
+            .eth_rpc_url
+            .clone()
+            .or_else(|| static_state.config.chain.eth_rpc_url.clone());
+        #[cfg(feature = "vss")]
+        let rgb_vss_backup = match (&static_state.vss_url, &vss_identity) {
+            (Some(vss_url), Some(identity)) => Some((
+                vss_url.clone(),
+                format!("{}_rgb", identity.pubkey_hex),
+                identity.signing_key,
+            )),
+            _ => None,
+        };
+        // go_online and configure_vss_backup drive blocking rgb-lib HTTP clients;
+        // run them off the async runtime so they don't fail on a single-vCPU host.
+        let (rgb_wallet, rgb_online) = tokio::task::spawn_blocking(move || {
+            let mut rgb_wallet = RgbLibWallet::new(
+                WalletData {
+                    data_dir,
+                    bitcoin_network,
+                    database_type: DatabaseType::Sqlite,
+                    max_allocations_per_utxo: 1,
+                    supported_schemas: supported_asset_schemas(
+                        bitcoin_network,
+                        eth_rpc_url.is_some(),
+                    ),
+                    reuse_addresses,
+                },
+                keys,
+            )
+            .expect("valid rgb-lib wallet");
+            let rgb_online = rgb_wallet.go_online(OnlineOptions {
+                indexer_url: indexer_url_owned,
+                skip_consistency_check: false,
+                vanilla_sync_lookback: 20,
+                eth_rpc_url,
+            })?;
+            #[cfg(feature = "vss")]
+            if let Some((vss_url, rgb_store_id, signing_key)) = rgb_vss_backup {
+                let vss_config =
+                    rgb_lib::wallet::vss::VssBackupConfig::new(vss_url, rgb_store_id, signing_key)
+                        .with_encryption(true)
+                        .with_auto_backup(true)
+                        .with_backup_mode(rgb_lib::wallet::vss::VssBackupMode::Blocking);
+                // Fail closed: a misconfigured backup must not silently run local-only.
+                rgb_wallet.configure_vss_backup(vss_config).map_err(|e| {
+                    APIError::FailedVssInit(format!(
+                        "Failed to configure VSS backup for RGB wallet: {e}"
+                    ))
+                })?;
+                tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
+                // Auto-backup only tracks local changes; an empty remote (fresh
+                // wallet or wiped store) needs an explicit upload.
+                if let Some(client) = rgb_wallet.vss_client() {
+                    let rt = client.handle().clone();
+                    let info = rt
+                        .block_on(rgb_wallet.vss_backup_info(&client))
+                        .map_err(|e| APIError::FailedVssInit(format!("VSS backup info: {e}")))?;
+                    if !info.backup_exists {
+                        rt.block_on(rgb_wallet.vss_backup(&client)).map_err(|e| {
+                            APIError::FailedVssInit(format!("initial RGB VSS backup failed: {e}"))
+                        })?;
+                        tracing::info!("Uploaded RGB wallet backup to empty VSS store");
+                    }
+                }
+            }
+            Ok::<_, APIError>((rgb_wallet, rgb_online))
+        })
+        .await
+        .map_err(|e| APIError::Unexpected(format!("rgb-lib wallet setup task failed: {e}")))??;
+        save_config(
+            &static_state.db(),
+            kv_store.as_ref(),
+            CONFIG_WALLET_FINGERPRINT,
+            &master_fingerprint,
+        )?;
+        save_config(
+            &static_state.db(),
+            kv_store.as_ref(),
+            CONFIG_WALLET_ACCOUNT_XPUB_COLORED,
+            &account_xpub_colored,
+        )?;
+        save_config(
+            &static_state.db(),
+            kv_store.as_ref(),
+            CONFIG_WALLET_ACCOUNT_XPUB_VANILLA,
+            &account_xpub_vanilla,
+        )?;
+        save_config(
+            &static_state.db(),
+            kv_store.as_ref(),
+            CONFIG_WALLET_MASTER_FINGERPRINT,
+            &master_fingerprint,
+        )?;
+
+        // No second VssBackupClient is constructed here: the manual /vssbackup
+        // and /vssbackupinfo routes use the wallet's own client, retrievable via
+        // `wallet.vss_client()` (R-lib.1 in rgb-lib's PR #31). Keeping a single
+        // client per stream avoids running two tokio runtimes for the same
+        // backups and removes the race between the two clients writing
+        // overlapping state.
+        let rgb_wallet_wrapper = Arc::new(RgbLibWalletWrapper::new(
+            Arc::new(Mutex::new(rgb_wallet)),
+            rgb_online,
+        ));
+
+        let node_id = match self.external_node_id.as_deref() {
+            Some(node_id) => PublicKey::from_str(node_id).map_err(|error| {
+                APIError::ExternalSignerProtocolError(format!(
+                    "invalid bootstrap node identity: {error}"
+                ))
+            })?,
+            None => signer
+                .get_node_id(lightning::sign::Recipient::Node)
+                .map_err(|_| {
+                    APIError::Unexpected("failed to read signer node identity".to_string())
+                })?,
+        };
+        Ok(Arc::new(CommonState {
+            config: Arc::clone(&static_state.config),
+            signer,
+            entropy_source,
+            kv_store: Arc::clone(kv_store),
+            rgb_wallet_wrapper,
+            proxy_endpoint: self.proxy_endpoint.clone(),
+            external_signer_mode,
+            external_signer: self.external_signer.clone(),
+            external_node_id: self.external_node_id.clone(),
+            node_id,
+            indexer_url: self.indexer_url.clone(),
+            #[cfg(feature = "vss")]
+            persistence_shutdown: CancellationToken::new(),
+            #[cfg(feature = "vss")]
+            persistence_worker: Mutex::new(None),
+        }))
+    }
+}
+
+/// Unlock the common wallet/session, constructing Lightning only where supported.
+pub(crate) async fn start_node(
+    app_state: Arc<AppState>,
+    key_source: NodeKeySource,
+    unlock_request: UnlockRequest,
+) -> Result<(Option<LdkBackgroundServices>, Arc<UnlockedAppState>), APIError> {
+    if app_state.cancel_token.is_cancelled() {
+        return Err(APIError::Unexpected("Node is shutting down".to_string()));
+    }
+    #[allow(unused_mut)]
+    let mut setup = prepare_node(app_state, key_source, unlock_request).await?;
+    let result = if setup.app_state.static_state.network == BitcoinNetwork::Mainnet {
+        let common = setup
+            .create_common_state(setup.create_signer(), Arc::new(SystemEntropySource))
+            .await?;
+        #[cfg(feature = "vss")]
+        if let Some(guard) = setup.fence_guard.as_mut() {
+            guard.disarm();
+        }
+        (
+            None,
+            Arc::new(UnlockedAppState {
+                common,
+                lightning: None,
+            }),
+        )
+    } else {
+        start_lightning(setup).await?
+    };
+    #[cfg(feature = "vss")]
+    start_persistence_worker(&result.1.common);
+    Ok(result)
+}
+
+#[cfg(feature = "vss")]
+fn start_persistence_worker(common: &Arc<CommonState>) {
+    if !common.kv_store.has_remote() {
+        return;
+    }
+    let store = Arc::clone(&common.kv_store);
+    let shutdown = common.persistence_shutdown.clone();
+    let worker = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            let store = Arc::clone(&store);
+            if let Err(e) = tokio::task::spawn_blocking(move || store.drain_pending()).await {
+                tracing::error!(error = %e, "periodic VSS drain task failed");
+            }
+        }
+    });
+    *common.persistence_worker.lock().unwrap() = Some(worker);
+}
+
+async fn prepare_node(
     app_state: Arc<AppState>,
     key_source: NodeKeySource,
     mut unlock_request: UnlockRequest,
-) -> Result<(LdkBackgroundServices, Arc<UnlockedAppState>), APIError> {
-    let gossip_source_config = unlock_request.gossip_source.clone().unwrap_or_default();
+) -> Result<NodeStartup, APIError> {
     let static_state = &app_state.static_state;
+    let mainnet = static_state.network == BitcoinNetwork::Mainnet;
 
     // Unlock request params take precedence, the config file provides defaults.
     let file_config = &static_state.config;
@@ -4848,81 +5208,86 @@ pub(crate) async fn start_ldk(
             }
         }));
 
-        let monitor_kv_store = Arc::new(RemoteFirstKvStore::new(
-            Arc::clone(&local_kv_store),
-            Some(Arc::clone(&vss_kv_store)),
-        ));
-        let synced = Arc::new(SyncedKvStore::with_vss(local_kv_store, vss_kv_store));
+        let monitor_kv_store = (!mainnet).then(|| {
+            Arc::new(RemoteFirstKvStore::new(
+                Arc::clone(&local_kv_store),
+                Some(Arc::clone(&vss_kv_store)),
+            ))
+        });
+        // Mainnet retains old Lightning records without loading or replaying them. Only the
+        // existing common configuration mirrors may be changed or replicated by this session.
+        let synced = Arc::new(if mainnet {
+            SyncedKvStore::with_vss_common_config_only(local_kv_store, vss_kv_store)
+        } else {
+            SyncedKvStore::with_vss(local_kv_store, vss_kv_store)
+        });
 
-        // Auto-restore from VSS if local DB has no channel manager data.
-        // On failure: abort unlock unless --vss-allow-empty-restore was set.
-        // Starting a recovering node with empty local state can lose funds
-        // (no channel monitors → can't watch chain), so we refuse by default.
-        let has_local_data = synced
-            .read(
-                CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-                CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-                CHANNEL_MANAGER_PERSISTENCE_KEY,
-            )
-            .is_ok();
-        if !has_local_data {
-            match synced.restore_from_vss(false) {
-                Ok(0) => tracing::info!("No VSS backup data found, starting fresh"),
-                Ok(n) => {
-                    vss_restored_keys = n;
-                    tracing::info!(keys_restored = n, "Restored node KV state from VSS");
-                }
-                Err(e) => {
-                    if static_state.vss_allow_empty_restore {
-                        tracing::warn!(
-                            error = %e,
-                            "VSS restore failed; starting fresh due to --vss-allow-empty-restore"
-                        );
-                    } else {
-                        return Err(APIError::FailedVssInit(format!(
-                            "VSS restore failed: {e}. Pass --vss-allow-empty-restore \
+        if !mainnet {
+            // Auto-restore from VSS if local DB has no channel manager data.
+            // On failure: abort unlock unless --vss-allow-empty-restore was set.
+            // Starting a recovering node with empty local state can lose funds
+            // (no channel monitors → can't watch chain), so we refuse by default.
+            let has_local_data = synced
+                .read(
+                    CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+                    CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+                    CHANNEL_MANAGER_PERSISTENCE_KEY,
+                )
+                .is_ok();
+            if !has_local_data {
+                match synced.restore_from_vss(false) {
+                    Ok(0) => tracing::info!("No VSS backup data found, starting fresh"),
+                    Ok(n) => {
+                        vss_restored_keys = n;
+                        tracing::info!(keys_restored = n, "Restored node KV state from VSS");
+                    }
+                    Err(e) => {
+                        if static_state.vss_allow_empty_restore {
+                            tracing::warn!(
+                                error = %e,
+                                "VSS restore failed; starting fresh due to --vss-allow-empty-restore"
+                            );
+                        } else {
+                            return Err(APIError::FailedVssInit(format!(
+                                "VSS restore failed: {e}. Pass --vss-allow-empty-restore \
                              to start with an empty local state instead (UNSAFE if \
                              you previously had active channels)."
-                        )));
+                            )));
+                        }
                     }
                 }
+            } else {
+                // Local state is authoritative: refill whatever the remote lacks
+                // (wiped or partial store) without overwriting what it holds.
+                synced.push_missing_to_vss().map_err(|e| {
+                    APIError::FailedVssInit(format!("VSS resync of local state failed: {e}"))
+                })?;
             }
-        } else {
-            // Local state is authoritative: refill whatever the remote lacks
-            // (wiped or partial store) without overwriting what it holds.
-            synced.push_missing_to_vss().map_err(|e| {
-                APIError::FailedVssInit(format!("VSS resync of local state failed: {e}"))
-            })?;
         }
 
         (synced, monitor_kv_store)
     } else {
-        let monitor_kv_store = Arc::new(RemoteFirstKvStore::new(Arc::clone(&local_kv_store), None));
-        let synced = Arc::new(SyncedKvStore::local_only(local_kv_store));
+        let monitor_kv_store = (!mainnet)
+            .then(|| Arc::new(RemoteFirstKvStore::new(Arc::clone(&local_kv_store), None)));
+        let synced = Arc::new(if mainnet {
+            SyncedKvStore::local_common_config_only(local_kv_store)
+        } else {
+            SyncedKvStore::local_only(local_kv_store)
+        });
         (synced, monitor_kv_store)
     };
 
     #[cfg(not(feature = "vss"))]
-    let kv_store = Arc::new(SyncedKvStore::local_only(local_kv_store));
-
-    #[cfg(feature = "vss")]
-    let bp_kv_store: BpKvStore = Arc::new(crate::async_kv_store::BpKvStoreRouter::new(
-        Arc::clone(&monitor_kv_store),
-        bp_local_kv_store,
-        Arc::clone(&kv_store),
-    ));
-    #[cfg(not(feature = "vss"))]
-    let bp_kv_store: BpKvStore = KVStoreSyncWrapper(Arc::clone(&kv_store));
+    let kv_store = Arc::new(if mainnet {
+        SyncedKvStore::local_common_config_only(local_kv_store)
+    } else {
+        SyncedKvStore::local_only(local_kv_store)
+    });
 
     // Sync config from database to KVStore
     sync_config_to_kvstore(&static_state.db(), kv_store.as_ref())?;
 
-    let ldk_data_dir = static_state.ldk_data_dir.clone();
-    let ldk_data_dir_path = PathBuf::from(&ldk_data_dir);
-    let logger = static_state.logger.clone();
     let bitcoin_network = static_state.network;
-    let network: Network = bitcoin_network.into();
-    let ldk_peer_listening_port = static_state.ldk_peer_listening_port;
 
     // RGB setup
     let indexer_url = resolve_indexer_url(
@@ -4961,6 +5326,77 @@ pub(crate) async fn start_ldk(
         CONFIG_BITCOIN_NETWORK,
         &bitcoin_network.to_string(),
     )?;
+
+    let indexer_url = indexer_url.to_string();
+    let proxy_endpoint = proxy_endpoint.to_string();
+    Ok(NodeStartup {
+        app_state,
+        unlock_request,
+        internal_mnemonic,
+        external_signer_mode,
+        external_bootstrap,
+        external_signer,
+        external_node_id,
+        external_signer_link_watch,
+        kv_store,
+        indexer_url,
+        #[cfg(feature = "transaction-sync")]
+        indexer_protocol,
+        proxy_endpoint,
+        #[cfg(feature = "vss")]
+        monitor_kv_store,
+        #[cfg(feature = "vss")]
+        bp_local_kv_store,
+        #[cfg(feature = "vss")]
+        vss_identity,
+        #[cfg(feature = "vss")]
+        vss_restored_keys,
+        #[cfg(feature = "vss")]
+        fence_guard,
+    })
+}
+
+async fn start_lightning(
+    #[allow(unused_mut)] mut setup: NodeStartup,
+) -> Result<(Option<LdkBackgroundServices>, Arc<UnlockedAppState>), APIError> {
+    // Defense in depth: no chain backend, manager or worker precedes this check.
+    setup.app_state.check_lightning_supported()?;
+    let app_state = Arc::clone(&setup.app_state);
+    let static_state = &app_state.static_state;
+    let unlock_request = setup.unlock_request.clone();
+    let gossip_source_config = unlock_request.gossip_source.clone().unwrap_or_default();
+    let kv_store = Arc::clone(&setup.kv_store);
+    let external_signer_mode = setup.external_signer_mode;
+    let internal_mnemonic = setup.internal_mnemonic.clone();
+    let external_bootstrap = setup.external_bootstrap.clone();
+    let external_signer = setup.external_signer.clone();
+    let external_signer_link_watch = setup.external_signer_link_watch.clone();
+    #[cfg(feature = "transaction-sync")]
+    let indexer_url = setup.indexer_url.as_str();
+    #[cfg(feature = "transaction-sync")]
+    let indexer_protocol = setup.indexer_protocol.clone();
+    let ldk_data_dir = static_state.ldk_data_dir.clone();
+    let ldk_data_dir_path = ldk_data_dir.clone();
+    let logger = Arc::clone(&static_state.logger);
+    let bitcoin_network = static_state.network;
+    let network: Network = bitcoin_network.into();
+    let ldk_peer_listening_port = static_state.ldk_peer_listening_port;
+    #[cfg(feature = "vss")]
+    let monitor_kv_store = setup.monitor_kv_store.clone().ok_or_else(|| {
+        APIError::Unexpected("Lightning monitor store is not available".to_string())
+    })?;
+    #[cfg(feature = "vss")]
+    let bp_local_kv_store = Arc::clone(&setup.bp_local_kv_store);
+    #[cfg(feature = "vss")]
+    let vss_restored_keys = setup.vss_restored_keys;
+    #[cfg(feature = "vss")]
+    let bp_kv_store: BpKvStore = Arc::new(crate::async_kv_store::BpKvStoreRouter::new(
+        Arc::clone(&monitor_kv_store),
+        bp_local_kv_store,
+        Arc::clone(&kv_store),
+    ));
+    #[cfg(not(feature = "vss"))]
+    let bp_kv_store: BpKvStore = KVStoreSyncWrapper(Arc::clone(&kv_store));
 
     // Initialize the chain backend for the requested sync mode
     let handle = tokio::runtime::Handle::current();
@@ -5072,45 +5508,10 @@ pub(crate) async fn start_ldk(
         }
     };
 
-    // LDK signing: internal mode uses `KeysManager` from the mnemonic-derived LDK seed (BIP32 child
-    // 535 of the master xpriv). External mode uses `ExternalSigner` only; inbound / peer_storage /
-    // receive_auth key material comes from bootstrap hex fields (see `ExternalSigner::from_attachment`).
+    let keys_manager = setup.create_signer();
     let cur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
-
-    let keys_manager: ActiveSignerRef = if let Some(s) = external_signer.as_ref() {
-        Arc::new(DynRlnSigner::from_external(Arc::clone(s)))
-    } else {
-        let mnemonic = internal_mnemonic
-            .as_ref()
-            .expect("internal mnemonic must be present when external signer is not configured");
-        let ldk_seed: [u8; 32] = {
-            let xkey: ExtendedKey = mnemonic
-                .clone()
-                .into_extended_key()
-                .expect("a valid key should have been provided");
-            let master_xprv = &xkey
-                .into_xprv(network.into())
-                .expect("should be possible to get an extended private key");
-            let xprv: Xpriv = master_xprv
-                .derive_priv(&Secp256k1_30::new(), &ChildNumber::Hardened { index: 535 })
-                .unwrap();
-            xprv.private_key.secret_bytes()
-        };
-        let internal_keys_manager = Arc::new(KeysManager::new(
-            &ldk_seed,
-            cur.as_secs(),
-            cur.subsec_nanos(),
-            true,
-            ldk_data_dir_path.clone(),
-            Arc::clone(&kv_store) as Arc<dyn KVStoreSync + Send + Sync>,
-        ));
-        Arc::new(DynRlnSigner::from_internal(internal_keys_manager))
-    };
-    // `entropy_source` (app APIs) and `ldk_entropy_source` (LDK wiring) always use OsRng.
-    // When LDK passes `keys_manager` as `EntropySource`, external `DynRlnSigner` delegates to
-    // `ExternalSigner` which uses the same system RNG — never the host `GetSecureRandomBytes` RPC.
     let entropy_source: Arc<dyn crate::signer::RlnEntropySource> = Arc::new(SystemEntropySource);
     let ldk_entropy_source = Arc::new(LightningEntropySource::new(Arc::clone(&entropy_source)));
 
@@ -5352,187 +5753,10 @@ pub(crate) async fn start_ldk(
         }
     }
 
-    // Prepare the RGB wallet
-    let (account_xpub_vanilla, account_xpub_colored, master_fingerprint, rgb_wallet_mnemonic) =
-        if external_signer_mode {
-            let bootstrap = external_bootstrap.clone().ok_or_else(|| {
-                APIError::ExternalSignerProtocolError(
-                    "missing external bootstrap in external mode".to_string(),
-                )
-            })?;
-            (
-                bootstrap.identity.account_xpub_vanilla,
-                bootstrap.identity.account_xpub_colored,
-                bootstrap.identity.master_fingerprint,
-                None,
-            )
-        } else {
-            let mnemonic_str = internal_mnemonic
-                .as_ref()
-                .ok_or_else(|| {
-                    APIError::ExternalSignerProtocolError(
-                        "missing internal mnemonic in internal mode".to_string(),
-                    )
-                })?
-                .to_string();
-            let (_, account_xpub_vanilla, _) = get_account_data(
-                &bitcoin_network,
-                &mnemonic_str,
-                false,
-                WitnessVersion::Taproot,
-            )
-            .unwrap();
-            let (_, account_xpub_colored, master_fingerprint) = get_account_data(
-                &bitcoin_network,
-                &mnemonic_str,
-                true,
-                WitnessVersion::Taproot,
-            )
-            .unwrap();
-            (
-                account_xpub_vanilla.to_string(),
-                account_xpub_colored.to_string(),
-                master_fingerprint.to_string(),
-                Some(mnemonic_str.clone()),
-            )
-        };
-    let data_dir = static_state
-        .storage_dir_path
-        .clone()
-        .to_string_lossy()
-        .to_string();
-
-    // Pull the RGB wallet down from VSS before constructing it locally, when
-    // VSS is configured and the local wallet directory for this mnemonic's
-    // fingerprint is absent. Mirrors the KV-side auto-restore at the top of
-    // this function — together they make `unlock` recover the full node
-    // state (channels + assets + on-chain) on a fresh device.
-    #[cfg(feature = "vss")]
-    if let (Some(ref vss_url), Some(ref identity)) = (&static_state.vss_url, &vss_identity) {
-        let rgb_store_id = format!("{}_rgb", identity.pubkey_hex);
-        maybe_restore_rgb_from_vss(
-            vss_url,
-            rgb_store_id,
-            identity.signing_key,
-            &static_state.storage_dir_path,
-            &master_fingerprint.to_string(),
-            static_state.vss_allow_empty_restore,
-        )
+    let common = setup
+        .create_common_state(keys_manager.clone(), entropy_source)
         .await?;
-    }
-
-    let keys = SinglesigKeys {
-        account_xpub_vanilla: account_xpub_vanilla.clone(),
-        account_xpub_colored: account_xpub_colored.clone(),
-        vanilla_keychain: None,
-        master_fingerprint: master_fingerprint.clone(),
-        mnemonic: rgb_wallet_mnemonic,
-        witness_version: WitnessVersion::Taproot,
-    };
-    let reuse_addresses = static_state.reuse_addresses;
-    let indexer_url_owned = indexer_url.to_string();
-    let eth_rpc_url = unlock_request
-        .eth_rpc_url
-        .clone()
-        .or_else(|| static_state.config.chain.eth_rpc_url.clone());
-    #[cfg(feature = "vss")]
-    let rgb_vss_backup = match (&static_state.vss_url, &vss_identity) {
-        (Some(vss_url), Some(identity)) => Some((
-            vss_url.clone(),
-            format!("{}_rgb", identity.pubkey_hex),
-            identity.signing_key,
-        )),
-        _ => None,
-    };
-    // go_online and configure_vss_backup drive blocking rgb-lib HTTP clients;
-    // run them off the async runtime so they don't fail on a single-vCPU host.
-    let (rgb_wallet, rgb_online) = tokio::task::spawn_blocking(move || {
-        let mut rgb_wallet = RgbLibWallet::new(
-            WalletData {
-                data_dir,
-                bitcoin_network,
-                database_type: DatabaseType::Sqlite,
-                max_allocations_per_utxo: 1,
-                supported_schemas: supported_asset_schemas(bitcoin_network, eth_rpc_url.is_some()),
-                reuse_addresses,
-            },
-            keys,
-        )
-        .expect("valid rgb-lib wallet");
-        let rgb_online = rgb_wallet.go_online(OnlineOptions {
-            indexer_url: indexer_url_owned,
-            skip_consistency_check: false,
-            vanilla_sync_lookback: 20,
-            eth_rpc_url,
-        })?;
-        #[cfg(feature = "vss")]
-        if let Some((vss_url, rgb_store_id, signing_key)) = rgb_vss_backup {
-            let vss_config =
-                rgb_lib::wallet::vss::VssBackupConfig::new(vss_url, rgb_store_id, signing_key)
-                    .with_encryption(true)
-                    .with_auto_backup(true)
-                    .with_backup_mode(rgb_lib::wallet::vss::VssBackupMode::Blocking);
-            // Fail closed: a misconfigured backup must not silently run local-only.
-            rgb_wallet.configure_vss_backup(vss_config).map_err(|e| {
-                APIError::FailedVssInit(format!(
-                    "Failed to configure VSS backup for RGB wallet: {e}"
-                ))
-            })?;
-            tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
-            // Auto-backup only tracks local changes; an empty remote (fresh
-            // wallet or wiped store) needs an explicit upload.
-            if let Some(client) = rgb_wallet.vss_client() {
-                let rt = client.handle().clone();
-                let info = rt
-                    .block_on(rgb_wallet.vss_backup_info(&client))
-                    .map_err(|e| APIError::FailedVssInit(format!("VSS backup info: {e}")))?;
-                if !info.backup_exists {
-                    rt.block_on(rgb_wallet.vss_backup(&client)).map_err(|e| {
-                        APIError::FailedVssInit(format!("initial RGB VSS backup failed: {e}"))
-                    })?;
-                    tracing::info!("Uploaded RGB wallet backup to empty VSS store");
-                }
-            }
-        }
-        Ok::<_, APIError>((rgb_wallet, rgb_online))
-    })
-    .await
-    .map_err(|e| APIError::Unexpected(format!("rgb-lib wallet setup task failed: {e}")))??;
-    save_config(
-        &static_state.db(),
-        kv_store.as_ref(),
-        CONFIG_WALLET_FINGERPRINT,
-        &master_fingerprint,
-    )?;
-    save_config(
-        &static_state.db(),
-        kv_store.as_ref(),
-        CONFIG_WALLET_ACCOUNT_XPUB_COLORED,
-        &account_xpub_colored,
-    )?;
-    save_config(
-        &static_state.db(),
-        kv_store.as_ref(),
-        CONFIG_WALLET_ACCOUNT_XPUB_VANILLA,
-        &account_xpub_vanilla,
-    )?;
-    save_config(
-        &static_state.db(),
-        kv_store.as_ref(),
-        CONFIG_WALLET_MASTER_FINGERPRINT,
-        &master_fingerprint,
-    )?;
-
-    // No second VssBackupClient is constructed here: the manual /vssbackup
-    // and /vssbackupinfo routes use the wallet's own client, retrievable via
-    // `wallet.vss_client()` (R-lib.1 in rgb-lib's PR #31). Keeping a single
-    // client per stream avoids running two tokio runtimes for the same
-    // backups and removes the race between the two clients writing
-    // overlapping state.
-    let rgb_wallet_wrapper = Arc::new(RgbLibWalletWrapper::new(
-        Arc::new(Mutex::new(rgb_wallet)),
-        rgb_online,
-    ));
+    let rgb_wallet_wrapper = Arc::clone(&common.rgb_wallet_wrapper);
 
     reimport_funding_consignments(&rgb_wallet_wrapper, &kv_store, &ldk_data_dir).await;
 
@@ -6122,13 +6346,11 @@ pub(crate) async fn start_ldk(
         external_signer: external_signer.clone(),
     }));
 
-    let unlocked_state = Arc::new(UnlockedAppState {
-        config: static_state.config.clone(),
+    let unlocked_state = Arc::new(LightningState {
+        common: Arc::clone(&common),
         channel_manager: Arc::clone(&channel_manager),
         gossip_source: Arc::clone(&gossip_source),
         inbound_payments,
-        signer: keys_manager,
-        entropy_source,
         network_graph,
         chain_monitor: chain_monitor.clone(),
         onion_messenger: onion_messenger.clone(),
@@ -6137,21 +6359,15 @@ pub(crate) async fn start_ldk(
         async_order_handler,
         asset_link_handler: Arc::clone(&asset_link_handler),
         async_payments_preimage_root,
-        kv_store: Arc::clone(&kv_store),
         #[cfg(feature = "vss")]
         monitor_kv_store: Arc::clone(&monitor_kv_store),
         rgb_file_transfer_handler: Arc::clone(&rgb_file_transfer_handler),
         bump_tx_event_handler,
-        rgb_wallet_wrapper,
         maker_swaps,
         taker_swaps: Arc::clone(&taker_swaps),
         router: Arc::clone(&router),
         output_sweeper: Arc::clone(&output_sweeper),
         channel_ids_map,
-        proxy_endpoint: proxy_endpoint.to_string(),
-        external_signer_mode,
-        external_signer,
-        external_node_id,
         virtual_channel_draft_store,
         virtual_channel_session_store,
         next_payment_idx,
@@ -6234,28 +6450,6 @@ pub(crate) async fn start_ldk(
         Arc::clone(&stop_processing),
         app_state.cancel_token.clone(),
     ));
-
-    // Periodically drain queued VSS replications so an idle node still heals
-    // after an outage (drains are otherwise only triggered by new writes).
-    #[cfg(feature = "vss")]
-    {
-        let drain_store = Arc::clone(&kv_store);
-        let stop_drain = Arc::clone(&stop_processing);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                if stop_drain.load(Ordering::Acquire) {
-                    break;
-                }
-                let store = Arc::clone(&drain_store);
-                if let Err(e) = tokio::task::spawn_blocking(move || store.drain_pending()).await {
-                    tracing::error!(error = %e, "periodic VSS drain task failed");
-                }
-            }
-        });
-    }
 
     // Regularly reconnect to channel peers.
     let connect_cm = Arc::clone(&channel_manager);
@@ -6447,19 +6641,22 @@ pub(crate) async fn start_ldk(
     tracing::info!("Local Node ID is {}", channel_manager.get_our_node_id());
 
     #[cfg(feature = "vss")]
-    if let Some(guard) = fence_guard.as_mut() {
+    if let Some(guard) = setup.fence_guard.as_mut() {
         guard.disarm();
     }
 
     Ok((
-        LdkBackgroundServices {
+        Some(LdkBackgroundServices {
             stop_processing,
             gossip_shutdown,
             peer_manager: peer_manager.clone(),
             bp_exit,
             background_processor: Some(background_processor),
-        },
-        unlocked_state,
+        }),
+        Arc::new(UnlockedAppState {
+            common,
+            lightning: Some(unlocked_state),
+        }),
     ))
 }
 
@@ -6484,16 +6681,10 @@ pub(crate) fn attach_external_signer_transport(
 }
 
 impl AppState {
-    fn stop_ldk(&self) -> Option<JoinHandle<Result<(), io::Error>>> {
+    fn stop_lightning(&self) -> Option<LdkBackgroundServices> {
         let mut ldk_background_services = self.get_ldk_background_services();
 
-        if ldk_background_services.is_none() {
-            // node is locked
-            tracing::info!("LDK is not running");
-            return None;
-        }
-
-        let ldk_background_services = ldk_background_services.as_mut().unwrap();
+        let ldk_background_services = ldk_background_services.take()?;
 
         // Disconnect our peers and stop accepting new connections. This ensures we don't continue
         // updating our channel data after we've stopped the background processor.
@@ -6508,10 +6699,8 @@ impl AppState {
         // already gone. Also, send can find no receiver during a panic (racy).
         if !ldk_background_services.bp_exit.is_closed() {
             let _ = ldk_background_services.bp_exit.send(());
-            ldk_background_services.background_processor.take()
-        } else {
-            None
         }
+        Some(ldk_background_services)
     }
 }
 
@@ -6547,10 +6736,15 @@ enum VssTeardown {
 #[cfg(feature = "vss")]
 async fn stop_vss_stores(
     kv_store: &Arc<SyncedKvStore>,
-    monitor_kv_store: &Arc<RemoteFirstKvStore>,
+    monitor_kv_store: Option<&Arc<RemoteFirstKvStore>>,
     deadline: Instant,
 ) -> VssTeardown {
     let remaining = || deadline.saturating_duration_since(Instant::now());
+    let stop_monitors = || {
+        if let Some(store) = monitor_kv_store {
+            store.stop();
+        }
+    };
 
     let flush_store = Arc::clone(kv_store);
     let flush_deadline = std::cmp::min(deadline, Instant::now() + VSS_TEARDOWN_FLUSH_WINDOW);
@@ -6565,12 +6759,12 @@ async fn stop_vss_stores(
         ),
         Ok(Err(e)) => {
             tracing::error!(error = %e, "pending-queue flush task failed");
-            monitor_kv_store.stop();
+            stop_monitors();
             return VssTeardown::Abandoned;
         }
         Err(_) => {
             tracing::error!("pending-queue flush did not finish within the teardown budget");
-            monitor_kv_store.stop();
+            stop_monitors();
             return VssTeardown::Abandoned;
         }
     }
@@ -6583,18 +6777,18 @@ async fn stop_vss_stores(
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             tracing::error!(error = %e, "pending-queue stop task failed");
-            monitor_kv_store.stop();
+            stop_monitors();
             return VssTeardown::Abandoned;
         }
         Err(_) => {
             tracing::error!("pending-queue stop did not finish within the teardown budget");
-            monitor_kv_store.stop();
+            stop_monitors();
             return VssTeardown::Abandoned;
         }
     }
     // Only signals the retry loops to abort, so it cannot block. Idempotent: the abandoned
     // paths above may have already called it.
-    monitor_kv_store.stop();
+    stop_monitors();
     VssTeardown::Complete
 }
 
@@ -6657,11 +6851,20 @@ mod vss_teardown_tests {
 
         let teardown = stop_vss_stores(
             &kv_store,
-            &monitor_kv_store,
+            Some(&monitor_kv_store),
             Instant::now() + Duration::from_secs(5),
         )
         .await;
 
+        assert_eq!(teardown, VssTeardown::Complete);
+        assert!(release_vss_fence(kv_store, teardown).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wallet_only_teardown_does_not_require_monitor_store() {
+        let (kv_store, _) = local_stores();
+        let teardown =
+            stop_vss_stores(&kv_store, None, Instant::now() + Duration::from_secs(5)).await;
         assert_eq!(teardown, VssTeardown::Complete);
         assert!(release_vss_fence(kv_store, teardown).await);
     }
@@ -6676,7 +6879,7 @@ mod vss_teardown_tests {
 
         let teardown = stop_vss_stores(
             &kv_store,
-            &monitor_kv_store,
+            Some(&monitor_kv_store),
             Instant::now() + Duration::from_millis(100),
         )
         .await;
@@ -6688,76 +6891,95 @@ mod vss_teardown_tests {
     }
 }
 
-pub(crate) async fn stop_ldk(app_state: Arc<AppState>) {
-    tracing::info!("Stopping LDK");
+/// Stop the resources owned by the unlocked session, including wallet-only persistence.
+pub(crate) async fn stop_node(app_state: Arc<AppState>) {
+    tracing::info!("Stopping node services");
+    // Wait for wallet operations holding the API mutex, then remove both session owners together.
+    // New callers cannot use a wallet after its VSS fence has been handed over; concurrent stops
+    // cannot release the fence while another stop is still flushing the background processor.
+    let mut unlocked_guard = app_state.get_unlocked_app_state().await;
+    let unlocked = unlocked_guard.take();
+    let mut lightning = app_state.stop_lightning();
+    drop(unlocked_guard);
 
     #[cfg(feature = "vss")]
-    let stores = app_state
-        .get_unlocked_app_state()
-        .await
-        .as_ref()
-        .map(|unlocked| {
-            (
-                Arc::clone(&unlocked.kv_store),
-                Arc::clone(&unlocked.monitor_kv_store),
-            )
-        });
+    let common_and_monitor = unlocked.as_ref().map(|unlocked| {
+        unlocked.common.persistence_shutdown.cancel();
+        (
+            Arc::clone(&unlocked.common),
+            unlocked
+                .lightning
+                .as_ref()
+                .map(|lightning| Arc::clone(&lightning.monitor_kv_store)),
+        )
+    });
 
     #[cfg(feature = "vss")]
-    if let Some(mut join_handle) = app_state.stop_ldk() {
-        // Bounded flush: give the final remote-first persists time to reach
-        // VSS, then abort outage-pending retries so shutdown cannot hang.
+    if let Some(mut join_handle) = lightning
+        .as_mut()
+        .and_then(|services| services.background_processor.take())
+    {
         match tokio::time::timeout(BP_SHUTDOWN_FLUSH_TIMEOUT, &mut join_handle).await {
             Ok(res) => log_bp_shutdown_result(res),
             Err(_) => {
-                tracing::error!(
-                    "final VSS flush did not complete in {:?}; aborting pending \
-                     retries — last channel-manager state may not have replicated",
-                    BP_SHUTDOWN_FLUSH_TIMEOUT
-                );
-                if let Some((_, ref monitor_kv_store)) = stores {
-                    monitor_kv_store.stop();
+                tracing::error!("final VSS flush did not complete in {:?}; aborting pending retries — last channel-manager state may not have replicated", BP_SHUTDOWN_FLUSH_TIMEOUT);
+                if let Some((_, Some(ref monitor_store))) = common_and_monitor {
+                    monitor_store.stop();
                 }
                 log_bp_shutdown_result(join_handle.await);
             }
         }
     }
     #[cfg(not(feature = "vss"))]
-    if let Some(join_handle) = app_state.stop_ldk() {
+    if let Some(join_handle) = lightning
+        .as_mut()
+        .and_then(|services| services.background_processor.take())
+    {
         log_bp_shutdown_result(join_handle.await);
     }
 
-    // Any shutdown that reaches here (lock, /shutdown, signal, fatal panic) hands the VSS fence
-    // over so the next unlock — a fresh instance id — takes over without an explicit
-    // /vssclearfence. The teardown is bounded, and the fence is only released once it provably
-    // completed; a hard kill, or a teardown abandoned at its deadline, leaves the fence behind.
     #[cfg(feature = "vss")]
-    {
-        if let Some((kv_store, monitor_kv_store)) = stores {
-            let deadline = Instant::now() + VSS_TEARDOWN_TIMEOUT;
-            let teardown = stop_vss_stores(&kv_store, &monitor_kv_store, deadline).await;
-            release_vss_fence(kv_store, teardown).await;
+    if let Some((common, monitor_store)) = common_and_monitor {
+        let deadline = Instant::now() + VSS_TEARDOWN_TIMEOUT;
+        let teardown = stop_vss_stores(&common.kv_store, monitor_store.as_ref(), deadline).await;
+        let worker = common.persistence_worker.lock().unwrap().take();
+        if let Some(mut worker) = worker {
+            if tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                &mut worker,
+            )
+            .await
+            .is_err()
+            {
+                worker.abort();
+                tracing::warn!("common persistence worker did not exit within teardown budget");
+            }
         }
+        release_vss_fence(Arc::clone(&common.kv_store), teardown).await;
     }
 
-    // connect to the peer port so it can be released
-    let peer_port = app_state.static_state.ldk_peer_listening_port;
-    let sock_addr = SocketAddr::from(([127, 0, 0, 1], peer_port));
-    let _ = check_port_is_available(peer_port);
-    // check the peer port has been released
-    let t_0 = OffsetDateTime::now_utc();
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if TcpListener::bind(sock_addr).is_ok() {
-            break;
-        }
-        if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 10.0 {
-            tracing::error!("LDK peer port {peer_port} was not released within 10s");
-            break;
+    // Only an owned Lightning listener needs the baseline wakeup and port-release wait.
+    // A wallet-only or already-stopped session must not contact an unused peer port.
+    if lightning.is_some() {
+        // connect to the peer port so it can be released
+        let peer_port = app_state.static_state.ldk_peer_listening_port;
+        let sock_addr = SocketAddr::from(([127, 0, 0, 1], peer_port));
+        let _ = check_port_is_available(peer_port);
+        // check the peer port has been released
+        let t_0 = OffsetDateTime::now_utc();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if TcpListener::bind(sock_addr).is_ok() {
+                break;
+            }
+            if (OffsetDateTime::now_utc() - t_0).as_seconds_f32() > 10.0 {
+                tracing::error!("LDK peer port {peer_port} was not released within 10s");
+                break;
+            }
         }
     }
-
-    tracing::info!("Stopped LDK");
+    drop(unlocked);
+    tracing::info!("Stopped node services");
 }
 
 pub(crate) fn write_rgb_payment_info_file(

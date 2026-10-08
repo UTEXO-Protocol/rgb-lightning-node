@@ -44,7 +44,7 @@ use crate::{
     rgb::get_rgb_channel_info_optional,
     utils::{
         description_from_invoice, description_hash_from_invoice, get_current_timestamp, get_route,
-        hex_str, new_jsonrpc_request_id, UnlockedAppState,
+        hex_str, new_jsonrpc_request_id, CommonState, LightningState,
     },
 };
 
@@ -414,7 +414,7 @@ impl CustomMessageHandler for AssetLinkMessageHandler {
 }
 
 pub(crate) fn create_asset_link(
-    unlocked_state: &UnlockedAppState,
+    unlocked_state: &CommonState,
     params: AssetLinkRequest,
 ) -> Result<AssetLinkResponse, APIError> {
     if unlocked_state.external_signer_mode {
@@ -511,7 +511,7 @@ pub(crate) fn create_asset_link(
 }
 
 pub(crate) fn find_linked_asset_channel(
-    unlocked_state: &UnlockedAppState,
+    unlocked_state: &LightningState,
     contract_id: ContractId,
     asset_amount: u64,
     amt_msat: u64,
@@ -595,7 +595,7 @@ pub(crate) fn find_linked_asset_channel(
 }
 
 pub(crate) fn has_sufficient_asset_channel(
-    unlocked_state: &UnlockedAppState,
+    unlocked_state: &LightningState,
     contract_id: ContractId,
     asset_amount: u64,
     amt_msat: u64,
@@ -620,7 +620,7 @@ pub(crate) fn has_sufficient_asset_channel(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_linked_asset_payment(
-    unlocked_state: &UnlockedAppState,
+    unlocked_state: &LightningState,
     invoice: &Bolt11Invoice,
     contract_id: ContractId,
     linked_contract_id: ContractId,
