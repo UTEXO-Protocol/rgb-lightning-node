@@ -123,6 +123,8 @@ CResultString rln_list_payments(const COpaqueStruct *node);
 
 CResultString rln_list_peers(const COpaqueStruct *node);
 
+CResultString rln_list_rgb_sweep_quarantine(const COpaqueStruct *node);
+
 CResultString rln_list_swaps(const COpaqueStruct *node);
 
 CResultString rln_list_transactions(const COpaqueStruct *node,
@@ -154,6 +156,8 @@ CResultString rln_node_info(const COpaqueStruct *node);
 CResultString rln_open_channel(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_post_asset_media(const COpaqueStruct *node, const char *request_json);
+
+CResultString rln_recover_rgb_sweep(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_refresh_transfers(const COpaqueStruct *node, const char *request_json);
 

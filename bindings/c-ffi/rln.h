@@ -143,6 +143,8 @@ struct CResultString rln_list_payments(const struct COpaqueStruct *node);
 
 struct CResultString rln_list_peers(const struct COpaqueStruct *node);
 
+struct CResultString rln_list_rgb_sweep_quarantine(const struct COpaqueStruct *node);
+
 struct CResultString rln_list_swaps(const struct COpaqueStruct *node);
 
 struct CResultString rln_list_transactions(const struct COpaqueStruct *node,
@@ -175,6 +177,9 @@ struct CResultString rln_open_channel(const struct COpaqueStruct *node, const ch
 
 struct CResultString rln_post_asset_media(const struct COpaqueStruct *node,
                                           const char *request_json);
+
+struct CResultString rln_recover_rgb_sweep(const struct COpaqueStruct *node,
+                                           const char *request_json);
 
 struct CResultString rln_refresh_transfers(const struct COpaqueStruct *node,
                                            const char *request_json);

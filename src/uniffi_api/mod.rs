@@ -927,6 +927,14 @@ impl SdkNode {
         })
     }
 
+    pub fn list_rgb_sweep_quarantine(&self) -> Result<Vec<RgbSweepQuarantineInfo>, RlnError> {
+        block_on_sdk(sdk::list_rgb_sweep_quarantine(self.handle.app_state()))
+    }
+
+    pub fn recover_rgb_sweep(&self, request: RgbSweepRecoveryRequest) -> Result<(), RlnError> {
+        block_on_sdk(sdk::recover_rgb_sweep(self.handle.app_state(), request))
+    }
+
     pub fn failtransfers(
         &self,
         request: SdkFailTransfersRequest,

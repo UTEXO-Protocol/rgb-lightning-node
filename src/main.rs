@@ -208,6 +208,11 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/disconnectpeer", post(disconnect_peer))
         .route("/estimatefee", post(estimate_fee))
         .route("/failtransfers", post(fail_transfers))
+        .route(
+            "/rgbsweeps/quarantine",
+            get(crate::routes::list_rgb_sweep_quarantine),
+        )
+        .route("/rgbsweeps/recover", post(crate::routes::recover_rgb_sweep))
         .route("/getassetmedia", post(get_asset_media))
         .route("/getchannelid", post(get_channel_id))
         .route("/getconsignment", post(get_consignment))

@@ -633,6 +633,45 @@ Replication guarantees differ per stream. On supported non-mainnet networks, cha
 - `POST /vssclearfence` — clear the single-writer fence to take over a store
   after a previous owner shut down without releasing it
 
+## RGB sweep quarantine and recovery
+
+A damaged or permanently invalid prepared channel sweep is moved from `rgb_sweeps`
+to `rgb_sweeps_quarantine`. Other receipts and ordinary wallet refresh continue.
+Database, indexer and I/O errors retain the receipt for a later refresh. The
+original bytes, including consignments, are preserved before the active receipt
+is removed. `ChannelReady` logs refresh errors without requesting event replay.
+
+On an unlocked Lightning node, inspect `GET /rgbsweeps/quarantine`, then submit
+`POST /rgbsweeps/recover` with the returned `key`, `record_id` and an `action`:
+
+```json
+{"key":"12345","record_id":"<record_id from the list>","action":"resume"}
+```
+
+- `resume`: retry the original sweep after restoring its batch and preparation
+  files from the matching wallet backup. The batch must be active or consumed.
+- `reprepare`: release a Failed batch only if signing was never attempted, no
+  signed transaction for these inputs is cached, LDK still tracks every input as
+  awaiting its initial broadcast, and the indexer reports no confirmation. A
+  missing transaction alone is insufficient proof. Old receipts and receipts
+  restored from VSS cannot provide the unsigned proof and must use restoration
+  and `resume` instead.
+- `resolve`: archive an already consumed, confirmed sweep. Its inputs remain
+  blocked from new preparation, even if LDK changes their grouping or order.
+
+Each action archives the original receipt in `rgb_sweeps_archive` before removing
+quarantine. Failed storage writes preserve the quarantine fence; repeat the same
+request after repairing storage. Re-list records before choosing a new action.
+A corrupt receipt or missing batch requires a matching backup; this API does not
+blindly discard it. If corruption hides a receipt's inputs, new sweep preparation
+is blocked until restoration, while refresh remains available.
+
+The SDK/UniFFI methods are `list_rgb_sweep_quarantine()` and
+`recover_rgb_sweep(RgbSweepRecoveryRequest)`. C FFI exposes
+`rln_list_rgb_sweep_quarantine` and `rln_recover_rgb_sweep`, with the same JSON
+schema as HTTP. HTTP recovery follows normal authentication and requires admin
+or explicit permission for `/rgbsweeps/recover`; a read-only token cannot recover.
+
 [VSS]: https://github.com/lightningdevkit/vss-server
 [Biscuit tokens]: https://www.biscuitsec.org/
 [RGB proxy server]: https://github.com/RGB-Tools/rgb-proxy-server

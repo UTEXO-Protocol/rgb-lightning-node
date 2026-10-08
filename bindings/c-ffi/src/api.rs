@@ -368,6 +368,19 @@ pub(crate) fn refresh_transfers(
     json(JsonRefreshTransfersResponse::from(resp))
 }
 
+pub(crate) fn list_rgb_sweep_quarantine(node: &COpaqueStruct) -> Result<String, Error> {
+    json(require_handle(node)?.list_rgb_sweep_quarantine()?)
+}
+
+pub(crate) fn recover_rgb_sweep(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let request: rln::RgbSweepRecoveryRequest = parse_req(request_json)?;
+    require_handle(node)?.recover_rgb_sweep(request)?;
+    ok_void()
+}
+
 pub(crate) fn fail_transfers(
     node: &COpaqueStruct,
     request_json: *const c_char,

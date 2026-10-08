@@ -492,22 +492,16 @@ impl CommonState {
         filter: Vec<RefreshFilter>,
         skip_sync: bool,
     ) -> Result<RefreshResult, RgbLibError> {
+        let _sweep_guard = self
+            .rgb_wallet_wrapper
+            .sweep_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if self.rgb_wallet_wrapper.bitcoin_network() != BitcoinNetwork::Mainnet {
             crate::rgb_sweep::reconcile_prepared_sweeps(
                 self.kv_store.as_ref(),
-                |txid| {
-                    self.rgb_wallet_wrapper
-                        .get_tx_height(txid)
-                        .map(|height| height.is_some())
-                        .map_err(|e| e.to_string())
-                },
-                |idx| {
-                    self.rgb_wallet_wrapper
-                        .consume_transfer_fascia(idx)
-                        .map_err(|e| e.to_string())
-                },
-            )
-            .map_err(|details| RgbLibError::Internal { details })?;
+                &mut WalletSweepBackend(&self.rgb_wallet_wrapper),
+            );
         }
         self.rgb_wallet_wrapper.refresh(asset_id, filter, skip_sync)
     }
@@ -688,14 +682,80 @@ fn validate_burn_signed_psbt(unsigned: &str, signed: &str) -> Result<String, Rgb
     Ok(prepared.to_string())
 }
 
+pub(crate) struct WalletSweepBackend<'a>(pub(crate) &'a RgbLibWalletWrapper);
+
+impl crate::rgb_sweep::SweepBackend for WalletSweepBackend<'_> {
+    fn batch(
+        &mut self,
+        idx: i32,
+        txid: &str,
+    ) -> Result<Option<crate::rgb_sweep::SweepBatch>, String> {
+        self.0
+            .list_transfers(AssetFilter::AnyOrNone, Some(txid.to_string()))
+            .map(|transfers| {
+                transfers
+                    .into_iter()
+                    .find(|t| t.batch_transfer_idx == idx)
+                    .map(|t| crate::rgb_sweep::SweepBatch {
+                        status: t.status,
+                        txid: t.txid,
+                    })
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    fn confirmed(&mut self, txid: &str) -> Result<bool, String> {
+        self.0
+            .get_tx_height(txid.to_string())
+            .map(|height| height.is_some())
+            .map_err(|e| e.to_string())
+    }
+
+    fn consume(
+        &mut self,
+        sweep: &crate::rgb_sweep::PreparedRgbSweep,
+    ) -> Result<(), crate::rgb_sweep::ConsumeError> {
+        use crate::rgb_sweep::ConsumeError;
+        let txid = sweep.txid().map_err(ConsumeError::Quarantine)?;
+        let mut wallet = self.0.get_rgb_wallet();
+        // Layout of rgb-lib's pinned prepare/consume API. Missing files cannot repair themselves
+        // by retrying refresh; keep the receipt in quarantine for restoring the wallet backup.
+        let dir = wallet.get_wallet_dir().join("transfers").join(txid);
+        for file in ["color_prepare", "fascia", "unsigned.psbt"] {
+            match dir.join(file).try_exists() {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(ConsumeError::Quarantine(format!(
+                        "missing RGB preparation file: {file}"
+                    )))
+                }
+                Err(e) => return Err(ConsumeError::Retry(e.to_string())),
+            }
+        }
+        wallet
+            .consume_transfer_fascia(self.0.online, sweep.batch_transfer_idx)
+            .map_err(|e| match e {
+                RgbLibError::BatchTransferNotFound { .. } | RgbLibError::Inconsistency { .. } => {
+                    ConsumeError::Quarantine(e.to_string())
+                }
+                _ => ConsumeError::Retry(e.to_string()),
+            })
+    }
+}
+
 pub(crate) struct RgbLibWalletWrapper {
     pub(crate) wallet: Arc<Mutex<RgbLibWallet>>,
     pub(crate) online: Online,
+    pub(crate) sweep_lock: Mutex<()>,
 }
 
 impl RgbLibWalletWrapper {
     pub(crate) fn new(wallet: Arc<Mutex<RgbLibWallet>>, online: Online) -> Self {
-        RgbLibWalletWrapper { wallet, online }
+        RgbLibWalletWrapper {
+            wallet,
+            online,
+            sweep_lock: Mutex::new(()),
+        }
     }
 
     pub(crate) fn get_rgb_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {

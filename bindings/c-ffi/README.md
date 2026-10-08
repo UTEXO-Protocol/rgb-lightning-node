@@ -95,3 +95,11 @@ been attached first. No seed or password belongs in this request.
 ```sh
 make format
 ```
+
+## RGB sweep recovery
+
+`rln_list_rgb_sweep_quarantine(handle)` returns a JSON array of quarantine records.
+`rln_recover_rgb_sweep(handle, request_json)` accepts `key`, `record_id` and a
+lowercase `action` (`resume`, `reprepare`, `resolve`). Both require an unlocked
+Lightning node. See [recovery requirements](../../README.md#rgb-sweep-quarantine-and-recovery)
+before selecting an action.

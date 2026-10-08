@@ -2767,6 +2767,25 @@ pub(crate) async fn estimate_fee(
     Ok(Json(EstimateFeeResponse { fee_rate }))
 }
 
+pub(crate) async fn list_rgb_sweep_quarantine(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::rgb_sweep::RgbSweepQuarantineInfo>>, APIError> {
+    crate::rgb_sweep::list_rgb_sweep_quarantine(state)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn recover_rgb_sweep(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(request), _): WithRejection<
+        Json<crate::rgb_sweep::RgbSweepRecoveryRequest>,
+        APIError,
+    >,
+) -> Result<Json<EmptyResponse>, APIError> {
+    crate::rgb_sweep::recover_rgb_sweep(state, request).await?;
+    Ok(Json(EmptyResponse {}))
+}
+
 pub(crate) async fn fail_transfers(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<FailTransfersRequest>, APIError>,
