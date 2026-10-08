@@ -170,6 +170,9 @@ jobs:
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
         run: python3 test/python-e2e/external_signer_bfa.py
 
+      - name: Test funded external-signer burn and recovery
+        run: cargo test --locked --features uniffi,vls,test-utils --test lib_sdk external_burn_funded_and_recovery -- --nocapture
+
       - name: Test external-signer BFA unlock through C ABI
         run: |
           cargo test --locked --manifest-path bindings/c-ffi/Cargo.toml --lib

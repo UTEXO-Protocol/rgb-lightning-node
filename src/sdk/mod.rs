@@ -4382,12 +4382,6 @@ pub(crate) async fn burn(
 ) -> Result<BurnResponseData, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
-    if unlocked_state.external_signer_mode {
-        return Err(APIError::UnsupportedInExternalSignerMode(
-            "burn is not supported in external signer mode".to_string(),
-        ));
-    }
-
     let unlocked_state_copy = unlocked_state.clone();
     let burn_result = tokio::task::spawn_blocking(move || {
         unlocked_state_copy.rgb_burn(

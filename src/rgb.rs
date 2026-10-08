@@ -279,6 +279,36 @@ impl CommonState {
         fee_rate: u64,
         min_confirmations: u8,
     ) -> Result<OperationResult, RgbLibError> {
+        if self.external_signer_mode {
+            // Keep preparation, signing and completion serialized against other wallet operations.
+            // Persist Initiated before asking the signer: an interrupted call must retain its inputs.
+            let wrapper = &self.rgb_wallet_wrapper;
+            let mut wallet = wrapper.get_rgb_wallet();
+            let prepared = wallet.burn_begin(
+                wrapper.online,
+                asset_id,
+                amount,
+                burn_recipient,
+                fee_rate,
+                min_confirmations,
+                false,
+            )?;
+            let mut complete = || {
+                let signed = self.rgb_sign_psbt(prepared.psbt.clone())?;
+                let signed = validate_burn_signed_psbt(&prepared.psbt, &signed)?;
+                wallet.burn_end(wrapper.online, signed)
+            };
+            return complete().map_err(|err| {
+                // Never free the reservation or retry here: the signer or broadcaster may have
+                // completed its work even when its response was lost.
+                RgbLibError::Internal {
+                    details: format!(
+                        "external burn completion failed (batch_transfer_idx={:?}); reconcile the transfer before retrying: {err}",
+                        prepared.batch_transfer_idx,
+                    ),
+                }
+            });
+        }
         self.rgb_wallet_wrapper.burn(
             asset_id,
             amount,
@@ -601,6 +631,44 @@ impl CommonState {
             min_confirmations,
         )
     }
+}
+
+/// Accept only final signatures from the signer, retaining the prepared transaction and RGB data.
+fn validate_burn_signed_psbt(unsigned: &str, signed: &str) -> Result<String, RgbLibError> {
+    let invalid = |details: &str| RgbLibError::Internal {
+        details: format!("invalid external burn PSBT: {details}"),
+    };
+    let mut prepared = Psbt::from_str(unsigned).map_err(|_| invalid("invalid prepared PSBT"))?;
+    let signed = Psbt::from_str(signed).map_err(|_| invalid("signer returned malformed PSBT"))?;
+    if prepared.unsigned_tx != signed.unsigned_tx {
+        return Err(invalid("signer changed the prepared transaction"));
+    }
+    if prepared.inputs.is_empty() || prepared.inputs.len() != signed.inputs.len() {
+        return Err(invalid("signer returned an invalid input count"));
+    }
+    for (input, signature) in prepared.inputs.iter_mut().zip(signed.inputs) {
+        let has_witness = signature
+            .final_script_witness
+            .as_ref()
+            .is_some_and(|s| !s.is_empty());
+        let has_script_sig = signature
+            .final_script_sig
+            .as_ref()
+            .is_some_and(|s| !s.is_empty());
+        if !has_witness && !has_script_sig {
+            return Err(invalid("signer did not finalize every input"));
+        }
+        input.final_script_sig = signature.final_script_sig;
+        input.final_script_witness = signature.final_script_witness;
+    }
+    let tx = prepared
+        .clone()
+        .extract_tx()
+        .map_err(|_| invalid("invalid finalized transaction"))?;
+    if tx.compute_txid() != prepared.unsigned_tx.compute_txid() {
+        return Err(invalid("finalization changed the prepared transaction ID"));
+    }
+    Ok(prepared.to_string())
 }
 
 pub(crate) struct RgbLibWalletWrapper {
@@ -1335,6 +1403,133 @@ pub(crate) fn get_rgb_channel_info_optional(
     kv_store
         .read_rgb_channel_info(&channel_id_str, pending)
         .ok()
+}
+
+#[cfg(test)]
+mod burn_psbt_tests {
+    use super::*;
+    use bitcoin::psbt::raw::ProprietaryKey;
+    use bitcoin::{absolute, transaction, Amount, Sequence, TxIn, Witness};
+
+    fn fixture() -> Psbt {
+        let mut psbt = Psbt::from_unsigned_tx(Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(bitcoin::Txid::from_byte_array([1; 32]), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(9000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        })
+        .unwrap();
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(10000),
+            script_pubkey: ScriptBuf::new(),
+        });
+        psbt.proprietary.insert(
+            ProprietaryKey {
+                prefix: b"RGB".to_vec(),
+                subtype: 1,
+                key: vec![],
+            },
+            vec![42],
+        );
+        psbt
+    }
+
+    fn finalized(psbt: &Psbt) -> Psbt {
+        let mut signed = psbt.clone();
+        signed.inputs[0].final_script_witness = Some(Witness::from_slice(&[vec![1; 64]]));
+        signed
+    }
+
+    #[test]
+    fn burn_retains_prepared_metadata_and_only_accepts_signatures() {
+        let prepared = fixture();
+        let mut signed = finalized(&prepared);
+        signed.proprietary.clear();
+        signed.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(1);
+        signed.outputs[0].proprietary.insert(
+            ProprietaryKey {
+                prefix: b"unexpected".to_vec(),
+                subtype: 1,
+                key: vec![],
+            },
+            vec![99],
+        );
+        let result = validate_burn_signed_psbt(&prepared.to_string(), &signed.to_string()).unwrap();
+        let result = Psbt::from_str(&result).unwrap();
+        let mut expected = prepared;
+        expected.inputs[0].final_script_witness = signed.inputs[0].final_script_witness.clone();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn burn_rejects_transaction_mutations() {
+        let prepared = fixture();
+        let mutations: [fn(&mut Transaction); 6] = [
+            |tx| tx.output[0].value = Amount::from_sat(1),
+            |tx| tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51]),
+            |tx| tx.input[0].previous_output.vout = 1,
+            |tx| tx.input[0].sequence = Sequence::MAX,
+            |tx| tx.lock_time = absolute::LockTime::from_consensus(1),
+            |tx| tx.version = transaction::Version::ONE,
+        ];
+        for mutate in mutations {
+            let mut signed = finalized(&prepared);
+            mutate(&mut signed.unsigned_tx);
+            let err =
+                validate_burn_signed_psbt(&prepared.to_string(), &signed.to_string()).unwrap_err();
+            assert!(err.to_string().contains("changed the prepared transaction"));
+        }
+    }
+
+    #[test]
+    fn burn_rejects_unfinalized_and_empty_witnesses() {
+        let prepared = fixture();
+        for witness in [None, Some(Witness::new())] {
+            let mut signed = prepared.clone();
+            signed.inputs[0].final_script_witness = witness;
+            let err =
+                validate_burn_signed_psbt(&prepared.to_string(), &signed.to_string()).unwrap_err();
+            assert!(err.to_string().contains("did not finalize every input"));
+        }
+    }
+
+    #[test]
+    fn burn_requires_every_input_to_be_finalized() {
+        let mut prepared = fixture();
+        let mut second = prepared.unsigned_tx.input[0].clone();
+        second.previous_output.vout = 1;
+        prepared.unsigned_tx.input.push(second);
+        prepared.inputs.push(prepared.inputs[0].clone());
+        let signed = finalized(&prepared);
+        let err =
+            validate_burn_signed_psbt(&prepared.to_string(), &signed.to_string()).unwrap_err();
+        assert!(err.to_string().contains("did not finalize every input"));
+    }
+
+    #[test]
+    fn burn_rejects_malformed_psbts() {
+        let prepared = fixture().to_string();
+        assert!(validate_burn_signed_psbt(&prepared, "not a psbt").is_err());
+        assert!(validate_burn_signed_psbt("not a psbt", &prepared).is_err());
+    }
+
+    #[test]
+    fn burn_rejects_final_script_sig_that_changes_txid() {
+        let prepared = fixture();
+        let mut signed = finalized(&prepared);
+        signed.inputs[0].final_script_sig = Some(ScriptBuf::from_bytes(vec![0x51]));
+        let err =
+            validate_burn_signed_psbt(&prepared.to_string(), &signed.to_string()).unwrap_err();
+        assert!(err.to_string().contains("finalization changed"));
+    }
 }
 
 #[cfg(test)]

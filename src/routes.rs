@@ -3013,12 +3013,6 @@ pub(crate) async fn burn(
     no_cancel(async move {
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
-        if unlocked_state.external_signer_mode {
-            return Err(APIError::UnsupportedInExternalSignerMode(
-                "burn is not supported in external signer mode".to_string(),
-            ));
-        }
-
         let burn_recipient = payload
             .burn_recipient
             .map(|r| {

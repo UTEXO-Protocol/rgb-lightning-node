@@ -8,6 +8,7 @@ mod close_coop_standard;
 mod close_coop_vanilla;
 mod close_force_standard;
 mod contract_import;
+mod external_burn;
 mod external_signer;
 mod invoice;
 mod multi_hop;
