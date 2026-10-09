@@ -107,7 +107,8 @@ pub(crate) fn find_prepared_sweep(
     Ok(matching)
 }
 
-// A confirmed witness also satisfies rgb-lib's requirement that the indexer see the transaction.
+// Conservatively wait for confirmation before applying fascia. rgb-lib only requires that
+// the indexer see the transaction.
 // Consumption is driven by wallet refresh (API/SDK/ChannelReady), not a separate background job.
 // A transaction that never confirms retains its receipt and Initiated batch for operator repair.
 // Each receipt is independent; even a failed list/read/consume/remove must not abort wallet refresh.
