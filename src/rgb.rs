@@ -17,7 +17,7 @@ use rgb_lib::{
     bdk_wallet::{KeychainKind, SignOptions},
     bitcoin::psbt::Psbt as BitcoinPsbt,
     wallet::{
-        rust_only::{check_proxy_url, ColoringInfo},
+        rust_only::{check_proxy_url, ColorPrepareResult, ColoringInfo},
         AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance,
         IfaIssuanceType, Media, Metadata, Online, OperationResult, Outpoint, ReceiveData,
         Recipient, RefreshFilter, RefreshResult, RefreshedTransfer, RgbWalletOpsOffline,
@@ -492,6 +492,22 @@ impl CommonState {
         filter: Vec<RefreshFilter>,
         skip_sync: bool,
     ) -> Result<RefreshResult, RgbLibError> {
+        if self.rgb_wallet_wrapper.bitcoin_network() != BitcoinNetwork::Mainnet {
+            crate::rgb_sweep::reconcile_prepared_sweeps(
+                self.kv_store.as_ref(),
+                |txid| {
+                    self.rgb_wallet_wrapper
+                        .get_tx_height(txid)
+                        .map(|height| height.is_some())
+                        .map_err(|e| e.to_string())
+                },
+                |idx| {
+                    self.rgb_wallet_wrapper
+                        .consume_transfer_fascia(idx)
+                        .map_err(|e| e.to_string())
+                },
+            );
+        }
         self.rgb_wallet_wrapper.refresh(asset_id, filter, skip_sync)
     }
 
@@ -747,13 +763,21 @@ impl RgbLibWalletWrapper {
         self.get_rgb_wallet().consume_fascia(fascia, witness_ord)
     }
 
-    pub(crate) fn color_psbt_and_consume(
+    pub(crate) fn color_psbt_and_prepare_consume(
         &self,
         psbt_to_color: &mut BitcoinPsbt,
         coloring_info: ColoringInfo,
-    ) -> Result<Vec<RgbTransfer>, RgbLibError> {
+    ) -> Result<ColorPrepareResult, RgbLibError> {
         self.get_rgb_wallet()
-            .color_psbt_and_consume(psbt_to_color, coloring_info)
+            .color_psbt_and_prepare_consume(psbt_to_color, coloring_info, 0, None)
+    }
+
+    pub(crate) fn consume_transfer_fascia(
+        &self,
+        batch_transfer_idx: i32,
+    ) -> Result<(), RgbLibError> {
+        self.get_rgb_wallet()
+            .consume_transfer_fascia(self.online, batch_transfer_idx)
     }
 
     pub(crate) fn create_consigments(&self, psbt: String) -> Result<(), RgbLibError> {

@@ -140,8 +140,19 @@ async fn close_coop_standard() {
     assert_eq!(asset_balance_spendable(node3_addr, &asset_id).await, 10);
 
     close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    let sweep_txid =
+        crate::ldk::test_retry_prepared_rgb_sweep(test_get_app_state(node1_addr)).await;
     wait_for_balance(node1_addr, &asset_id, 890).await;
     wait_for_balance(node2_addr, &asset_id, 100).await;
+    // Receiving uses zero confirmations; explicitly confirm before checking the prepared batch.
+    mine(false);
+    refresh_transfers(node1_addr).await;
+    let sweep_transfers = list_transfers_by_txid(node1_addr, &sweep_txid).await;
+    assert!(!sweep_transfers.is_empty());
+    assert!(sweep_transfers
+        .iter()
+        .all(|t| t.status == TransferStatus::Settled));
+    assert_eq!(asset_balance(node1_addr, &asset_id).await.settled, 890);
 
     let peers = list_peers(node1_addr).await;
     assert!(peers.iter().any(|p| p.pubkey == node2_pubkey));

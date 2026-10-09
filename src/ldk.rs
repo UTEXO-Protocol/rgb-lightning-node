@@ -2089,7 +2089,13 @@ async fn handle_ldk_events(
                         AssetSchema::Uda => Assignment::NonFungible,
                     };
                     let recipient_id =
-                        recipient_id_from_script_buf(script_buf, static_state.network);
+                        match recipient_id_from_script_buf(script_buf, static_state.network) {
+                            Ok(recipient_id) => recipient_id,
+                            Err(e) => {
+                                reject_virtual_open(format!("invalid funding recipient: {e}"));
+                                return Ok(());
+                            }
+                        };
                     let recipient_map = map! {
                         asset_id.clone() => vec![Recipient {
                             recipient_id,
@@ -2387,7 +2393,17 @@ async fn handle_ldk_events(
                 };
 
                 let recipient_id =
-                    recipient_id_from_script_buf(script_buf.clone(), static_state.network);
+                    match recipient_id_from_script_buf(script_buf.clone(), static_state.network) {
+                        Ok(recipient_id) => recipient_id,
+                        Err(e) => {
+                            return handle_funding_prepare_err(
+                                e,
+                                &unlocked_state.channel_manager,
+                                &temporary_channel_id,
+                                &counterparty_node_id,
+                            );
+                        }
+                    };
 
                 let recipient_map = map! {
                     asset_id.clone() => vec![Recipient {
@@ -3479,12 +3495,13 @@ async fn handle_ldk_events(
                 hex_str(&counterparty_node_id.serialize()),
             );
 
-            tokio::task::spawn_blocking(move || {
-                unlocked_state.rgb_refresh(None, vec![], false).unwrap();
-                unlocked_state.rgb_refresh(None, vec![], true).unwrap()
+            refresh_after_channel_ready(*channel_id, move |skip_sync| {
+                unlocked_state
+                    .rgb_refresh(None, vec![], skip_sync)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             })
-            .await
-            .unwrap();
+            .await?;
         }
         Event::ChannelClosed {
             channel_id,
@@ -3800,6 +3817,29 @@ async fn handle_ldk_events(
     Ok(())
 }
 
+// Refresh is supplementary: replaying ChannelReady would block later ChannelManager events
+// on an unavailable indexer. A later API refresh/ChannelReady can retry this work.
+async fn refresh_after_channel_ready(
+    channel_id: ChannelId,
+    mut refresh: impl FnMut(bool) -> Result<(), String> + Send + 'static,
+) -> Result<(), ReplayEvent> {
+    match tokio::task::spawn_blocking(move || {
+        refresh(false)?;
+        refresh(true)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%channel_id, %error, "ChannelReady RGB refresh failed; event acknowledged")
+        }
+        Err(error) => {
+            tracing::error!(%channel_id, %error, "ChannelReady RGB refresh task failed; event acknowledged")
+        }
+    }
+    Ok(())
+}
+
 // Resolves the RGB amount a spendable output carries. An empty map is a truly vanilla tx (0);
 // a non-empty map that lacks the output is an invariant violation and must error so the sweep
 // retries rather than paying the colored output out as vanilla BTC, stranding the allocation.
@@ -3833,6 +3873,33 @@ impl RgbOutputSpender {
         let mut txes = self.txes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = txes.get(&descriptors_hash) {
             return Ok(tx.clone());
+        }
+        let sweep_key = descriptors_hash.to_string();
+        let inputs: HashSet<_> = descriptors
+            .iter()
+            .map(|d| d.spendable_outpoint().into_bitcoin_outpoint())
+            .collect();
+        // The descriptor order and batch can change between LDK attempts. Check cached
+        // transactions too: their active receipt may already have been consumed and removed.
+        for tx in txes.values() {
+            let saved: HashSet<_> = tx.input.iter().map(|i| i.previous_output).collect();
+            if saved == inputs {
+                return Ok(tx.clone());
+            }
+            if !saved.is_disjoint(&inputs) {
+                return Err("inputs overlap a previously signed sweep".into());
+            }
+        }
+        if let Some(prepared) =
+            crate::rgb_sweep::find_prepared_sweep(self.kv_store.as_ref(), &inputs)?
+        {
+            return self.finish_prepared_rgb_sweep(
+                descriptors,
+                descriptors_hash,
+                &mut txes,
+                secp_ctx,
+                prepared,
+            );
         }
 
         let mut vout = 0;
@@ -4003,17 +4070,70 @@ impl RgbOutputSpender {
         };
 
         let mut psbt = RgbLibPsbt::from_str(&psbt.to_string()).expect("valid PSBT");
-        let consignments = self
+        let prepared = self
             .rgb_wallet_wrapper
-            .color_psbt_and_consume(&mut psbt, coloring_info)
+            .color_psbt_and_prepare_consume(&mut psbt, coloring_info)
             .map_err(|e| format!("cannot color the sweep PSBT: {e}"))?;
+        let batch_transfer_idx = prepared.batch_transfer_idx;
+        let prepared = crate::rgb_sweep::PreparedRgbSweep::new(psbt.to_string(), prepared)
+            .and_then(|prepared| {
+                prepared.persist(self.kv_store.as_ref(), &sweep_key)?;
+                Ok(prepared)
+            })
+            .inspect_err(|_| {
+                // The transaction has not been signed or handed to LDK for broadcast.
+                if let Err(cleanup) =
+                    self.rgb_wallet_wrapper
+                        .fail_transfers(Some(batch_transfer_idx), false, true)
+                {
+                    tracing::error!(batch_transfer_idx, error = %cleanup,
+                        "cannot fail unpersisted RGB sweep preparation");
+                }
+            })?;
+        self.finish_prepared_rgb_sweep(descriptors, descriptors_hash, &mut txes, secp_ctx, prepared)
+    }
 
-        let mut psbt = Psbt::from_str(&psbt.to_string()).expect("valid transaction");
+    fn finish_prepared_rgb_sweep(
+        &self,
+        descriptors: &[&SpendableOutputDescriptor],
+        descriptors_hash: u64,
+        txes: &mut OutputSpenderTxes,
+        secp_ctx: &Secp256k1<All>,
+        prepared: crate::rgb_sweep::PreparedRgbSweep,
+    ) -> Result<bitcoin::Transaction, String> {
+        let mut psbt = Psbt::from_str(&prepared.psbt)
+            .map_err(|e| format!("invalid prepared sweep PSBT: {e}"))?;
+        let unsigned_tx = psbt.unsigned_tx.clone();
+        let batch_is_active = self
+            .rgb_wallet_wrapper
+            .list_transfers(
+                rgb_lib::wallet::AssetFilter::AnyOrNone,
+                Some(unsigned_tx.compute_txid().to_string()),
+            )
+            .map_err(|e| format!("cannot inspect prepared sweep: {e}"))?
+            .iter()
+            .any(|transfer| {
+                transfer.batch_transfer_idx == prepared.batch_transfer_idx
+                    && matches!(
+                        transfer.status,
+                        TransferStatus::Initiated
+                            | TransferStatus::WaitingConfirmations
+                            | TransferStatus::Settled
+                    )
+            });
+        if !batch_is_active {
+            return Err(s!(
+                "prepared RGB sweep batch is missing or no longer active"
+            ));
+        }
 
         psbt = self
             .signer
             .sign_spendable_outputs_psbt(descriptors, psbt, secp_ctx)
             .map_err(|e| format!("cannot sign the sweep PSBT: {e:?}"))?;
+        if psbt.unsigned_tx != unsigned_tx {
+            return Err(s!("signer changed the prepared RGB sweep transaction"));
+        }
 
         let spending_tx = match psbt.extract_tx() {
             Ok(tx) => tx,
@@ -4022,20 +4142,39 @@ impl RgbOutputSpender {
         };
 
         let closing_txid = spending_tx.compute_txid().to_string();
+        if closing_txid != prepared.txid()? {
+            return Err(s!("signing changed the prepared RGB sweep transaction ID"));
+        }
 
         let handle = Handle::current();
         let _ = handle.enter();
 
-        for consignment in consignments {
-            let contract_id = consignment.contract_id();
+        for (asset_id, consignment) in prepared.consignments {
+            // A retry after a failed KV write must not provide an already accepted consignment.
+            let received = self
+                .rgb_wallet_wrapper
+                .list_transfers(
+                    rgb_lib::wallet::AssetFilter::Id(asset_id.clone()),
+                    Some(closing_txid.clone()),
+                )
+                .map_err(|e| format!("cannot inspect sweep receive: {e}"))?
+                .iter()
+                .any(|transfer| {
+                    transfer.txid.as_deref() == Some(closing_txid.as_str())
+                        && transfer.kind == rgb_lib::wallet::TransferKind::ReceiveWitness
+                        && transfer.status != TransferStatus::Failed
+                        && transfer.status != TransferStatus::WaitingCounterparty
+                });
+            if received {
+                continue;
+            }
 
             // persist consignment and hand it to rgb-lib (out-of-band)
             let consignment_path = self
                 .static_state
                 .ldk_data_dir
-                .join(format!("consignment_{closing_txid}_{contract_id}"));
-            consignment
-                .save_file(&consignment_path)
+                .join(format!("consignment_{closing_txid}_{asset_id}"));
+            fs::write(&consignment_path, consignment)
                 .map_err(|e| format!("cannot save consignment: {e}"))?;
             let consignment_path_str = consignment_path.to_string_lossy().to_string();
             let rgb_wallet_wrapper_copy = self.rgb_wallet_wrapper.clone();
@@ -7031,9 +7170,149 @@ pub(crate) fn clear_rgb_payment_pending(
     }
 }
 
+// Exercise the real signer, rgb-lib batch lookup and duplicate-consignment path on a closed
+// regtest channel, before wallet refresh consumes/removes the prepared receipt.
+#[cfg(test)]
+pub(crate) async fn test_retry_prepared_rgb_sweep(state: Arc<AppState>) -> String {
+    let unlocked = state.get_unlocked_app_state().await.clone().unwrap();
+    let lightning = unlocked.lightning().unwrap().clone();
+    for _ in 0..30 {
+        // Drive the public sweeper entry point instead of waiting for the background timer.
+        lightning
+            .output_sweeper
+            .regenerate_and_broadcast_spend_if_necessary()
+            .await
+            .unwrap();
+        let state = state.clone();
+        let lightning = lightning.clone();
+        if let Some(txid) = tokio::task::spawn_blocking(move || {
+            let tracked = lightning.output_sweeper.tracked_spendable_outputs();
+            let store = lightning.kv_store.as_ref();
+            let mut txes = match store.read("", "", OUTPUT_SPENDER_TXES_KEY) {
+                Ok(bytes) => OutputSpenderTxes::read(&mut &bytes[..]).unwrap(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+                Err(e) => panic!("cannot inspect sweep tx cache: {e}"),
+            };
+            for key in store.list("rgb_sweeps", "").unwrap() {
+                let raw = store.read("rgb_sweeps", "", &key).unwrap();
+                let prepared: crate::rgb_sweep::PreparedRgbSweep =
+                    bincode::deserialize(&raw).unwrap();
+                let txid = prepared.txid().unwrap();
+                let Some(original) = txes
+                    .values()
+                    .find(|tx| tx.compute_txid().to_string() == txid)
+                    .cloned()
+                else {
+                    continue;
+                };
+                let mut descriptors: Vec<_> = tracked
+                    .iter()
+                    .filter(|o| {
+                        original.input.iter().any(|i| {
+                            i.previous_output
+                                == o.descriptor.spendable_outpoint().into_bitcoin_outpoint()
+                        })
+                    })
+                    .map(|o| &o.descriptor)
+                    .collect();
+                assert_eq!(descriptors.len(), original.input.len());
+                descriptors.reverse();
+                let spender = RgbOutputSpender {
+                    static_state: state.static_state.clone(),
+                    rgb_wallet_wrapper: lightning.rgb_wallet_wrapper.clone(),
+                    signer: lightning.signer.clone(),
+                    kv_store: lightning.kv_store.clone(),
+                    txes: Arc::new(Mutex::new(txes.clone())),
+                    sweep_recipients: Arc::new(Mutex::new(HashMap::new())),
+                };
+                let lookup = || {
+                    lightning
+                        .rgb_wallet_wrapper
+                        .list_transfers(rgb_lib::wallet::AssetFilter::AnyOrNone, Some(txid.clone()))
+                        .unwrap()
+                };
+                let before = lookup();
+                let retried = spender
+                    .finish_prepared_rgb_sweep(
+                        &descriptors,
+                        key.parse().unwrap(),
+                        &mut txes,
+                        &Secp256k1::new(),
+                        prepared,
+                    )
+                    .unwrap();
+                assert_eq!(retried.compute_txid(), original.compute_txid());
+                assert_eq!(
+                    lookup().len(),
+                    before.len(),
+                    "retry must not create another receive"
+                );
+                let mut missing_batch: crate::rgb_sweep::PreparedRgbSweep =
+                    bincode::deserialize(&raw).unwrap();
+                missing_batch.batch_transfer_idx = i32::MAX;
+                assert!(spender
+                    .finish_prepared_rgb_sweep(
+                        &descriptors,
+                        key.parse().unwrap(),
+                        &mut txes,
+                        &Secp256k1::new(),
+                        missing_batch
+                    )
+                    .unwrap_err()
+                    .contains("no longer active"));
+                return Some(txid);
+            }
+            None
+        })
+        .await
+        .unwrap()
+        {
+            return txid;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    panic!("no completed RGB sweep preparation available to retry");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn channel_ready_acknowledges_refresh_errors_and_join_errors() {
+        for fail_at in [false, true] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let seen = calls.clone();
+            let result = refresh_after_channel_ready(ChannelId([1; 32]), move |skip_sync| {
+                seen.lock().unwrap().push(skip_sync);
+                if skip_sync == fail_at {
+                    Err("indexer offline".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
+            assert!(
+                result.is_ok(),
+                "refresh errors must not replay ChannelReady"
+            );
+            assert_eq!(
+                *calls.lock().unwrap(),
+                if fail_at {
+                    vec![false, true]
+                } else {
+                    vec![false]
+                }
+            );
+        }
+        // A worker panic becomes JoinError. The handler must not unwrap it or request replay.
+        // The daemon's separate global panic policy is intentionally unchanged.
+        assert!(
+            refresh_after_channel_ready(ChannelId([1; 32]), |_| panic!("worker failed"))
+                .await
+                .is_ok()
+        );
+    }
 
     // `chain.indexer_url` is the whole reason the unlock request keeps `indexer_url` optional
     // instead of adopting upstream's mandatory field, so the layering itself is pinned here.
