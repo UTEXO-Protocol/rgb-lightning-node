@@ -57,9 +57,9 @@ impl PreparedRgbSweep {
     }
 }
 
-// Reuse the prepared transaction even if LDK reorders its descriptors. An overlapping batch
-// must finish before a larger/different batch can be prepared. Unknown inputs cannot safely
-// authorize a new preparation, but must not prevent retrying an already known transaction.
+// Match input outpoints because LDK can reorder descriptors between attempts. Reuse an exact
+// input set; reject partial overlaps until the existing sweep is resolved. Unreadable records
+// block new preparations but allow retrying a known matching transaction.
 pub(crate) fn find_prepared_sweep(
     store: &impl KVStoreSync,
     inputs: &HashSet<bitcoin::OutPoint>,
