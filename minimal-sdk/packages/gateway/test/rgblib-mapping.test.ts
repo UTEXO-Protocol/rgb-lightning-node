@@ -215,6 +215,7 @@ describe('mapUnspents', () => {
           outpoint: { txid: 'txid-1', vout: 2 },
           btcAmount: 998,
           colorable: true,
+          exists: true,
         },
         pendingBlinded: 1,
         rgbAllocations: [
@@ -229,6 +230,7 @@ describe('mapUnspents', () => {
         vout: 2,
         amountSat: 998,
         colorable: true,
+        exists: true,
         pendingBlinded: 1,
         allocations: [
           {
@@ -253,6 +255,8 @@ describe('mapUnspents', () => {
       { utxo: { outpoint: { txid: 't', vout: 0 }, btcAmount: 1, colorable: false } },
     ]);
     expect(unspent?.pendingBlinded).toBe(0);
+    // Absent `exists` must read as false, never as an optimistic true.
+    expect(unspent?.exists).toBe(false);
   });
 
   it('returns an empty list for a non-array payload', () => {

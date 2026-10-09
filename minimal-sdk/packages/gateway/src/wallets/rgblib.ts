@@ -23,6 +23,7 @@ import {
   type SendAssetBeginRequest,
   type UnspentAllocation,
   type WalletAsset,
+  type AssetSendResult,
   type WalletBackend,
   type WalletBtcBalance,
   type WalletHandle,
@@ -334,6 +335,7 @@ export function mapUnspents(raw: unknown): WalletUnspent[] {
       vout: safeIntegerOrZero(outpoint['vout'], 'unspent vout'),
       amountSat: safeIntegerOrZero(utxo['btcAmount'], 'unspent btcAmount'),
       colorable: utxo['colorable'] === true,
+      exists: utxo['exists'] === true,
       // Blind receives already promised against this UTXO. A client choosing
       // inputs or counting free allocation slots cannot do it from
       // `allocations` alone: a pending blind receive reserves a slot without
@@ -591,18 +593,23 @@ class NativeWalletHandle implements WalletHandle {
     return psbt;
   }
 
-  async sendAssetEnd(signedPsbt: string): Promise<string> {
+  async sendAssetEnd(signedPsbt: string): Promise<AssetSendResult> {
     const raw = this.call('sendAssetEnd', () =>
       JSON.parse(this.lib.rgblib_send_end(this.wallet, this.online, signedPsbt, false)),
     ) as Record<string, unknown>;
     const txid = stringOrNull(raw['txid']);
-    if (txid === null) {
+    // rgb-lib's OperationResult always carries both; a response missing either
+    // is shape drift, and a transfer a client cannot address is not a success.
+    if (txid === null || typeof raw['batchTransferIdx'] !== 'number') {
       throw new WalletBackendError(
         'wallet sendAssetEnd failed',
         `unexpected send result shape: ${Object.keys(raw).join(',')}`,
       );
     }
-    return txid;
+    return {
+      txid,
+      batchTransferIdx: safeInteger(raw['batchTransferIdx'], 'send batchTransferIdx'),
+    };
   }
 
   async createUtxosBegin(params: CreateUtxosParams): Promise<string> {

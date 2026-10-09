@@ -1,5 +1,6 @@
 /** Configurable in-memory wallet backend for unit tests. */
 import type {
+  AssetSendResult,
   CreateUtxosParams,
   ReceiveData,
   ReceiveRequest,
@@ -26,6 +27,7 @@ export interface MockWalletData {
   preparedPsbt?: string;
   sendBtcTxid?: string;
   sendAssetTxid?: string;
+  sendAssetBatchTransferIdx?: number;
   utxosCreated?: number;
 }
 
@@ -120,10 +122,13 @@ export class MockWalletHandle implements WalletHandle {
     });
   }
 
-  sendAssetEnd(signedPsbt: string): Promise<string> {
+  sendAssetEnd(signedPsbt: string): Promise<AssetSendResult> {
     return this.op('sendAssetEnd', () => {
       this.lastSignedPsbt = signedPsbt;
-      return this.data.sendAssetTxid ?? 'mock-asset-txid';
+      return {
+        txid: this.data.sendAssetTxid ?? 'mock-asset-txid',
+        batchTransferIdx: this.data.sendAssetBatchTransferIdx ?? 7,
+      };
     });
   }
 

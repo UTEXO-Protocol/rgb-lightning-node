@@ -226,8 +226,16 @@ export const sendAssetCompleteRouteSchema = {
   response: {
     200: {
       type: 'object',
-      properties: { txid: { type: 'string' } },
-      required: ['txid'],
+      properties: {
+        txid: { type: 'string' },
+        /**
+         * rgb-lib's batch transfer index for the transfer this created. refresh,
+         * fail and delete address a transfer by this, not by its txid, so a
+         * client cannot manage what it just sent without it.
+         */
+        batchTransferIdx: { type: ['integer', 'null'] },
+      },
+      required: ['txid', 'batchTransferIdx'],
       additionalProperties: false,
     },
     ...completeErrorResponses,

@@ -68,6 +68,11 @@ export interface CompletedOp {
   txid: string | null;
   /** Only set for create-utxos completions. */
   utxosCreated: number | null;
+  /**
+   * Only set for send-asset completions: rgb-lib's batch transfer index, which
+   * is how refresh, fail and delete address the transfer this created.
+   */
+  batchTransferIdx: number | null;
 }
 
 /**
@@ -437,8 +442,9 @@ export class OnchainService {
 
     let txid: string | null = null;
     let utxosCreated: number | null = null;
+    let batchTransferIdx: number | null = null;
     try {
-      ({ txid, utxosCreated } = await this.runEnd(identity, kind, signedPsbt));
+      ({ txid, utxosCreated, batchTransferIdx } = await this.runEnd(identity, kind, signedPsbt));
     } catch (error) {
       if (error instanceof WalletBackendError) {
         if (error.insufficientFunds) {
@@ -483,7 +489,7 @@ export class OnchainService {
     }
 
     this.settleCompleted(opId, kind, userId, txid, now);
-    return { txid, utxosCreated };
+    return { txid, utxosCreated, batchTransferIdx };
   }
 
   /**
@@ -499,17 +505,20 @@ export class OnchainService {
   ): Promise<CompletedOp> {
     let txid: string | null = null;
     let utxosCreated: number | null = null;
+    let batchTransferIdx: number | null = null;
     await this.pool.withWallet(identity, async (wallet) => {
       if (kind === 'send_btc') {
         txid = await wallet.sendBtcEnd(signedPsbt);
       } else if (kind === 'send_asset') {
-        txid = await wallet.sendAssetEnd(signedPsbt);
+        const sent = await wallet.sendAssetEnd(signedPsbt);
+        txid = sent.txid;
+        batchTransferIdx = sent.batchTransferIdx;
       } else {
         utxosCreated = await wallet.createUtxosEnd(signedPsbt);
         txid = txidFromPsbt(signedPsbt);
       }
     });
-    return { txid, utxosCreated };
+    return { txid, utxosCreated, batchTransferIdx };
   }
 
   /** Terminal bookkeeping for a finished op; shared with the worker. */

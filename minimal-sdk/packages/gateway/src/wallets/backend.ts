@@ -67,6 +67,12 @@ export interface WalletUnspent {
   vout: number;
   amountSat: number;
   colorable: boolean;
+  /**
+   * Whether the transaction creating this UTXO has been broadcast. A client
+   * selecting inputs or counting spendable value cannot infer this from the
+   * other fields, and must not guess it.
+   */
+  exists: boolean;
   /** Blind receives already promised against this UTXO (reserved slots). */
   pendingBlinded: number;
   allocations: UnspentAllocation[];
@@ -122,6 +128,12 @@ export interface SendAssetBeginRequest {
   expirationTimestamp: number;
 }
 
+export interface AssetSendResult {
+  txid: string;
+  /** rgb-lib's batch transfer index for the created transfer. */
+  batchTransferIdx: number;
+}
+
 export interface CreateUtxosParams {
   upTo: boolean;
   num: number;
@@ -146,8 +158,14 @@ export interface WalletHandle {
   sendBtcEnd(signedPsbt: string): Promise<string>;
   /** Prepare an unsigned asset-send PSBT (opret commitment already embedded). */
   sendAssetBegin(request: SendAssetBeginRequest): Promise<string>;
-  /** Post consignment + broadcast a signed asset-send PSBT; returns the txid. */
-  sendAssetEnd(signedPsbt: string): Promise<string>;
+  /**
+   * Post consignment + broadcast a signed asset-send PSBT.
+   *
+   * The batch transfer index comes back with the txid because rgb-lib keys
+   * refresh, fail and delete by it — a client that only receives a txid cannot
+   * address the transfer it just created.
+   */
+  sendAssetEnd(signedPsbt: string): Promise<AssetSendResult>;
   /** Prepare an unsigned PSBT creating colorable UTXOs. */
   createUtxosBegin(params: CreateUtxosParams): Promise<string>;
   /** Broadcast a signed create-utxos PSBT; returns how many UTXOs were created. */

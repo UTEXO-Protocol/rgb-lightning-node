@@ -374,6 +374,7 @@ describe('wallet routes', () => {
             vout: 1,
             amountSat: 9999,
             colorable: true,
+            exists: true,
             pendingBlinded: 2,
             allocations: [
               {
@@ -400,6 +401,7 @@ describe('wallet routes', () => {
         vout: 1,
         amountSat: 9999,
         colorable: true,
+        exists: true,
         pendingBlinded: 2,
         allocations: [
           {

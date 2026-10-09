@@ -43,8 +43,14 @@ export function registerOnchainRoutes(app: FastifyInstance): void {
       const userId = request.userId as string;
       const { opId, signedPsbt } = request.body as CompleteBody;
       return app.queues.enqueue(userId, async () => {
-        const { txid, utxosCreated } = await app.onchain.complete(userId, kind, opId, signedPsbt);
-        return kind === 'create_utxos' ? { txid, utxosCreated } : { txid };
+        const completed = await app.onchain.complete(userId, kind, opId, signedPsbt);
+        if (kind === 'create_utxos') {
+          return { txid: completed.txid, utxosCreated: completed.utxosCreated };
+        }
+        if (kind === 'send_asset') {
+          return { txid: completed.txid, batchTransferIdx: completed.batchTransferIdx };
+        }
+        return { txid: completed.txid };
       });
     });
   };

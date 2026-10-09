@@ -481,7 +481,10 @@ describe('on-chain prepare/complete routes', () => {
       const { opId } = (await prepareSendAsset()).json();
       const response = await complete('send-asset', opId);
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ txid: 'mock-asset-txid' });
+      // The batch transfer index travels with the txid: rgb-lib keys refresh,
+      // fail and delete by it, so a client cannot manage what it just sent
+      // without it.
+      expect(response.json()).toEqual({ txid: 'mock-asset-txid', batchTransferIdx: 7 });
       const owned = app.db
         .prepare('SELECT user_id, state FROM resource_map WHERE kind = ? AND resource_id = ?')
         .get('asset_transfer', 'mock-asset-txid') as { user_id: string; state: string };

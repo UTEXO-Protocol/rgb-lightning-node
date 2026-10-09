@@ -165,6 +165,8 @@ export const walletUnspentsRouteSchema = {
               vout: { type: 'integer' },
               amountSat: { type: 'number' },
               colorable: { type: 'boolean' },
+              /** True once the transaction creating this UTXO has been broadcast. */
+              exists: { type: 'boolean' },
               /**
                * Blind receives already promised against this UTXO. A client
                * counting free allocation slots cannot derive this from
@@ -187,7 +189,15 @@ export const walletUnspentsRouteSchema = {
                 },
               },
             },
-            required: ['txid', 'vout', 'amountSat', 'colorable', 'pendingBlinded', 'allocations'],
+            required: [
+              'txid',
+              'vout',
+              'amountSat',
+              'colorable',
+              'exists',
+              'pendingBlinded',
+              'allocations',
+            ],
             additionalProperties: false,
           },
         },
