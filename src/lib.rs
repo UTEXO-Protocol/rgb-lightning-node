@@ -54,6 +54,7 @@ mod node_info;
 mod rgb;
 mod rgb_file_transfer;
 mod rgb_import;
+mod rgb_sweep;
 mod routes;
 mod runtime;
 mod sdk;

@@ -584,7 +584,8 @@ async fn mainnet_rgb_invoice_decoding_and_onchain_requirements_are_unchanged() {
     let recipient = rgb_lib::utils::recipient_id_from_script_buf(
         ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([1; 20])),
         BitcoinNetwork::Mainnet,
-    );
+    )
+    .unwrap();
     let invoice = format!("rgb:~/~/~/{recipient}");
     let decoded = sdk::decode_rgb_invoice(fixture.state.clone(), invoice.clone())
         .await
