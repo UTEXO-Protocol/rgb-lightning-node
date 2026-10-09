@@ -20,6 +20,7 @@ use bitcoin::{io, Amount, Network};
 use bitcoin::{BlockHash, TxOut};
 use bitcoin_bech32::WitnessProgram;
 use hex::DisplayHex;
+use lightning::chain::chaininterface::ConfirmationTarget;
 #[cfg(feature = "transaction-sync")]
 use lightning::chain::Confirm;
 use lightning::chain::{chainmonitor, transaction::OutPoint, ChannelMonitorUpdateStatus};
@@ -2009,6 +2010,7 @@ async fn handle_ldk_events(
     event: Event,
     unlocked_state: Arc<LightningState>,
     static_state: Arc<StaticState>,
+    fee_estimator: Arc<DynFeeEstimator>,
 ) -> Result<(), ReplayEvent> {
     match event {
         Event::FundingGenerationReady {
@@ -2377,6 +2379,11 @@ async fn handle_ldk_events(
                 return Ok(());
             }
 
+            // 1 sat/vB = 250 sat/kWu
+            let fee_rate_sat_per_vb = fee_estimator
+                .get_est_sat_per_1000_weight(ConfirmationTarget::OutputSpendingFee)
+                as u64
+                / 250;
             let (unsigned_psbt, asset_id) = if is_colored {
                 let rgb_info = get_rgb_channel_info_pending(
                     &temporary_channel_id,
@@ -2416,7 +2423,6 @@ async fn handle_ldk_events(
                         transport_endpoints: vec![]
                 }]};
 
-                let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
                 let min_channel_confirmations = unlocked_state.config.rgb.min_channel_confirmations;
                 let unlocked_state_copy = unlocked_state.clone();
                 let res = tokio::task::spawn_blocking(
@@ -2424,7 +2430,7 @@ async fn handle_ldk_events(
                         let res = unlocked_state_copy.rgb_send_begin(
                             recipient_map,
                             true,
-                            fee_rate_sat_vb,
+                            fee_rate_sat_per_vb,
                             min_channel_confirmations,
                             get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS,
                             false,
@@ -2480,7 +2486,7 @@ async fn handle_ldk_events(
                 let raw_psbt = match unlocked_state.rgb_send_btc_begin(
                     addr.to_address(),
                     channel_value_satoshis,
-                    unlocked_state.config.rgb.fee_rate_sat_vb,
+                    fee_rate_sat_per_vb,
                 ) {
                     Ok(psbt) => psbt,
                     Err(e) => {
@@ -4040,7 +4046,6 @@ impl RgbOutputSpender {
                 .map_err(|()| s!("cannot spend vanilla spendable outputs"));
         }
 
-        let feerate_sat_per_1000_weight = self.static_state.config.rgb.fee_rate_sat_vb as u32 * 250; // 1 sat/vB = 250 sat/kw
         let (psbt, _expected_max_weight) =
             SpendableOutputDescriptor::create_spendable_outputs_psbt(
                 secp_ctx,
@@ -6489,6 +6494,7 @@ async fn start_lightning(
         common: Arc::clone(&common),
         channel_manager: Arc::clone(&channel_manager),
         gossip_source: Arc::clone(&gossip_source),
+        fee_estimator: Arc::clone(&fee_estimator),
         inbound_payments,
         network_graph,
         chain_monitor: chain_monitor.clone(),
@@ -6548,7 +6554,10 @@ async fn start_lightning(
     let event_handler = move |event: Event| {
         let unlocked_state_copy = Arc::clone(&unlocked_state_copy);
         let static_state_copy = Arc::clone(&static_state_copy);
-        async move { handle_ldk_events(event, unlocked_state_copy, static_state_copy).await }
+        let fee_estimator = Arc::clone(&fee_estimator);
+        async move {
+            handle_ldk_events(event, unlocked_state_copy, static_state_copy, fee_estimator).await
+        }
     };
 
     // Background Processing

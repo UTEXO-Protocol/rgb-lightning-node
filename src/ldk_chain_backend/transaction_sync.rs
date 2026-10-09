@@ -480,6 +480,7 @@ fn poll_electrum_fee_estimates(
 
                     store_fee_estimates(
                         &fees,
+                        &logger,
                         background_estimate,
                         normal_estimate,
                         high_prio_estimate,
@@ -529,6 +530,7 @@ fn poll_esplora_fee_estimates(
 
                     store_fee_estimates(
                         &fees,
+                        &logger,
                         background_estimate,
                         normal_estimate,
                         high_prio_estimate,

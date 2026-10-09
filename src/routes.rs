@@ -14,6 +14,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf};
 use hex::DisplayHex;
+use lightning::chain::chaininterface::ConfirmationTarget;
 use lightning::ln::{channelmanager::OptionalOfferPaymentParams, types::ChannelId};
 use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
@@ -616,7 +617,8 @@ pub(crate) struct CreateUtxosRequest {
     pub(crate) up_to: bool,
     pub(crate) num: Option<u8>,
     pub(crate) size: Option<u32>,
-    pub(crate) fee_rate: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fee_rate: Option<u64>,
     pub(crate) skip_sync: bool,
 }
 
@@ -706,6 +708,16 @@ pub(crate) struct EstimateFeeRequest {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct EstimateFeeResponse {
     pub(crate) fee_rate: f64,
+    pub(crate) fee_rates: FeeRates,
+}
+
+// sat/kWu, as held in the `FeeEstimator` by the chain backend poll loops
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct FeeRates {
+    pub(crate) background: u32,
+    pub(crate) normal: u32,
+    pub(crate) high_prio: u32,
+    pub(crate) very_high_prio: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -808,7 +820,8 @@ pub(crate) struct BurnResponse {
 pub(crate) struct InflateRequest {
     pub(crate) asset_id: String,
     pub(crate) inflation_amounts: Vec<u64>,
-    pub(crate) fee_rate: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fee_rate: Option<u64>,
     pub(crate) min_confirmations: u8,
 }
 
@@ -1410,7 +1423,8 @@ pub(crate) struct RgbInvoiceResponse {
 pub(crate) struct SendBtcRequest {
     pub(crate) amount: u64,
     pub(crate) address: String,
-    pub(crate) fee_rate: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fee_rate: Option<u64>,
     pub(crate) skip_sync: bool,
 }
 
@@ -1445,7 +1459,8 @@ pub(crate) struct SendPaymentResponse {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct SendRgbRequest {
     pub(crate) donation: bool,
-    pub(crate) fee_rate: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fee_rate: Option<u64>,
     pub(crate) min_confirmations: u8,
     #[serde(default = "default_expiration_timestamp")]
     pub(crate) expiration_timestamp: u64,
@@ -2598,6 +2613,10 @@ pub(crate) async fn create_utxos(
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
 
+        let fee_rate = unlocked_state
+            .lightning()?
+            .resolve_fee_sat_per_vb(payload.fee_rate);
+
         let num = payload.num.unwrap_or(unlocked_state.config.rgb.utxo_num);
         let size = payload
             .size
@@ -2607,7 +2626,7 @@ pub(crate) async fn create_utxos(
                 payload.up_to,
                 num,
                 size,
-                payload.fee_rate,
+                fee_rate,
                 payload.skip_sync,
             )?;
             let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).map_err(|e| {
@@ -2620,7 +2639,7 @@ pub(crate) async fn create_utxos(
                 payload.up_to,
                 num,
                 size,
-                payload.fee_rate,
+                fee_rate,
                 payload.skip_sync,
             )?;
         }
@@ -2757,14 +2776,27 @@ pub(crate) async fn estimate_fee(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<EstimateFeeRequest>, APIError>,
 ) -> Result<Json<EstimateFeeResponse>, APIError> {
-    let fee_rate = state
-        .check_unlocked()
-        .await?
-        .clone()
-        .unwrap()
-        .rgb_get_fee_estimation(payload.blocks)?;
+    let unlocked = state.check_unlocked().await?.clone().unwrap();
+    let fee_rate = unlocked.rgb_get_fee_estimation(payload.blocks)?;
 
-    Ok(Json(EstimateFeeResponse { fee_rate }))
+    // mirror the targets the chain backend poll loops write into
+    let lightning_state = unlocked.lightning()?;
+    let est = |target| {
+        lightning_state
+            .fee_estimator
+            .get_est_sat_per_1000_weight(target)
+    };
+    let fee_rates = FeeRates {
+        background: est(ConfirmationTarget::OutputSpendingFee),
+        normal: est(ConfirmationTarget::NonAnchorChannelFee),
+        high_prio: est(ConfirmationTarget::UrgentOnChainSweep),
+        very_high_prio: est(ConfirmationTarget::MaximumFeeEstimate),
+    };
+
+    Ok(Json(EstimateFeeResponse {
+        fee_rate,
+        fee_rates,
+    }))
 }
 
 pub(crate) async fn fail_transfers(
@@ -3055,12 +3087,16 @@ pub(crate) async fn inflate(
             ));
         }
 
+        let fee_rate = unlocked_state
+            .lightning()?
+            .resolve_fee_sat_per_vb(payload.fee_rate);
+
         let unlocked_state_copy = unlocked_state.clone();
         let inflate_result = tokio::task::spawn_blocking(move || {
             unlocked_state_copy.rgb_inflate(
                 payload.asset_id,
                 payload.inflation_amounts,
-                payload.fee_rate,
+                fee_rate,
                 payload.min_confirmations,
             )
         })
@@ -5200,12 +5236,13 @@ pub(crate) async fn send_btc(
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
 
+        let fee_rate = unlocked_state
+            .lightning()?
+            .resolve_fee_sat_per_vb(payload.fee_rate);
+
         let txid = if unlocked_state.external_signer_mode {
-            let unsigned_psbt = unlocked_state.rgb_send_btc_begin(
-                payload.address,
-                payload.amount,
-                payload.fee_rate,
-            )?;
+            let unsigned_psbt =
+                unlocked_state.rgb_send_btc_begin(payload.address, payload.amount, fee_rate)?;
             let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).map_err(|e| {
                 tracing::error!("rgb_sign_psbt failed during send_btc (PSBT path): {e}");
                 APIError::from(e)
@@ -5215,7 +5252,7 @@ pub(crate) async fn send_btc(
             unlocked_state.rgb_send_btc(
                 payload.address,
                 payload.amount,
-                payload.fee_rate,
+                fee_rate,
                 payload.skip_sync,
             )?
         };
@@ -5559,6 +5596,10 @@ pub(crate) async fn send_rgb(
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
 
+        let fee_rate = unlocked_state
+            .lightning()?
+            .resolve_fee_sat_per_vb(payload.fee_rate);
+
         let recipient_map: HashMap<String, Vec<RgbLibRecipient>> = payload
             .recipient_map
             .into_iter()
@@ -5573,7 +5614,7 @@ pub(crate) async fn send_rgb(
                 unlocked_state_copy.rgb_send_begin(
                     recipient_map,
                     payload.donation,
-                    payload.fee_rate,
+                    fee_rate,
                     payload.min_confirmations,
                     payload.expiration_timestamp,
                     false,
@@ -5602,7 +5643,7 @@ pub(crate) async fn send_rgb(
                 unlocked_state_copy.rgb_send(
                     recipient_map,
                     payload.donation,
-                    payload.fee_rate,
+                    fee_rate,
                     payload.min_confirmations,
                     payload.expiration_timestamp,
                 )
