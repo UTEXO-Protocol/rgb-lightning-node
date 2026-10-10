@@ -87,6 +87,9 @@ async fn issue() {
     )
     .await;
 
+    // An empty digest must fail closed before touching the filesystem
+    // (previously it reached the media dir itself and errored with
+    // "Is a directory").
     let payload = GetAssetMediaRequest { digest: s!("") };
     let res = reqwest::Client::new()
         .post(format!("http://{node1_addr}/getassetmedia"))
@@ -96,9 +99,40 @@ async fn issue() {
         .unwrap();
     check_response_is_nok(
         res,
-        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-        "IO error: Is a directory (os error 21)",
-        "IO",
+        reqwest::StatusCode::BAD_REQUEST,
+        "Invalid media digest",
+        "InvalidMediaDigest",
     )
     .await;
+
+    // Path traversal vectors must be rejected before Path::join:
+    // a digest is only ever a 64-char SHA-256 hex string.
+    for digest in [
+        s!("../../../etc/passwd"),
+        s!("..\\..\\windows\\system32\\config\\sam"),
+        s!("/etc/passwd"),
+        s!("/proc/self/environ"),
+        s!("../../../../../../"),
+        // 64 chars but not hex (must not be confused with a real digest)
+        s!("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"),
+        // valid hex but wrong length
+        s!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    ] {
+        let payload = GetAssetMediaRequest {
+            digest: digest.to_string(),
+        };
+        let res = reqwest::Client::new()
+            .post(format!("http://{node1_addr}/getassetmedia"))
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        check_response_is_nok(
+            res,
+            reqwest::StatusCode::BAD_REQUEST,
+            "Invalid media digest",
+            "InvalidMediaDigest",
+        )
+        .await;
+    }
 }
