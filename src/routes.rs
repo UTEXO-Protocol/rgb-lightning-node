@@ -102,12 +102,13 @@ use crate::ldk::{node_override_matches, FORCE_PUSH_ASSET_AMOUNT_ON_NODE};
 use crate::signer::read_key_source_file;
 use crate::swap::{SwapData, SwapInfo, SwapString};
 use crate::utils::{
-    check_already_initialized, check_channel_id, check_password_strength, check_password_validity,
-    description_from_invoice, description_hash_from_invoice, encrypt_and_save_mnemonic,
-    get_max_local_rgb_amount, get_route, hex_str, hex_str_to_compressed_pubkey, hex_str_to_vec,
-    invoice_description_from_request, is_external_signer_mode_configured, new_jsonrpc_request_id,
-    open_database_pool, validate_and_parse_payment_hash, validate_and_parse_payment_preimage,
-    UnlockedAppState, UserOnionMessageContents,
+    check_already_initialized, check_channel_id, check_media_digest, check_password_strength,
+    check_password_validity, description_from_invoice, description_hash_from_invoice,
+    encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_route, hex_str,
+    hex_str_to_compressed_pubkey, hex_str_to_vec, invoice_description_from_request,
+    is_external_signer_mode_configured, new_jsonrpc_request_id, open_database_pool,
+    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, UnlockedAppState,
+    UserOnionMessageContents,
 };
 use crate::{
     backup::{do_backup, install_backup, unpack_backup},
@@ -2795,13 +2796,14 @@ pub(crate) async fn get_asset_media(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<GetAssetMediaRequest>, APIError>,
 ) -> Result<Json<GetAssetMediaResponse>, APIError> {
+    let digest = check_media_digest(&payload.digest)?;
     let file_path = state
         .check_unlocked()
         .await?
         .clone()
         .unwrap()
         .rgb_get_media_dir()
-        .join(payload.digest.to_lowercase());
+        .join(digest);
     if !file_path.exists() {
         return Err(APIError::InvalidMediaDigest);
     }
@@ -3210,13 +3212,19 @@ pub(crate) async fn issue_asset_cfa(
             ));
         }
 
-        let file_path = payload.file_digest.map(|d: String| {
-            unlocked_state
-                .rgb_get_media_dir()
-                .join(d.to_lowercase())
-                .to_string_lossy()
-                .to_string()
-        });
+        let file_path = match payload.file_digest {
+            Some(d) => {
+                let digest = check_media_digest(&d)?;
+                Some(
+                    unlocked_state
+                        .rgb_get_media_dir()
+                        .join(digest)
+                        .to_string_lossy()
+                        .to_string(),
+                )
+            }
+            None => None,
+        };
 
         let asset = unlocked_state.rgb_issue_asset_cfa(
             payload.name,
@@ -3304,18 +3312,18 @@ pub(crate) async fn issue_asset_uda(
         }
 
         let rgb_media_dir = unlocked_state.rgb_get_media_dir();
-        let get_string_path = |d: String| {
-            rgb_media_dir
-                .join(d.to_lowercase())
-                .to_string_lossy()
-                .to_string()
+        let media_file_path = match payload.media_file_digest {
+            Some(d) => {
+                let digest = check_media_digest(&d)?;
+                Some(rgb_media_dir.join(digest).to_string_lossy().to_string())
+            }
+            None => None,
         };
-        let media_file_path = payload.media_file_digest.map(get_string_path);
-        let attachments_file_paths = payload
-            .attachments_file_digests
-            .into_iter()
-            .map(get_string_path)
-            .collect();
+        let mut attachments_file_paths = Vec::new();
+        for d in payload.attachments_file_digests {
+            let digest = check_media_digest(&d)?;
+            attachments_file_paths.push(rgb_media_dir.join(digest).to_string_lossy().to_string());
+        }
 
         let asset = unlocked_state.rgb_issue_asset_uda(
             payload.ticker,
