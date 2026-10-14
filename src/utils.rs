@@ -548,6 +548,21 @@ pub(crate) fn check_channel_id(channel_id_str: &str) -> Result<ChannelId, APIErr
     }
 }
 
+/// Media digests are SHA-256 hashes (64 hex chars) computed by
+/// `post_asset_media`. Validate the shape before joining a digest
+/// into the media dir: `Path::join` replaces the base on absolute
+/// inputs and follows `..` segments, so an unvalidated digest would
+/// let a caller read (or embed into an asset) any file the daemon
+/// user can access. Same fail-closed pattern as
+/// `validate_consignment_lookup` in `routes.rs`.
+pub(crate) fn check_media_digest(digest: &str) -> Result<String, APIError> {
+    let normalized = digest.to_lowercase();
+    match hex_str_to_vec(&normalized) {
+        Some(digest_bytes) if digest_bytes.len() == 32 => Ok(normalized),
+        _ => Err(APIError::InvalidMediaDigest),
+    }
+}
+
 pub(crate) fn check_port_is_available(port: u16) -> Result<(), AppError> {
     if TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).is_ok() {
         return Err(AppError::UnavailablePort(port));
