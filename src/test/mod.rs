@@ -72,24 +72,25 @@ use crate::routes::{
     Channel, ChannelStatus, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest,
     ConnectPeerRequest, CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse,
     DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse, DecodeSwapstringRequest,
-    DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
-    FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
-    GetChannelIdResponse, GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest,
-    GetPaymentResponse, GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse,
-    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
-    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse,
-    IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse,
-    KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest,
-    ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse, ListPeersResponse,
-    ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest,
-    ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
-    MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
-    OpenChannelResponse, Payment, PaymentDirection, PaymentType, Peer, PostAssetMediaResponse,
-    ProvideOutOfBandAckRequest, ProvideOutOfBandAckResponse, ProvideOutOfBandConsignmentResponse,
-    Recipient, RefreshRequest, RefreshResponse, RestoreRequest, RevokeTokenRequest,
-    RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
-    SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest, Transaction,
-    Transfer, TransferKind, TransferStatus, UnlockRequest, Unspent, WitnessData,
+    DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, EstimateFeeRequest,
+    EstimateFeeResponse, FailTransfersRequest, FailTransfersResponse, GetAssetMediaRequest,
+    GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse, GetConsignmentRequest,
+    GetConsignmentResponse, GetPaymentRequest, GetPaymentResponse, GetSwapRequest, GetSwapResponse,
+    InflateRequest, InflateResponse, InitRequest, InitResponse, InvoiceStatus,
+    InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest, IssueAssetCFAResponse,
+    IssueAssetIFARequest, IssueAssetIFAResponse, IssueAssetNIARequest, IssueAssetNIAResponse,
+    IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest,
+    LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse, ListChannelsResponse,
+    ListPaymentsResponse, ListPeersResponse, ListSwapsResponse, ListTransactionsRequest,
+    ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse, ListUnspentsRequest,
+    ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest, MakerInitResponse,
+    NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment,
+    PaymentDirection, PaymentType, Peer, PostAssetMediaResponse, ProvideOutOfBandAckRequest,
+    ProvideOutOfBandAckResponse, ProvideOutOfBandConsignmentResponse, Recipient, RefreshRequest,
+    RefreshResponse, RestoreRequest, RevokeTokenRequest, RgbInvoiceRequest, RgbInvoiceResponse,
+    SendBtcRequest, SendBtcResponse, SendPaymentRequest, SendPaymentResponse, SendRgbRequest,
+    SendRgbResponse, Swap, TakerRequest, Transaction, Transfer, TransferKind, TransferStatus,
+    UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,
@@ -995,7 +996,7 @@ async fn create_utxos(node_address: SocketAddr, up_to: bool, num: Option<u8>, si
         up_to,
         num,
         size,
-        fee_rate: FEE_RATE,
+        fee_rate: Some(FEE_RATE),
         skip_sync: false,
     };
     let res = reqwest::Client::new()
@@ -1185,7 +1186,7 @@ async fn inflate(node_address: SocketAddr, asset_id: &str, inflation_amount: u64
     let payload = InflateRequest {
         asset_id: asset_id.to_string(),
         inflation_amounts: vec![inflation_amount],
-        fee_rate: FEE_RATE,
+        fee_rate: Some(FEE_RATE),
         min_confirmations: 1,
     };
     let res = reqwest::Client::new()
@@ -1624,6 +1625,22 @@ async fn list_swaps(node_address: SocketAddr) -> ListSwapsResponse {
         .await
         .unwrap();
     check_response_is_ok(res).await.json().await.unwrap()
+}
+
+async fn estimate_fee(node_address: SocketAddr, blocks: u16) -> EstimateFeeResponse {
+    println!("estimating fee for {blocks} blocks on node {node_address}");
+    let payload = EstimateFeeRequest { blocks };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/estimatefee"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    check_response_is_ok(res)
+        .await
+        .json::<EstimateFeeResponse>()
+        .await
+        .unwrap()
 }
 
 async fn get_swap(node_address: SocketAddr, payment_hash: &str, taker: bool) -> Swap {
@@ -2829,7 +2846,7 @@ async fn send_assets(
     );
     let payload = SendRgbRequest {
         donation,
-        fee_rate: FEE_RATE,
+        fee_rate: Some(FEE_RATE),
         min_confirmations: 1,
         expiration_timestamp: OffsetDateTime::now_utc().unix_timestamp() as u64 + DURATION_SECONDS,
         recipient_map,
@@ -2853,7 +2870,7 @@ async fn send_btc(node_address: SocketAddr, amount: u64, address: &str) -> Strin
     let payload = SendBtcRequest {
         amount,
         address: address.to_string(),
-        fee_rate: FEE_RATE,
+        fee_rate: Some(FEE_RATE),
         skip_sync: false,
     };
     let res = reqwest::Client::new()
@@ -3479,6 +3496,7 @@ mod colored_channel_electrum;
 mod concurrent_btc_payments;
 mod concurrent_openchannel;
 mod drop_funding_signed;
+mod dynamic_fee;
 #[cfg(all(feature = "transaction-sync", feature = "electrum"))]
 mod electrum_opret_confirm;
 mod esplora_indexer_defaults;
