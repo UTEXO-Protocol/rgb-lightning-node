@@ -2,7 +2,7 @@ services:
   bitcoind:
     platform: linux/amd64
     image: registry.gitlab.com/hashbeam/docker/bitcoind:30.2
-    command: ["-fallbackfee=0.0002", "-rest", "-rpcallowip=0.0.0.0/0"]
+    command: ["-fallbackfee=0.0002", "-rest", "-rpcallowip=0.0.0.0/0", "${BITCOIND_EXTRA_ARGS:-}"]
     environment:
       MYUID: 1000
       MYGID: 1000
