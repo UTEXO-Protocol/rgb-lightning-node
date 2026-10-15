@@ -3522,6 +3522,7 @@ mod restore_legacy_backup;
 mod restore_swaps_db_pool;
 mod rgb_payment_htlc_persistence;
 mod send_receive;
+mod sweep_after_discarded_funding;
 mod swap_assets_liquidity_both_ways;
 mod swap_reverse_same_channel;
 mod swap_roundtrip_assets;
