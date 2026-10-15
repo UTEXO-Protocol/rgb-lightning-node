@@ -3960,9 +3960,10 @@ impl RgbOutputSpender {
                 .rgb_wallet_wrapper
                 .update_witnesses(closing_height, vec![RgbTxid::from_str(&txid_str).unwrap()])
                 .map_err(|e| format!("error while updating witnesses for {txid_str}: {e}"))?;
-            // The update covers every witness in the stock after the closing height, including
-            // commitment transactions colored for channel updates, which are never broadcast and
-            // always fail to resolve. Only the closing transaction's own failure stops the sweep.
+            // The update also goes over the other witnesses in the stock that are not ignored. One
+            // that never reached the chain, such as the funding transaction of a colored channel
+            // discarded before broadcast, may fail to resolve depending on the indexer. Only the
+            // closing transaction's own failure stops the sweep.
             if update_res.failed.keys().any(|w| w.to_string() == txid_str) {
                 return Err(format!(
                     "failed to update witnesses for {txid_str}: {update_res:?}"
