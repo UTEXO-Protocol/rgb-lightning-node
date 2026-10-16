@@ -3262,6 +3262,7 @@ dependencies = [
  "rgb-lib",
  "rgb-strict-encoding",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
