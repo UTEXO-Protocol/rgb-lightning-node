@@ -5691,6 +5691,8 @@ async fn start_lightning(
             Arc::clone(&keys_manager),
             Arc::clone(&broadcaster),
             Arc::clone(&fee_estimator),
+            Some(ldk_data_dir_path.to_string_lossy().into_owned()),
+            Some(Arc::clone(&kv_store) as Arc<dyn KVStoreSync + Send + Sync>),
         );
         // Read before moving the persister into the ChainMonitor.
         let channelmonitors = persister
@@ -5722,6 +5724,8 @@ async fn start_lightning(
             Arc::clone(&keys_manager),
             Arc::clone(&broadcaster),
             Arc::clone(&fee_estimator),
+            Some(ldk_data_dir_path.to_string_lossy().into_owned()),
+            Some(Arc::clone(&kv_store) as Arc<dyn KVStoreSync + Send + Sync>),
         ));
         let peer_storage_signer = Arc::clone(&keys_manager);
         let chain_monitor = Arc::new(chainmonitor::ChainMonitor::new_with_peer_storage_encryptor(
