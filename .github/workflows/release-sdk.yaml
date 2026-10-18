@@ -55,7 +55,7 @@ jobs:
           echo "publish_to_maven=${PUBLISH_TO_MAVEN}" >> "$GITHUB_OUTPUT"
           echo "publish_to_npm=${PUBLISH_TO_NPM}" >> "$GITHUB_OUTPUT"
 
-  wasm-sdk:
+  build-wasm-sdk:
     name: Build WASM SDK package
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -119,8 +119,8 @@ jobs:
           if-no-files-found: error
           path: release/rln-wasm-sdk-pkg-${{ needs.resolve-version.outputs.version }}.tar.gz
 
-  kotlin-android:
-    name: Build Kotlin Android and publish Maven
+  build-kotlin-android:
+    name: Build Kotlin Android artifacts
     runs-on: warp-ubuntu-latest-x64-16x
     timeout-minutes: 80
     needs: resolve-version
@@ -208,47 +208,12 @@ jobs:
           export BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android="--sysroot=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           ./scripts/ci/build_android_jni.sh
 
-      - name: Publish Kotlin Android to Maven
-        if: needs.resolve-version.outputs.publish_to_maven == 'true'
-        env:
-          MAVEN_GROUP_ID: ${{ vars.MAVEN_GROUP_ID }}
-          MAVEN_ARTIFACT_ID: ${{ vars.MAVEN_ARTIFACT_ID }}
-          JRELEASER_MAVENCENTRAL_USERNAME: ${{ secrets.MAVENCENTRAL_USERNAME }}
-          JRELEASER_MAVENCENTRAL_PASSWORD: ${{ secrets.MAVENCENTRAL_PASSWORD }}
-          JRELEASER_GPG_KEY_NAME: ${{ secrets.GPG_KEY_NAME }}
-          JRELEASER_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: |
-          gradle --version
-          echo "${{ secrets.GPG_SECRET_KEY }}" | gpg --batch --import
-          gpg --list-secret-keys --keyid-format short
-
-          GROUP_ID="${MAVEN_GROUP_ID:-com.utexo}"
-          ARTIFACT_ID="${MAVEN_ARTIFACT_ID:-rgb-lightning-node-android}"
-          gradle -p bindings/kotlin-android-sdk \
-            publish \
-            -PGROUP_ID="${GROUP_ID}" \
-            -PARTIFACT_ID="${ARTIFACT_ID}" \
-            -PVERSION_NAME="${{ needs.resolve-version.outputs.version }}"
-
-          gradle -p bindings/kotlin-android-sdk \
-            jreleaserDeploy \
-            -PGROUP_ID="${GROUP_ID}" \
-            -PARTIFACT_ID="${ARTIFACT_ID}" \
-            -PVERSION_NAME="${{ needs.resolve-version.outputs.version }}" \
-            -Pjreleaser.gpg.keyName="${JRELEASER_GPG_KEY_NAME}" \
-            -Pjreleaser.gpg.passphrase="${JRELEASER_GPG_PASSPHRASE}" \
-            --stacktrace \
-            --info
-
-      - name: Upload JReleaser debug outputs
-        if: failure()
+      - name: Upload Kotlin Android generated bindings
         uses: actions/upload-artifact@v4
         with:
-          name: jreleaser-debug
-          if-no-files-found: ignore
-          path: |
-            bindings/kotlin-android-sdk/build/jreleaser/**
-            bindings/kotlin-android-sdk/build/staging-deploy/**
+          name: kotlin-android-generated
+          if-no-files-found: error
+          path: target/uniffi/kotlin-android
 
       - name: Package Kotlin Android release bundle
         run: |
@@ -265,7 +230,7 @@ jobs:
           if-no-files-found: error
           path: release/rgb-lightning-node-kotlin-android-${{ needs.resolve-version.outputs.version }}.zip
 
-  swift-ios:
+  build-swift-ios:
     name: Build Swift XCFramework
     runs-on: warp-macos-latest-arm64-6x
     timeout-minutes: 90
@@ -341,10 +306,100 @@ jobs:
           if-no-files-found: error
           path: release/rgb-lightning-node-swift-${{ needs.resolve-version.outputs.version }}.zip
 
-  npm-wasm:
+  publish-kotlin-maven:
+    name: Publish Kotlin Android to Maven
+    runs-on: warp-ubuntu-latest-x64-16x
+    timeout-minutes: 45
+    needs: [resolve-version, build-wasm-sdk, build-kotlin-android, build-swift-ios]
+    steps:
+      - name: Checkout repository
+        if: needs.resolve-version.outputs.publish_to_maven == 'true'
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/git-credentials
+        if: needs.resolve-version.outputs.publish_to_maven == 'true'
+        with:
+          token: ${{ secrets.ORG_READ_TOKEN }}
+
+      - name: Setup Java
+        if: needs.resolve-version.outputs.publish_to_maven == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Gradle
+        if: needs.resolve-version.outputs.publish_to_maven == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Setup Android SDK
+        if: needs.resolve-version.outputs.publish_to_maven == 'true'
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ""
+
+      - name: Download Kotlin Android generated bindings
+        if: needs.resolve-version.outputs.publish_to_maven == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: kotlin-android-generated
+          path: target/uniffi/kotlin-android
+
+      - name: Publish Kotlin Android to Maven
+        if: needs.resolve-version.outputs.publish_to_maven == 'true'
+        env:
+          MAVEN_GROUP_ID: ${{ vars.MAVEN_GROUP_ID }}
+          MAVEN_ARTIFACT_ID: ${{ vars.MAVEN_ARTIFACT_ID }}
+          JRELEASER_MAVENCENTRAL_USERNAME: ${{ secrets.MAVENCENTRAL_USERNAME }}
+          JRELEASER_MAVENCENTRAL_PASSWORD: ${{ secrets.MAVENCENTRAL_PASSWORD }}
+          JRELEASER_GPG_KEY_NAME: ${{ secrets.GPG_KEY_NAME }}
+          JRELEASER_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          gradle --version
+          echo "${{ secrets.GPG_SECRET_KEY }}" | gpg --batch --import
+          gpg --list-secret-keys --keyid-format short
+          ls -la target/uniffi/kotlin-android
+
+          GROUP_ID="${MAVEN_GROUP_ID:-com.utexo}"
+          ARTIFACT_ID="${MAVEN_ARTIFACT_ID:-rgb-lightning-node-android}"
+          gradle -p bindings/kotlin-android-sdk \
+            publish \
+            -PGROUP_ID="${GROUP_ID}" \
+            -PARTIFACT_ID="${ARTIFACT_ID}" \
+            -PVERSION_NAME="${{ needs.resolve-version.outputs.version }}"
+
+          gradle -p bindings/kotlin-android-sdk \
+            jreleaserDeploy \
+            -PGROUP_ID="${GROUP_ID}" \
+            -PARTIFACT_ID="${ARTIFACT_ID}" \
+            -PVERSION_NAME="${{ needs.resolve-version.outputs.version }}" \
+            -Pjreleaser.gpg.keyName="${JRELEASER_GPG_KEY_NAME}" \
+            -Pjreleaser.gpg.passphrase="${JRELEASER_GPG_PASSPHRASE}" \
+            --stacktrace \
+            --info
+
+      - name: Upload JReleaser debug outputs
+        if: failure() && needs.resolve-version.outputs.publish_to_maven == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jreleaser-debug
+          if-no-files-found: ignore
+          path: |
+            bindings/kotlin-android-sdk/build/jreleaser/**
+            bindings/kotlin-android-sdk/build/staging-deploy/**
+
+      - name: Skip Maven publish
+        if: needs.resolve-version.outputs.publish_to_maven != 'true'
+        run: echo "publish_to_maven=false, skipping Maven publish"
+
+  publish-wasm-npm:
     name: Publish WASM package to npm
     runs-on: ubuntu-latest
-    needs: [resolve-version, kotlin-android, swift-ios, wasm-sdk]
+    needs: [resolve-version, build-wasm-sdk, build-kotlin-android, build-swift-ios]
     steps:
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
@@ -402,7 +457,7 @@ jobs:
   github-release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
-    needs: [resolve-version, kotlin-android, swift-ios, wasm-sdk, npm-wasm]
+    needs: [resolve-version, build-wasm-sdk, build-kotlin-android, build-swift-ios, publish-kotlin-maven, publish-wasm-npm]
     steps:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
