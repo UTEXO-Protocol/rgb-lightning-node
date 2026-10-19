@@ -1,0 +1,41 @@
+BFA draft CI
+
+Private dependency access
+-------------------------
+Cargo fetches the pinned UTEXO-Protocol/rgb-lib-bfa revision through Git.
+The default GITHUB_TOKEN only grants access to the current repository.
+ORG_READ_TOKEN must also be allowed to read rgb-lib-bfa. Alternatively,
+add BFA_READ_TOKEN in this repository's Actions secrets, with Contents: read
+access to rgb-lib-bfa. The credential action scopes that override to this
+dependency only; ORG_READ_TOKEN continues to serve the other private forks.
+If organization policy requires approval or SSO authorization, a repository
+or organization administrator must grant it. Never put a token in source.
+No extra credentials are provided to pull requests from forks.
+
+The credential action checks access before Cargo runs. A missing secret,
+403 or authentication error is a failed check, not a skipped build.
+
+Features and merge order
+------------------------
+Native builds use uniffi,vls. VSS is absent from the BFA RGB-lib API; its
+native test job and VSS-only sanitizer were removed with that feature.
+Local SQLite persistence remains covered by the address sanitizer job.
+The other test and platform jobs remain enabled and must pass independently.
+Passing a build does not establish Lightning, backup or live payout support.
+
+The rust-lightning companion PR must merge into dev before this PR. The
+check-gitmodules job deliberately keeps enforcing that ancestry rule.
+After a squash or rebase merge, update the gitlink to the resulting commit
+on dev before rerunning the checks. Do not bypass this guard for a draft.
+
+The BFA Android AAR is built locally by scripts/build-bfa-android.py.
+Existing CI artifact jobs build JNI libraries and other binding bundles;
+they do not yet package that AAR or validate it inside the sandbox APK.
+They are compilation gates, not a claim of validated application support
+on those platforms. No release or deployment is performed by PR checks.
+
+Local verification does not run the full regtest/Lightning E2E suite or
+the cross-platform artifact matrix. Those checks remain required before
+merge; fixing credentials is not a guarantee that all later stages pass.
+The opt-in Anvil BFA fixtures were adapted to the new API for compilation,
+but their live mint/burn scenarios were not executed.

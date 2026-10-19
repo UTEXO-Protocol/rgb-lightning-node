@@ -25,6 +25,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -67,6 +68,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -93,6 +95,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: llvm-tools-preview
@@ -130,6 +133,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -146,6 +150,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -180,6 +185,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
@@ -204,6 +210,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""

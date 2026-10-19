@@ -133,6 +133,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -279,6 +280,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1

@@ -3,12 +3,34 @@ description: 'Configure git to authenticate with private UTEXO-Protocol reposito
 inputs:
   token:
     description: 'GitHub PAT with read access to private UTEXO-Protocol repositories'
-    required: true
+    required: false
+    default: ''
+  rgb-lib-token:
+    description: 'Optional read-only token scoped to UTEXO-Protocol/rgb-lib-bfa'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
     - name: Configure git credentials
       shell: bash
+      env:
+        PRIVATE_REPO_TOKEN: ${{ inputs.token }}
+        BFA_READ_TOKEN: ${{ inputs.rgb-lib-token }}
       run: |
-        git config --global url."https://x-access-token:${{ inputs.token }}@github.com/".insteadOf "https://github.com/"
-        echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
+        set -euo pipefail
+        if [[ -z "$PRIVATE_REPO_TOKEN" && -z "$BFA_READ_TOKEN" ]]; then
+          echo "::error::Private dependency credentials are missing. Configure ORG_READ_TOKEN and/or BFA_READ_TOKEN as described in docs/bfa-ci.txt."
+          exit 1
+        fi
+        if [[ -n "$PRIVATE_REPO_TOKEN" ]]; then
+          git config --global url."https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/UTEXO-Protocol/".insteadOf "https://github.com/UTEXO-Protocol/"
+        fi
+        if [[ -n "$BFA_READ_TOKEN" ]]; then
+          git config --global url."https://x-access-token:${BFA_READ_TOKEN}@github.com/UTEXO-Protocol/rgb-lib-bfa.git".insteadOf "https://github.com/UTEXO-Protocol/rgb-lib-bfa.git"
+        fi
+        echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+        if ! GIT_TERMINAL_PROMPT=0 git -c http.https://github.com/.extraheader= ls-remote --exit-code https://github.com/UTEXO-Protocol/rgb-lib-bfa.git HEAD >/dev/null; then
+          echo "::error::CI cannot read UTEXO-Protocol/rgb-lib-bfa. Grant this dependency Contents: read access to ORG_READ_TOKEN, or add a BFA_READ_TOKEN secret. See docs/bfa-ci.txt."
+          exit 1
+        fi
