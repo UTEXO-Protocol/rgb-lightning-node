@@ -52,6 +52,14 @@ impl NodeHandle {
     }
 
     pub async fn new(config: NodeConfig) -> Result<Self, AppError> {
+        if config.reuse_addresses || config.enable_virtual_channels_v0 || config.vss_url.is_some() {
+            return Err(AppError::InvalidConfig(
+                "Address reuse, virtual channels, and VSS are unavailable in this local BFA build"
+                    .into(),
+            ));
+        }
+        crate::bfa_values::check_fresh_storage(&config.storage_dir_path)
+            .map_err(AppError::InvalidConfig)?;
         let args = UserArgs {
             storage_dir_path: config.storage_dir_path,
             daemon_listening_port: config.daemon_listening_port,

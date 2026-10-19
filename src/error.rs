@@ -464,7 +464,6 @@ impl From<axum::extract::multipart::MultipartRejection> for APIError {
 impl From<RgbLibError> for APIError {
     fn from(error: RgbLibError) -> Self {
         match error {
-            RgbLibError::AddressReuseDisabled => APIError::AddressReuseDisabled,
             RgbLibError::AllocationsAlreadyAvailable => APIError::AllocationsAlreadyAvailable,
             RgbLibError::AssetNotFound { .. } => APIError::UnknownContractId,
             RgbLibError::BatchTransferNotFound { .. } => APIError::BatchTransferNotFound,
@@ -495,23 +494,14 @@ impl From<RgbLibError> for APIError {
                 APIError::InsufficientFunds(needed - available)
             }
             RgbLibError::InvalidAddress { details } => APIError::InvalidAddress(details),
+            RgbLibError::InvalidBurnReason { details } => APIError::InvalidBurnRecipient(details),
             RgbLibError::InvalidAmountZero => APIError::InvalidAmount(s!("0")),
             RgbLibError::InvalidAssignment => APIError::InvalidAssignment,
             RgbLibError::InvalidAttachments { details } => APIError::InvalidAttachments(details),
-            RgbLibError::InvalidContractLink { details } => APIError::InvalidContractLink(details),
-            RgbLibError::InvalidRightOutpoint { details } => {
-                APIError::InvalidRightOutpoint(details)
-            }
             RgbLibError::InvalidDetails { details } => APIError::InvalidDetails(details),
             RgbLibError::InvalidElectrum { details } => APIError::InvalidIndexer(details),
             RgbLibError::InvalidEstimationBlocks => APIError::InvalidEstimationBlocks,
-            RgbLibError::InvalidEthRpcUrl { details } => APIError::InvalidEthRpcUrl(details),
-            RgbLibError::InvalidBurnRecipient { len } => {
-                APIError::InvalidBurnRecipient(format!("must be 32 bytes, got {len}"))
-            }
-            RgbLibError::MissingBurnRecipient => {
-                APIError::InvalidBurnRecipient(s!("required for a BFA burn"))
-            }
+            RgbLibError::InvalidEvmRpcUrl { details } => APIError::InvalidEthRpcUrl(details),
             RgbLibError::NoBurnAmount => {
                 APIError::InvalidAmount(s!("burn request with zero amount"))
             }
@@ -551,9 +541,6 @@ impl From<RgbLibError> for APIError {
             RgbLibError::OutputBelowDustLimit => APIError::OutputBelowDustLimit,
             RgbLibError::Proxy { details } => APIError::Network(format!("proxy err: {details}")),
             RgbLibError::RecipientIDAlreadyUsed => APIError::RecipientIDAlreadyUsed,
-            RgbLibError::RestoredBackupInconsistent { details } => {
-                APIError::RestoredBackupInconsistent(details)
-            }
             RgbLibError::TooHighInflationAmounts => {
                 APIError::InvalidAmount(s!("inflation amount exceeds the max possible supply"))
             }

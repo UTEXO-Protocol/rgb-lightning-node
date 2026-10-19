@@ -70,15 +70,15 @@ impl LightningInfo {
 /// Read the wallet indexer's tip without constructing an LDK chain backend or polling worker.
 /// The caller releases the lifecycle lock before awaiting the query. Client timeouts limit
 /// socket operations; Electrum hostname resolution still uses the system resolver's timing.
-pub(crate) async fn mainnet_height(indexer_url: String) -> Result<u32, APIError> {
-    tokio::task::spawn_blocking(move || read_mainnet_height(&indexer_url, 5))
+pub(crate) async fn wallet_height(indexer_url: String, network: bitcoin::Network) -> Result<u32, APIError> {
+    tokio::task::spawn_blocking(move || read_wallet_height(&indexer_url, 5, network))
         .await
         .map_err(|err| APIError::Unexpected(format!("indexer height task failed: {err}")))?
 }
 
-fn read_mainnet_height(indexer_url: &str, timeout_seconds: u8) -> Result<u32, APIError> {
+fn read_wallet_height(indexer_url: &str, timeout_seconds: u8, network: bitcoin::Network) -> Result<u32, APIError> {
     let genesis =
-        bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin).block_hash();
+        bitcoin::blockdata::constants::genesis_block(network).block_hash();
     #[cfg(feature = "electrum")]
     if !indexer_url.starts_with("http://") && !indexer_url.starts_with("https://") {
         use electrum_client::ElectrumApi;
@@ -94,7 +94,7 @@ fn read_mainnet_height(indexer_url: &str, timeout_seconds: u8) -> Result<u32, AP
         })?;
         if header.block_hash() != genesis {
             return Err(APIError::InvalidIndexer(
-                "wallet indexer is not on mainnet".into(),
+                "wallet indexer is on the wrong network".into(),
             ));
         }
         let tip = client.block_headers_subscribe().map_err(|err| {
@@ -114,7 +114,7 @@ fn read_mainnet_height(indexer_url: &str, timeout_seconds: u8) -> Result<u32, AP
         })?;
         if remote_genesis != genesis {
             return Err(APIError::InvalidIndexer(
-                "wallet indexer is not on mainnet".into(),
+                "wallet indexer is on the wrong network".into(),
             ));
         }
         return client
@@ -147,7 +147,7 @@ mod tests {
                 std::future::pending::<()>().await;
             });
             let started = Instant::now();
-            let result = tokio::task::spawn_blocking(move || read_mainnet_height(&url, 1))
+            let result = tokio::task::spawn_blocking(move || read_wallet_height(&url, 1, bitcoin::Network::Bitcoin))
                 .await
                 .unwrap();
             assert!(
@@ -179,7 +179,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-            let result = mainnet_height(url).await;
+            let result = wallet_height(url, bitcoin::Network::Bitcoin).await;
             if network == bitcoin::Network::Bitcoin {
                 assert_eq!(result.unwrap(), 123456);
             } else {

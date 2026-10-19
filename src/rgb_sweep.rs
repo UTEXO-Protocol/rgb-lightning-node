@@ -1,10 +1,9 @@
 //! Durable preparation for RGB sweeps. Apply the fascia only after the sweep is confirmed.
 
+use crate::local_build::ColorPrepareResult;
 use bitcoin::io;
 use lightning::util::persist::KVStoreSync;
-use rgb_lib::{
-    bitcoin::psbt::Psbt, wallet::rust_only::ColorPrepareResult, ConsignmentExt, FileContent,
-};
+use rgb_lib::{bitcoin::psbt::Psbt, ConsignmentExt, FileContent};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, str::FromStr};
 

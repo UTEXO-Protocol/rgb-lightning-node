@@ -1,4 +1,5 @@
 use crate::ldk::write_rgb_payment_info_file;
+use crate::local_build::IfaIssuanceType as RgbLibIfaIssuanceType;
 use crate::rgb_import::{
     self, ImportRgbContractRequestData, ImportRgbTransferConsignmentRequestData,
 };
@@ -44,18 +45,15 @@ use rgb_lib::{
     bdk_wallet::keys::bip39::Mnemonic,
     keys::{generate_keys, WitnessVersion},
     wallet::{
-        rust_only::{
-            check_indexer_url as rgb_lib_check_indexer_url,
-            IndexerProtocol as RgbLibIndexerProtocol,
-        },
-        AssetBFA as RgbLibAssetBFA, AssetCFA as RgbLibAssetCFA, AssetFilter as RgbLibAssetFilter,
-        AssetIFA as RgbLibAssetIFA, AssetNIA as RgbLibAssetNIA, AssetUDA as RgbLibAssetUDA,
-        Balance as RgbLibBalance, EmbeddedMedia as RgbLibEmbeddedMedia,
-        IfaIssuanceType as RgbLibIfaIssuanceType, Invoice as RgbLibInvoice, Media as RgbLibMedia,
-        Metadata as RgbLibMetadata, OperationResult as RgbLibOperationResult,
-        Outpoint as RgbLibOutpoint, ProofOfReserves as RgbLibProofOfReserves,
-        Recipient as RgbLibRecipient, RecipientInfo, RecipientType as RgbLibRecipientType,
-        RefreshFilter as RgbLibRefreshFilter, RefreshTransferStatus as RgbLibRefreshTransferStatus,
+        check_indexer_url as rgb_lib_check_indexer_url, AssetBFA as RgbLibAssetBFA,
+        AssetCFA as RgbLibAssetCFA, AssetFilter as RgbLibAssetFilter, AssetIFA as RgbLibAssetIFA,
+        AssetNIA as RgbLibAssetNIA, AssetUDA as RgbLibAssetUDA, Balance as RgbLibBalance,
+        EmbeddedMedia as RgbLibEmbeddedMedia, IndexerProtocol as RgbLibIndexerProtocol,
+        Invoice as RgbLibInvoice, Media as RgbLibMedia, Metadata as RgbLibMetadata,
+        OperationResult as RgbLibOperationResult, Outpoint as RgbLibOutpoint,
+        ProofOfReserves as RgbLibProofOfReserves, Recipient as RgbLibRecipient, RecipientInfo,
+        RecipientType as RgbLibRecipientType, RefreshFilter as RgbLibRefreshFilter,
+        RefreshTransferStatus as RgbLibRefreshTransferStatus,
         RefreshedTransfer as RgbLibRefreshedTransfer, SyncKeychain as RgbLibSyncKeychain,
         SyncOptions as RgbLibSyncOptions, SyncStrategy as RgbLibSyncStrategy, Token as RgbLibToken,
         TokenLight as RgbLibTokenLight, WitnessData as RgbLibWitnessData,
@@ -280,9 +278,9 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             balance: value.balance.into(),
             media: value.media.map(|m| m.into()),
             reject_list_url: value.reject_list_url,
-            issuance_link_right_outpoint: value.issuance_link_right_outpoint,
-            linked_from_asset_id: value.linked_from_asset_id,
-            linked_to_asset_id: value.linked_to_asset_id,
+            issuance_link_right_outpoint: None,
+            linked_from_asset_id: None,
+            linked_to_asset_id: None,
         }
     }
 }
@@ -435,9 +433,8 @@ pub(crate) enum Assignment {
     Fungible(u64),
     NonFungible,
     InflationRight(u64),
+    MintRight,
     Any,
-    LinkRight,
-    BridgeRight,
 }
 
 impl From<RgbLibAssignment> for Assignment {
@@ -447,8 +444,7 @@ impl From<RgbLibAssignment> for Assignment {
             RgbLibAssignment::NonFungible => Self::NonFungible,
             RgbLibAssignment::InflationRight(amt) => Self::InflationRight(amt),
             RgbLibAssignment::Any => Self::Any,
-            RgbLibAssignment::LinkRight => Self::LinkRight,
-            RgbLibAssignment::BridgeRight => Self::BridgeRight,
+            RgbLibAssignment::MintRight => Self::MintRight,
         }
     }
 }
@@ -460,8 +456,7 @@ impl From<Assignment> for RgbLibAssignment {
             Assignment::NonFungible => Self::NonFungible,
             Assignment::InflationRight(amt) => Self::InflationRight(amt),
             Assignment::Any => Self::Any,
-            Assignment::LinkRight => Self::LinkRight,
-            Assignment::BridgeRight => Self::BridgeRight,
+            Assignment::MintRight => Self::MintRight,
         }
     }
 }
@@ -649,7 +644,7 @@ pub(crate) struct DecodeRGBInvoiceRequest {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct DecodeRGBInvoiceResponse {
     pub(crate) recipient_id: String,
-    pub(crate) proxy_recipient_id: String,
+    pub(crate) proxy_recipient_id: Option<String>,
     pub(crate) recipient_type: RecipientType,
     pub(crate) asset_schema: Option<AssetSchema>,
     pub(crate) asset_id: Option<String>,
@@ -775,6 +770,7 @@ pub(crate) struct GetSwapResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum IndexerProtocol {
+    Bitcoind,
     Electrum,
     Esplora,
 }
@@ -784,6 +780,7 @@ impl From<RgbLibIndexerProtocol> for IndexerProtocol {
         match x {
             RgbLibIndexerProtocol::Electrum => Self::Electrum,
             RgbLibIndexerProtocol::Esplora => Self::Esplora,
+            RgbLibIndexerProtocol::Bitcoind => Self::Bitcoind,
         }
     }
 }
@@ -1275,6 +1272,9 @@ impl From<Recipient> for RgbLibRecipient {
     fn from(value: Recipient) -> Self {
         Self {
             recipient_id: value.recipient_id,
+            public_key: None,
+            encryption: rgb_lib::Encryption::Unsupported,
+            expiration_timestamp: None,
             witness_data: value.witness_data.map(|w| w.into()),
             assignment: value.assignment.into(),
             transport_endpoints: value.transport_endpoints,
@@ -1645,6 +1645,7 @@ pub(crate) enum TransferKind {
     Send,
     Inflation,
     Burn,
+    Mint,
     Link,
 }
 
@@ -2120,9 +2121,9 @@ fn asset_metadata_response_from_metadata(metadata: RgbLibMetadata) -> AssetMetad
         ticker: metadata.ticker,
         details: metadata.details,
         token: metadata.token.map(|t| t.into()),
-        unspent_link_right_outpoint: metadata.unspent_link_right_outpoint,
-        linked_from_asset_id: metadata.linked_from_asset_id,
-        linked_to_asset_id: metadata.linked_to_asset_id,
+        unspent_link_right_outpoint: None,
+        linked_from_asset_id: None,
+        linked_to_asset_id: None,
     }
 }
 
@@ -2278,7 +2279,7 @@ pub(crate) async fn check_indexer_url(
     WithRejection(Json(payload), _): WithRejection<Json<CheckIndexerUrlRequest>, APIError>,
 ) -> Result<Json<CheckIndexerUrlResponse>, APIError> {
     let indexer_protocol =
-        rgb_lib_check_indexer_url(&payload.indexer_url, state.static_state.network)?.into();
+        rgb_lib_check_indexer_url(&payload.indexer_url, None, state.static_state.network)?.into();
 
     Ok(Json(CheckIndexerUrlResponse { indexer_protocol }))
 }
@@ -2676,7 +2677,7 @@ pub(crate) async fn decode_rgb_invoice(
 
     Ok(Json(DecodeRGBInvoiceResponse {
         recipient_id: invoice_data.recipient_id,
-        proxy_recipient_id: invoice_data.proxy_recipient_id,
+        proxy_recipient_id: None,
         recipient_type: recipient_info.recipient_type.into(),
         asset_schema: invoice_data.asset_schema.map(|s| s.into()),
         asset_id: invoice_data.asset_id,
@@ -3901,11 +3902,11 @@ pub(crate) async fn list_transfers(
                 rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
                 rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
                 rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
-                rgb_lib::wallet::TransferKind::Link => TransferKind::Link,
+                rgb_lib::wallet::TransferKind::Mint => TransferKind::Mint,
             },
             txid: transfer.txid,
             recipient_id: transfer.recipient_id,
-            proxy_recipient_id: transfer.proxy_recipient_id,
+            proxy_recipient_id: None,
             receive_utxo: transfer.receive_utxo.map(|u| u.to_string()),
             change_utxo: transfer.change_utxo.map(|u| u.to_string()),
             expiration_timestamp: transfer.expiration_timestamp,
@@ -4452,7 +4453,7 @@ pub(crate) async fn network_info(
     } else {
         let indexer_url = unlocked_state.indexer_url.clone();
         drop(guard);
-        crate::node_info::mainnet_height(indexer_url).await?
+        crate::node_info::wallet_height(indexer_url, state.static_state.network.into()).await?
     };
 
     Ok(Json(NetworkInfoResponse {
@@ -4750,7 +4751,7 @@ pub(crate) async fn open_channel(
                 fake_p2wsh[1] = 32;
                 let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
                 let recipient_id =
-                    recipient_id_from_script_buf(script_buf, state.static_state.network)?;
+                    recipient_id_from_script_buf(script_buf, state.static_state.network);
                 let asset_id = contract_id.to_string();
                 let assignment = match schema {
                     RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa | RgbLibAssetSchema::Bfa => {
@@ -4761,6 +4762,9 @@ pub(crate) async fn open_channel(
 
                 let recipient_map = map! {
                     asset_id => vec![RgbLibRecipient {
+                        public_key: None,
+                        encryption: rgb_lib::Encryption::Unsupported,
+                        expiration_timestamp: None,
                         recipient_id,
                         witness_data: Some(RgbLibWitnessData {
                             amount_sat: payload.capacity_sat,

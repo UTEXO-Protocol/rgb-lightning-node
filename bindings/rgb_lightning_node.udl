@@ -510,7 +510,7 @@ dictionary DecodeLnInvoiceResponse {
 
 dictionary DecodeRgbInvoiceResponse {
     string recipient_id;
-    string proxy_recipient_id;
+    string? proxy_recipient_id;
     string recipient_type;
     string? asset_schema;
     ContractId? asset_id;

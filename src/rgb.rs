@@ -1,3 +1,4 @@
+use crate::local_build::{ColorPrepareResult, IfaIssuanceType};
 use crate::signer::{ActiveSignerRef, ExternalSigner, RlnKeysInterface};
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::script::ScriptBuf;
@@ -17,16 +18,15 @@ use rgb_lib::{
     bdk_wallet::{KeychainKind, SignOptions},
     bitcoin::psbt::Psbt as BitcoinPsbt,
     wallet::{
-        rust_only::{check_proxy_url, ColorPrepareResult, ColoringInfo},
-        AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance,
-        IfaIssuanceType, Media, Metadata, Online, OperationResult, Outpoint, ReceiveData,
-        Recipient, RefreshFilter, RefreshResult, RefreshedTransfer, RgbWalletOpsOffline,
-        RgbWalletOpsOnline, SendBeginResult, SinglesigKeys, SyncOptions,
-        Transaction as RgbLibTransaction, Transfer, TransferKind, TransportEndpoint, Unspent,
-        Wallet as RgbLibWallet,
+        rust_only::{check_proxy_url, ColoringInfo},
+        AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, Media,
+        Metadata, Online, OperationResult, Outpoint, ReceiveData, Recipient, RefreshFilter,
+        RefreshResult, RefreshedTransfer, RgbWalletOpsOffline, RgbWalletOpsOnline, SendBeginResult,
+        SinglesigKeys, SyncOptions, Transaction as RgbLibTransaction, Transfer, TransferKind,
+        TransportEndpoint, Unspent, Wallet as RgbLibWallet,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
-    Fascia, RgbContract, RgbTransfer, RgbTxid, UpdateRes, WitnessOrd,
+    Fascia, RgbTransfer, RgbTxid, UpdateRes, WitnessOrd,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -238,14 +238,6 @@ impl CommonState {
         Ok((metadata, already_imported))
     }
 
-    pub(crate) fn rgb_import_asset_contract(
-        &self,
-        contract: RgbContract,
-    ) -> Result<(Metadata, bool), RgbLibError> {
-        let imported = self.rgb_wallet_wrapper.import_asset_contract(contract)?;
-        Ok((imported.metadata, imported.already_imported))
-    }
-
     pub(crate) fn rgb_get_btc_balance(&self, skip_sync: bool) -> Result<BtcBalance, RgbLibError> {
         self.rgb_wallet_wrapper.get_btc_balance(skip_sync)
     }
@@ -279,6 +271,17 @@ impl CommonState {
         fee_rate: u64,
         min_confirmations: u8,
     ) -> Result<OperationResult, RgbLibError> {
+        let is_bfa = self
+            .rgb_wallet_wrapper
+            .get_asset_metadata(ContractId::from_str(&asset_id).map_err(|_| {
+                RgbLibError::AssetNotFound {
+                    asset_id: asset_id.clone(),
+                }
+            })?)?
+            .asset_schema
+            == AssetSchema::Bfa;
+        let burn_reason = crate::local_build::burn_reason(burn_recipient.as_deref(), is_bfa)
+            .map_err(|details| RgbLibError::InvalidBurnReason { details })?;
         if self.external_signer_mode {
             // Keep preparation, signing and completion serialized against other wallet operations.
             // Persist Initiated before asking the signer: an interrupted call must retain its inputs.
@@ -288,7 +291,7 @@ impl CommonState {
                 wrapper.online,
                 asset_id,
                 amount,
-                burn_recipient,
+                burn_reason,
                 fee_rate,
                 min_confirmations,
                 false,
@@ -309,13 +312,8 @@ impl CommonState {
                 }
             });
         }
-        self.rgb_wallet_wrapper.burn(
-            asset_id,
-            amount,
-            burn_recipient,
-            fee_rate,
-            min_confirmations,
-        )
+        self.rgb_wallet_wrapper
+            .burn(asset_id, amount, burn_reason, fee_rate, min_confirmations)
     }
 
     pub(crate) fn rgb_inflate(
@@ -363,24 +361,24 @@ impl CommonState {
         )
     }
 
+    #[allow(unused_variables)]
     pub(crate) fn rgb_find_link_right_outpoint(
         &self,
         contract_id: ContractId,
     ) -> Result<Option<Outpoint>, RgbLibError> {
-        self.rgb_list_unspents(false, false)?;
-        Ok(self
-            .rgb_get_asset_metadata(contract_id)?
-            .unspent_link_right_outpoint)
+        Err(RgbLibError::Internal {
+            details: "Unavailable in local BFA build: IFA linking".into(),
+        })
     }
 
+    #[allow(unused_variables)]
     pub(crate) fn rgb_find_link_transfer(
         &self,
         contract_id: ContractId,
     ) -> Result<Option<Transfer>, RgbLibError> {
-        Ok(self
-            .rgb_list_transfers(AssetFilter::Id(contract_id.to_string()), None)?
-            .into_iter()
-            .find(|transfer| transfer.kind == TransferKind::Link))
+        Err(RgbLibError::Internal {
+            details: "Unavailable in local BFA build: IFA linking".into(),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -492,7 +490,9 @@ impl CommonState {
         filter: Vec<RefreshFilter>,
         skip_sync: bool,
     ) -> Result<RefreshResult, RgbLibError> {
-        if self.rgb_wallet_wrapper.bitcoin_network() != BitcoinNetwork::Mainnet {
+        if !crate::local_build::ONCHAIN_ONLY
+            && self.rgb_wallet_wrapper.bitcoin_network() != BitcoinNetwork::Mainnet
+        {
             crate::rgb_sweep::reconcile_prepared_sweeps(
                 self.kv_store.as_ref(),
                 |txid| {
@@ -747,11 +747,13 @@ impl RgbLibWalletWrapper {
         min_confirmations: u8,
     ) -> Result<ReceiveData, RgbLibError> {
         self.get_rgb_wallet().blind_receive(
+            Some(self.online),
             asset_id,
             assignment,
             expiration_timestamp,
             transport_endpoints,
             min_confirmations,
+            None,
         )
     }
 
@@ -763,21 +765,25 @@ impl RgbLibWalletWrapper {
         self.get_rgb_wallet().consume_fascia(fascia, witness_ord)
     }
 
+    #[allow(unused_variables)]
     pub(crate) fn color_psbt_and_prepare_consume(
         &self,
         psbt_to_color: &mut BitcoinPsbt,
         coloring_info: ColoringInfo,
     ) -> Result<ColorPrepareResult, RgbLibError> {
-        self.get_rgb_wallet()
-            .color_psbt_and_prepare_consume(psbt_to_color, coloring_info, 0, None)
+        Err(RgbLibError::Internal {
+            details: "Unavailable in local BFA build: prepared RGB channel sweeps".into(),
+        })
     }
 
+    #[allow(unused_variables)]
     pub(crate) fn consume_transfer_fascia(
         &self,
         batch_transfer_idx: i32,
     ) -> Result<(), RgbLibError> {
-        self.get_rgb_wallet()
-            .consume_transfer_fascia(self.online, batch_transfer_idx)
+        Err(RgbLibError::Internal {
+            details: "Unavailable in local BFA build: prepared RGB channel sweeps".into(),
+        })
     }
 
     pub(crate) fn create_consigments(&self, psbt: String) -> Result<(), RgbLibError> {
@@ -849,7 +855,9 @@ impl RgbLibWalletWrapper {
     }
 
     pub(crate) fn rotate_address(&self) -> Result<String, RgbLibError> {
-        self.get_rgb_wallet().rotate_address(KeychainKind::Internal)
+        Err(RgbLibError::Internal {
+            details: "Unavailable in local BFA build: custom address rotation".into(),
+        })
     }
 
     pub(crate) fn get_asset_balance(
@@ -899,7 +907,7 @@ impl RgbLibWalletWrapper {
         &self,
         asset_id: String,
         amount: u64,
-        burn_recipient: Option<Vec<u8>>,
+        burn_reason: Option<String>,
         fee_rate: u64,
         min_confirmations: u8,
     ) -> Result<OperationResult, RgbLibError> {
@@ -907,7 +915,7 @@ impl RgbLibWalletWrapper {
             self.online,
             asset_id,
             amount,
-            burn_recipient,
+            burn_reason,
             fee_rate,
             min_confirmations,
         )
@@ -952,6 +960,11 @@ impl RgbLibWalletWrapper {
         reject_list_url: Option<String>,
         issuance_type: Option<IfaIssuanceType>,
     ) -> Result<AssetIFA, RgbLibError> {
+        if !matches!(issuance_type, None | Some(IfaIssuanceType::Legacy)) {
+            return Err(RgbLibError::Internal {
+                details: "IFA link rights are unavailable in the local BFA build".into(),
+            });
+        }
         self.get_rgb_wallet().issue_asset_ifa(
             ticker,
             name,
@@ -959,11 +972,11 @@ impl RgbLibWalletWrapper {
             amounts,
             inflation_amounts,
             reject_list_url,
-            issuance_type,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(unused_variables)]
     pub(crate) fn link_ifa(
         &self,
         parent_contract_id: String,
@@ -972,14 +985,9 @@ impl RgbLibWalletWrapper {
         fee_rate: u64,
         min_confirmations: u8,
     ) -> Result<OperationResult, RgbLibError> {
-        self.get_rgb_wallet().link_ifa(
-            self.online,
-            parent_contract_id,
-            child_contract_id,
-            link_right_outpoint,
-            fee_rate,
-            min_confirmations,
-        )
+        Err(RgbLibError::Internal {
+            details: "Unavailable in local BFA build: IFA linking".into(),
+        })
     }
 
     pub(crate) fn issue_asset_nia(
@@ -1104,13 +1112,6 @@ impl RgbLibWalletWrapper {
             .save_new_asset(self.online, consignment, offchain_txid)
     }
 
-    pub(crate) fn import_asset_contract(
-        &self,
-        contract: RgbContract,
-    ) -> Result<rgb_lib::wallet::rust_only::ImportAssetContractResult, RgbLibError> {
-        self.get_rgb_wallet().import_asset_contract(contract)
-    }
-
     pub(crate) fn send(
         &self,
         recipient_map: HashMap<String, Vec<Recipient>>,
@@ -1141,6 +1142,11 @@ impl RgbLibWalletWrapper {
         dry_run: bool,
         lock_time: Option<u32>,
     ) -> Result<SendBeginResult, RgbLibError> {
+        if lock_time.is_some() {
+            return Err(RgbLibError::Internal {
+                details: "Custom RGB funding locktime is unavailable in the local BFA build".into(),
+            });
+        }
         self.get_rgb_wallet().send_begin(
             self.online,
             recipient_map,
@@ -1148,8 +1154,8 @@ impl RgbLibWalletWrapper {
             fee_rate,
             min_confirmations,
             expiration_timestamp,
+            None,
             dry_run,
-            lock_time,
         )
     }
 
@@ -1161,7 +1167,7 @@ impl RgbLibWalletWrapper {
         skip_sync: bool,
     ) -> Result<String, RgbLibError> {
         self.get_rgb_wallet()
-            .send_btc(self.online, address, amount, fee_rate, skip_sync, None)
+            .send_btc(self.online, address, amount, fee_rate, skip_sync)
     }
 
     pub(crate) fn send_btc_begin(
@@ -1173,15 +1179,8 @@ impl RgbLibWalletWrapper {
     ) -> Result<String, RgbLibError> {
         // Funding-only path: pin a final (zero) locktime so LDK accepts the
         // vanilla channel funding tx regardless of the node's chain-tip lag.
-        self.get_rgb_wallet().send_btc_begin(
-            self.online,
-            address,
-            amount,
-            fee_rate,
-            false,
-            false,
-            Some(0),
-        )
+        self.get_rgb_wallet()
+            .send_btc_begin(self.online, address, amount, fee_rate, false, false)
     }
 
     pub(crate) fn send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {
@@ -1235,11 +1234,13 @@ impl RgbLibWalletWrapper {
         min_confirmations: u8,
     ) -> Result<ReceiveData, RgbLibError> {
         self.get_rgb_wallet().witness_receive(
+            Some(self.online),
             asset_id,
             assignment,
             expiration_timestamp,
             transport_endpoints,
             min_confirmations,
+            None,
         )
     }
 }
@@ -1412,9 +1413,10 @@ impl WalletSource for RgbLibWalletWrapper {
 
 pub(crate) async fn check_rgb_proxy_endpoint(proxy_endpoint: &str) -> Result<(), APIError> {
     let proxy_url = TransportEndpoint::new(proxy_endpoint.to_string())?.endpoint;
-    tokio::task::spawn_blocking(move || check_proxy_url(&proxy_url))
-        .await
-        .unwrap()?;
+    crate::proxy_startup::validate(&proxy_url).await.map_err(|error| match error {
+        crate::proxy_startup::ValidationError::Network(details) => APIError::Network(details),
+        crate::proxy_startup::ValidationError::Protocol(version) => APIError::InvalidProxyProtocol(version),
+    })?;
     Ok(())
 }
 

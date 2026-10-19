@@ -418,7 +418,7 @@ pub struct DecodeLnInvoiceResponse {
 
 pub struct DecodeRgbInvoiceResponse {
     pub recipient_id: String,
-    pub proxy_recipient_id: String,
+    pub proxy_recipient_id: Option<String>,
     pub recipient_type: String,
     pub asset_schema: Option<String>,
     pub asset_id: Option<ContractId>,
