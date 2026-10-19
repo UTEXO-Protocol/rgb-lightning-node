@@ -43,4 +43,4 @@ jobs:
           toolchain: ${{matrix.toolchain}}
           rustflags: ""
       - name: Build
-        run: cargo build --release --features "uniffi,vls,vss"
+        run: cargo build --release --features "uniffi,vls"

@@ -32,7 +32,7 @@ jobs:
           rustflags: ""
 
       - name: Run library-only test suite
-        run: cargo test --features "uniffi,vls,vss,test-utils" --test lib_core
+        run: cargo test --features "uniffi,vls,test-utils" --test lib_core
 
   kotlin-jvm:
     name: Kotlin JVM (Linux host)
@@ -55,7 +55,7 @@ jobs:
           rustflags: ""
 
       - name: Build host cdylib
-        run: cargo build --release --features "uniffi,vls,vss" --lib
+        run: cargo build --release --features "uniffi,vls" --lib
 
       - name: Generate Kotlin bindings
         run: ./scripts/ci/uniffi_generate_kotlin.sh
@@ -102,11 +102,12 @@ jobs:
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26d
+          ndk-version: r27d
 
       - name: Normalize Android NDK env
+        env:
+          NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          NDK_PATH="/usr/local/lib/android/sdk/ndk/27.3.13750724"
           test -d "$NDK_PATH"
           echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK_PATH" >> "$GITHUB_ENV"
@@ -126,7 +127,7 @@ jobs:
           sudo apt-get install -y cmake ninja-build make clang pkg-config build-essential
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --version 3.5.4 --locked
+        run: cargo install cargo-ndk --version 4.1.2 --locked
 
       - name: Install bindgen-cli
         run: |
@@ -135,19 +136,16 @@ jobs:
           bindgen --version
 
       - name: Build host cdylib with external signer API
-        run: cargo build --release --features "uniffi,vls,vss" --lib
+        run: cargo build --release --features "uniffi,vls" --lib
 
       - name: Generate Kotlin Android bindings
         run: ./scripts/ci/uniffi_generate_from_library.sh kotlin target/uniffi/kotlin-android target/release/librgb_lightning_node.so uniffi-android.toml
 
       - name: Build Android JNI libs
         env:
-          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.3.13750724
-          ANDROID_NDK_ROOT: /usr/local/lib/android/sdk/ndk/27.3.13750724
-          ANDROID_NDK: /usr/local/lib/android/sdk/ndk/27.3.13750724
           AWS_LC_SYS_EXTERNAL_BINDGEN: "1"
           CMAKE: /usr/bin/cmake
-          UNIFFI_CARGO_FEATURES: "uniffi,vls,vss"
+          UNIFFI_CARGO_FEATURES: "uniffi,vls"
         run: |
           echo "Using NDK_HOME=${ANDROID_NDK_HOME}"
           echo "Using NDK_ROOT=${ANDROID_NDK_ROOT}"
@@ -215,10 +213,10 @@ jobs:
           export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios="--sysroot=${IOS_SYSROOT}"
           export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim="--sysroot=${SIM_SYSROOT}"
           export BINDGEN_EXTRA_CLANG_ARGS_x86_64_apple_ios="--sysroot=${SIM_SYSROOT}"
-          cargo build --release --features "uniffi,vls,vss" --lib
-          cargo build --release --features "uniffi,vls,vss" --lib --target aarch64-apple-ios
-          cargo build --release --features "uniffi,vls,vss" --lib --target aarch64-apple-ios-sim
-          cargo build --release --features "uniffi,vls,vss" --lib --target x86_64-apple-ios
+          cargo build --release --features "uniffi,vls" --lib
+          cargo build --release --features "uniffi,vls" --lib --target aarch64-apple-ios
+          cargo build --release --features "uniffi,vls" --lib --target aarch64-apple-ios-sim
+          cargo build --release --features "uniffi,vls" --lib --target x86_64-apple-ios
 
       - name: Generate Swift bindings
         run: ./scripts/ci/uniffi_generate_from_library.sh swift target/uniffi/swift target/release/librgb_lightning_node.dylib
