@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "org.utexo.rgblightningnode"
+cdylib_name = "rgb_lightning_node"
+android = true
+android_cleaner = true

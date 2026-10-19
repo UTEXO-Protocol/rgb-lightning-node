@@ -49,3 +49,8 @@ node_modules/
 e2e-specs/node_modules/
 test-results/
 e2e-specs/test-results/
+
+# BFA Android build outputs
+/bindings/bfa-android/build/
+/bindings/bfa-android/.gradle/
+/bindings/bfa-android/local.properties

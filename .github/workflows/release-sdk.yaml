@@ -133,6 +133,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -192,7 +193,7 @@ jobs:
           bindgen --version
 
       - name: Build host cdylib with external signer API
-        run: cargo build --release --features "uniffi,vls,vss" --lib
+        run: cargo build --release --features "uniffi,vls" --lib
 
       - name: Generate Kotlin Android bindings
         run: ./scripts/ci/uniffi_generate_from_library.sh kotlin target/uniffi/kotlin-android target/release/librgb_lightning_node.so uniffi-android.toml
@@ -201,7 +202,7 @@ jobs:
         env:
           AWS_LC_SYS_EXTERNAL_BINDGEN: "1"
           CMAKE: /usr/bin/cmake
-          UNIFFI_CARGO_FEATURES: "uniffi,vls,vss"
+          UNIFFI_CARGO_FEATURES: "uniffi,vls"
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           export BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi="--sysroot=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
@@ -279,6 +280,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -313,10 +315,10 @@ jobs:
           export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios="--sysroot=${IOS_SYSROOT}"
           export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim="--sysroot=${SIM_SYSROOT}"
           export BINDGEN_EXTRA_CLANG_ARGS_x86_64_apple_ios="--sysroot=${SIM_SYSROOT}"
-          cargo build --release --features "uniffi,vls,vss" --lib
-          cargo build --release --features "uniffi,vls,vss" --lib --target aarch64-apple-ios
-          cargo build --release --features "uniffi,vls,vss" --lib --target aarch64-apple-ios-sim
-          cargo build --release --features "uniffi,vls,vss" --lib --target x86_64-apple-ios
+          cargo build --release --features "uniffi,vls" --lib
+          cargo build --release --features "uniffi,vls" --lib --target aarch64-apple-ios
+          cargo build --release --features "uniffi,vls" --lib --target aarch64-apple-ios-sim
+          cargo build --release --features "uniffi,vls" --lib --target x86_64-apple-ios
 
       - name: Generate Swift bindings
         run: ./scripts/ci/uniffi_generate_from_library.sh swift target/uniffi/swift target/release/librgb_lightning_node.dylib

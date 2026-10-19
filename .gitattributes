@@ -1,0 +1,4 @@
+
+# Keep third-party crate sources collapsed in code review.
+vendor/** linguist-vendored
+vendor/**/LOCAL_PATCH.txt linguist-vendored=false

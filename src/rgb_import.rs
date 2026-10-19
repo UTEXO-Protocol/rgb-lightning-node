@@ -3,8 +3,7 @@ use crate::utils::AppState;
 use base64::{engine::general_purpose, Engine as _};
 use rgb_lib::wallet::Metadata as RgbLibMetadata;
 use rgb_lib::{
-    ConsignmentExt, ContractId, Error as RgbLibError, FileContent, RgbContract, RgbTransfer,
-    RgbTxid,
+    ConsignmentExt, ContractId, Error as RgbLibError, FileContent, RgbTransfer, RgbTxid,
 };
 use std::str::FromStr;
 use std::sync::Arc;
@@ -18,6 +17,8 @@ pub(crate) struct ImportRgbTransferConsignmentRequestData {
     pub(crate) expected_asset_id: Option<String>,
 }
 
+// Preserve the request shape while standalone contract import is unavailable.
+#[allow(dead_code)]
 pub(crate) struct ImportRgbContractRequestData {
     pub(crate) contract_base64: String,
     pub(crate) expected_asset_id: String,
@@ -31,6 +32,7 @@ pub(crate) struct ImportRgbData {
 
 #[derive(Clone, Copy)]
 enum RgbPayloadKind {
+    #[allow(dead_code)] // Still exercised by contract payload validation tests.
     Contract,
     TransferConsignment,
 }
@@ -120,15 +122,6 @@ where
         .map_err(|error| APIError::Unexpected(format!("{operation} task failed: {error}")))?
 }
 
-fn map_contract_import_error(error: RgbLibError) -> APIError {
-    match error {
-        RgbLibError::InvalidConsignment => {
-            APIError::InvalidRgbContract("contract validation failed".to_string())
-        }
-        other => APIError::from(other),
-    }
-}
-
 fn map_transfer_import_error(error: RgbLibError) -> APIError {
     match error {
         RgbLibError::InvalidConsignment => {
@@ -187,32 +180,14 @@ pub(crate) async fn import_rgb_transfer_consignment(
 }
 
 /// Validate and register public RGB contract metadata without importing allocations.
+#[allow(unused_variables)]
 pub(crate) async fn import_rgb_contract(
     state: Arc<AppState>,
     request: ImportRgbContractRequestData,
 ) -> Result<ImportRgbData, APIError> {
-    let expected_asset_id = request.expected_asset_id;
-    let (contract, contract_id) = parse_rgb_payload("contract", move || {
-        let bytes = decode_rgb_base64(request.contract_base64, RgbPayloadKind::Contract)?;
-        let contract = RgbContract::load(&bytes[..])
-            .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
-        let contract_id = contract.contract_id();
-        validate_expected_asset_id(&expected_asset_id, &contract_id, RgbPayloadKind::Contract)?;
-        Ok((contract, contract_id))
-    })
-    .await?;
-
-    run_rgb_import(state, "contract", move |unlocked_state| {
-        let (metadata, already_imported) = unlocked_state
-            .rgb_import_asset_contract(contract)
-            .map_err(map_contract_import_error)?;
-        Ok(ImportRgbData {
-            asset_id: contract_id.to_string(),
-            already_imported,
-            metadata,
-        })
-    })
-    .await
+    Err(APIError::InvalidRequest(
+        "Contract import is unavailable in the local BFA build".into(),
+    ))
 }
 
 #[cfg(test)]

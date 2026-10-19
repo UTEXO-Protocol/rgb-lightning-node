@@ -1,0 +1,9 @@
+Local Android compatibility patch on native-tls 0.2.18.
+Only changes Android system CA-store selection: prefer the nonempty Conscrypt APEX
+store, then the legacy system CA directory. Keep the existing X.509 parsing,
+OpenSSL certificate verification, and hostname verification. Do not merge roots
+from an older system image into the active updatable store. No global environment
+changes and no trust-all override.
+Primary platform reference:
+https://android.googlesource.com/platform/prebuilts/fullsdk/sources/+/refs/heads/androidx-constraintlayout-release/android-35/com/android/org/conscrypt/TrustedCertificateStore.java
+The complete new RGB-lib checkout remains unchanged at its pinned commit.

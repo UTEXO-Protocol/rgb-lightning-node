@@ -25,6 +25,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -67,6 +68,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -93,6 +95,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: llvm-tools-preview
@@ -130,6 +133,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -146,6 +150,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
@@ -157,50 +162,14 @@ jobs:
         if: always()
         run: ./regtest.sh stop
 
-  vss-tests:
-    runs-on: warp-ubuntu-latest-x64-16x
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: ./.github/actions/git-credentials
-        with:
-          token: ${{ secrets.ORG_READ_TOKEN }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: ""
-      - name: Build with vss feature
-        run: cargo build --features vss
-      - name: Run deterministic VSS durability regressions
-        run: cargo test --features vss "test::vss_durability_gaps" -- --test-threads=1
-      - name: Run VSS teardown headline tests
-        run: cargo test --features "uniffi,test-utils,vls,vss" --bin rgb-lightning-node ldk::vss_teardown_tests -- --test-threads=1
-      - name: Start regtest and VSS services
-        run: VSS=1 ./regtest.sh start
-      - name: Run VSS tests (e2e against regtest + VSS server)
-        run: SKIP_INIT=1 cargo test --features vss "test::vss::tests" -- --test-threads=1
-      - name: Run VSS unreachable openchannel e2e test
-        run: SKIP_INIT=1 cargo test --features vss "test::vss_unreachable_openchannel" -- --test-threads=1
-      - name: Run local SQLite process-kill matrix
-        run: cargo test --features "uniffi,test-utils,vls,vss" --lib kv_store_os_kill_matrix -- --test-threads=1
-      - name: Run VSS process-kill matrix
-        run: cargo test --features "uniffi,test-utils,vls,vss" --bin rgb-lightning-node synced_kv_os_kill_matrix -- --ignored --test-threads=1
-      - name: Run VSS full-restore e2e test (wipe node dir, restore from seed)
-        run: SKIP_INIT=1 cargo test --features "uniffi,test-utils,vls,vss" --test lib_sdk vss_restore -- --test-threads=1
-      - name: Run consignment re-import e2e test (restore without RGB backup)
-        run: cargo test --features "uniffi,test-utils,vls,vss" --test lib_sdk vss_consignment_reimport -- --test-threads=1
-      - name: Stop regtest and VSS services
-        if: always()
-        run: docker compose --profile vss down -v --remove-orphans
-
+  # BFA RGB-lib has no native VSS API. Local persistence is still checked below.
   persistence-sanitizers:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        sanitizer: [address, thread]
+        sanitizer: [address]
     env:
       CARGO_BUILD_JOBS: 1
       RUSTFLAGS: >-
@@ -216,6 +185,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
@@ -228,31 +198,8 @@ jobs:
         if: matrix.sanitizer == 'address'
         run: >-
           cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
-          --features "uniffi,test-utils,vls,vss" --lib
+          --features "uniffi,test-utils,vls" --lib
           kv_store::persistence_tests::kv_store_os_kill_matrix -- --exact --test-threads=1
-      - name: Start VSS services for ThreadSanitizer
-        if: matrix.sanitizer == 'thread'
-        run: |
-          docker compose --profile vss up -d --build vss-postgres vss-server
-          for attempt in $(seq 1 60); do
-            if curl --silent --show-error --max-time 2 --output /dev/null http://127.0.0.1:8081/vss/list-key-versions; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker compose --profile vss logs vss-postgres vss-server
-          exit 1
-      - name: Run VSS ordering regression under ThreadSanitizer
-        if: matrix.sanitizer == 'thread'
-        run: >-
-          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
-          --all-features --bin rgb-lightning-node
-          test::vss::tests::synced_kv_store_drain_never_regresses_newer_write
-          -- --exact --test-threads=1
-      - name: Stop sanitizer VSS services
-        if: always() && matrix.sanitizer == 'thread'
-        run: docker compose --profile vss down -v --remove-orphans
-
   gossip-tests:
     runs-on: warp-ubuntu-latest-x64-16x
     timeout-minutes: 60
@@ -263,6 +210,7 @@ jobs:
       - uses: ./.github/actions/git-credentials
         with:
           token: ${{ secrets.ORG_READ_TOKEN }}
+          rgb-lib-token: ${{ secrets.BFA_READ_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""

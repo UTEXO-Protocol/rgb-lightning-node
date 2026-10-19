@@ -21,6 +21,11 @@ pub(crate) use state::{clear_uniffi_app_state, set_uniffi_app_state};
 use std::{str::FromStr, sync::Arc};
 pub use types::*;
 
+#[uniffi::export]
+pub fn local_bfa_build_info() -> String {
+    "rgb-lib=3f571ac58909400046d69143ebb535f4da1f4d42;proxy=1.0;vss=off;lightning=off;android-ca=apex-preferred;proxy-http=1.1;decode-cause=on".into()
+}
+
 pub fn uniffi_healthcheck() -> String {
     "rgb_lightning_node_uniffi_ready".to_string()
 }
@@ -82,6 +87,11 @@ fn attach_host_with_expected_key_source(
 }
 
 fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> {
+    if request.reuse_addresses || request.enable_virtual_channels_v0 == Some(true) {
+        return Err(RlnError::InvalidRequest(
+            "Address reuse and virtual channels are unavailable in the local BFA build".into(),
+        ));
+    }
     let network = network_from_str(&request.network)?;
     if let Some(url) = &request.vss_url {
         #[cfg(feature = "vss")]
@@ -307,14 +317,14 @@ fn map_media(data: crate::sdk::Media) -> Media {
 
 fn map_ifa_issuance_type(
     issuance_type: IfaIssuanceType,
-) -> Result<rgb_lib::wallet::IfaIssuanceType, RlnError> {
+) -> Result<crate::local_build::IfaIssuanceType, RlnError> {
     Ok(match issuance_type {
-        IfaIssuanceType::Legacy => rgb_lib::wallet::IfaIssuanceType::Legacy,
-        IfaIssuanceType::LinkRightOnly => rgb_lib::wallet::IfaIssuanceType::LinkRightOnly,
+        IfaIssuanceType::Legacy => crate::local_build::IfaIssuanceType::Legacy,
+        IfaIssuanceType::LinkRightOnly => crate::local_build::IfaIssuanceType::LinkRightOnly,
         IfaIssuanceType::LinkedFromParent {
             contract_id,
             request_link_right,
-        } => rgb_lib::wallet::IfaIssuanceType::LinkedFromParent {
+        } => crate::local_build::IfaIssuanceType::LinkedFromParent {
             contract_id: contract_id.to_string(),
             request_link_right,
         },

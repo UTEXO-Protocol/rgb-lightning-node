@@ -65,7 +65,7 @@ pub(crate) const ELECTRUM_URL_REGTEST: &str = "127.0.0.1:50001";
 #[cfg(test)]
 pub(crate) const ESPLORA_URL_REGTEST: &str = "http://127.0.0.1:3002";
 pub(crate) const PROXY_ENDPOINT_LOCAL: &str = "rpc://127.0.0.1:3000/json-rpc";
-pub(crate) const PROXY_ENDPOINT_PUBLIC: &str = "rpcs://proxy.iriswallet.com/0.2/json-rpc";
+pub(crate) const PROXY_ENDPOINT_PUBLIC: &str = "rpcs://rgb-proxy.dev.utexo.com/json-rpc";
 
 /// Set by the panic hook and by the background-processor watchdog. Once set, the shutdown is
 /// fatal: it stops waiting for an in-progress state change and the process exits non-zero.
@@ -99,6 +99,11 @@ impl AppState {
     /// Kept separate from wallet/lifecycle checks so on-chain and administrative APIs retain
     /// their existing requirements. REST and SDK entry points share this policy.
     pub(crate) fn check_lightning_supported(&self) -> Result<(), APIError> {
+        if crate::local_build::ONCHAIN_ONLY {
+            return Err(APIError::InvalidRequest(
+                "Lightning is unavailable in the local on-chain BFA build".into(),
+            ));
+        }
         if self.static_state.network == BitcoinNetwork::Mainnet {
             return Err(APIError::LightningUnsupportedOnMainnet);
         }

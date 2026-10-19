@@ -1,0 +1,29 @@
+BFA on-chain Android draft
+
+This branch targets RGB-lib revision 3f571ac58909400046d69143ebb535f4da1f4d42
+from UTEXO-Protocol/rgb-lib-bfa. Initialize the rust-lightning submodule before
+building. This build does not support VSS, Lightning runtime, IFA links,
+address reuse or legacy wallet database migration. Use isolated fresh storage.
+
+Requirements: Rust 1.94 or later, the aarch64-linux-android target, cargo-ndk
+4.1.2, Android SDK 36, NDK 27 or later, JDK 17 and Gradle 8.14.3.
+Private dependency access must already be configured for git/Cargo.
+
+Set ANDROID_HOME, JAVA_HOME and ANDROID_NDK_HOME for your machine. Set GRADLE
+to the Gradle executable if it is not on PATH. Then run:
+
+  git submodule update --init
+  python3 scripts/build-bfa-android.py
+
+Output: target/bfa-android-artifact contains an ARM64 AAR and its SHA-256
+provenance. No artifacts are published. Pass that directory to the companion
+React Native SDK's scripts/stage-bfa-native.mjs helper.
+
+The vendored native-tls 0.2.18 patch chooses the active Android Conscrypt CA
+store, preserving certificate and hostname verification. Vendored reqwest
+0.13.4 preserves decode errors and defaults Android clients to HTTP/1.1.
+The HTTP/1.1 change is a compatibility experiment, not a proven fix for the
+dev proxy's VPN access restriction. Original crate licenses are retained.
+
+Draft limitations: the release workflow and other platforms/features have not
+been migrated or validated. No live burn/payout validation is claimed.

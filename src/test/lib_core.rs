@@ -6,10 +6,10 @@ use rgb_lightning_node::test_utils::{
     node_handle_from_mock_state_for_tests, register_uniffi_state_for_tests,
 };
 use rgb_lightning_node::{
-    sdk_get_channel_id, sdk_get_payment, sdk_get_swap, sdk_ln_invoice, sdk_node_info, sdk_send_rgb,
-    uniffi_is_initialized, Bolt11Invoice, ChannelId, ContractId, LnInvoiceRequest, PaymentHash,
-    PaymentType, PublicKey, RecipientId, RlnError, SendRgbRequest, TransportEndpoint, Txid,
-    UniffiCustomTypeConverter,
+    sdk_address, sdk_get_channel_id, sdk_get_payment, sdk_get_swap, sdk_ln_invoice, sdk_node_info,
+    sdk_send_rgb, uniffi_is_initialized, Bolt11Invoice, ChannelId, ContractId, LnInvoiceRequest,
+    PaymentHash, PaymentType, PublicKey, RecipientId, RlnError, SendRgbRequest, TransportEndpoint,
+    Txid, UniffiCustomTypeConverter,
 };
 
 #[test]
@@ -51,7 +51,7 @@ fn register_and_clear_uniffi_state_transitions() {
 
 #[test]
 #[serial(uniffi_state)]
-fn locked_state_does_not_bypass_unlock_guards() {
+fn onchain_build_rejects_lightning_and_keeps_wallet_unlock_guards() {
     let state = mock_locked_app_state();
     register_uniffi_state_for_tests(&state);
 
@@ -65,7 +65,13 @@ fn locked_state_does_not_bypass_unlock_guards() {
         description_hash: None,
         min_final_cltv_expiry_delta: None,
     });
-    assert!(matches!(invoice, Err(RlnError::NotInitialized(_))));
+    let error = invoice.err().expect("Lightning invoice must be rejected");
+    assert!(
+        matches!(&error, RlnError::InvalidRequest(message)
+            if message == "Invalid request: Lightning is unavailable in the local on-chain BFA build"),
+        "{error:?}"
+    );
+    assert!(matches!(sdk_address(), Err(RlnError::NotInitialized(_))));
 
     let send_rgb = sdk_send_rgb(SendRgbRequest {
         donation: false,
