@@ -15,14 +15,13 @@ use lightning::sign::ChangeDestinationSource;
 use lightning::util::async_poll::AsyncResult;
 use lightning::util::persist::KVStoreSync;
 use rgb_lib::{
-    bdk_wallet::{KeychainKind, SignOptions},
+    bdk_wallet::SignOptions,
     bitcoin::psbt::Psbt as BitcoinPsbt,
     wallet::{
-        rust_only::{check_proxy_url, ColoringInfo},
-        AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance, Media,
-        Metadata, Online, OperationResult, Outpoint, ReceiveData, Recipient, RefreshFilter,
-        RefreshResult, RefreshedTransfer, RgbWalletOpsOffline, RgbWalletOpsOnline, SendBeginResult,
-        SinglesigKeys, SyncOptions, Transaction as RgbLibTransaction, Transfer, TransferKind,
+        rust_only::ColoringInfo, AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets,
+        Balance, BtcBalance, Media, Metadata, Online, OperationResult, ReceiveData, Recipient,
+        RefreshFilter, RefreshResult, RefreshedTransfer, RgbWalletOpsOffline, RgbWalletOpsOnline,
+        SendBeginResult, SinglesigKeys, SyncOptions, Transaction as RgbLibTransaction, Transfer,
         TransportEndpoint, Unspent, Wallet as RgbLibWallet,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
@@ -358,44 +357,6 @@ impl CommonState {
             inflation_amounts,
             reject_list_url,
             issuance_type,
-        )
-    }
-
-    #[allow(unused_variables)]
-    pub(crate) fn rgb_find_link_right_outpoint(
-        &self,
-        contract_id: ContractId,
-    ) -> Result<Option<Outpoint>, RgbLibError> {
-        Err(RgbLibError::Internal {
-            details: "Unavailable in local BFA build: IFA linking".into(),
-        })
-    }
-
-    #[allow(unused_variables)]
-    pub(crate) fn rgb_find_link_transfer(
-        &self,
-        contract_id: ContractId,
-    ) -> Result<Option<Transfer>, RgbLibError> {
-        Err(RgbLibError::Internal {
-            details: "Unavailable in local BFA build: IFA linking".into(),
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn rgb_link_ifa(
-        &self,
-        parent_contract_id: String,
-        child_contract_id: String,
-        link_right_outpoint: Outpoint,
-        fee_rate: u64,
-        min_confirmations: u8,
-    ) -> Result<OperationResult, RgbLibError> {
-        self.rgb_wallet_wrapper.link_ifa(
-            parent_contract_id,
-            child_contract_id,
-            link_right_outpoint,
-            fee_rate,
-            min_confirmations,
         )
     }
 
@@ -973,21 +934,6 @@ impl RgbLibWalletWrapper {
             inflation_amounts,
             reject_list_url,
         )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[allow(unused_variables)]
-    pub(crate) fn link_ifa(
-        &self,
-        parent_contract_id: String,
-        child_contract_id: String,
-        link_right_outpoint: Outpoint,
-        fee_rate: u64,
-        min_confirmations: u8,
-    ) -> Result<OperationResult, RgbLibError> {
-        Err(RgbLibError::Internal {
-            details: "Unavailable in local BFA build: IFA linking".into(),
-        })
     }
 
     pub(crate) fn issue_asset_nia(
@@ -1634,7 +1580,6 @@ mod wallet_source_tests {
                 database_type: DatabaseType::Sqlite,
                 max_allocations_per_utxo: 1,
                 supported_schemas: vec![AssetSchema::Nia],
-                reuse_addresses: false,
             },
             SinglesigKeys {
                 account_xpub_vanilla: keys.account_xpub_vanilla,

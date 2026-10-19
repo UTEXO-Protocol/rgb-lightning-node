@@ -19,6 +19,8 @@ pub(crate) fn burn_reason(
     }
 }
 
+// Used by the library SDK; the standalone binary only uses the other validators.
+#[allow(dead_code)]
 pub(crate) fn invoice_expiration(duration: Option<u32>, now: u64) -> Result<u64, String> {
     let duration = duration.unwrap_or(86400);
     if duration == 0 || duration > 2_592_000 {
@@ -43,6 +45,8 @@ pub(crate) fn parse_evm_chain_id(
     value.ok_or("invalid eth_chainId response")
 }
 
+// Used by the library NodeHandle before it opens wallet storage.
+#[allow(dead_code)]
 pub(crate) fn check_fresh_storage(path: &std::path::Path) -> Result<(), String> {
     const MARKER: &str = "local-bfa-rgb-lib-3f571ac-v1";
     let marker = path.join(".bfa-local-format");

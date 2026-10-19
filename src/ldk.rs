@@ -1,7 +1,5 @@
 use crate::asset_link::{
     AssetLinkAuthorizeParamsWire, AssetLinkAuthorizer, AssetLinkMessageHandler,
-    ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH, ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY,
-    ASSET_LINK_ERROR_UNKNOWN_ASSET, ASSET_LINK_ERROR_UNKNOWN_LINK,
 };
 use crate::async_order::{
     AsyncOrderInvoiceProvider, AsyncOrderMessageHandler, AsyncOrderOutboundInvoiceResultWire,
@@ -99,8 +97,7 @@ use rgb_lib::{
     wallet::{
         check_indexer_url,
         rust_only::{AssetColoringInfo, ColoringInfo},
-        DatabaseType, OnlineOptions, Recipient, SinglesigKeys, Wallet as RgbLibWallet, WalletData,
-        WitnessData,
+        DatabaseType, Recipient, SinglesigKeys, Wallet as RgbLibWallet, WalletData, WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
     Fascia, FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,
@@ -117,7 +114,7 @@ use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 #[cfg(any(test, feature = "vss"))]
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
@@ -129,9 +126,7 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "vss")]
 use crate::async_kv_store::RemoteFirstKvStore;
-use crate::core_types::{
-    HTLCStatus, LdkChainSync, NodeKeySource, SwapStatus, UnlockRequest, PENDING_SWAP_TIMEOUT_SECS,
-};
+use crate::core_types::{HTLCStatus, LdkChainSync, NodeKeySource, SwapStatus, UnlockRequest};
 use crate::database::RlnDatabase;
 use crate::disk::{self, FilesystemLogger};
 use crate::gossip::{GossipSource, GossipSourceConfig};
@@ -141,7 +136,6 @@ const OUTBOUND_PAYMENTS_KEY: &str = "outbound_payments";
 const CHANNEL_IDS_KEY: &str = "channel_ids";
 const MAKER_SWAPS_KEY: &str = "maker_swaps";
 const TAKER_SWAPS_KEY: &str = "taker_swaps";
-const ASSET_LINK_SWAP_AUTHORIZATION_MAX_EXPIRY_SECS: u64 = 24 * 60 * 60;
 const OUTPUT_SPENDER_TXES_KEY: &str = "output_spender_txes";
 const PSBT_NAMESPACE: &str = "psbt";
 const PENDING_FUNDING_NAMESPACE: &str = "pending_funding";
@@ -186,13 +180,13 @@ use crate::signer::{
     ActiveSignerRef, DynRlnChannelSigner, DynRlnSigner, LightningEntropySource, RlnKeysInterface,
     SystemEntropySource,
 };
-use crate::swap::{SwapData, SwapInfo};
+use crate::swap::SwapData;
 use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, description_from_invoice,
-    description_hash_from_invoice, do_connect_peer, get_current_timestamp,
-    get_max_local_rgb_amount, hex_str, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, AppState, CommonState, LightningState, StaticState,
-    UnlockedAppState, FATAL_ERROR, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
+    description_hash_from_invoice, do_connect_peer, get_current_timestamp, hex_str,
+    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState, CommonState,
+    LightningState, StaticState, UnlockedAppState, FATAL_ERROR, PROXY_ENDPOINT_LOCAL,
+    PROXY_ENDPOINT_PUBLIC,
 };
 
 const RGB_TRANSFER_CHAN_EXPIRATION_SECS: u64 = 86400;
@@ -1319,38 +1313,8 @@ impl CustomMsgPeerAccessControl for LiveChannelAccess {
     }
 }
 
-struct NodeAssetLinkAuthorizer {
-    unlocked_state_weak: Weak<LightningState>,
-    channel_manager: Arc<ChannelManager>,
-    kv_store: Arc<SyncedKvStore>,
-    taker_swaps: Arc<Mutex<SwapMap>>,
-}
-
-fn reserved_outbound_rgb_amount(
-    taker_swaps: &SwapMap,
-    outbound_contract_id: ContractId,
-    current_time: u64,
-) -> u64 {
-    taker_swaps
-        .swaps
-        .values()
-        .filter(|swap| {
-            if swap.swap_info.from_asset != Some(outbound_contract_id) {
-                return false;
-            }
-
-            match swap.status {
-                SwapStatus::Waiting => current_time <= swap.swap_info.expiry,
-                SwapStatus::Pending => swap.initiated_at.is_none_or(|initiated_at| {
-                    current_time <= initiated_at.saturating_add(PENDING_SWAP_TIMEOUT_SECS)
-                }),
-                SwapStatus::Succeeded | SwapStatus::Expired | SwapStatus::Failed => false,
-            }
-        })
-        .fold(0, |reserved_amount, swap| {
-            reserved_amount.saturating_add(swap.swap_info.qty_from)
-        })
-}
+// IFA authorization is rejected without retaining Lightning state.
+struct NodeAssetLinkAuthorizer;
 
 impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
     #[allow(unused_variables)]
@@ -6408,12 +6372,7 @@ async fn start_lightning(
         next_payment_idx,
     });
 
-    asset_link_handler.set_authorizer(Arc::new(NodeAssetLinkAuthorizer {
-        unlocked_state_weak: Arc::downgrade(&unlocked_state),
-        channel_manager: Arc::clone(&channel_manager),
-        kv_store: Arc::clone(&kv_store),
-        taker_swaps: Arc::clone(&taker_swaps),
-    }));
+    asset_link_handler.set_authorizer(Arc::new(NodeAssetLinkAuthorizer));
 
     // Refresh the RGS snapshot on a fixed interval (RGS mode only). The first
     // tick fires immediately, so a freshly unlocked node syncs right away.

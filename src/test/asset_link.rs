@@ -120,16 +120,16 @@ async fn asset_link_create_uses_rgb_link_state_and_is_idempotent() {
         .is_some_and(|txid| !txid.is_empty()));
     assert!(asset_link.created_at.is_some());
 
-    // the link transaction consumes the link right allocation in the UTXO,
-    // so it must be non-existent after the RGB transition
+    // The parent was issued with LinkRightOnly. Its sole allocation must be
+    // absent after the link transaction consumes it.
     mine(false);
     wait_for_link_transfer_settled(node_addr, &parent_asset_id).await;
     let unspents = list_settled_unspents(node_addr).await;
     assert!(!unspents.iter().any(|unspent| {
-        unspent.rgb_allocations.iter().any(|allocation| {
-            allocation.asset_id.as_deref() == Some(parent_asset_id.as_str())
-                && allocation.assignment == Assignment::LinkRight
-        })
+        unspent
+            .rgb_allocations
+            .iter()
+            .any(|allocation| allocation.asset_id.as_deref() == Some(parent_asset_id.as_str()))
     }));
     assert_eq!(
         asset_metadata(node_addr, &parent_asset_id)

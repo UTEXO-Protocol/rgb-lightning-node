@@ -6,8 +6,8 @@ pub(crate) use rgb_lightning_node::{
     SdkCloseChannelRequest, SdkCreateUtxosRequest, SdkExternalSignerBootstrap, SdkInitRequest,
     SdkIssueAssetCfaRequest, SdkIssueAssetNiaRequest, SdkKeysendRequest, SdkLdkChainSync, SdkNode,
     SdkOpenChannelRequest, SdkRefreshTransfersRequest, SdkRgbInvoiceRequest, SdkSendBtcRequest,
-    SdkSendPaymentRequest, SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest,
-    TransactionType, TransportEndpoint, WitnessData,
+    SdkSendPaymentRequest, SdkUnlockRequest, SendRgbRequest, TransactionType, TransportEndpoint,
+    WitnessData,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -956,4 +956,23 @@ pub(crate) fn close_channel_with_force(
 pub(crate) fn refresh_transfers(node: &SdkNode) {
     node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
         .expect("refreshtransfers");
+}
+
+/// Inspect only this burn's witness so an earlier burn cannot satisfy the assertion.
+pub(crate) fn assert_burn_reason(path: String, txid: bitcoin::Txid, recipient: &[u8]) {
+    use rgb_lib::inspect::{inspect_consignment, BundleFilter, TransitionGlobal};
+    let inspection = inspect_consignment(path, BundleFilter::Witness(txid.to_string())).unwrap();
+    let reasons: Vec<_> = inspection
+        .witnesses
+        .iter()
+        .flat_map(|w| &w.operations)
+        .flat_map(|op| &op.transitions)
+        .flat_map(|t| &t.globals)
+        .filter_map(|global| match global {
+            TransitionGlobal::BurnReason(reason) => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
+    let expected: String = recipient.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(reasons, vec![expected]);
 }

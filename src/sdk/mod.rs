@@ -2941,7 +2941,7 @@ pub(crate) async fn rgb_invoice(
     };
 
     let expiration_timestamp =
-        crate::local_build::invoice_expiration(request.duration_seconds, get_current_timestamp())
+        crate::bfa_values::invoice_expiration(request.duration_seconds, get_current_timestamp())
             .map_err(APIError::InvalidRequest)?;
     let wallet_state = Arc::clone(unlocked_state);
     let receive_data = tokio::task::spawn_blocking(move || {

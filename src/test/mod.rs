@@ -1,3 +1,4 @@
+use crate::local_build::IfaIssuanceType;
 #[cfg(feature = "esplora")]
 use crate::utils::ESPLORA_URL_REGTEST;
 use amplify::s;
@@ -32,7 +33,7 @@ use lightning_transaction_sync::ElectrumSyncClient;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use reqwest::{Response, StatusCode};
-use rgb_lib::{wallet::IfaIssuanceType, BitcoinNetwork, ContractId};
+use rgb_lib::{BitcoinNetwork, ContractId};
 use sea_orm::{ConnectOptions, Database};
 use std::collections::HashMap;
 use std::fs::File;

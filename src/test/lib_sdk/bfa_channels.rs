@@ -2,9 +2,7 @@
 use crate::helpers::*;
 use bitcoin::hex::FromHex;
 use rgb_lib::keys::{generate_keys, WitnessVersion};
-use rgb_lib::wallet::{
-    DatabaseType, OnlineOptions, RgbWalletOpsOffline, SinglesigKeys, Wallet, WalletData,
-};
+use rgb_lib::wallet::{DatabaseType, SinglesigKeys, Wallet, WalletData};
 use rgb_lib::{AssetSchema, BitcoinNetwork};
 use rgb_lightning_node::BurnRequest;
 use serde_json::{json, Value};
@@ -131,18 +129,16 @@ fn mint_bfa(dir: &Path, node: &Node, bridge: &str, container: &str) -> (Wallet, 
             database_type: DatabaseType::Sqlite,
             max_allocations_per_utxo: 5,
             supported_schemas: vec![AssetSchema::Bfa],
-            reuse_addresses: false,
         },
         SinglesigKeys::from_keys(&keys, None),
     )
     .unwrap();
     let online = issuer
-        .go_online(OnlineOptions {
-            indexer_url: INDEXER.into(),
-            skip_consistency_check: false,
-            vanilla_sync_lookback: 20,
-            eth_rpc_url: Some(node.eth_rpc.clone()),
-        })
+        .go_online(lightning::rgb_utils::rgb_online_options(
+            INDEXER.into(),
+            std::collections::HashMap::from([(31337, node.eth_rpc.clone())]),
+            false,
+        ))
         .unwrap();
     let funded = Command::new("./regtest.sh")
         .args(["sendtoaddress", &issuer.get_address().unwrap(), "0.02"])
@@ -164,6 +160,7 @@ fn mint_bfa(dir: &Path, node: &Node, bridge: &str, container: &str) -> (Wallet, 
             "BFA Lightning".into(),
             6,
             1,
+            31337,
             bridge.into(),
             None,
         )
@@ -174,13 +171,16 @@ fn mint_bfa(dir: &Path, node: &Node, bridge: &str, container: &str) -> (Wallet, 
             asset_id: None,
             assignment_kind: Some(AssignmentKind::Fungible),
             assignment_amount: Some(1000),
-            duration_seconds: Some(3600),
+            duration_seconds: Some(86400),
             min_confirmations: 1,
             witness: false,
         })
         .unwrap();
+    let invoice_data = rgb_lib::wallet::Invoice::new(receive.invoice.clone())
+        .unwrap()
+        .invoice_data();
     let prepared = issuer
-        .bridge_begin(
+        .mint_begin(
             online,
             asset.asset_id,
             rgb_lib::wallet::Recipient {
@@ -188,9 +188,13 @@ fn mint_bfa(dir: &Path, node: &Node, bridge: &str, container: &str) -> (Wallet, 
                 witness_data: None,
                 assignment: rgb_lib::Assignment::Fungible(1000),
                 transport_endpoints: vec![proxy()],
+                public_key: invoice_data.public_key,
+                encryption: invoice_data.encryption,
+                expiration_timestamp: invoice_data.expiration_timestamp,
             },
             2,
             1,
+            proxy(),
         )
         .unwrap();
     let locked = Command::new("docker")
@@ -220,7 +224,7 @@ fn mint_bfa(dir: &Path, node: &Node, bridge: &str, container: &str) -> (Wallet, 
     let receipt: Value = serde_json::from_slice(&locked.stdout).unwrap();
     assert_eq!(receipt["status"], "0x1");
     let signed = issuer.sign_psbt(prepared.psbt, None).unwrap();
-    issuer.bridge_end(online, signed).unwrap();
+    issuer.mint_end(online, signed).unwrap();
     mine(6);
     wait_for_received(node, &asset_id, 1000);
     (issuer, asset_id)
@@ -333,7 +337,7 @@ fn bfa_channels_multihop_restart_close_and_burn() {
     let mut a = Node::new(root.join("a"), NODE_A_PEER_PORT + 200, &eth);
     let mut b = Node::new(root.join("b"), NODE_B_PEER_PORT + 200, &eth);
     let mut c = Node::new(root.join("c"), NODE_C_PEER_PORT + 200, &eth);
-    let (issuer, asset) = mint_bfa(&root.join("issuer"), &a, &bridge, &container);
+    let (_issuer, asset) = mint_bfa(&root.join("issuer"), &a, &bridge, &container);
     eprintln!("BFA minted: {asset}");
 
     let receive = b
@@ -423,5 +427,5 @@ fn bfa_channels_multihop_restart_close_and_burn() {
     mine(6);
     wait_for_balance(&c, &asset, 80, TIMEOUT);
     let proof = c.get_consignment_path(asset, burned.txid).unwrap();
-    assert_eq!(issuer.get_burn_recipient(proof).unwrap(), recipient);
+    assert_burn_reason(proof, burned.txid, &recipient);
 }

@@ -17,6 +17,8 @@ pub(crate) struct ImportRgbTransferConsignmentRequestData {
     pub(crate) expected_asset_id: Option<String>,
 }
 
+// Preserve the request shape while standalone contract import is unavailable.
+#[allow(dead_code)]
 pub(crate) struct ImportRgbContractRequestData {
     pub(crate) contract_base64: String,
     pub(crate) expected_asset_id: String,
@@ -30,6 +32,7 @@ pub(crate) struct ImportRgbData {
 
 #[derive(Clone, Copy)]
 enum RgbPayloadKind {
+    #[allow(dead_code)] // Still exercised by contract payload validation tests.
     Contract,
     TransferConsignment,
 }
@@ -117,15 +120,6 @@ where
 
     task.await
         .map_err(|error| APIError::Unexpected(format!("{operation} task failed: {error}")))?
-}
-
-fn map_contract_import_error(error: RgbLibError) -> APIError {
-    match error {
-        RgbLibError::InvalidConsignment => {
-            APIError::InvalidRgbContract("contract validation failed".to_string())
-        }
-        other => APIError::from(other),
-    }
 }
 
 fn map_transfer_import_error(error: RgbLibError) -> APIError {

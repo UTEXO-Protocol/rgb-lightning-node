@@ -3,7 +3,7 @@
 
 pub(crate) const ONCHAIN_ONLY: bool = true;
 
-pub(crate) use crate::bfa_values::{burn_reason, invoice_expiration};
+pub(crate) use crate::bfa_values::burn_reason;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub(crate) enum IfaIssuanceType {

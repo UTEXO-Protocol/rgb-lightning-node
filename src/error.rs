@@ -20,6 +20,7 @@ pub(crate) struct APIErrorResponse {
 #[derive(Debug, thiserror::Error)]
 pub enum APIError {
     #[error("Address reuse is disabled")]
+    #[allow(dead_code)] // Retained in the wire error vocabulary for disabled fork APIs.
     AddressReuseDisabled,
 
     #[error("Allocations already available")]
@@ -195,9 +196,11 @@ pub enum APIError {
     InvalidConsignment,
 
     #[error("Invalid contract link: {0}")]
+    #[allow(dead_code)] // Retained in the wire error vocabulary for disabled fork APIs.
     InvalidContractLink(String),
 
     #[error("Invalid right outpoint: {0}")]
+    #[allow(dead_code)] // Retained in the wire error vocabulary for disabled fork APIs.
     InvalidRightOutpoint(String),
 
     #[error("Invalid description: {0}")]
@@ -391,6 +394,7 @@ pub enum APIError {
     Unexpected(String),
 
     #[error("Restored VSS backup is inconsistent: {0}")]
+    #[allow(dead_code)] // Retained in the wire error vocabulary for disabled fork APIs.
     RestoredBackupInconsistent(String),
 
     #[error("Unknown channel ID")]
@@ -839,11 +843,9 @@ mod tests {
     #[test]
     fn burn_errors_map_to_client_errors() {
         assert!(matches!(
-            APIError::from(RgbLibError::MissingBurnRecipient),
-            APIError::InvalidBurnRecipient(_)
-        ));
-        assert!(matches!(
-            APIError::from(RgbLibError::InvalidBurnRecipient { len: 20 }),
+            APIError::from(RgbLibError::InvalidBurnReason {
+                details: s!("invalid destination commitment"),
+            }),
             APIError::InvalidBurnRecipient(_)
         ));
         assert!(matches!(
@@ -857,7 +859,7 @@ mod tests {
             APIError::UnsupportedBurn(_)
         ));
         assert!(matches!(
-            APIError::from(RgbLibError::InvalidEthRpcUrl {
+            APIError::from(RgbLibError::InvalidEvmRpcUrl {
                 details: s!("Ethereum RPC URL is required for BFA"),
             }),
             APIError::InvalidEthRpcUrl(_)

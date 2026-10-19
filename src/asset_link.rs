@@ -19,11 +19,10 @@ use lightning::{
     },
 };
 use lightning_invoice::{Bolt11Invoice, PaymentSecret};
-use rgb_lib::{AssetSchema as RgbLibAssetSchema, ContractId};
+use rgb_lib::ContractId;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -49,10 +48,6 @@ use crate::{
 };
 
 const ASSET_LINK_AUTHORIZE_SWAP_METHOD: &str = "asset_link.authorize_swap";
-pub(crate) const ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH: i64 = 1203;
-pub(crate) const ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY: i64 = 1202;
-pub(crate) const ASSET_LINK_ERROR_UNKNOWN_ASSET: i64 = 1204;
-pub(crate) const ASSET_LINK_ERROR_UNKNOWN_LINK: i64 = 1201;
 pub(crate) const ASSET_LINK_ERROR_UNSUPPORTED_PROTOCOL_VERSION: i64 = 1200;
 pub(crate) const ASSET_LINK_MESSAGE_TYPE_ID: u16 = 37917;
 pub(crate) const ASSET_LINK_PROTOCOL_VERSION: u64 = 1;

@@ -18,6 +18,8 @@ struct Reply {
 
 // Same wire requirements as the pinned RGB-lib ServerInfoResponse. Do not
 // accept an older protocol or coerce non-compliant field types to success.
+// Mandatory fields are validated during deserialization, even when not displayed.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Info {
     protocol_version: String,

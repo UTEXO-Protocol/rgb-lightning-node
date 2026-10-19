@@ -14,6 +14,7 @@ mod async_kv_store;
 mod async_order;
 mod auth;
 mod backup;
+mod bfa_values;
 mod config;
 mod core_types;
 mod crypto;
@@ -21,6 +22,7 @@ mod custom_msg_rpc;
 mod database;
 mod disk;
 mod error;
+mod evm_rpc;
 #[cfg(test)]
 #[path = "test/fee_mock.rs"]
 mod fee_mock;
@@ -28,8 +30,10 @@ mod gossip;
 mod kv_store;
 mod ldk;
 mod ldk_chain_backend;
+mod local_build;
 mod mainnet_state;
 mod node_info;
+mod proxy_startup;
 mod rgb;
 mod rgb_file_transfer;
 mod rgb_import;
