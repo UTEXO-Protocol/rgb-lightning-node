@@ -1413,10 +1413,14 @@ impl WalletSource for RgbLibWalletWrapper {
 
 pub(crate) async fn check_rgb_proxy_endpoint(proxy_endpoint: &str) -> Result<(), APIError> {
     let proxy_url = TransportEndpoint::new(proxy_endpoint.to_string())?.endpoint;
-    crate::proxy_startup::validate(&proxy_url).await.map_err(|error| match error {
-        crate::proxy_startup::ValidationError::Network(details) => APIError::Network(details),
-        crate::proxy_startup::ValidationError::Protocol(version) => APIError::InvalidProxyProtocol(version),
-    })?;
+    crate::proxy_startup::validate(&proxy_url)
+        .await
+        .map_err(|error| match error {
+            crate::proxy_startup::ValidationError::Network(details) => APIError::Network(details),
+            crate::proxy_startup::ValidationError::Protocol(version) => {
+                APIError::InvalidProxyProtocol(version)
+            }
+        })?;
     Ok(())
 }
 

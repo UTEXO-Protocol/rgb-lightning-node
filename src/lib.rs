@@ -45,7 +45,6 @@ mod kv_store;
 mod ldk;
 mod ldk_chain_backend;
 mod local_build;
-mod proxy_startup;
 #[cfg(all(test, feature = "electrum"))]
 mod mainnet_startup_tests;
 mod mainnet_state;
@@ -55,6 +54,7 @@ mod mainnet_tests;
 mod mainnet_vss_tests;
 mod node;
 mod node_info;
+mod proxy_startup;
 mod rgb;
 mod rgb_file_transfer;
 mod rgb_import;
