@@ -1,3 +1,4 @@
+use crate::rgb_compat::IfaIssuanceType as RgbLibIfaIssuanceType;
 // NOTE: This module mirrors core behavior from `src/routes.rs` for SDK consumers.
 // If route-level business logic changes, keep SDK equivalents in sync.
 
@@ -74,7 +75,7 @@ use lightning::{
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description, PaymentSecret};
 use regex::Regex;
 use rgb_lib::utils::recipient_id_from_script_buf;
-use rgb_lib::wallet::rust_only::check_indexer_url as rgb_lib_check_indexer_url;
+use rgb_lib::wallet::check_indexer_url as rgb_lib_check_indexer_url;
 use rgb_lib::wallet::{
     Invoice as RgbLibInvoice, Recipient as RgbLibRecipient, RecipientInfo,
     WitnessData as RgbLibWitnessData,
@@ -93,14 +94,13 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
 
-use rgb_lib::wallet::rust_only::IndexerProtocol as RgbLibIndexerProtocol;
+use rgb_lib::wallet::IndexerProtocol as RgbLibIndexerProtocol;
 use rgb_lib::wallet::RecipientType as RgbLibRecipientType;
 use rgb_lib::wallet::{
     AssetBFA as RgbLibAssetBFA, AssetCFA as RgbLibAssetCFA, AssetIFA as RgbLibAssetIFA,
     AssetNIA as RgbLibAssetNIA, AssetUDA as RgbLibAssetUDA, EmbeddedMedia as RgbLibEmbeddedMedia,
-    IfaIssuanceType as RgbLibIfaIssuanceType, Media as RgbLibMedia, Metadata as RgbLibMetadata,
-    Outpoint as RgbLibOutpoint, ProofOfReserves as RgbLibProofOfReserves, Token as RgbLibToken,
-    TokenLight as RgbLibTokenLight,
+    Media as RgbLibMedia, Metadata as RgbLibMetadata, Outpoint as RgbLibOutpoint,
+    ProofOfReserves as RgbLibProofOfReserves, Token as RgbLibToken, TokenLight as RgbLibTokenLight,
 };
 use rgb_lib::BitcoinNetwork as RgbBitcoinNetwork;
 use rgb_lib::{AssetSchema as RgbLibAssetSchema, Assignment as RgbLibAssignment};
@@ -299,7 +299,7 @@ pub(crate) struct DecodeLnInvoiceData {
 
 pub(crate) struct DecodeRgbInvoiceData {
     pub(crate) recipient_id: String,
-    pub(crate) proxy_recipient_id: String,
+    pub(crate) proxy_recipient_id: Option<String>,
     pub(crate) recipient_type: RgbLibRecipientType,
     pub(crate) asset_schema: Option<RgbLibAssetSchema>,
     pub(crate) asset_id: Option<String>,
@@ -307,6 +307,8 @@ pub(crate) struct DecodeRgbInvoiceData {
     pub(crate) network: RgbBitcoinNetwork,
     pub(crate) expiration_timestamp: Option<i64>,
     pub(crate) transport_endpoints: Vec<String>,
+    pub(crate) public_key: Option<String>,
+    pub(crate) encryption: String,
 }
 
 pub(crate) struct EstimateFeeData {
@@ -377,6 +379,16 @@ pub(crate) struct RecipientInput {
 pub(crate) struct AssetRecipientsInput {
     pub(crate) asset_id: String,
     pub(crate) recipients: Vec<RecipientInput>,
+}
+
+pub(crate) struct SendRgbInvoiceRequestData {
+    pub(crate) invoice: String,
+    pub(crate) asset_id: String,
+    pub(crate) amount: u64,
+    pub(crate) witness_data: Option<WitnessDataInput>,
+    pub(crate) donation: bool,
+    pub(crate) fee_rate: u64,
+    pub(crate) min_confirmations: u8,
 }
 
 pub(crate) struct SendRgbRequestData {
@@ -819,6 +831,7 @@ pub(crate) enum TransferKind {
     Send,
     Inflation,
     Burn,
+    Mint,
     Link,
 }
 
@@ -1133,9 +1146,9 @@ impl From<RgbLibAssetIFA> for AssetIFA {
             },
             media: value.media.map(Into::into),
             reject_list_url: value.reject_list_url,
-            issuance_link_right_outpoint: value.issuance_link_right_outpoint,
-            linked_from_asset_id: value.linked_from_asset_id,
-            linked_to_asset_id: value.linked_to_asset_id,
+            issuance_link_right_outpoint: None,
+            linked_from_asset_id: None,
+            linked_to_asset_id: None,
         }
     }
 }
@@ -1153,11 +1166,14 @@ pub(crate) async fn estimate_fee(
     state: Arc<AppState>,
     blocks: u16,
 ) -> Result<EstimateFeeData, APIError> {
-    let fee_rate = check_unlocked(&state)
-        .await?
-        .clone()
-        .unwrap()
-        .rgb_get_fee_estimation(blocks)?;
+    let guard = check_unlocked(&state).await?;
+    let wallet = guard.as_ref().unwrap();
+    let fee_rate = wallet_task(wallet, move |wallet| {
+        wallet
+            .rgb_get_fee_estimation(blocks)
+            .map_err(APIError::from)
+    })
+    .await?;
     Ok(EstimateFeeData { fee_rate })
 }
 
@@ -1165,7 +1181,11 @@ pub(crate) async fn check_indexer_url(
     state: Arc<AppState>,
     indexer_url: String,
 ) -> Result<CheckIndexerUrlData, APIError> {
-    let indexer_protocol = rgb_lib_check_indexer_url(&indexer_url, state.static_state.network)?;
+    let network = state.static_state.network;
+    let indexer_protocol =
+        tokio::task::spawn_blocking(move || rgb_lib_check_indexer_url(&indexer_url, None, network))
+            .await
+            .map_err(|_| APIError::InvalidIndexer("Indexer validation task failed".into()))??;
     Ok(CheckIndexerUrlData { indexer_protocol })
 }
 
@@ -1213,7 +1233,7 @@ pub(crate) async fn network_info(state: Arc<AppState>) -> Result<NetworkInfoData
     } else {
         let indexer_url = unlocked_state.indexer_url.clone();
         drop(guard);
-        crate::node_info::mainnet_height(indexer_url).await?
+        crate::node_info::wallet_height(indexer_url, state.static_state.network.into()).await?
     };
 
     Ok(NetworkInfoData {
@@ -1423,13 +1443,37 @@ pub(crate) async fn async_order_outbound_invoice(
     })
 }
 
+async fn wallet_task<T, F>(
+    wallet: &Arc<crate::utils::UnlockedAppState>,
+    operation: F,
+) -> Result<T, APIError>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<crate::utils::UnlockedAppState>) -> Result<T, APIError> + Send + 'static,
+{
+    let wallet = Arc::clone(wallet);
+    tokio::task::spawn_blocking(move || operation(wallet))
+        .await
+        .map_err(|_| {
+            APIError::Unexpected(
+                "Blocking wallet task failed; inspect transfer history before retrying mutations"
+                    .into(),
+            )
+        })?
+}
+
 pub(crate) async fn btc_balance(
     state: Arc<AppState>,
     skip_sync: bool,
 ) -> Result<BtcBalanceData, APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
-    let btc_balance = unlocked_state.rgb_get_btc_balance(skip_sync)?;
+    let btc_balance = wallet_task(unlocked_state, move |wallet| {
+        wallet
+            .rgb_get_btc_balance(skip_sync)
+            .map_err(APIError::from)
+    })
+    .await?;
 
     Ok(BtcBalanceData {
         vanilla: BtcBalance {
@@ -1705,9 +1749,9 @@ fn asset_metadata_data_from_metadata(metadata: RgbLibMetadata) -> AssetMetadataD
         ticker: metadata.ticker,
         details: metadata.details,
         token: metadata.token.map(Into::into),
-        unspent_link_right_outpoint: metadata.unspent_link_right_outpoint,
-        linked_from_asset_id: metadata.linked_from_asset_id,
-        linked_to_asset_id: metadata.linked_to_asset_id,
+        unspent_link_right_outpoint: None,
+        linked_from_asset_id: None,
+        linked_to_asset_id: None,
     }
 }
 
@@ -1883,6 +1927,30 @@ pub(crate) async fn list_assets(
     })
 }
 
+pub(crate) async fn send_rgb_invoice(
+    state: Arc<AppState>,
+    request: SendRgbInvoiceRequestData,
+) -> Result<SendRgbData, APIError> {
+    let recipient = crate::rgb_invoice::recipient_from_invoice(
+        request.invoice,
+        &request.asset_id,
+        request.amount,
+        state.static_state.network,
+        request.witness_data.map(|w| RgbLibWitnessData {
+            amount_sat: w.amount_sat,
+            blinding: w.blinding,
+        }),
+    )?;
+    send_rgb(
+        state,
+        HashMap::from([(request.asset_id, vec![recipient])]),
+        request.donation,
+        request.fee_rate,
+        request.min_confirmations,
+    )
+    .await
+}
+
 pub(crate) async fn send_rgb(
     state: Arc<AppState>,
     recipient_map: HashMap<String, Vec<rgb_lib::wallet::Recipient>>,
@@ -1890,6 +1958,11 @@ pub(crate) async fn send_rgb(
     fee_rate: u64,
     min_confirmations: u8,
 ) -> Result<SendRgbData, APIError> {
+    let operation_expiration = crate::rgb_invoice::operation_expiration(
+        &recipient_map,
+        donation,
+        get_current_timestamp(),
+    )?;
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
@@ -1901,7 +1974,7 @@ pub(crate) async fn send_rgb(
                 donation,
                 fee_rate,
                 min_confirmations,
-                get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS,
+                operation_expiration,
                 false,
                 None,
             )
@@ -1930,7 +2003,7 @@ pub(crate) async fn send_rgb(
                 donation,
                 fee_rate,
                 min_confirmations,
-                get_current_timestamp() + DEFAULT_RGB_TRANSFER_EXPIRATION_SECS,
+                operation_expiration,
             )
         })
         .await
@@ -1947,6 +2020,16 @@ pub(crate) async fn send_rgb_from_groups(
     state: Arc<AppState>,
     request: SendRgbRequestData,
 ) -> Result<SendRgbData, APIError> {
+    if request.recipient_groups.iter().any(|g| {
+        g.recipients
+            .iter()
+            .any(|r| !r.transport_endpoints.is_empty())
+    }) {
+        return Err(APIError::InvalidRequest(
+            "Proxy RGB recipients require a complete authenticated invoice; use sendrgbinvoice"
+                .into(),
+        ));
+    }
     if request.recipient_groups.is_empty() {
         return Err(APIError::InvalidAmount(
             "recipient_groups cannot be empty".to_string(),
@@ -1964,6 +2047,9 @@ pub(crate) async fn send_rgb_from_groups(
                     let assignment =
                         rgb_assignment_from_kind(r.assignment_kind, r.assignment_amount)?;
                     let recipient = RgbLibRecipient {
+                        public_key: None,
+                        encryption: rgb_lib::Encryption::Unsupported,
+                        expiration_timestamp: None,
                         recipient_id: r.recipient_id,
                         witness_data: r.witness_data.map(|w| RgbLibWitnessData {
                             amount_sat: w.amount_sat,
@@ -2055,14 +2141,10 @@ pub(crate) async fn vss_backup(state: Arc<AppState>) -> Result<i64, APIError> {
                 .ok_or_else(|| APIError::Unexpected("VSS is not configured".to_string()))?;
 
             let wrapper = unlocked_state.rgb_wallet_wrapper.clone();
-            let version = tokio::task::spawn_blocking(move || {
-                let wallet = wrapper.get_rgb_wallet();
-                let rt = vss_client.handle().clone();
-                rt.block_on(wallet.vss_backup(&vss_client))
-            })
-            .await
-            .map_err(|e| APIError::Unexpected(format!("VSS backup task failed: {e}")))?
-            .map_err(|e| APIError::Unexpected(format!("VSS backup failed: {e}")))?;
+            let version = tokio::task::spawn_blocking(move || wrapper.vss_backup(&vss_client))
+                .await
+                .map_err(|e| APIError::Unexpected(format!("VSS backup task failed: {e}")))?
+                .map_err(|e| APIError::Unexpected(format!("VSS backup failed: {e}")))?;
 
             Ok(version)
         }
@@ -2557,45 +2639,48 @@ pub(crate) async fn create_utxos(
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    let num = request.num.unwrap_or(unlocked_state.config.rgb.utxo_num);
-    let size = request
-        .size
-        .unwrap_or(unlocked_state.config.rgb.utxo_size_sat);
-    if unlocked_state.external_signer_mode {
-        let unsigned_psbt = unlocked_state
-            .rgb_create_utxos_begin(
+    wallet_task(unlocked_state, move |unlocked_state| {
+        let num = request.num.unwrap_or(unlocked_state.config.rgb.utxo_num);
+        let size = request
+            .size
+            .unwrap_or(unlocked_state.config.rgb.utxo_size_sat);
+        if unlocked_state.external_signer_mode {
+            let unsigned_psbt = unlocked_state
+                .rgb_create_utxos_begin(
+                    request.up_to,
+                    num,
+                    size,
+                    request.fee_rate,
+                    request.skip_sync,
+                )
+                .map_err(|e| {
+                    tracing::error!("rgb_create_utxos_begin failed in external signer mode: {e}");
+                    APIError::from(e)
+                })?;
+            let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).map_err(|e| {
+                tracing::error!("rgb_sign_psbt failed in external signer mode: {e}");
+                APIError::from(e)
+            })?;
+            let _created = unlocked_state
+                .rgb_create_utxos_end(signed_psbt, request.skip_sync)
+                .map_err(|e| {
+                    tracing::error!("rgb_create_utxos_end failed in external signer mode: {e}");
+                    APIError::from(e)
+                })?;
+        } else {
+            unlocked_state.rgb_create_utxos(
                 request.up_to,
                 num,
                 size,
                 request.fee_rate,
                 request.skip_sync,
-            )
-            .map_err(|e| {
-                tracing::error!("rgb_create_utxos_begin failed in external signer mode: {e}");
-                APIError::from(e)
-            })?;
-        let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).map_err(|e| {
-            tracing::error!("rgb_sign_psbt failed in external signer mode: {e}");
-            APIError::from(e)
-        })?;
-        let _created = unlocked_state
-            .rgb_create_utxos_end(signed_psbt, request.skip_sync)
-            .map_err(|e| {
-                tracing::error!("rgb_create_utxos_end failed in external signer mode: {e}");
-                APIError::from(e)
-            })?;
-    } else {
-        unlocked_state.rgb_create_utxos(
-            request.up_to,
-            num,
-            size,
-            request.fee_rate,
-            request.skip_sync,
-        )?;
-    }
-    tracing::debug!("UTXO creation complete");
+            )?;
+        }
+        tracing::debug!("UTXO creation complete");
 
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 pub(crate) async fn issue_asset_nia(
@@ -2895,28 +2980,32 @@ pub(crate) async fn rgb_invoice(
         None => RgbLibAssignment::Any,
     };
 
-    let expiration_timestamp = get_current_timestamp()
-        + request
-            .duration_seconds
-            .map(u64::from)
-            .unwrap_or(DEFAULT_RGB_TRANSFER_EXPIRATION_SECS);
-    let receive_data = if request.witness {
-        unlocked_state.rgb_witness_receive(
-            request.asset_id,
-            assignment,
-            expiration_timestamp,
-            vec![unlocked_state.proxy_endpoint.clone()],
-            request.min_confirmations,
-        )?
-    } else {
-        unlocked_state.rgb_blind_receive(
-            request.asset_id,
-            assignment,
-            expiration_timestamp,
-            vec![unlocked_state.proxy_endpoint.clone()],
-            request.min_confirmations,
-        )?
-    };
+    let expiration_timestamp =
+        crate::bfa_values::invoice_expiration(request.duration_seconds, get_current_timestamp())
+            .map_err(APIError::InvalidRequest)?;
+    let wallet_state = Arc::clone(unlocked_state);
+    let receive_data = tokio::task::spawn_blocking(move || {
+        let endpoints = vec![wallet_state.proxy_endpoint.clone()];
+        if request.witness {
+            wallet_state.rgb_witness_receive(
+                request.asset_id,
+                assignment,
+                expiration_timestamp,
+                endpoints,
+                request.min_confirmations,
+            )
+        } else {
+            wallet_state.rgb_blind_receive(
+                request.asset_id,
+                assignment,
+                expiration_timestamp,
+                endpoints,
+                request.min_confirmations,
+            )
+        }
+    })
+    .await
+    .map_err(|_| APIError::Unexpected("RGB receive task failed".into()))??;
 
     Ok(RgbInvoiceData {
         recipient_id: receive_data.recipient_id,
@@ -3137,7 +3226,7 @@ pub(crate) async fn open_channel(
         let mut fake_p2wsh: [u8; 34] = [0; 34];
         fake_p2wsh[1] = 32;
         let script_buf = ScriptBuf::from_bytes(fake_p2wsh.to_vec());
-        let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network)?;
+        let recipient_id = recipient_id_from_script_buf(script_buf, state.static_state.network);
         let asset_id = contract_id.to_string();
         let schema = unlocked_state
             .rgb_get_asset_metadata(*contract_id)?
@@ -3152,6 +3241,9 @@ pub(crate) async fn open_channel(
 
         let recipient_map = map! {
             asset_id => vec![RgbLibRecipient {
+                        public_key: None,
+                        encryption: rgb_lib::Encryption::Unsupported,
+                        expiration_timestamp: None,
                 recipient_id,
                 witness_data: Some(RgbLibWitnessData {
                     amount_sat: request.capacity_sat,
@@ -3916,10 +4008,15 @@ pub(crate) async fn send_onion_message(
 pub(crate) async fn sync(state: Arc<AppState>) -> Result<(), APIError> {
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
-    unlocked_state.rgb_sync(rgb_lib::wallet::SyncOptions {
-        keychain: rgb_lib::wallet::SyncKeychain::Colored,
-        strategy: rgb_lib::wallet::SyncStrategy::FastSync,
-    })?;
+    wallet_task(unlocked_state, |wallet| {
+        wallet
+            .rgb_sync(rgb_lib::wallet::SyncOptions {
+                keychain: rgb_lib::wallet::SyncKeychain::Colored,
+                strategy: rgb_lib::wallet::SyncStrategy::FastSync,
+            })
+            .map_err(APIError::from)
+    })
+    .await?;
     Ok(())
 }
 
@@ -3964,7 +4061,7 @@ pub(crate) async fn decode_rgb_invoice(
 
     Ok(DecodeRgbInvoiceData {
         recipient_id: invoice_data.recipient_id,
-        proxy_recipient_id: invoice_data.proxy_recipient_id,
+        proxy_recipient_id: None,
         recipient_type: recipient_info.recipient_type,
         asset_schema: invoice_data.asset_schema,
         asset_id: invoice_data.asset_id,
@@ -3972,6 +4069,8 @@ pub(crate) async fn decode_rgb_invoice(
         network: invoice_data.network,
         expiration_timestamp: invoice_data.expiration_timestamp.map(|t| t as i64),
         transport_endpoints: invoice_data.transport_endpoints,
+        public_key: invoice_data.public_key,
+        encryption: format!("{:?}", invoice_data.encryption),
     })
 }
 
@@ -4563,11 +4662,11 @@ fn to_transfer_data(transfer: rgb_lib::wallet::Transfer) -> TransferData {
             rgb_lib::wallet::TransferKind::Send => TransferKind::Send,
             rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
             rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
-            rgb_lib::wallet::TransferKind::Link => TransferKind::Link,
+            rgb_lib::wallet::TransferKind::Mint => TransferKind::Mint,
         },
         txid: transfer.txid,
         recipient_id: transfer.recipient_id,
-        proxy_recipient_id: transfer.proxy_recipient_id,
+        proxy_recipient_id: None,
         receive_utxo: transfer.receive_utxo.map(|u| u.to_string()),
         change_utxo: transfer.change_utxo.map(|u| u.to_string()),
         expiration: transfer.expiration_timestamp.map(|t| t as i64),
@@ -4593,8 +4692,13 @@ pub(crate) async fn list_transactions(
     let guard = check_unlocked(&state).await?;
     let unlocked_state = guard.as_ref().unwrap();
 
-    Ok(unlocked_state
-        .rgb_list_transactions(skip_sync)?
+    let transactions = wallet_task(unlocked_state, move |wallet| {
+        wallet
+            .rgb_list_transactions(skip_sync)
+            .map_err(APIError::from)
+    })
+    .await?;
+    Ok(transactions
         .into_iter()
         .map(to_transaction_data)
         .filter(|tx| txid.as_ref().is_none_or(|t| &tx.txid == t))
@@ -4661,7 +4765,13 @@ pub(crate) async fn list_unspents(
     let unlocked_state = guard.as_ref().unwrap();
 
     let mut unspents = vec![];
-    for unspent in unlocked_state.rgb_list_unspents(false, skip_sync)? {
+    let rows = wallet_task(unlocked_state, move |wallet| {
+        wallet
+            .rgb_list_unspents(false, skip_sync)
+            .map_err(APIError::from)
+    })
+    .await?;
+    for unspent in rows {
         unspents.push(UnspentData {
             utxo: UtxoData {
                 outpoint: unspent.utxo.outpoint.to_string(),

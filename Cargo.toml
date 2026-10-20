@@ -35,7 +35,7 @@ default = [
 ]
 test-utils = []
 vls = ["signer-external/with-vls", "dep:vls-persist"]
-vss = ["rgb-lib/vss", "dep:vss-client"]
+vss = ["dep:hex_bytes", "dep:vss-client", "dep:hkdf", "dep:sha2"]
 remote-signer = ["dep:vls-persist", "dep:tokio-rustls", "dep:rustls-pemfile", "vls"]
 # sync LDK from a bitcoind instance, consuming full blocks over JSON-RPC
 block-sync = [
@@ -81,6 +81,9 @@ dirs = "5.0.1"
 electrum-client = { version = "0.24.0", optional = true }
 esplora-client = { version = "0.12", default-features = false, features = ["blocking-https-rustls"], optional = true }
 futures = "0.3"
+hex_bytes = { package = "hex", version = "0.4", optional = true }
+hkdf = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
 hex = { package = "hex-conservative", version = "0.3.0", default-features = false }
 lightning = { version = "0.2.0", features = ["dnssec"] }
 lightning-background-processor = { version = "0.2.0" }
@@ -95,11 +98,11 @@ lightning-transaction-sync = { version = "0.2.0", optional = true }
 rand = "0.8.5"
 regex = { version = "1.11", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
-rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib.git", tag = "v0.3.0-beta.50-bfa", default-features = false }
-psrgbt = { package = "rgb-psbt-utils", version = "=0.11.1-rc.11", default-features = false }
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib-bfa.git", rev = "7ce6045d7da6f07010aad1fe1b4f934437c8fc6d", default-features = false }
+psrgbt = { package = "rgb-psbt-utils", version = "=0.11.2-rc.1", default-features = false }
 rln-migration = { path = "migration" }
 # Pinned fork/branch for RGB compatibility work; CI and clones do not require a sibling checkout.
-signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer.git", branch = "main", default-features = false }
+signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer.git", rev = "0fb005ec4b927ddbe13e1646d247b5bb11e8ffed", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
@@ -145,6 +148,7 @@ zip = { version = "2.2.0", default-features = false, features = ["time", "zstd"]
 libc = "0.2"
 
 [dev-dependencies]
+rgbinvoice = { package = "rgb-invoicing", version = "=0.11.2-rc.1", default-features = false }
 dircmp = "0.2.0"
 rcgen = "0.13"
 electrum-client = "0.24.0"
@@ -173,14 +177,8 @@ lightning-persister = { path = "./rust-lightning/lightning-persister" }
 lightning-rapid-gossip-sync = { path = "./rust-lightning/lightning-rapid-gossip-sync" }
 lightning-transaction-sync = { path = "./rust-lightning/lightning-transaction-sync" }
 # Use the UTEXO RGB compatibility branches; no sibling local checkout required.
-vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
-vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
-# The pinned rgb-lib revision builds against the BFA-enabled RGB crates; `[patch]` is not inherited from
-# dependencies, so these must mirror the ones in rgb-lib's own Cargo.toml.
-rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "2faf6118b2f5fe30dd90dd5244d5a7dc32bcd757" }
-rgb-ops = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "773766b5ca7a9e705ec68c2f9ed0917f505cd6e3" }
-rgb-invoicing = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa", rev = "773766b5ca7a9e705ec68c2f9ed0917f505cd6e3" }
-rgb-schemas = { git = "https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "238dfe7a89db998107fd87d919bf2757a2746d7f" }
+vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", rev = "45c72edfd58620849eb486925439a76526b415ae" }
+vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", rev = "dddd336fcdf84c4febdd7af8363bda8d1721d893" }
 [lints.rust.unexpected_cfgs]
 level = "allow"
 
@@ -205,3 +203,7 @@ required-features = ["uniffi", "test-utils"]
 name = "lib_sdk"
 path = "src/test/lib_sdk/mod.rs"
 required-features = ["uniffi", "test-utils", "vls"]
+
+# Checked arithmetic is required by the BFA RGB graph.
+[profile.release]
+overflow-checks = true

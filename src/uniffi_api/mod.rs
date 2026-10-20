@@ -82,6 +82,11 @@ fn attach_host_with_expected_key_source(
 }
 
 fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> {
+    if request.reuse_addresses {
+        return Err(RlnError::InvalidRequest(
+            "Address reuse is not supported by rgb-lib-bfa".into(),
+        ));
+    }
     let network = network_from_str(&request.network)?;
     if let Some(url) = &request.vss_url {
         #[cfg(feature = "vss")]
@@ -307,14 +312,14 @@ fn map_media(data: crate::sdk::Media) -> Media {
 
 fn map_ifa_issuance_type(
     issuance_type: IfaIssuanceType,
-) -> Result<rgb_lib::wallet::IfaIssuanceType, RlnError> {
+) -> Result<crate::rgb_compat::IfaIssuanceType, RlnError> {
     Ok(match issuance_type {
-        IfaIssuanceType::Legacy => rgb_lib::wallet::IfaIssuanceType::Legacy,
-        IfaIssuanceType::LinkRightOnly => rgb_lib::wallet::IfaIssuanceType::LinkRightOnly,
+        IfaIssuanceType::Legacy => crate::rgb_compat::IfaIssuanceType::Legacy,
+        IfaIssuanceType::LinkRightOnly => crate::rgb_compat::IfaIssuanceType::LinkRightOnly,
         IfaIssuanceType::LinkedFromParent {
             contract_id,
             request_link_right,
-        } => rgb_lib::wallet::IfaIssuanceType::LinkedFromParent {
+        } => crate::rgb_compat::IfaIssuanceType::LinkedFromParent {
             contract_id: contract_id.to_string(),
             request_link_right,
         },
@@ -1479,6 +1484,8 @@ impl SdkNode {
             network: format!("{:?}", resp.network),
             expiration_timestamp: resp.expiration_timestamp,
             transport_endpoints: resp.transport_endpoints,
+            public_key: resp.public_key,
+            encryption: resp.encryption,
         })
     }
 
@@ -1648,6 +1655,32 @@ impl SdkNode {
         ))?;
         let txid = Txid::from_str(&response.txid).map_err(RlnError::internal)?;
         Ok(InflateResponse { txid })
+    }
+
+    /// Send a fungible asset without discarding authenticated proxy invoice fields.
+    pub fn sendrgbinvoice(
+        &self,
+        request: SendRgbInvoiceRequest,
+    ) -> Result<SendRgbResponse, RlnError> {
+        let response = block_on_sdk(sdk::send_rgb_invoice(
+            self.handle.app_state(),
+            sdk::SendRgbInvoiceRequestData {
+                invoice: request.invoice,
+                asset_id: request.asset_id.to_string(),
+                amount: request.amount,
+                witness_data: request.witness_data.map(|w| sdk::WitnessDataInput {
+                    amount_sat: w.amount_sat,
+                    blinding: w.blinding,
+                }),
+                donation: request.donation,
+                fee_rate: request.fee_rate,
+                min_confirmations: request.min_confirmations,
+            },
+        ))?;
+        Ok(SendRgbResponse {
+            txid: Txid::from_str(&response.txid).map_err(RlnError::internal)?,
+            batch_transfer_idx: response.batch_transfer_idx,
+        })
     }
 
     pub fn send_rgb(&self, request: SendRgbRequest) -> Result<SendRgbResponse, RlnError> {
@@ -2053,3 +2086,8 @@ impl crate::signer::ExternalSignerTransport for UniffiExternalSignerTransport {
 
 #[cfg(test)]
 mod tests;
+
+pub fn sdk_sendrgbinvoice(request: SendRgbInvoiceRequest) -> Result<SendRgbResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.sendrgbinvoice(request)
+}

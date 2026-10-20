@@ -3,8 +3,7 @@ use crate::utils::AppState;
 use base64::{engine::general_purpose, Engine as _};
 use rgb_lib::wallet::Metadata as RgbLibMetadata;
 use rgb_lib::{
-    ConsignmentExt, ContractId, Error as RgbLibError, FileContent, RgbContract, RgbTransfer,
-    RgbTxid,
+    ConsignmentExt, ContractId, Error as RgbLibError, FileContent, RgbTransfer, RgbTxid,
 };
 use std::str::FromStr;
 use std::sync::Arc;
@@ -192,22 +191,34 @@ pub(crate) async fn import_rgb_contract(
     request: ImportRgbContractRequestData,
 ) -> Result<ImportRgbData, APIError> {
     let expected_asset_id = request.expected_asset_id;
-    let (contract, contract_id) = parse_rgb_payload("contract", move || {
-        let bytes = decode_rgb_base64(request.contract_base64, RgbPayloadKind::Contract)?;
-        let contract = RgbContract::load(&bytes[..])
-            .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
-        let contract_id = contract.contract_id();
-        validate_expected_asset_id(&expected_asset_id, &contract_id, RgbPayloadKind::Contract)?;
-        Ok((contract, contract_id))
-    })
-    .await?;
-
+    let contract_id = ContractId::from_str(&expected_asset_id)
+        .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
+    let bytes = decode_rgb_base64(request.contract_base64, RgbPayloadKind::Contract)?;
     run_rgb_import(state, "contract", move |unlocked_state| {
-        let (metadata, already_imported) = unlocked_state
-            .rgb_import_asset_contract(contract)
-            .map_err(map_contract_import_error)?;
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new()
+            .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
+        file.write_all(&bytes)
+            .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
+        let path = file
+            .path()
+            .to_str()
+            .ok_or_else(|| APIError::InvalidRgbContract("Invalid temporary contract path".into()))?
+            .to_owned();
+        let mut wallet = unlocked_state.rgb_wallet_wrapper.get_rgb_wallet();
+        let already_imported = wallet.is_asset_known(contract_id)?;
+        let imported_id = rgb_lib::wallet::RgbWalletOpsOffline::import_contract(
+            &mut *wallet,
+            path,
+            Some(expected_asset_id),
+        )
+        .map_err(map_contract_import_error)?;
+        let metadata = rgb_lib::wallet::RgbWalletOpsOffline::get_asset_metadata(
+            &*wallet,
+            imported_id.clone(),
+        )?;
         Ok(ImportRgbData {
-            asset_id: contract_id.to_string(),
+            asset_id: imported_id,
             already_imported,
             metadata,
         })

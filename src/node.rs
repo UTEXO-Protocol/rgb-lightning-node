@@ -52,6 +52,11 @@ impl NodeHandle {
     }
 
     pub async fn new(config: NodeConfig) -> Result<Self, AppError> {
+        if config.reuse_addresses {
+            return Err(AppError::InvalidConfig(
+                "Address reuse is not supported by rgb-lib-bfa".into(),
+            ));
+        }
         let args = UserArgs {
             storage_dir_path: config.storage_dir_path,
             daemon_listening_port: config.daemon_listening_port,

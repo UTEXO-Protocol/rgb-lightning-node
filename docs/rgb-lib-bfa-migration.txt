@@ -1,0 +1,97 @@
+RGB library migration scope
+===========================
+
+This change starts from RLN ecc69f20308231400561f6f060fea88acfa40cc4 and
+migrates the wallet graph to UTEXO-Protocol/rgb-lib-bfa. Cargo.lock and the
+rust-lightning submodule record the exact candidate revisions. It does not
+adopt draft RLN #211's global on-chain-only build, VSS removal, or vendored
+reqwest/native-tls workarounds.
+
+Protocol-1.0 transfers
+---------------------
+Use sendrgbinvoice (SDK/UniFFI) or POST /sendrgbinvoice for a fungible invoice.
+The request contains the complete invoice, asset_id, integer amount,
+optional witness_data, donation, fee_rate and min_confirmations. Native
+code checks network, asset, invoice amount and receive mode, then retains
+the recipient's public key, encryption preference and invoice expiration.
+It supplies the configured sender proxy and bounds the operation deadline
+to leave the protocol's ACK/release interval before invoice expiration.
+Proxy witness blinding is derived by the library; caller-specified blinding
+is rejected. The library performs recipient-key, proxy and transaction
+validation before signing. Existing legacy recipient-group requests do not
+contain the necessary authentication data and explicitly direct proxy
+callers to the complete-invoice method. Out-of-band requests remain distinct.
+
+decode_rgb_invoice returns the additive public_key and encryption fields.
+The deprecated proxy_recipient_id is absent in protocol 1.0 and is nullable.
+The encryption values are Required, Optional and Unsupported. A sender must
+honor the invoice preference, rather than downgrade it to fit an old DTO.
+
+Public contract import uses rgb-lib-bfa's validated standalone registration
+API with the expected asset ID supplied before mutation. It imports actual
+metadata/stock and no allocations. Inspection alone is not asset admission.
+
+Burn requests retain a generic 32-byte commitment boundary. New RGB burn_reason
+is the hex encoding of these exact bytes; RLN does not interpret them as an
+EVM address or claim they satisfy a bridge's destination-preimage protocol.
+Bridge V1 destination validation/commitment construction belongs above this
+boundary and must be independently tested.
+
+VSS
+---
+The transport/crypto implementation in src/rgb_vss.rs retains the encrypted
+stream version from UTEXO-Protocol/rgb-lib commit
+1b951af0c8233308c919975552487be19ad2a930 (MIT). Snapshot preparation and
+conditional acknowledgement use the new library's public primitives.
+Manifest version 2 uses generation-specific immutable chunk keys, embedded
+encryption metadata/fingerprint and a ciphertext SHA-256. Chunks are written
+first without overwriting the previous generation; manifest CAS and canonical
+readback happen before local acknowledgement. Interrupted or uncertain uploads
+retain their orphan generation keys for diagnosis. Legacy manifest format 1
+requires a separate fresh migration test store and is explicitly rejected;
+this change does not claim old-format backup migration.
+Creating an archive does not clear backup dirtiness. The exact content token
+is acknowledged only after the remote upload succeeds; a changed token
+returns an error and leaves the current state pending.
+
+RgbLibWalletWrapper owns the one VSS client. Its wallet guard checkpoints
+dirty state on release when the client's automatic policy is enabled.
+Manual backup is available with automatic backup disabled. Maintained
+binding policy may persist a separate default-on preference, disable this
+automatic hook, and call rgb_vss::backup_wallet while holding its own single
+wallet admission mutex. That helper never acquires the wrapper mutex again.
+Policy callers must persist their intent and complete catch-up before
+enabling automatic backup; changing the in-memory flag alone is not durable
+policy or proof of a completed backup.
+
+Only encrypted snapshots are supported: the new database contains proxy
+operation keys, so the old plaintext BDK-file redaction is insufficient.
+Restore authenticates/decrypts before bounded admission. Limits match the
+maintained binding: 128 MiB raw archive, stream-tag-adjusted ciphertext,
+512 MiB expanded, 25,000 entries and an expansion ratio of 2000 per entry.
+Manifest data is bounded to 64 KiB and encryption metadata to 4 KiB.
+Archive paths, entry types, duplicate names and fingerprint are checked in
+an isolated staging directory before rename. Existing wallets are not
+overwritten; normal online consistency and wallet-setting checks still run.
+
+Explicit generic runtime compatibility limits
+---------------------------------------------
+Iris's maintained on-chain profile is selected by its caller. This change
+does not globally disable Lightning or report unqualified behavior as passed.
+The new RGB library does not implement these old fork extensions:
+
+* IFA link rights/link operations and linked-contract metadata;
+* persisted prepared channel sweeps followed by separate consume;
+* custom final locktime for Bitcoin/RGB channel funding transactions.
+
+These operation boundaries fail explicitly before signing or eagerly
+consuming RGB state. They must not be treated as a successful channel
+funding, sweep, or asset-link result. Optional legacy link metadata is
+unavailable in returned records. Ordinary new-address generation uses the
+new library API; requested address reuse is rejected, not silently enabled.
+
+LDK creates temporary wallet handles outside the maintained on-chain wrapper.
+General Lightning + VSS cross-handle snapshot serialization and channel
+behavior therefore require separate qualification. A compilation result is
+not that acceptance. No legacy wallet migration or hosted bridge operation
+is established by this change.
