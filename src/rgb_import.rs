@@ -124,6 +124,10 @@ fn map_contract_import_error(error: RgbLibError) -> APIError {
         RgbLibError::InvalidConsignment => {
             APIError::InvalidRgbContract("contract validation failed".to_string())
         }
+        error @ (RgbLibError::ContractIdMismatch { .. }
+        | RgbLibError::ConsignmentValidationFailed { .. }) => {
+            APIError::InvalidRgbContract(error.to_string())
+        }
         other => APIError::from(other),
     }
 }
@@ -259,6 +263,68 @@ mod tests {
         assert_eq!(
             decode_rgb_base64("YWJj".to_string(), RgbPayloadKind::Contract).unwrap(),
             b"abc"
+        );
+    }
+
+    fn contract_validation_errors() -> [RgbLibError; 2] {
+        [
+            RgbLibError::ContractIdMismatch {
+                expected: "rgb:OG9No4hZ-UrxoWmR-09ohtOk-ppxBN7h-g~KkQro-ncKc9A4".into(),
+                actual: "rgb:bslIXT4U-xgVHutV-XwymZwu-4chvqMh-D~jaKFe-ZCTMTwQ".into(),
+            },
+            // This is the deterministic validation failure observed when the supplied
+            // Signet contract is imported into the isolated Regtest wallet.
+            RgbLibError::ConsignmentValidationFailed {
+                details: "detected a failure that makes the consignment invalid".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn contract_validation_failures_are_http_client_errors_with_original_details() {
+        use axum::response::IntoResponse;
+
+        for error in contract_validation_errors() {
+            let expected = error.to_string();
+            let mapped = map_contract_import_error(error);
+            assert!(
+                matches!(&mapped, APIError::InvalidRgbContract(details) if details == &expected)
+            );
+            assert_eq!(
+                mapped.into_response().status(),
+                axum::http::StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn contract_validation_failures_reach_native_clients_as_invalid_requests() {
+        use crate::uniffi_api::{state::map_api_error, RlnError};
+
+        for error in contract_validation_errors() {
+            let expected = error.to_string();
+            let mapped = map_api_error(map_contract_import_error(error));
+            assert!(
+                matches!(mapped, RlnError::InvalidRequest(details) if details.contains(&expected))
+            );
+        }
+    }
+
+    #[test]
+    fn contract_import_io_and_transport_failures_keep_their_operational_categories() {
+        let mapped = map_contract_import_error(RgbLibError::IO {
+            details: "contract file could not be read".into(),
+        });
+        assert!(
+            matches!(mapped, APIError::IO(error) if error.to_string().contains("contract file could not be read"))
+        );
+
+        let mapped = map_contract_import_error(RgbLibError::Network {
+            details: "resolver transport unavailable".into(),
+        });
+        assert!(
+            matches!(mapped, APIError::Network(details) if details == "resolver transport unavailable")
         );
     }
 }
