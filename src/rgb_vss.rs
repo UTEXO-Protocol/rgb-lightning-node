@@ -1139,7 +1139,11 @@ fn promote_wallet_without_replacement(source: &Path, destination: &Path) -> std:
         };
         #[cfg(any(target_os = "linux", target_os = "android"))]
         let result = unsafe {
-            libc::renameat2(
+            // Android exposes the libc renameat2 symbol only from API 30. Use the kernel
+            // syscall so the API-29 native build retains exclusive promotion without an
+            // unavailable dynamic symbol or a replacing-rename fallback.
+            libc::syscall(
+                libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 source.as_ptr(),
                 libc::AT_FDCWD,
