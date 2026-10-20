@@ -89,9 +89,36 @@ consuming RGB state. They must not be treated as a successful channel
 funding, sweep, or asset-link result. Optional legacy link metadata is
 unavailable in returned records. Ordinary new-address generation uses the
 new library API; requested address reuse is rejected, not silently enabled.
+Ordinary on-chain Bitcoin send preparation uses the supported native API;
+the custom-locktime restriction is a separate channel-funding boundary.
 
 LDK creates temporary wallet handles outside the maintained on-chain wrapper.
 General Lightning + VSS cross-handle snapshot serialization and channel
 behavior therefore require separate qualification. A compilation result is
 not that acceptance. No legacy wallet migration or hosted bridge operation
 is established by this change.
+
+Candidate source and qualification
+----------------------------------
+RGB: 962730a211f0f7569d7ad8ae777052f433d87655
+LDK: 510189d5700a6d1406229ce7523e181c3838715e
+External signer: 0fb005ec4b927ddbe13e1646d247b5bb11e8ffed
+VLS core: 45c72edfd58620849eb486925439a76526b415ae
+VLS protocol signer: dddd336fcdf84c4febdd7af8363bda8d1721d893
+
+The predecessor RGB prerequisite source 7ce6045 and LDK 6f5a57d passed
+cargo check --lib --features uniffi,vls,vss,test-utils, four invoice tests
+and eight VSS tests (including real local protobuf fault injection).
+The VSS cases cover failed chunk/manifest updates, uncertain commit,
+canonical readback before local acknowledgement, malformed encryption,
+bounded staging, and concurrent no-replace directory promotion.
+
+The final RGB pin adds artifact-to-token consistency hardening. The final
+RLN follow-up separates ordinary BTC preparation from channel funding and
+adds current-generation deletion/CAS checks. Their new tests, a repeat
+production check, final RGB ABA tests, retained native-overlay compilation,
+native artifacts, funded import/receive/send and device qualification are
+pending; local compilation was paused at the isolated workspace disk floor.
+Formatting, diff checks and locked offline dependency-tree resolution for
+the final source graph pass. This source is a migration candidate, not a
+release or a claim of completed native/bridge acceptance.

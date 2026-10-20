@@ -24,6 +24,7 @@ struct ServerState {
     lose_commit_response: bool,
     corrupt_next_readback: bool,
     corrupt_readback: bool,
+    advance_manifest_during_delete: bool,
 }
 fn protobuf(status: StatusCode, value: impl Message) -> Response {
     (
@@ -58,6 +59,12 @@ async fn handle(
     match uri.path() {
         "/getObject" => {
             let request = GetObjectRequest::decode(bytes).unwrap();
+            if state.advance_manifest_during_delete
+                && request.key.starts_with(BACKUP_KEY_CHUNK_PREFIX)
+            {
+                state.advance_manifest_during_delete = false;
+                state.rows.get_mut(BACKUP_KEY_MANIFEST).unwrap().version += 1;
+            }
             match state.rows.get(&request.key).cloned() {
                 Some(mut value) => {
                     if request.key == BACKUP_KEY_MANIFEST && state.corrupt_readback {
@@ -88,6 +95,7 @@ async fn handle(
             if request
                 .transaction_items
                 .iter()
+                .chain(request.delete_items.iter())
                 .any(|row| state.rows.get(&row.key).map_or(0, |old| old.version) != row.version)
             {
                 return failure(ErrorCode::ConflictException);
@@ -95,6 +103,9 @@ async fn handle(
             for mut row in request.transaction_items {
                 row.version += 1;
                 state.rows.insert(row.key.clone(), row);
+            }
+            for row in request.delete_items {
+                state.rows.remove(&row.key);
             }
             if manifest_commit && state.corrupt_next_readback {
                 state.corrupt_next_readback = false;
@@ -227,4 +238,27 @@ async fn mismatched_canonical_readback_cannot_acknowledge_local_wallet() {
     server.state.lock().unwrap().corrupt_next_readback = true;
     assert!(backup_wallet(&mut wallet, &client).is_err());
     assert!(wallet.backup_info().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_current_generation_cannot_delete_a_newer_manifest() {
+    let server = Server::new().await;
+    let client = server.client();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("aabbccdd/data", SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"small synthetic wallet snapshot").unwrap();
+    let snapshot = zip.finish().unwrap().into_inner();
+    client.upload_backup(snapshot.clone()).await.unwrap();
+    let manifest: BackupManifest = serde_json::from_slice(&server.manifest().value).unwrap();
+    assert_eq!(manifest.chunk_count, 1);
+    server.state.lock().unwrap().advance_manifest_during_delete = true;
+    assert!(matches!(
+        client.delete_backup().await,
+        Err(Error::VssVersionConflict { .. })
+    ));
+    assert_eq!(client.download_backup().await.unwrap(), snapshot);
+    client.delete_backup().await.unwrap();
+    assert!(server.state.lock().unwrap().rows.is_empty());
+    client.delete_backup().await.unwrap();
 }

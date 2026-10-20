@@ -2302,7 +2302,7 @@ async fn handle_ldk_events(
                 // the channel (so the caller can retry) rather than panic the event
                 // task. handle_funding_prepare_err force-closes on terminal errors
                 // and replays the event on transient network errors.
-                let raw_psbt = match unlocked_state.rgb_send_btc_begin(
+                let raw_psbt = match unlocked_state.rgb_send_btc_channel_funding_begin(
                     addr.to_address(),
                     channel_value_satoshis,
                     unlocked_state.config.rgb.fee_rate_sat_vb,

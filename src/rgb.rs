@@ -541,6 +541,16 @@ impl CommonState {
             .send_btc_begin(address, amount, fee_rate, false)
     }
 
+    pub(crate) fn rgb_send_btc_channel_funding_begin(
+        &self,
+        address: String,
+        amount: u64,
+        fee_rate: u64,
+    ) -> Result<String, RgbLibError> {
+        self.rgb_wallet_wrapper
+            .send_btc_channel_funding_begin(address, amount, fee_rate)
+    }
+
     pub(crate) fn rgb_send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {
         self.rgb_wallet_wrapper.send_btc_end(signed_psbt)
     }
@@ -1229,7 +1239,17 @@ impl RgbLibWalletWrapper {
         address: String,
         amount: u64,
         fee_rate: u64,
-        _dry_run: bool,
+        dry_run: bool,
+    ) -> Result<String, RgbLibError> {
+        self.get_rgb_wallet()
+            .send_btc_begin(self.online, address, amount, fee_rate, false, dry_run)
+    }
+
+    pub(crate) fn send_btc_channel_funding_begin(
+        &self,
+        address: String,
+        amount: u64,
+        fee_rate: u64,
     ) -> Result<String, RgbLibError> {
         // The new library does not expose the explicit final locktime required by LDK.
         // Fail before creating/signing a potentially incompatible channel funding transaction.

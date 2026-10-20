@@ -497,6 +497,13 @@ impl VssBackupClient {
 
     /// Get the backup manifest
     async fn get_manifest(&self) -> Result<BackupManifest, Error> {
+        self.get_manifest_with_version()
+            .await
+            .map(|(manifest, _)| manifest)
+    }
+
+    /// Keep the validated payload and its CAS identity from the same read.
+    async fn get_manifest_with_version(&self) -> Result<(BackupManifest, i64), Error> {
         let request = GetObjectRequest {
             store_id: self.store_id.clone(),
             key: BACKUP_KEY_MANIFEST.to_string(),
@@ -508,10 +515,9 @@ impl VssBackupClient {
             .await
             .map_err(vss_error_to_rgb_error)?;
 
-        let manifest_bytes = response
-            .value
-            .map(|kv| kv.value)
-            .ok_or(Error::VssBackupNotFound)?;
+        let object = response.value.ok_or(Error::VssBackupNotFound)?;
+        let manifest_version = object.version;
+        let manifest_bytes = object.value;
 
         if manifest_bytes.len() > MAX_MANIFEST_BYTES {
             return Err(Error::Internal {
@@ -558,7 +564,7 @@ impl VssBackupClient {
                 details: "Invalid VSS manifest identity, generation or bounds".into(),
             });
         }
-        Ok(manifest)
+        Ok((manifest, manifest_version))
     }
 
     /// Get the encryption metadata
@@ -636,40 +642,38 @@ impl VssBackupClient {
     /// Delete the backup from VSS server
     pub async fn delete_backup(&self) -> Result<(), Error> {
         // Get manifest to know what to delete
-        let manifest = match self.get_manifest().await {
-            Ok(m) => m,
-            Err(_) => return Ok(()), // No backup to delete
+        let (manifest, manifest_version) = match self.get_manifest_with_version().await {
+            Ok(value) => value,
+            Err(Error::VssBackupNotFound) => return Ok(()),
+            Err(error) => return Err(error),
         };
 
         let mut delete_items = vec![];
 
-        // Delete chunks if any
-        if manifest.chunk_count > 1 {
-            for i in 0..manifest.chunk_count {
-                let key = format!("{}{}", manifest.chunk_prefix, i);
-                if let Some(version) = self.get_current_version(&key).await? {
-                    delete_items.push(KeyValue {
-                        key,
-                        version,
-                        value: vec![],
-                    });
-                }
-            }
-        } else {
-            // Delete single data key
-            if let Some(version) = self.get_current_version(BACKUP_KEY_DATA).await? {
+        // Every v2 backup has generation chunks, including a one-chunk backup. Historical and
+        // orphan generations deliberately remain outside this current-generation operation.
+        for i in 0..manifest.chunk_count {
+            let key = format!("{}{}", manifest.chunk_prefix, i);
+            if let Some(version) = self.get_current_version(&key).await? {
                 delete_items.push(KeyValue {
-                    key: BACKUP_KEY_DATA.to_string(),
+                    key,
                     version,
                     value: vec![],
                 });
             }
         }
 
-        // Delete manifest
-        if let Some(version) = self.get_current_version(BACKUP_KEY_MANIFEST).await? {
+        // This exact version makes the entire delete fail if another backup commits meanwhile.
+        delete_items.push(KeyValue {
+            key: BACKUP_KEY_MANIFEST.to_string(),
+            version: manifest_version,
+            value: vec![],
+        });
+
+        // Remove the small-payload diagnostic alias in the same atomic transaction.
+        if let Some(version) = self.get_current_version(BACKUP_KEY_DATA).await? {
             delete_items.push(KeyValue {
-                key: BACKUP_KEY_MANIFEST.to_string(),
+                key: BACKUP_KEY_DATA.to_string(),
                 version,
                 value: vec![],
             });
@@ -1102,9 +1106,71 @@ pub(crate) fn restore_snapshot_bytes(
             "VSS snapshot is missing the wallet manifest or database",
         ));
     }
-    fs::write(staged_wallet.join(VSS_RESTORE_MARKER), b"")?;
-    fs::rename(&staged_wallet, &destination)?;
+    let marker = fs::File::create(staged_wallet.join(VSS_RESTORE_MARKER))?;
+    marker.sync_all()?;
+    #[cfg(unix)]
+    fs::File::open(&staged_wallet)?.sync_all()?;
+    promote_wallet_without_replacement(&staged_wallet, &destination)?;
+    #[cfg(unix)]
+    fs::File::open(target)?.sync_all()?;
     Ok(destination)
+}
+
+/// The existence check during archive admission is advisory. Promotion itself must reject a
+/// destination created while the archive was being checked, including an empty directory.
+fn promote_wallet_without_replacement(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let source = CString::new(source.as_os_str().as_bytes())?;
+        let destination = CString::new(destination.as_os_str().as_bytes())?;
+        // Both paths belong to the same staging filesystem. No fallback to replacing rename is
+        // allowed when the kernel or filesystem does not support exclusive directory promotion.
+        #[cfg(target_vendor = "apple")]
+        let result = unsafe {
+            libc::renameatx_np(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        // MoveFileExW used by std rejects an existing directory destination on Windows.
+        fs::rename(source, destination)
+    }
+    #[cfg(not(any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        windows
+    )))]
+    {
+        let _ = (source, destination);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Atomic exclusive wallet promotion is unavailable on this platform",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -1177,6 +1243,40 @@ mod tests {
         assert!(path.join(VSS_RESTORE_MARKER).is_file());
         assert!(restore_snapshot_bytes(&valid, root.path(), "aabbccdd").is_err());
         assert_eq!(fs::read(path.join("rgb_lib_db")).unwrap(), b"db");
+    }
+
+    #[test]
+    fn restore_promotion_cannot_replace_an_empty_or_concurrently_created_wallet() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("wallet");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("state"), b"incoming").unwrap();
+        fs::create_dir(&destination).unwrap();
+        assert!(promote_wallet_without_replacement(&source, &destination).is_err());
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+        assert_eq!(fs::read(source.join("state")).unwrap(), b"incoming");
+        fs::remove_dir(&destination).unwrap();
+
+        let competing = root.path().join("competing");
+        fs::create_dir(&competing).unwrap();
+        fs::write(competing.join("state"), b"competing").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let results = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                barrier.wait();
+                promote_wallet_without_replacement(&source, &destination)
+            });
+            let b = scope.spawn(|| {
+                barrier.wait();
+                promote_wallet_without_replacement(&competing, &destination)
+            });
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_ne!(results.0.is_ok(), results.1.is_ok());
+        let winner = fs::read(destination.join("state")).unwrap();
+        assert!(winner == b"incoming" || winner == b"competing");
+        assert!(source.exists() || competing.exists());
     }
 
     #[test]
