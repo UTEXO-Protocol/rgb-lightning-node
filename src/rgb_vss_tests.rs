@@ -19,6 +19,7 @@ use vss_client::{
 #[derive(Default)]
 struct ServerState {
     rows: BTreeMap<String, KeyValue>,
+    put_requests: usize,
     fail_second_chunk: bool,
     fail_manifest: bool,
     lose_commit_response: bool,
@@ -76,6 +77,7 @@ async fn handle(
             }
         }
         "/putObjects" => {
+            state.put_requests += 1;
             let request = PutObjectRequest::decode(bytes).unwrap();
             let manifest_commit = request
                 .transaction_items
@@ -160,6 +162,147 @@ fn payload(seed: u64) -> Vec<u8> {
         .unwrap();
     zip.write_all(&value).unwrap();
     zip.finish().unwrap().into_inner()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_upload_preserves_legacy_and_invalid_backups_without_any_write() {
+    let server = Server::new().await;
+    let client = server.client();
+    let snapshot = payload(1);
+    let valid = BackupManifest {
+        chunk_count: 1,
+        total_size: 1,
+        encrypted: true,
+        version: VSS_MANIFEST_VERSION,
+        chunk_prefix: format!("{}{}/", BACKUP_KEY_CHUNK_PREFIX, "a".repeat(32)),
+        ciphertext_sha256: "b".repeat(64),
+        encryption_metadata: VssEncryptionMetadata::new(),
+        fingerprint: "aabbccdd".into(),
+    };
+    let mut invalid_crypto = valid.clone();
+    invalid_crypto.encryption_metadata.version = 2;
+    let mut wrong_wallet = valid.clone();
+    wrong_wallet.fingerprint = "11223344".into();
+    let mut invalid_salt = valid.clone();
+    invalid_salt.encryption_metadata.salt = "00".into();
+    for (version, manifest) in [
+        (
+            7,
+            br#"{"chunk_count":1,"total_size":4,"encrypted":true,"version":1}"#.to_vec(),
+        ),
+        (7, b"not valid JSON".to_vec()),
+        (7, vec![b' '; MAX_MANIFEST_BYTES + 1]),
+        (0, serde_json::to_vec(&valid).unwrap()),
+        (7, serde_json::to_vec(&invalid_crypto).unwrap()),
+        (7, serde_json::to_vec(&invalid_salt).unwrap()),
+        (7, serde_json::to_vec(&wrong_wallet).unwrap()),
+    ] {
+        let before = BTreeMap::from([
+            (
+                BACKUP_KEY_MANIFEST.into(),
+                KeyValue {
+                    key: BACKUP_KEY_MANIFEST.into(),
+                    version,
+                    value: manifest,
+                },
+            ),
+            (
+                BACKUP_KEY_DATA.into(),
+                KeyValue {
+                    key: BACKUP_KEY_DATA.into(),
+                    version: 4,
+                    value: b"previous encrypted backup".to_vec(),
+                },
+            ),
+            (
+                BACKUP_KEY_METADATA.into(),
+                KeyValue {
+                    key: BACKUP_KEY_METADATA.into(),
+                    version: 4,
+                    value: b"previous metadata".to_vec(),
+                },
+            ),
+            (
+                format!("{BACKUP_KEY_CHUNK_PREFIX}0"),
+                KeyValue {
+                    key: format!("{BACKUP_KEY_CHUNK_PREFIX}0"),
+                    version: 4,
+                    value: b"previous chunk".to_vec(),
+                },
+            ),
+        ]);
+        {
+            let mut state = server.state.lock().unwrap();
+            state.rows = before.clone();
+            state.put_requests = 0;
+        }
+        assert!(client.upload_backup(snapshot.clone()).await.is_err());
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.rows, before);
+        assert_eq!(state.put_requests, 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn validated_existing_generation_accepts_the_next_same_wallet_snapshot() {
+    let server = Server::new().await;
+    let client = server.client();
+    assert_eq!(client.upload_backup(payload(1)).await.unwrap(), 1);
+    let previous = server.manifest();
+    let snapshot = payload(2);
+    assert_eq!(client.upload_backup(snapshot.clone()).await.unwrap(), 2);
+    assert_eq!(client.download_backup().await.unwrap(), snapshot);
+    assert_ne!(server.manifest(), previous);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_manifest_cannot_overwrite_canonical_recovery_aliases() {
+    let server = Server::new().await;
+    let client = server.client();
+    for key in [BACKUP_KEY_DATA, BACKUP_KEY_METADATA, BACKUP_KEY_FINGERPRINT] {
+        let before = BTreeMap::from([(
+            key.into(),
+            KeyValue {
+                key: key.into(),
+                version: 4,
+                value: b"previous recovery material".to_vec(),
+            },
+        )]);
+        {
+            let mut state = server.state.lock().unwrap();
+            state.rows = before.clone();
+            state.put_requests = 0;
+        }
+        assert!(client.upload_backup(payload(1)).await.is_err());
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.rows, before);
+        assert_eq!(state.put_requests, 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_store_retry_preserves_orphan_generation_chunks_and_commits_normally() {
+    let server = Server::new().await;
+    let client = server.client();
+    server.state.lock().unwrap().fail_second_chunk = true;
+    assert!(client.upload_backup(payload(1)).await.is_err());
+    let orphaned = {
+        let mut state = server.state.lock().unwrap();
+        assert!(!state.rows.is_empty());
+        assert!(state
+            .rows
+            .keys()
+            .all(|key| key.starts_with(BACKUP_KEY_CHUNK_PREFIX)));
+        state.fail_second_chunk = false;
+        state.rows.clone()
+    };
+    let snapshot = payload(2);
+    assert_eq!(client.upload_backup(snapshot.clone()).await.unwrap(), 1);
+    assert_eq!(client.download_backup().await.unwrap(), snapshot);
+    let state = server.state.lock().unwrap();
+    for (key, value) in orphaned {
+        assert_eq!(state.rows.get(&key), Some(&value));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -327,6 +327,33 @@ impl VssBackupClient {
             });
         }
         let fingerprint = get_fingerprint_from_zip_bytes(&data)?;
+        // Migration snapshots belong to a separate fresh store. Validate the existing
+        // canonical manifest before any write, so an upload cannot destroy a legacy
+        // backup merely because this client would refuse to restore its format.
+        let before = match self.get_manifest_with_version().await {
+            Ok((previous, version)) => {
+                if previous.fingerprint != fingerprint {
+                    return Err(Error::Internal {
+                        details: "Existing VSS backup belongs to another wallet fingerprint".into(),
+                    });
+                }
+                version
+            }
+            Err(Error::VssBackupNotFound) => {
+                // Absence of a manifest does not authorize replacing recovery material
+                // left by an incomplete legacy backup. UUID generation chunks from an
+                // interrupted v2 upload are independent and may remain for a fresh retry.
+                for key in [BACKUP_KEY_DATA, BACKUP_KEY_METADATA, BACKUP_KEY_FINGERPRINT] {
+                    if self.get_current_version(key).await?.is_some() {
+                        return Err(Error::Internal {
+                            details: "VSS store has backup material without a valid manifest; preserve it and use a separate fresh test wallet/store".into(),
+                        });
+                    }
+                }
+                0
+            }
+            Err(error) => return Err(error),
+        };
         let metadata = VssEncryptionMetadata::new();
         let ciphertext = encrypt_data(&data, &self.signing_key, &metadata, None)?;
         if ciphertext.len() > MAX_BACKUP_BYTES {
@@ -335,10 +362,6 @@ impl VssBackupClient {
             });
         }
         // Capture CAS before uploading chunks. Interrupted generations never overwrite old keys.
-        let before = self
-            .get_current_version(BACKUP_KEY_MANIFEST)
-            .await?
-            .unwrap_or(0);
         let successor = before.checked_add(1).ok_or_else(|| Error::Internal {
             details: "VSS manifest version overflow".into(),
         })?;
@@ -539,7 +562,8 @@ impl VssBackupClient {
             .chunk_prefix
             .strip_prefix(BACKUP_KEY_CHUNK_PREFIX)
             .and_then(|value| value.strip_suffix('/'));
-        if !manifest.encrypted
+        if manifest_version < 1
+            || !manifest.encrypted
             || manifest.total_size == 0
             || manifest.total_size > MAX_BACKUP_BYTES
             || manifest.chunk_count != manifest.total_size.div_ceil(VSS_CHUNK_SIZE)
@@ -562,6 +586,20 @@ impl VssBackupClient {
         {
             return Err(Error::Internal {
                 details: "Invalid VSS manifest identity, generation or bounds".into(),
+            });
+        }
+        // A structurally valid v2 manifest with unusable encryption parameters is
+        // still a backup that must not be overwritten by migration admission.
+        manifest.encryption_metadata.nonce_bytes()?;
+        if manifest.encryption_metadata.salt.len() != BACKUP_SALT_LENGTH * 2
+            || !manifest
+                .encryption_metadata
+                .salt
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(Error::Internal {
+                details: "Invalid VSS manifest encryption salt".into(),
             });
         }
         Ok((manifest, manifest_version))
