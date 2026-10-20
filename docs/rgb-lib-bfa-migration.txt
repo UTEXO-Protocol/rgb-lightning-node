@@ -82,7 +82,7 @@ The new RGB library does not implement these old fork extensions:
 
 * IFA link rights/link operations and linked-contract metadata;
 * persisted prepared channel sweeps followed by separate consume;
-* custom final locktime for Bitcoin/RGB channel funding transactions.
+* explicit final-zero-locktime Bitcoin/RGB channel funding construction.
 
 These operation boundaries fail explicitly before signing or eagerly
 consuming RGB state. They must not be treated as a successful channel
@@ -90,7 +90,22 @@ funding, sweep, or asset-link result. Optional legacy link metadata is
 unavailable in returned records. Ordinary new-address generation uses the
 new library API; requested address reuse is rejected, not silently enabled.
 Ordinary on-chain Bitcoin send preparation uses the supported native API;
-the custom-locktime restriction is a separate channel-funding boundary.
+the channel-funding restriction is separate from that on-chain operation.
+
+The funding consequence is concrete: this candidate cannot open ordinary
+locally funded BTC or RGB Lightning channels. Colored SDK/HTTP open preflight
+and FundingGenerationReady pass Some(0), which the guarded RGB builder rejects.
+The standard vanilla funding event calls the always-rejecting dedicated BTC
+funding builder. Those errors terminate funding before signing. Colored virtual
+funding is also blocked; its event has a separate replay path. Peer-funded
+incoming channels, existing channels and uncolored synthetic virtual channels
+are different paths and are not proven broken or qualified by this finding.
+
+A safe funding prerequisite belongs in rgb-lib-bfa: construct final-zero-locktime
+transactions before txid-bound reservation/consignment persistence, with matching
+dry-run, end and abort semantics for both RGB and vanilla funding. Merely dropping
+the guard or rewriting the returned PSBT can leave the persisted original txid
+inconsistent with the signed transaction. This migration does not claim that API.
 
 LDK creates temporary wallet handles outside the maintained on-chain wrapper.
 General Lightning + VSS cross-handle snapshot serialization and channel
@@ -113,12 +128,13 @@ The VSS cases cover failed chunk/manifest updates, uncertain commit,
 canonical readback before local acknowledgement, malformed encryption,
 bounded staging, and concurrent no-replace directory promotion.
 
-The final RGB pin adds artifact-to-token consistency hardening. The final
-RLN follow-up separates ordinary BTC preparation from channel funding and
-adds current-generation deletion/CAS checks. Their new tests, a repeat
-production check, final RGB ABA tests, retained native-overlay compilation,
-native artifacts, funded import/receive/send and device qualification are
-pending; local compilation was paused at the isolated workspace disk floor.
-Formatting, diff checks and locked offline dependency-tree resolution for
-the final source graph pass. This source is a migration candidate, not a
-release or a claim of completed native/bridge acceptance.
+The final RGB pin adds artifact-to-token consistency hardening. Linux/macOS
+prerequisite CI passes 73 wallet tests and 15 bitcoind-feature tests per OS.
+The focused VSS suite passes 13 cases; the maintained native adapter passes
+107 tests, C-FFI passes 18 tests and its locked production check passes.
+Actual Darwin Debug Bare/Node consumers pass lifecycle, BIP-322, local VSS
+backup/restore, funded BTC round trips and a post-restore confirmed spend.
+These are Debug host scopes, not platform release or generic Lightning acceptance.
+Platform artifact CI currently lacks private rgb-lib-bfa read access. Funded
+BFA/bridge and coordinated iOS acceptance remain pending. No hosted bridge has
+been operated. This source remains an unpublished migration candidate.
