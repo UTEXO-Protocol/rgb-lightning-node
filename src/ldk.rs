@@ -4344,6 +4344,25 @@ fn sync_ln_eth_rpc_url(
     }
 }
 
+fn sync_ln_evm_rpc_urls(
+    kv_store: &dyn KVStoreSync,
+    bitcoin_network: BitcoinNetwork,
+    evm_rpc_urls: &HashMap<u64, String>,
+) -> Result<(), APIError> {
+    if bitcoin_network != BitcoinNetwork::Mainnet {
+        // This mirror is read by Lightning helpers. The on-chain wallet has
+        // already received the current map directly, including on mainnet.
+        // Leave historical Lightning configuration inert on mainnet.
+        kv_store.write_config(
+            lightning::rgb_utils::EVM_RPC_URLS_FNAME,
+            &serde_json::to_string(evm_rpc_urls).map_err(|_| {
+                APIError::Unexpected("cannot serialize EVM RPC configuration".into())
+            })?,
+        );
+    }
+    Ok(())
+}
+
 // A dead background processor must take the node down, not leave it serving without event
 // processing; only `stop_processing` termination is expected. The shutdown is requested rather
 // than forced, so the VSS teardown still runs; `main` turns `FATAL_ERROR` into exit code 70.
@@ -4931,12 +4950,7 @@ impl NodeStartup {
                 bitcoin_network,
                 ln_eth_rpc_url.as_deref(),
             );
-            kv_store.write_config(
-                lightning::rgb_utils::EVM_RPC_URLS_FNAME,
-                &serde_json::to_string(&ln_evm_rpc_urls).map_err(|_| {
-                    APIError::Unexpected("cannot serialize EVM RPC configuration".into())
-                })?,
-            );
+            sync_ln_evm_rpc_urls(kv_store.as_ref(), bitcoin_network, &ln_evm_rpc_urls)?;
         }
         save_config(
             &static_state.db(),
@@ -7625,6 +7639,41 @@ mod tests {
             store.read_config(ETH_RPC_URL_FNAME).unwrap(),
             "http://historical-endpoint.invalid"
         );
+    }
+
+    #[test]
+    fn bfa_ln_evm_map_matches_current_unlock_and_clears_stale_config() {
+        let store = build_kv_store();
+        let key = lightning::rgb_utils::EVM_RPC_URLS_FNAME;
+        store.write_config(key, r#"{"42161":"https://old-endpoint.invalid"}"#);
+        let configured = HashMap::from([(42161, "https://current-endpoint.invalid".into())]);
+        sync_ln_evm_rpc_urls(store.as_ref(), BitcoinNetwork::Regtest, &configured).unwrap();
+        assert_eq!(
+            serde_json::from_str::<HashMap<u64, String>>(&store.read_config(key).unwrap()).unwrap(),
+            configured
+        );
+        sync_ln_evm_rpc_urls(store.as_ref(), BitcoinNetwork::Regtest, &HashMap::new()).unwrap();
+        assert_eq!(store.read_config(key).unwrap(), "{}");
+    }
+
+    #[test]
+    fn bfa_ln_evm_map_preserves_inactive_mainnet_state_with_or_without_configuration() {
+        let store = build_kv_store();
+        let key = lightning::rgb_utils::EVM_RPC_URLS_FNAME;
+        let historical = r#"{"42161":"https://historical-endpoint.invalid"}"#;
+        store.write_config(key, historical);
+        assert!(!crate::mainnet_state::is_common_config(
+            "rgb",
+            "wallet_config",
+            key
+        ));
+        for configuration in [
+            HashMap::from([(42161, "https://current-endpoint.invalid".into())]),
+            HashMap::new(),
+        ] {
+            sync_ln_evm_rpc_urls(store.as_ref(), BitcoinNetwork::Mainnet, &configuration).unwrap();
+            assert_eq!(store.read_config(key).unwrap(), historical);
+        }
     }
 
     #[test]

@@ -132,6 +132,7 @@ struct Fixture {
     _directory: tempfile::TempDir,
     indexer: Indexer,
     proxy: String,
+    proxy_requests: Arc<Mutex<Vec<String>>>,
     proxy_task: JoinHandle<()>,
     peer: TcpListener,
     backend: TcpListener,
@@ -163,9 +164,35 @@ impl Fixture {
         let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = format!("rpc://{}/json-rpc", proxy_listener.local_addr().unwrap());
-        let proxy_router = Router::new().route("/json-rpc", post(|Json(request): Json<Value>| async move {
-            assert_eq!(request["method"], "server.info");
-            Json(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"protocol_version": "1.0", "version": "fixture", "uptime": 1}}))
+        let proxy_requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&proxy_requests);
+        let proxy_router = Router::new().route("/json-rpc", post(move |Json(request): Json<Value>| {
+            let seen = Arc::clone(&seen);
+            async move {
+                assert_eq!(request["jsonrpc"], "2.0");
+                let method = request["method"].as_str().unwrap();
+                seen.lock().unwrap().push(method.to_string());
+                let now = chrono::Utc::now().timestamp();
+                let result = match method {
+                    "server.info" => json!({"protocol_version": "1.0", "version": "fixture", "uptime": 1,
+                        "current_time": now.to_string(), "max_expiry_secs": "2592000", "max_quota": "1",
+                        "max_pow_difficulty": "0", "retention_grace_secs": "86400"}),
+                    "invoice.prepare" => {
+                        let params = request["params"].as_object().unwrap();
+                        assert_eq!(params.len(), 3);
+                        for name in ["invoice_id", "recipient_pk"] {
+                            let value = params[name].as_str().unwrap();
+                            assert_eq!(value.len(), 64);
+                            assert!(value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                        }
+                        let expiry = params["expires_at"].as_str().unwrap().parse::<i64>().unwrap();
+                        assert!(expiry > now && expiry <= now + 2_592_000);
+                        json!(true)
+                    }
+                    other => panic!("Unexpected proxy fixture method: {other}"),
+                };
+                Json(json!({"jsonrpc": "2.0", "id": request["id"], "result": result}))
+            }
         }));
         let proxy_task =
             tokio::spawn(async move { axum::serve(proxy_listener, proxy_router).await.unwrap() });
@@ -203,6 +230,7 @@ impl Fixture {
             _directory: directory,
             indexer,
             proxy,
+            proxy_requests,
             proxy_task,
             peer,
             backend,
@@ -355,6 +383,16 @@ async fn mainnet_sdk_unlock_runs_wallet_without_lightning_and_restarts() {
         .await
         .unwrap();
     assert_eq!(decoded.network, BitcoinNetwork::Mainnet);
+    assert_eq!(
+        fixture
+            .proxy_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|method| method.as_str() == "invoice.prepare")
+            .count(),
+        1
+    );
     let signature = sdk::sign_message(fixture.state.clone(), "mainnet wallet".into())
         .await
         .unwrap();
@@ -501,6 +539,12 @@ async fn mainnet_legacy_state_stays_inactive_across_wallet_unlock_and_reopen() {
         ("reimport_marker", "", "fascia_replay", &[1]),
         ("monitors", "", "old_channel", b"opaque previous monitor"),
         ("rgb_sender_funding", "", "old_channel", b"old consignment"),
+        (
+            "rgb",
+            "wallet_config",
+            "evm_rpc_urls",
+            br#"{"42161":"https://historical-endpoint.invalid"}"#,
+        ),
         ("vss_pending", "", "_/_/manager", b"\x01queued snapshot"),
         ("vss_pending", "", "_/_/scorer", &[0]),
         ("vss_pending", "", "unknown", b"malformed intent"),
