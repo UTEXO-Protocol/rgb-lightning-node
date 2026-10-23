@@ -350,6 +350,9 @@ pub enum APIError {
     #[error("No indexer_url was supplied, in the unlock request or in the config file")]
     MissingIndexerUrl,
 
+    #[error("No protocol-1.0 proxy_endpoint was supplied in the unlock request or config file; public networks require an explicit RGB proxy")]
+    MissingProxyEndpoint,
+
     #[error("Unable to find payment preimage, be sure you've provided the correct swap info")]
     MissingSwapPaymentPreimage,
 
@@ -683,6 +686,7 @@ impl IntoResponse for APIError {
             | APIError::MaxFeeExceeded(_)
             | APIError::MinFeeNotMet(_)
             | APIError::MissingIndexerUrl
+            | APIError::MissingProxyEndpoint
             | APIError::NoAvailableUtxos
             | APIError::NoRoute
             | APIError::NotInitialized

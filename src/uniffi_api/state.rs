@@ -219,6 +219,7 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::InvalidTransportEndpoints(_)
         | APIError::MediaFileEmpty
         | APIError::MediaFileNotProvided
+        | APIError::MissingProxyEndpoint
         | APIError::MissingSwapPaymentPreimage
         | APIError::OutputBelowDustLimit
         | APIError::UnsupportedBurn(_)

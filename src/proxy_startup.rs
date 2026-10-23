@@ -144,6 +144,35 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn wallet_endpoint_preflight_normalizes_rpc_and_preserves_protocol_rejection() {
+        for (body, accepted) in [
+            (
+                r#"{"jsonrpc":"2.0","id":null,"result":{"protocol_version":"1.0","version":"0.3.0","uptime":1}}"#,
+                true,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":null,"result":{"protocol_version":"0.2","version":"old","uptime":1}}"#,
+                false,
+            ),
+        ] {
+            let (url, thread) = fixture(body, false);
+            let endpoint = url.replacen("http://", "rpc://", 1);
+            let result = crate::rgb::check_rgb_proxy_endpoint(&endpoint).await;
+            if accepted {
+                result.unwrap();
+            } else {
+                assert!(
+                    matches!(result, Err(crate::error::APIError::InvalidProxyProtocol(version)) if version == "0.2")
+                );
+            }
+            thread.join().unwrap();
+        }
+        assert!(matches!(
+            crate::rgb::check_rgb_proxy_endpoint("").await,
+            Err(crate::error::APIError::InvalidTransportEndpoint(_))
+        ));
+    }
+    #[tokio::test]
     async fn reports_malformed_body_and_cancels_slow_body_without_waiting_120_seconds() {
         for delay in [false, true] {
             let (url, thread) = fixture("<html>unavailable</html>", delay);

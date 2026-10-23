@@ -187,7 +187,6 @@ use crate::utils::{
     description_hash_from_invoice, do_connect_peer, get_current_timestamp, hex_str,
     validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState, CommonState,
     LightningState, StaticState, UnlockedAppState, FATAL_ERROR, PROXY_ENDPOINT_LOCAL,
-    PROXY_ENDPOINT_PUBLIC,
 };
 
 const RGB_TRANSFER_CHAN_EXPIRATION_SECS: u64 = 86400;
@@ -4685,6 +4684,19 @@ fn resolve_indexer_url<'a>(
     request.or(config).ok_or(APIError::MissingIndexerUrl)
 }
 
+// Public deployments must select a proxy implementing this graph's protocol.
+// The old implicit public proxy implements 0.2 and cannot serve 1.0 invoices.
+fn resolve_proxy_endpoint<'a>(
+    request: Option<&'a str>,
+    config: Option<&'a str>,
+    network: BitcoinNetwork,
+) -> Result<&'a str, APIError> {
+    request
+        .or(config)
+        .or_else(|| (network == BitcoinNetwork::Regtest).then_some(PROXY_ENDPOINT_LOCAL))
+        .ok_or(APIError::MissingProxyEndpoint)
+}
+
 /// Common startup resources. No Lightning backend or worker is created here.
 struct NodeStartup {
     app_state: Arc<AppState>,
@@ -5095,9 +5107,6 @@ async fn prepare_node(
 
     // Unlock request params take precedence, the config file provides defaults.
     let file_config = &static_state.config;
-    unlock_request.proxy_endpoint = unlock_request
-        .proxy_endpoint
-        .or_else(|| file_config.chain.proxy_endpoint.clone());
     unlock_request.announce_alias = unlock_request
         .announce_alias
         .or_else(|| file_config.node.announce_alias.clone());
@@ -5311,6 +5320,11 @@ async fn prepare_node(
         unlock_request.indexer_url.as_deref(),
         static_state.config.chain.indexer_url.as_deref(),
     )?;
+    let proxy_endpoint = resolve_proxy_endpoint(
+        unlock_request.proxy_endpoint.as_deref(),
+        static_state.config.chain.proxy_endpoint.as_deref(),
+        bitcoin_network,
+    )?;
     let indexer_to_check = indexer_url.to_string();
     let indexer_protocol = tokio::task::spawn_blocking(move || {
         check_indexer_url(&indexer_to_check, None, bitcoin_network)
@@ -5321,21 +5335,10 @@ async fn prepare_node(
         "Connected to an indexer with the {} protocol",
         indexer_protocol
     );
-    let proxy_endpoint = if let Some(proxy_endpoint) = &unlock_request.proxy_endpoint {
-        check_rgb_proxy_endpoint(proxy_endpoint).await?;
-        tracing::info!("Using a custom proxy");
-        proxy_endpoint
-    } else {
-        tracing::info!("Using the default proxy");
-        match bitcoin_network {
-            BitcoinNetwork::Signet
-            | BitcoinNetwork::SignetCustom
-            | BitcoinNetwork::Testnet
-            | BitcoinNetwork::Testnet4
-            | BitcoinNetwork::Mainnet => PROXY_ENDPOINT_PUBLIC,
-            BitcoinNetwork::Regtest => PROXY_ENDPOINT_LOCAL,
-        }
-    };
+    // The regtest default is subject to the same protocol and network checks
+    // as explicit endpoints; a default must never bypass proxy admission.
+    check_rgb_proxy_endpoint(proxy_endpoint).await?;
+    tracing::info!("Connected to an RGB proxy with protocol 1.0");
     save_config(
         &app_state.db(),
         kv_store.as_ref(),
@@ -7217,6 +7220,75 @@ mod tests {
             resolve_indexer_url(None, None),
             Err(APIError::MissingIndexerUrl)
         ));
+    }
+
+    #[test]
+    fn proxy_endpoint_request_precedes_config_and_regtest_default() {
+        for network in [BitcoinNetwork::Regtest, BitcoinNetwork::Signet] {
+            assert_eq!(
+                resolve_proxy_endpoint(
+                    Some("rpcs://request.example/json-rpc"),
+                    Some("rpcs://config.example/json-rpc"),
+                    network,
+                )
+                .unwrap(),
+                "rpcs://request.example/json-rpc"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_endpoint_config_is_used_on_every_network() {
+        for network in [
+            BitcoinNetwork::Regtest,
+            BitcoinNetwork::Signet,
+            BitcoinNetwork::SignetCustom,
+            BitcoinNetwork::Testnet,
+            BitcoinNetwork::Testnet4,
+            BitcoinNetwork::Mainnet,
+        ] {
+            assert_eq!(
+                resolve_proxy_endpoint(None, Some("rpcs://config.example/json-rpc"), network)
+                    .unwrap(),
+                "rpcs://config.example/json-rpc"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_endpoint_omission_is_only_defaulted_on_regtest() {
+        assert_eq!(
+            resolve_proxy_endpoint(None, None, BitcoinNetwork::Regtest).unwrap(),
+            PROXY_ENDPOINT_LOCAL
+        );
+        for network in [
+            BitcoinNetwork::Signet,
+            BitcoinNetwork::SignetCustom,
+            BitcoinNetwork::Testnet,
+            BitcoinNetwork::Testnet4,
+            BitcoinNetwork::Mainnet,
+        ] {
+            let error = resolve_proxy_endpoint(None, None, network).unwrap_err();
+            assert!(matches!(error, APIError::MissingProxyEndpoint));
+            assert!(error.to_string().contains("protocol-1.0"));
+        }
+    }
+
+    #[test]
+    fn explicit_empty_proxy_is_not_replaced_by_another_endpoint() {
+        assert_eq!(
+            resolve_proxy_endpoint(
+                Some(""),
+                Some("rpcs://config.example/json-rpc"),
+                BitcoinNetwork::Regtest
+            )
+            .unwrap(),
+            ""
+        );
+        assert_eq!(
+            resolve_proxy_endpoint(None, Some(""), BitcoinNetwork::Regtest).unwrap(),
+            ""
+        );
     }
     use crate::kv_store::SeaOrmKvStore;
     use lightning::rgb_utils::RgbInfo;

@@ -165,7 +165,7 @@ impl Fixture {
         let proxy = format!("rpc://{}/json-rpc", proxy_listener.local_addr().unwrap());
         let proxy_router = Router::new().route("/json-rpc", post(|Json(request): Json<Value>| async move {
             assert_eq!(request["method"], "server.info");
-            Json(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"protocol_version": "0.2", "version": "fixture", "uptime": 1}}))
+            Json(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"protocol_version": "1.0", "version": "fixture", "uptime": 1}}))
         }));
         let proxy_task =
             tokio::spawn(async move { axum::serve(proxy_listener, proxy_router).await.unwrap() });
@@ -265,6 +265,32 @@ impl Fixture {
             .iter()
             .any(|method| method == "blockchain.transaction.broadcast"));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mainnet_unlock_requires_explicit_proxy_and_remains_retryable() {
+    let fixture = Fixture::new().await;
+    let mut request = fixture.request();
+    request.proxy_endpoint = None;
+    assert!(matches!(
+        sdk::unlock(fixture.state.clone(), request).await,
+        Err(APIError::MissingProxyEndpoint)
+    ));
+    assert!(fixture.state.unlocked_app_state.lock().await.is_none());
+    assert!(fixture
+        .state
+        .ldk_background_services
+        .lock()
+        .unwrap()
+        .is_none());
+    assert!(!*fixture.state.changing_state.lock().unwrap());
+    sdk::unlock(fixture.state.clone(), fixture.request())
+        .await
+        .unwrap();
+    fixture.assert_no_lightning().await;
+    let _ = routes::lock(axum::extract::State(fixture.state.clone()))
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
