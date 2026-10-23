@@ -14,6 +14,7 @@ mod async_kv_store;
 mod async_order;
 mod auth;
 mod backup;
+mod bfa_values;
 mod config;
 mod core_types;
 mod crypto;
@@ -21,6 +22,7 @@ mod custom_msg_rpc;
 mod database;
 mod disk;
 mod error;
+mod evm_rpc;
 #[cfg(test)]
 #[path = "test/fee_mock.rs"]
 mod fee_mock;
@@ -30,10 +32,15 @@ mod ldk;
 mod ldk_chain_backend;
 mod mainnet_state;
 mod node_info;
+mod proxy_startup;
 mod rgb;
+mod rgb_compat;
 mod rgb_file_transfer;
 mod rgb_import;
+mod rgb_invoice;
 mod rgb_sweep;
+#[cfg(feature = "vss")]
+mod rgb_vss;
 mod routes;
 mod runtime;
 mod signer;
@@ -96,7 +103,8 @@ use crate::routes::{
     list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info, node_info,
     open_channel, post_asset_media, provide_out_of_band_ack, provide_out_of_band_consignment,
     refresh_transfers, restore, revoke_token, rgb_invoice, rotate_address, send_btc,
-    send_onion_message, send_payment, send_rgb, shutdown, sign_message, sync, taker, unlock,
+    send_onion_message, send_payment, send_rgb, send_rgb_invoice, shutdown, sign_message, sync,
+    taker, unlock,
 };
 #[cfg(feature = "vss")]
 use crate::routes::{vss_backup, vss_backup_info, vss_clear_fence};
@@ -255,6 +263,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/sendonionmessage", post(send_onion_message))
         .route("/sendpayment", post(send_payment))
         .route("/sendrgb", post(send_rgb))
+        .route("/sendrgbinvoice", post(send_rgb_invoice))
         .route("/shutdown", post(shutdown))
         .route("/signmessage", post(sign_message))
         .route("/sync", post(sync))

@@ -95,8 +95,6 @@ dependencies = [
  "amplify_syn",
  "ascii",
  "rand 0.8.7",
- "serde",
- "stringly_conversions",
  "wasm-bindgen",
 ]
 
@@ -129,7 +127,6 @@ version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afed304556696656d2d71495e1e5f2c4b524a3fb6eb0f2f3778ffc482a40b8a8"
 dependencies = [
- "serde",
  "wasm-bindgen",
 ]
 
@@ -400,9 +397,6 @@ name = "ascii"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "askama"
@@ -683,6 +677,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -719,6 +719,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bdk_coin_select"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43064fa3dd1d3a8b24079cfcb5ede6b785857edc782277f17a1736511ccc1916"
+
+[[package]]
 name = "bdk_core"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -750,24 +756,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "bdk_file_store"
-version = "0.22.0"
+name = "bdk_tx"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7b9a98edb58d02b601239832674a9ca9f1465e08e1dd1fac3a0e34004372406"
+checksum = "40406c9952f15ed30893826bd83b7d67b6bf11d56574c1efc3db3a5d70cdfcea"
 dependencies = [
- "bdk_core",
- "bincode",
- "serde",
+ "bdk_coin_select",
+ "miniscript",
+ "rand 0.8.7",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
 name = "bdk_wallet"
-version = "3.1.0"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1284fb23acc3e3022673712b55f4d5ce7e38aadc2c49bbef830dc3935f0a3289"
+checksum = "163ec032e0a5a795ded2a7e47fc40a887c75743326483147e4465159c53abdc4"
 dependencies = [
  "bdk_chain",
- "bdk_file_store",
+ "bdk_tx",
  "bip39",
  "bitcoin 0.32.102",
  "miniscript",
@@ -832,7 +839,7 @@ dependencies = [
  "biscuit-parser",
  "biscuit-quote",
  "ecdsa",
- "ed25519-dalek",
+ "ed25519-dalek 2.2.0",
  "elliptic-curve",
  "getrandom 0.2.17",
  "hex",
@@ -1596,10 +1603,25 @@ dependencies = [
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
  "digest 0.10.7",
- "fiat-crypto",
+ "fiat-crypto 0.2.9",
  "rustc_version",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "curve25519-dalek-derive",
+ "digest 0.11.3",
+ "fiat-crypto 0.3.0",
+ "rustc_version",
+ "subtle",
 ]
 
 [[package]]
@@ -1922,7 +1944,7 @@ dependencies = [
  "elliptic-curve",
  "rfc6979",
  "serdect",
- "signature",
+ "signature 2.2.0",
  "spki 0.7.3",
 ]
 
@@ -1933,7 +1955,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
  "pkcs8 0.10.2",
- "signature",
+ "signature 2.2.0",
+]
+
+[[package]]
+name = "ed25519"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
+dependencies = [
+ "signature 3.0.0",
 ]
 
 [[package]]
@@ -1942,13 +1973,25 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
- "curve25519-dalek",
- "ed25519",
+ "curve25519-dalek 4.1.3",
+ "ed25519 2.2.3",
  "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
+dependencies = [
+ "curve25519-dalek 5.0.0",
+ "ed25519 3.0.0",
+ "sha2 0.11.0",
+ "subtle",
 ]
 
 [[package]]
@@ -2144,6 +2187,12 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "fiat-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "file-format"
@@ -3262,6 +3311,7 @@ dependencies = [
  "rgb-lib",
  "rgb-strict-encoding",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -3653,15 +3703,6 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
-]
-
-[[package]]
-name = "nonasync"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d81f7335a3fa37124e24461d6164485760d4c056dd92a81a70c23fc28c2b63c8"
-dependencies = [
- "amplify",
 ]
 
 [[package]]
@@ -4743,16 +4784,14 @@ dependencies = [
 
 [[package]]
 name = "rgb-aluvm"
-version = "0.11.1-rc.4"
+version = "0.11.2-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcf4d92478fcff567ff0bd9f18684fd954f8426c74f16e5517254b0a2d34023a"
+checksum = "21de8dc75b4ce90dffe66cff585053e9f5d2abe6436589c95e6308f0605195f4"
 dependencies = [
  "amplify",
  "baid64",
  "blake3",
- "getrandom 0.3.4",
  "half",
- "paste",
  "rgb-ascii-armor",
  "rgb-strict-encoding",
  "rgb-strict-types",
@@ -4764,9 +4803,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-ascii-armor"
-version = "1.0.2"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcde5a129540e5911c24930fd854ea658a715b50a690d254273088f907a63516"
+checksum = "0b3a739537822793adce1f9539bb3fae3d54a16f409e8353ac85281bdfcec078"
 dependencies = [
  "amplify",
  "baid64",
@@ -4777,8 +4816,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-consensus"
-version = "0.11.1-rc.11"
-source = "git+https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa?rev=2faf6118b2f5fe30dd90dd5244d5a7dc32bcd757#2faf6118b2f5fe30dd90dd5244d5a7dc32bcd757"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd5d6c21f60f24976d8b983b6b5925cd87a4865af8ad6d965d45360518bbfd24"
 dependencies = [
  "amplify",
  "baid64",
@@ -4791,11 +4831,11 @@ dependencies = [
  "hex-conservative 1.2.0",
  "rand 0.9.5",
  "rgb-aluvm",
+ "rgb-ascii-armor",
  "rgb-strict-encoding",
  "rgb-strict-types",
  "ripemd",
- "secp256k1 0.31.1",
- "secp256k1 0.32.0-beta.2",
+ "secp256k1 0.33.1",
  "serde",
  "sha2 0.11.0",
  "wasm-bindgen",
@@ -4803,8 +4843,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-invoicing"
-version = "0.11.1-rc.11"
-source = "git+https://github.com/UTEXO-Protocol/rgb-ops-s-bfa?rev=773766b5ca7a9e705ec68c2f9ed0917f505cd6e3#773766b5ca7a9e705ec68c2f9ed0917f505cd6e3"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76692ae2017e3b4789d2539dcf483b5e5e9f4468030d9ffb619aabeab7cd43b4"
 dependencies = [
  "amplify",
  "baid64",
@@ -4821,17 +4862,20 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.7"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.50-bfa#1b951af0c8233308c919975552487be19ad2a930"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib-bfa.git?rev=89c37086a68ef792da75c62bce59b58b1d7952a0#89c37086a68ef792da75c62bce59b58b1d7952a0"
 dependencies = [
  "amplify",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bdk_electrum",
  "bdk_esplora",
  "bdk_wallet",
  "chacha20poly1305 0.11.0",
+ "ed25519-dalek 3.0.0",
  "file-format",
  "hex",
- "hkdf 0.12.4",
+ "hkdf 0.13.0",
+ "hmac 0.13.0",
+ "libc",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "rgb-invoicing",
@@ -4847,7 +4891,7 @@ dependencies = [
  "sea-query 1.0.2",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "slog",
  "slog-async",
  "slog-term",
@@ -4856,15 +4900,15 @@ dependencies = [
  "time",
  "tokio",
  "url",
- "vss-client-ng",
  "walkdir",
+ "x25519-dalek",
  "zip 8.6.0",
 ]
 
 [[package]]
 name = "rgb-lib-migration"
 version = "0.3.0-beta.5"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.50-bfa#1b951af0c8233308c919975552487be19ad2a930"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib-bfa.git?rev=89c37086a68ef792da75c62bce59b58b1d7952a0#89c37086a68ef792da75c62bce59b58b1d7952a0"
 dependencies = [
  "sea-orm-migration 2.0.2",
  "tokio",
@@ -4893,7 +4937,9 @@ dependencies = [
  "electrum-client 0.24.1",
  "esplora-client",
  "futures",
+ "hex",
  "hex-conservative 0.3.2",
+ "hkdf 0.12.4",
  "http",
  "lazy_static",
  "libc",
@@ -4913,6 +4959,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest 0.12.28",
+ "rgb-invoicing",
  "rgb-lib",
  "rgb-psbt-utils",
  "rln-migration",
@@ -4923,6 +4970,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2 0.10.9",
  "signer-external",
  "tempfile",
  "thiserror 2.0.19",
@@ -4950,8 +4998,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-ops"
-version = "0.11.1-rc.11"
-source = "git+https://github.com/UTEXO-Protocol/rgb-ops-s-bfa?rev=773766b5ca7a9e705ec68c2f9ed0917f505cd6e3#773766b5ca7a9e705ec68c2f9ed0917f505cd6e3"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0b0b332a32be0e41ce328d534d559e67a0add6381d250bdc188e44eb8777ca7"
 dependencies = [
  "amplify",
  "baid64",
@@ -4959,8 +5008,6 @@ dependencies = [
  "electrum-client 0.25.0",
  "esplora-client",
  "getrandom 0.3.4",
- "nonasync",
- "rand 0.9.5",
  "rgb-aluvm",
  "rgb-ascii-armor",
  "rgb-consensus",
@@ -4974,9 +5021,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-psbt-utils"
-version = "0.11.1-rc.11"
+version = "0.11.2-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9df8f48e7c851814306af91411d7d6f7e8571939d509d4a786597a5eba0efbbf"
+checksum = "16167fb6520c432702b42dbc6344c94573ff8873082386c129718a66bcb535ce"
 dependencies = [
  "amplify",
  "getrandom 0.3.4",
@@ -4988,8 +5035,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-schemas"
-version = "0.11.1-rc.11"
-source = "git+https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa?rev=238dfe7a89db998107fd87d919bf2757a2746d7f#238dfe7a89db998107fd87d919bf2757a2746d7f"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "480f3d71e0f1b23b3c75b59255d62de178259e074f4a74410c330c734f52246f"
 dependencies = [
  "amplify",
  "rgb-aluvm",
@@ -4999,9 +5047,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-strict-encoding"
-version = "1.0.2"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f68326e14d4b627f86634ea324510135cb551e27c5583a74811fa230b0cf34d"
+checksum = "43cf06a3afea7b29f92f279a5fabb39215d1287f796a8d1a75ce77dd4f807fd4"
 dependencies = [
  "amplify",
  "bitcoin 0.32.102",
@@ -5012,9 +5060,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-strict-encoding-derive"
-version = "1.0.2"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33367536cfef03cb582cd9f8f25e193c2298d3ec3112eb59018a376b465f1ed9"
+checksum = "473d4bc563f8db593abf7213f82fafc5bc667125f2c39222cd66ead369e60421"
 dependencies = [
  "amplify_syn",
  "heck 0.5.0",
@@ -5025,9 +5073,9 @@ dependencies = [
 
 [[package]]
 name = "rgb-strict-types"
-version = "1.0.2"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e920bdf61b662a3743572a03696b0d88992eeb7d4f7afa0902915968327b3ce6"
+checksum = "5efea5be04a66a22f96580fb8c7fd9558f7c5d74039c096bb024e4f325f4529a"
 dependencies = [
  "amplify",
  "baid64",
@@ -5116,7 +5164,7 @@ dependencies = [
  "pkcs1",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
- "signature",
+ "signature 2.2.0",
  "spki 0.7.3",
  "subtle",
  "zeroize",
@@ -5749,24 +5797,12 @@ dependencies = [
 
 [[package]]
 name = "secp256k1"
-version = "0.31.1"
+version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c3c81b43dc2d8877c216a3fccf76677ee1ebccd429566d3e67447290d0c42b2"
-dependencies = [
- "bitcoin_hashes 0.14.101",
- "rand 0.9.5",
- "secp256k1-sys 0.11.0",
- "serde",
-]
-
-[[package]]
-name = "secp256k1"
-version = "0.32.0-beta.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c5fdc7d6e800869d3fd60ff857c479bf0a83ea7bf44b389e64461e844204994"
+checksum = "d7f404a8dab7a7a5a631e741d8699aa9c8e1d689fc26ccf897c7187565490b69"
 dependencies = [
  "rand 0.9.5",
- "secp256k1-sys 0.12.0",
+ "secp256k1-sys 0.14.1",
  "serde",
 ]
 
@@ -5790,18 +5826,9 @@ dependencies = [
 
 [[package]]
 name = "secp256k1-sys"
-version = "0.11.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcb913707158fadaf0d8702c2db0e857de66eb003ccfdda5924b5f5ac98efb38"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "secp256k1-sys"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d3be00697c88c00fe102af8dc316038cc2062eab8da646e7463f4c0e70ca9fd"
+checksum = "f6b2992d4a3cd244539a7d5d0966aadbe5ca7fb868a5d7e38c29499b9e709bbd"
 dependencies = [
  "cc",
 ]
@@ -5913,16 +5940,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "serde_str_helpers"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b744a7c94f2f3785496af33a0d93857dfc0c521e25c38e993e9c5bb45f09c841"
-dependencies = [
- "serde",
- "serde_derive",
 ]
 
 [[package]]
@@ -6106,9 +6123,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+
+[[package]]
 name = "signer-external"
 version = "0.1.0-alpha"
-source = "git+https://github.com/UTEXO-Protocol/rln-external-signer.git?branch=main#0fb005ec4b927ddbe13e1646d247b5bb11e8ffed"
+source = "git+https://github.com/UTEXO-Protocol/rln-external-signer.git?rev=0fb005ec4b927ddbe13e1646d247b5bb11e8ffed#0fb005ec4b927ddbe13e1646d247b5bb11e8ffed"
 dependencies = [
  "base64 0.22.1",
  "bitcoin 0.32.102",
@@ -6637,16 +6660,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "stringly_conversions"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff63080f492dd4d289ffcaed8d7ece38adfb423db910eb342c0e04d409536a7a"
-dependencies = [
- "paste",
- "serde_str_helpers",
-]
 
 [[package]]
 name = "stringprep"
@@ -7548,7 +7561,7 @@ dependencies = [
 [[package]]
 name = "vls-core"
 version = "0.14.0"
-source = "git+https://github.com/UTEXO-Protocol/vls-core.git?branch=feat%2Frgb-compatibility#45c72edfd58620849eb486925439a76526b415ae"
+source = "git+https://github.com/UTEXO-Protocol/vls-core.git?rev=45c72edfd58620849eb486925439a76526b415ae#45c72edfd58620849eb486925439a76526b415ae"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -7638,7 +7651,7 @@ dependencies = [
 [[package]]
 name = "vls-protocol-signer"
 version = "0.14.0"
-source = "git+https://github.com/UTEXO-Protocol/vls-protocol-signer.git?branch=feat%2Frgb-compatibility#dddd336fcdf84c4febdd7af8363bda8d1721d893"
+source = "git+https://github.com/UTEXO-Protocol/vls-protocol-signer.git?rev=dddd336fcdf84c4febdd7af8363bda8d1721d893#dddd336fcdf84c4febdd7af8363bda8d1721d893"
 dependencies = [
  "bit-vec",
  "log",
@@ -7904,7 +7917,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8177,6 +8190,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
+]
+
+[[package]]
+name = "x25519-dalek"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e8131a03190127fb2263afc72b322ecadae46b6ff8c6f399ff5d02f5559af6"
+dependencies = [
+ "curve25519-dalek 5.0.0",
+ "rand_core 0.10.1",
 ]
 
 [[package]]

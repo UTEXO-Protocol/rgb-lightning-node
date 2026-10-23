@@ -49,3 +49,6 @@ node_modules/
 e2e-specs/node_modules/
 test-results/
 e2e-specs/test-results/
+
+# Local migration build/test receipts
+.migration-evidence/

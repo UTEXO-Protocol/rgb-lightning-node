@@ -65,7 +65,6 @@ pub(crate) const ELECTRUM_URL_REGTEST: &str = "127.0.0.1:50001";
 #[cfg(test)]
 pub(crate) const ESPLORA_URL_REGTEST: &str = "http://127.0.0.1:3002";
 pub(crate) const PROXY_ENDPOINT_LOCAL: &str = "rpc://127.0.0.1:3000/json-rpc";
-pub(crate) const PROXY_ENDPOINT_PUBLIC: &str = "rpcs://proxy.iriswallet.com/0.2/json-rpc";
 
 /// Set by the panic hook and by the background-processor watchdog. Once set, the shutdown is
 /// fatal: it stops waiting for an in-progress state change and the process exits non-zero.

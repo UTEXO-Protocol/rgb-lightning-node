@@ -418,7 +418,7 @@ pub struct DecodeLnInvoiceResponse {
 
 pub struct DecodeRgbInvoiceResponse {
     pub recipient_id: String,
-    pub proxy_recipient_id: String,
+    pub proxy_recipient_id: Option<String>,
     pub recipient_type: String,
     pub asset_schema: Option<String>,
     pub asset_id: Option<ContractId>,
@@ -426,6 +426,8 @@ pub struct DecodeRgbInvoiceResponse {
     pub network: String,
     pub expiration_timestamp: Option<i64>,
     pub transport_endpoints: Vec<String>,
+    pub public_key: Option<String>,
+    pub encryption: String,
 }
 
 pub enum InvoiceStatus {
@@ -863,6 +865,16 @@ pub struct SdkInitRequest {
     pub vss_allow_http: bool,
     pub vss_allow_empty_restore: bool,
     pub reuse_addresses: bool,
+}
+
+pub struct SendRgbInvoiceRequest {
+    pub invoice: String,
+    pub asset_id: ContractId,
+    pub amount: u64,
+    pub witness_data: Option<WitnessData>,
+    pub donation: bool,
+    pub fee_rate: u64,
+    pub min_confirmations: u8,
 }
 
 pub struct SendRgbRequest {

@@ -3,8 +3,7 @@ use crate::utils::AppState;
 use base64::{engine::general_purpose, Engine as _};
 use rgb_lib::wallet::Metadata as RgbLibMetadata;
 use rgb_lib::{
-    ConsignmentExt, ContractId, Error as RgbLibError, FileContent, RgbContract, RgbTransfer,
-    RgbTxid,
+    ConsignmentExt, ContractId, Error as RgbLibError, FileContent, RgbTransfer, RgbTxid,
 };
 use std::str::FromStr;
 use std::sync::Arc;
@@ -125,6 +124,10 @@ fn map_contract_import_error(error: RgbLibError) -> APIError {
         RgbLibError::InvalidConsignment => {
             APIError::InvalidRgbContract("contract validation failed".to_string())
         }
+        error @ (RgbLibError::ContractIdMismatch { .. }
+        | RgbLibError::ConsignmentValidationFailed { .. }) => {
+            APIError::InvalidRgbContract(error.to_string())
+        }
         other => APIError::from(other),
     }
 }
@@ -192,22 +195,34 @@ pub(crate) async fn import_rgb_contract(
     request: ImportRgbContractRequestData,
 ) -> Result<ImportRgbData, APIError> {
     let expected_asset_id = request.expected_asset_id;
-    let (contract, contract_id) = parse_rgb_payload("contract", move || {
-        let bytes = decode_rgb_base64(request.contract_base64, RgbPayloadKind::Contract)?;
-        let contract = RgbContract::load(&bytes[..])
-            .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
-        let contract_id = contract.contract_id();
-        validate_expected_asset_id(&expected_asset_id, &contract_id, RgbPayloadKind::Contract)?;
-        Ok((contract, contract_id))
-    })
-    .await?;
-
+    let contract_id = ContractId::from_str(&expected_asset_id)
+        .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
+    let bytes = decode_rgb_base64(request.contract_base64, RgbPayloadKind::Contract)?;
     run_rgb_import(state, "contract", move |unlocked_state| {
-        let (metadata, already_imported) = unlocked_state
-            .rgb_import_asset_contract(contract)
-            .map_err(map_contract_import_error)?;
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new()
+            .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
+        file.write_all(&bytes)
+            .map_err(|error| APIError::InvalidRgbContract(error.to_string()))?;
+        let path = file
+            .path()
+            .to_str()
+            .ok_or_else(|| APIError::InvalidRgbContract("Invalid temporary contract path".into()))?
+            .to_owned();
+        let mut wallet = unlocked_state.rgb_wallet_wrapper.get_rgb_wallet();
+        let already_imported = wallet.is_asset_known(contract_id)?;
+        let imported_id = rgb_lib::wallet::RgbWalletOpsOffline::import_contract(
+            &mut *wallet,
+            path,
+            Some(expected_asset_id),
+        )
+        .map_err(map_contract_import_error)?;
+        let metadata = rgb_lib::wallet::RgbWalletOpsOffline::get_asset_metadata(
+            &*wallet,
+            imported_id.clone(),
+        )?;
         Ok(ImportRgbData {
-            asset_id: contract_id.to_string(),
+            asset_id: imported_id,
             already_imported,
             metadata,
         })
@@ -248,6 +263,68 @@ mod tests {
         assert_eq!(
             decode_rgb_base64("YWJj".to_string(), RgbPayloadKind::Contract).unwrap(),
             b"abc"
+        );
+    }
+
+    fn contract_validation_errors() -> [RgbLibError; 2] {
+        [
+            RgbLibError::ContractIdMismatch {
+                expected: "rgb:OG9No4hZ-UrxoWmR-09ohtOk-ppxBN7h-g~KkQro-ncKc9A4".into(),
+                actual: "rgb:bslIXT4U-xgVHutV-XwymZwu-4chvqMh-D~jaKFe-ZCTMTwQ".into(),
+            },
+            // This is the deterministic validation failure observed when the supplied
+            // Signet contract is imported into the isolated Regtest wallet.
+            RgbLibError::ConsignmentValidationFailed {
+                details: "detected a failure that makes the consignment invalid".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn contract_validation_failures_are_http_client_errors_with_original_details() {
+        use axum::response::IntoResponse;
+
+        for error in contract_validation_errors() {
+            let expected = error.to_string();
+            let mapped = map_contract_import_error(error);
+            assert!(
+                matches!(&mapped, APIError::InvalidRgbContract(details) if details == &expected)
+            );
+            assert_eq!(
+                mapped.into_response().status(),
+                axum::http::StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn contract_validation_failures_reach_native_clients_as_invalid_requests() {
+        use crate::uniffi_api::{state::map_api_error, RlnError};
+
+        for error in contract_validation_errors() {
+            let expected = error.to_string();
+            let mapped = map_api_error(map_contract_import_error(error));
+            assert!(
+                matches!(mapped, RlnError::InvalidRequest(details) if details.contains(&expected))
+            );
+        }
+    }
+
+    #[test]
+    fn contract_import_io_and_transport_failures_keep_their_operational_categories() {
+        let mapped = map_contract_import_error(RgbLibError::IO {
+            details: "contract file could not be read".into(),
+        });
+        assert!(
+            matches!(mapped, APIError::IO(error) if error.to_string().contains("contract file could not be read"))
+        );
+
+        let mapped = map_contract_import_error(RgbLibError::Network {
+            details: "resolver transport unavailable".into(),
+        });
+        assert!(
+            matches!(mapped, APIError::Network(details) if details == "resolver transport unavailable")
         );
     }
 }

@@ -135,6 +135,8 @@ interface SdkNode {
     [Throws=RlnError]
     SendRgbResponse send_rgb(SendRgbRequest request);
     [Throws=RlnError]
+    SendRgbResponse sendrgbinvoice(SendRgbInvoiceRequest request);
+    [Throws=RlnError]
     AsyncOrderNewResponse apay_new(string host_node_id);
     [Throws=RlnError]
     AsyncOrderNewResponse apay_new_with_address(string host_node_id, string username, string domain);
@@ -510,7 +512,7 @@ dictionary DecodeLnInvoiceResponse {
 
 dictionary DecodeRgbInvoiceResponse {
     string recipient_id;
-    string proxy_recipient_id;
+    string? proxy_recipient_id;
     string recipient_type;
     string? asset_schema;
     ContractId? asset_id;
@@ -518,6 +520,8 @@ dictionary DecodeRgbInvoiceResponse {
     string network;
     i64? expiration_timestamp;
     sequence<string> transport_endpoints;
+    string? public_key;
+    string encryption;
 };
 
 enum InvoiceStatus {
@@ -905,6 +909,16 @@ dictionary SdkSendPaymentResponse {
     PaymentHash? payment_hash;
     string? payment_secret;
     HtlcStatus status;
+};
+
+dictionary SendRgbInvoiceRequest {
+    string invoice;
+    ContractId asset_id;
+    u64 amount;
+    WitnessData? witness_data;
+    boolean donation;
+    u64 fee_rate;
+    u8 min_confirmations;
 };
 
 dictionary SendRgbRequest {

@@ -671,10 +671,10 @@ mod tests {
 
         let (signing_key, store_id) = generate_test_keys();
         let config =
-            rgb_lib::wallet::vss::VssBackupConfig::new(VSS_URL.to_string(), store_id, signing_key)
+            crate::rgb_vss::VssBackupConfig::new(VSS_URL.to_string(), store_id, signing_key)
                 .with_encryption(true);
 
-        let client = rgb_lib::wallet::vss::VssBackupClient::new(config).expect("encrypted client");
+        let client = crate::rgb_vss::VssBackupClient::new(config).expect("encrypted client");
         assert!(client.encryption_enabled());
 
         let fingerprint = "a1b2c3d4";
@@ -710,11 +710,10 @@ mod tests {
 
         let (signing_key, store_id) = generate_test_keys();
         let config =
-            rgb_lib::wallet::vss::VssBackupConfig::new(VSS_URL.to_string(), store_id, signing_key)
+            crate::rgb_vss::VssBackupConfig::new(VSS_URL.to_string(), store_id, signing_key)
                 .with_encryption(false);
 
-        let client =
-            rgb_lib::wallet::vss::VssBackupClient::new(config).expect("unencrypted client");
+        let client = crate::rgb_vss::VssBackupClient::new(config).expect("unencrypted client");
         assert!(!client.encryption_enabled());
 
         let fingerprint = "e5f6a7b8";
@@ -1235,14 +1234,13 @@ mod tests {
         let payload = b"rgb wallet bytes".to_vec();
 
         // Pre-populate VSS with a backup for this rgb_store_id.
-        let upload_config = rgb_lib::wallet::vss::VssBackupConfig::new(
+        let upload_config = crate::rgb_vss::VssBackupConfig::new(
             VSS_URL.to_string(),
             rgb_store_id.clone(),
             signing_key,
         )
         .with_encryption(true);
-        let client =
-            rgb_lib::wallet::vss::VssBackupClient::new(upload_config).expect("backup client");
+        let client = crate::rgb_vss::VssBackupClient::new(upload_config).expect("backup client");
         client
             .upload_backup(create_test_wallet_zip(fingerprint, &payload))
             .await
@@ -1323,14 +1321,13 @@ mod tests {
         std::fs::write(&sentinel, b"local-state-must-survive").expect("write sentinel");
 
         // Even if VSS has a stale backup, the local copy wins.
-        let upload_config = rgb_lib::wallet::vss::VssBackupConfig::new(
+        let upload_config = crate::rgb_vss::VssBackupConfig::new(
             VSS_URL.to_string(),
             rgb_store_id.clone(),
             signing_key,
         )
         .with_encryption(true);
-        let client =
-            rgb_lib::wallet::vss::VssBackupClient::new(upload_config).expect("backup client");
+        let client = crate::rgb_vss::VssBackupClient::new(upload_config).expect("backup client");
         client
             .upload_backup(create_test_wallet_zip(fingerprint, b"stale-vss-bytes"))
             .await

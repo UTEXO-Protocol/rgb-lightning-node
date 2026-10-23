@@ -1,0 +1,140 @@
+RGB library migration scope
+===========================
+
+This change starts from RLN ecc69f20308231400561f6f060fea88acfa40cc4 and
+migrates the wallet graph to UTEXO-Protocol/rgb-lib-bfa. Cargo.lock and the
+rust-lightning submodule record the exact candidate revisions. It does not
+adopt draft RLN #211's global on-chain-only build, VSS removal, or vendored
+reqwest/native-tls workarounds.
+
+Protocol-1.0 transfers
+---------------------
+Use sendrgbinvoice (SDK/UniFFI) or POST /sendrgbinvoice for a fungible invoice.
+The request contains the complete invoice, asset_id, integer amount,
+optional witness_data, donation, fee_rate and min_confirmations. Native
+code checks network, asset, invoice amount and receive mode, then retains
+the recipient's public key, encryption preference and invoice expiration.
+It supplies the configured sender proxy and bounds the operation deadline
+to leave the protocol's ACK/release interval before invoice expiration.
+Proxy witness blinding is derived by the library; caller-specified blinding
+is rejected. The library performs recipient-key, proxy and transaction
+validation before signing. Existing legacy recipient-group requests do not
+contain the necessary authentication data and explicitly direct proxy
+callers to the complete-invoice method. Out-of-band requests remain distinct.
+
+decode_rgb_invoice returns the additive public_key and encryption fields.
+The deprecated proxy_recipient_id is absent in protocol 1.0 and is nullable.
+The encryption values are Required, Optional and Unsupported. A sender must
+honor the invoice preference, rather than downgrade it to fit an old DTO.
+
+Public contract import uses rgb-lib-bfa's validated standalone registration
+API with the expected asset ID supplied before mutation. It imports actual
+metadata/stock and no allocations. Inspection alone is not asset admission.
+
+Burn requests retain a generic 32-byte commitment boundary. New RGB burn_reason
+is the hex encoding of these exact bytes; RLN does not interpret them as an
+EVM address or claim they satisfy a bridge's destination-preimage protocol.
+Bridge V1 destination validation/commitment construction belongs above this
+boundary and must be independently tested.
+
+VSS
+---
+The transport/crypto implementation in src/rgb_vss.rs retains the encrypted
+stream version from UTEXO-Protocol/rgb-lib commit
+1b951af0c8233308c919975552487be19ad2a930 (MIT). Snapshot preparation and
+conditional acknowledgement use the new library's public primitives.
+Manifest version 2 uses generation-specific immutable chunk keys, embedded
+encryption metadata/fingerprint and a ciphertext SHA-256. Chunks are written
+first without overwriting the previous generation; manifest CAS and canonical
+readback happen before local acknowledgement. Interrupted or uncertain uploads
+retain their orphan generation keys for diagnosis. Legacy manifest format 1
+requires a separate fresh migration test store and is explicitly rejected;
+this change does not claim old-format backup migration.
+Creating an archive does not clear backup dirtiness. The exact content token
+is acknowledged only after the remote upload succeeds; a changed token
+returns an error and leaves the current state pending.
+
+RgbLibWalletWrapper owns the one VSS client. Its wallet guard checkpoints
+dirty state on release when the client's automatic policy is enabled.
+Manual backup is available with automatic backup disabled. Maintained
+binding policy may persist a separate default-on preference, disable this
+automatic hook, and call rgb_vss::backup_wallet while holding its own single
+wallet admission mutex. That helper never acquires the wrapper mutex again.
+Policy callers must persist their intent and complete catch-up before
+enabling automatic backup; changing the in-memory flag alone is not durable
+policy or proof of a completed backup.
+
+Only encrypted snapshots are supported: the new database contains proxy
+operation keys, so the old plaintext BDK-file redaction is insufficient.
+Restore authenticates/decrypts before bounded admission. Limits match the
+maintained binding: 128 MiB raw archive, stream-tag-adjusted ciphertext,
+512 MiB expanded, 25,000 entries and an expansion ratio of 2000 per entry.
+Manifest data is bounded to 64 KiB and encryption metadata to 4 KiB.
+Archive paths, entry types, duplicate names and fingerprint are checked in
+an isolated staging directory before rename. Existing wallets are not
+overwritten; normal online consistency and wallet-setting checks still run.
+
+Explicit generic runtime compatibility limits
+---------------------------------------------
+Iris's maintained on-chain profile is selected by its caller. This change
+does not globally disable Lightning or report unqualified behavior as passed.
+The new RGB library does not implement these old fork extensions:
+
+* IFA link rights/link operations and linked-contract metadata;
+* persisted prepared channel sweeps followed by separate consume;
+* explicit final-zero-locktime Bitcoin/RGB channel funding construction.
+
+These operation boundaries fail explicitly before signing or eagerly
+consuming RGB state. They must not be treated as a successful channel
+funding, sweep, or asset-link result. Optional legacy link metadata is
+unavailable in returned records. Ordinary new-address generation uses the
+new library API; requested address reuse is rejected, not silently enabled.
+Ordinary on-chain Bitcoin send preparation uses the supported native API;
+the channel-funding restriction is separate from that on-chain operation.
+
+The funding consequence is concrete: this candidate cannot open ordinary
+locally funded BTC or RGB Lightning channels. Colored SDK/HTTP open preflight
+and FundingGenerationReady pass Some(0), which the guarded RGB builder rejects.
+The standard vanilla funding event calls the always-rejecting dedicated BTC
+funding builder. Those errors terminate funding before signing. Colored virtual
+funding is also blocked; its event has a separate replay path. Peer-funded
+incoming channels, existing channels and uncolored synthetic virtual channels
+are different paths and are not proven broken or qualified by this finding.
+
+A safe funding prerequisite belongs in rgb-lib-bfa: construct final-zero-locktime
+transactions before txid-bound reservation/consignment persistence, with matching
+dry-run, end and abort semantics for both RGB and vanilla funding. Merely dropping
+the guard or rewriting the returned PSBT can leave the persisted original txid
+inconsistent with the signed transaction. This migration does not claim that API.
+
+LDK creates temporary wallet handles outside the maintained on-chain wrapper.
+General Lightning + VSS cross-handle snapshot serialization and channel
+behavior therefore require separate qualification. A compilation result is
+not that acceptance. No legacy wallet migration or hosted bridge operation
+is established by this change.
+
+Candidate source and qualification
+----------------------------------
+RGB: 962730a211f0f7569d7ad8ae777052f433d87655
+LDK: 510189d5700a6d1406229ce7523e181c3838715e
+External signer: 0fb005ec4b927ddbe13e1646d247b5bb11e8ffed
+VLS core: 45c72edfd58620849eb486925439a76526b415ae
+VLS protocol signer: dddd336fcdf84c4febdd7af8363bda8d1721d893
+
+The predecessor RGB prerequisite source 7ce6045 and LDK 6f5a57d passed
+cargo check --lib --features uniffi,vls,vss,test-utils, four invoice tests
+and eight VSS tests (including real local protobuf fault injection).
+The VSS cases cover failed chunk/manifest updates, uncertain commit,
+canonical readback before local acknowledgement, malformed encryption,
+bounded staging, and concurrent no-replace directory promotion.
+
+The final RGB pin adds artifact-to-token consistency hardening. Linux/macOS
+prerequisite CI passes 73 wallet tests and 15 bitcoind-feature tests per OS.
+The focused VSS suite passes 13 cases; the maintained native adapter passes
+107 tests, C-FFI passes 18 tests and its locked production check passes.
+Actual Darwin Debug Bare/Node consumers pass lifecycle, BIP-322, local VSS
+backup/restore, funded BTC round trips and a post-restore confirmed spend.
+These are Debug host scopes, not platform release or generic Lightning acceptance.
+Platform artifact CI currently lacks private rgb-lib-bfa read access. Funded
+BFA/bridge and coordinated iOS acceptance remain pending. No hosted bridge has
+been operated. This source remains an unpublished migration candidate.

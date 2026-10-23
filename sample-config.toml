@@ -38,7 +38,8 @@
 # (there is no built-in default: unlock fails if neither supplies one)
 #indexer_url = ""
 # Default RGB proxy endpoint used when /unlock does not provide one
-# (defaults to a per-network public proxy)
+# Public networks require an explicit protocol-1.0 endpoint. Regtest alone
+# defaults to rpc://127.0.0.1:3000/json-rpc; all endpoints are checked at unlock.
 #proxy_endpoint = ""
 # Default Ethereum RPC URL used when /unlock does not provide one. When set (from
 # either source) the wallet supports BFA assets, validating their consignments
