@@ -2601,32 +2601,26 @@ pub(crate) async fn create_utxos(
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
 
-        let num = payload.num.unwrap_or(unlocked_state.config.rgb.utxo_num);
-        let size = payload
-            .size
-            .unwrap_or(unlocked_state.config.rgb.utxo_size_sat);
-        if unlocked_state.external_signer_mode {
-            let unsigned_psbt = unlocked_state.rgb_create_utxos_begin(
-                payload.up_to,
-                num,
-                size,
-                payload.fee_rate,
-                payload.skip_sync,
-            )?;
-            let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).map_err(|e| {
-                tracing::error!("rgb_sign_psbt failed in external signer mode (create_utxos): {e}");
-                APIError::from(e)
-            })?;
-            unlocked_state.rgb_create_utxos_end(signed_psbt, payload.skip_sync)?;
-        } else {
-            unlocked_state.rgb_create_utxos(
-                payload.up_to,
-                num,
-                size,
-                payload.fee_rate,
-                payload.skip_sync,
-            )?;
-        }
+        let wallet = Arc::clone(unlocked_state);
+        let directory = {
+            use rgb_lib::wallet::RgbWalletOpsOffline;
+            wallet.rgb_wallet_wrapper.get_rgb_wallet().get_wallet_dir().join("rln_output_operations_v1")
+        };
+        tokio::task::spawn_blocking(move || {
+            let _ownership = wallet.rgb_wallet_wrapper.output_operations.lock().map_err(|_| APIError::Unexpected("RGB output operation ownership is unavailable".into()))?;
+            let request = crate::rgb_output_operations::OutputRequest {
+                operation_id: format!("{:032x}", rand::random::<u128>()), up_to: payload.up_to,
+                num: payload.num.unwrap_or(wallet.config.rgb.utxo_num),
+                size: payload.size.unwrap_or(wallet.config.rgb.utxo_size_sat),
+                fee_rate: payload.fee_rate, skip_sync: payload.skip_sync,
+            };
+            let store = crate::rgb_output_operations::OutputStore::new(directory);
+            let backend = crate::rgb_output_operations::NativeOutputBackend::new(Arc::clone(&wallet));
+            let operation = store.prepare(&backend, request)?;
+            let result = store.commit(&backend, &operation.operation_id)?;
+            if matches!(result.status.as_str(), "broadcast" | "confirmed") { Ok(()) }
+            else { Err(APIError::Unexpected("RGB output transaction submission is unresolved; inspect its exact operation before retrying".into())) }
+        }).await.map_err(|_| APIError::Unexpected("RGB output operation worker failed; inspect its exact operation before retrying".into()))??;
         tracing::debug!("UTXO creation complete");
 
         Ok(Json(EmptyResponse {}))

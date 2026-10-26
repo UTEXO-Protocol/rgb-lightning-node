@@ -152,6 +152,18 @@ pub(crate) fn install_backup(backup: &UnpackedBackup, target_dir: &Path) -> Resu
     tracing::info!("unzipping {:?} to {:?}", &backup.zip, target_dir);
     unzip(&backup.zip, target_dir)?;
 
+    // A file snapshot can precede a later broadcast just like a VSS snapshot. It cannot grant
+    // prebroadcast cancellation authority merely because it contains an old unsigned review.
+    for entry in WalkDir::new(target_dir).follow_links(false).max_depth(5) {
+        let entry = entry.map_err(|_| {
+            APIError::Unexpected("Cannot inspect restored RGB output operations".into())
+        })?;
+        if entry.file_type().is_dir() && entry.file_name() == "rln_output_operations_v1" {
+            crate::rgb_output_operations::OutputStore::new(entry.path().to_path_buf())
+                .mark_restored(&[])?;
+        }
+    }
+
     tracing::info!("restore completed");
     Ok(())
 }

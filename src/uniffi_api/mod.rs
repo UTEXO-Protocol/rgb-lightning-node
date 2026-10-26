@@ -528,6 +528,79 @@ impl SdkNode {
         Ok(())
     }
 
+    pub fn preparecreateutxos(
+        &self,
+        request: SdkPrepareCreateUtxosRequest,
+    ) -> Result<SdkCreateUtxosOperation, RlnError> {
+        block_on_sdk(sdk::prepare_create_utxos(
+            self.handle.app_state(),
+            request.operation_id,
+            sdk::CreateUtxosRequestData {
+                up_to: request.up_to,
+                num: request.num,
+                size: request.size,
+                fee_rate: request.fee_rate,
+                skip_sync: request.skip_sync,
+            },
+        ))
+        .map(Into::into)
+    }
+
+    pub fn commitpreparedcreateutxos(
+        &self,
+        operation_id: String,
+    ) -> Result<SdkCreateUtxosOperation, RlnError> {
+        block_on_sdk(sdk::commit_prepared_create_utxos(
+            self.handle.app_state(),
+            operation_id,
+        ))
+        .map(Into::into)
+    }
+
+    pub fn cancelcreateutxosplan(
+        &self,
+        operation_id: String,
+    ) -> Result<SdkCreateUtxosOperation, RlnError> {
+        block_on_sdk(sdk::cancel_create_utxos_plan(
+            self.handle.app_state(),
+            operation_id,
+        ))
+        .map(Into::into)
+    }
+
+    pub fn getcreateutxosoperation(
+        &self,
+        operation_id: String,
+    ) -> Result<Option<SdkCreateUtxosOperation>, RlnError> {
+        block_on_sdk(sdk::get_create_utxos_operation(
+            self.handle.app_state(),
+            operation_id,
+        ))
+        .map(|operation| operation.map(Into::into))
+    }
+
+    pub fn listcreateutxosoperations(&self) -> Result<Vec<SdkCreateUtxosOperation>, RlnError> {
+        block_on_sdk(sdk::list_create_utxos_operations(self.handle.app_state()))
+            .map(|operations| operations.into_iter().map(Into::into).collect())
+    }
+
+    pub fn listpendingvanillatransactions(
+        &self,
+    ) -> Result<Vec<SdkPendingVanillaTransaction>, RlnError> {
+        block_on_sdk(sdk::list_pending_vanilla_transactions(
+            self.handle.app_state(),
+        ))
+        .map(|pending| {
+            pending
+                .into_iter()
+                .map(|pending| SdkPendingVanillaTransaction {
+                    txid: pending.txid,
+                    r#type: pending.operation_type,
+                })
+                .collect()
+        })
+    }
+
     pub fn issueassetnia(&self, request: SdkIssueAssetNiaRequest) -> Result<AssetNia, RlnError> {
         let state = self.handle.app_state();
         let asset = block_on_sdk(sdk::issue_asset_nia(

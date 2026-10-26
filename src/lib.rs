@@ -59,6 +59,7 @@ mod rgb_compat;
 mod rgb_file_transfer;
 mod rgb_import;
 mod rgb_invoice;
+mod rgb_output_operations;
 mod rgb_sweep;
 #[cfg(feature = "vss")]
 pub mod rgb_vss;

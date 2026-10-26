@@ -4926,6 +4926,16 @@ impl NodeStartup {
                     .get_wallet_dir()
                     .join(crate::rgb_vss::VSS_RESTORE_MARKER);
                 if marker.exists() {
+                    crate::rgb_output_operations::OutputStore::new(
+                        rgb_wallet.get_wallet_dir().join("rln_output_operations_v1"),
+                    )
+                    .mark_restored(
+                        &rgb_wallet
+                            .list_pending_vanilla_txs()?
+                            .into_iter()
+                            .map(|pending| pending.txid)
+                            .collect::<Vec<_>>(),
+                    )?;
                     std::fs::remove_file(&marker).map_err(|error| {
                         APIError::FailedVssInit(format!(
                             "Cannot acknowledge restored wallet: {error}"

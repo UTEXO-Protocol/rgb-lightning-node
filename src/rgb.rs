@@ -708,6 +708,8 @@ impl Drop for RgbWalletGuard<'_> {
 pub(crate) struct RgbLibWalletWrapper {
     pub(crate) wallet: Arc<Mutex<RgbLibWallet>>,
     pub(crate) online: Online,
+    /// Serializes durable output-plan ownership, signing and exact-transaction retries.
+    pub(crate) output_operations: Mutex<()>,
     #[cfg(feature = "vss")]
     vss_client: Mutex<Option<Arc<crate::rgb_vss::VssBackupClient>>>,
 }
@@ -717,6 +719,7 @@ impl RgbLibWalletWrapper {
         RgbLibWalletWrapper {
             wallet,
             online,
+            output_operations: Mutex::new(()),
             #[cfg(feature = "vss")]
             vss_client: Mutex::new(None),
         }

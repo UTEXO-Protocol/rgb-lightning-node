@@ -31,13 +31,13 @@ use rgb_lightning_node::{
     SdkIssueAssetUdaRequest, SdkKeysendRequest, SdkKeysendResponse, SdkLdkChainSync,
     SdkMakerExecuteRequest, SdkMakerInitRequest, SdkMakerInitResponse, SdkOpenChannelRequest,
     SdkOpenChannelResponse, SdkPostAssetMediaRequest, SdkPostAssetMediaResponse,
-    SdkRefreshTransfersRequest, SdkRefreshTransfersResponse, SdkRgbInvoiceRequest,
-    SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse, SdkSendOnionMessageRequest,
-    SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest, SdkUnlockRequest,
-    SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse, SignMessageResponse, Swap, SwapList,
-    SwapStatus, Token, TokenLight, Transaction, TransactionType, Transfer,
-    TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo, VerifyMessageResponse,
-    WitnessData,
+    SdkPrepareCreateUtxosRequest, SdkRefreshTransfersRequest, SdkRefreshTransfersResponse,
+    SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
+    SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
+    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
+    SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
+    TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
+    VerifyMessageResponse, WitnessData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -2035,6 +2035,38 @@ pub(crate) struct JsonCreateUtxosRequest {
     pub size: Option<u32>,
     pub fee_rate: u64,
     pub skip_sync: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JsonPrepareCreateUtxosRequest {
+    pub operation_id: String,
+    pub up_to: bool,
+    #[serde(default)]
+    pub num: Option<u8>,
+    #[serde(default)]
+    pub size: Option<u32>,
+    pub fee_rate: u64,
+    pub skip_sync: bool,
+}
+
+impl From<JsonPrepareCreateUtxosRequest> for SdkPrepareCreateUtxosRequest {
+    fn from(request: JsonPrepareCreateUtxosRequest) -> Self {
+        Self {
+            operation_id: request.operation_id,
+            up_to: request.up_to,
+            num: request.num,
+            size: request.size,
+            fee_rate: request.fee_rate,
+            skip_sync: request.skip_sync,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JsonCreateUtxosOperationRequest {
+    pub operation_id: String,
 }
 
 impl From<JsonCreateUtxosRequest> for SdkCreateUtxosRequest {

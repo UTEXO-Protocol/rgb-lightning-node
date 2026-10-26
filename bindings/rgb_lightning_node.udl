@@ -55,6 +55,18 @@ interface SdkNode {
     [Throws=RlnError]
     void createutxos(SdkCreateUtxosRequest request);
     [Throws=RlnError]
+    SdkCreateUtxosOperation preparecreateutxos(SdkPrepareCreateUtxosRequest request);
+    [Throws=RlnError]
+    SdkCreateUtxosOperation commitpreparedcreateutxos(string operation_id);
+    [Throws=RlnError]
+    SdkCreateUtxosOperation cancelcreateutxosplan(string operation_id);
+    [Throws=RlnError]
+    SdkCreateUtxosOperation? getcreateutxosoperation(string operation_id);
+    [Throws=RlnError]
+    sequence<SdkCreateUtxosOperation> listcreateutxosoperations();
+    [Throws=RlnError]
+    sequence<SdkPendingVanillaTransaction> listpendingvanillatransactions();
+    [Throws=RlnError]
     AssetLinkRecord asset_link(SdkAssetLinkRequest request);
     [Throws=RlnError]
     AssetNia issueassetnia(SdkIssueAssetNiaRequest request);
@@ -746,6 +758,38 @@ dictionary SdkCreateUtxosRequest {
     u32? size;
     u64 fee_rate;
     boolean skip_sync;
+};
+
+dictionary SdkPrepareCreateUtxosRequest {
+    string operation_id;
+    boolean up_to;
+    u8? num;
+    u32? size;
+    u64 fee_rate;
+    boolean skip_sync;
+};
+
+dictionary SdkCreateUtxosInput {
+    string txid;
+    u32 vout;
+};
+
+dictionary SdkCreateUtxosOperation {
+    string operation_id;
+    string? txid;
+    string status;
+    boolean can_cancel;
+    boolean can_commit;
+    sequence<SdkCreateUtxosInput> inputs;
+    u8 num_outputs;
+    u32 size_sat;
+    u64 fee_sat;
+    u64 fee_rate;
+};
+
+dictionary SdkPendingVanillaTransaction {
+    string txid;
+    string type;
 };
 
 dictionary SdkIssueAssetNiaRequest {

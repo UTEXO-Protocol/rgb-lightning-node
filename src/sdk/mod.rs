@@ -2632,55 +2632,132 @@ pub(crate) async fn close_channel(
 
 /// In external signer mode, on-chain RGB flows that need signing use `rgb_sign_psbt` (never the
 /// watch-only wallet's private `sign_psbt`) for create_utxos, send_btc, and send_rgb PSBT paths.
+async fn output_operation_task<T, F>(state: Arc<AppState>, operation: F) -> Result<T, APIError>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            &crate::rgb_output_operations::OutputStore,
+            &crate::rgb_output_operations::NativeOutputBackend,
+        ) -> Result<T, APIError>
+        + Send
+        + 'static,
+{
+    let guard = check_unlocked(&state).await?;
+    let wallet = guard.as_ref().unwrap();
+    let directory = {
+        use rgb_lib::wallet::RgbWalletOpsOffline;
+        wallet
+            .rgb_wallet_wrapper
+            .get_rgb_wallet()
+            .get_wallet_dir()
+            .join("rln_output_operations_v1")
+    };
+    wallet_task(wallet, move |wallet| {
+        let _ownership = wallet
+            .rgb_wallet_wrapper
+            .output_operations
+            .lock()
+            .map_err(|_| {
+                APIError::Unexpected("RGB output operation ownership is unavailable".into())
+            })?;
+        let backend = crate::rgb_output_operations::NativeOutputBackend::new(Arc::clone(&wallet));
+        operation(
+            &crate::rgb_output_operations::OutputStore::new(directory),
+            &backend,
+        )
+    })
+    .await
+}
+
+pub(crate) async fn prepare_create_utxos(
+    state: Arc<AppState>,
+    operation_id: String,
+    request: CreateUtxosRequestData,
+) -> Result<crate::rgb_output_operations::OutputOperation, APIError> {
+    // Resolve defaults once: an operation ID is bound to these exact native parameters.
+    let guard = check_unlocked(&state).await?;
+    let wallet = guard.as_ref().unwrap();
+    let num = request.num.unwrap_or(wallet.config.rgb.utxo_num);
+    let size = request.size.unwrap_or(wallet.config.rgb.utxo_size_sat);
+    drop(guard);
+    output_operation_task(state, move |store, backend| {
+        store.prepare(
+            backend,
+            crate::rgb_output_operations::OutputRequest {
+                operation_id,
+                up_to: request.up_to,
+                num,
+                size,
+                fee_rate: request.fee_rate,
+                skip_sync: request.skip_sync,
+            },
+        )
+    })
+    .await
+}
+
+pub(crate) async fn commit_prepared_create_utxos(
+    state: Arc<AppState>,
+    operation_id: String,
+) -> Result<crate::rgb_output_operations::OutputOperation, APIError> {
+    output_operation_task(state, move |store, backend| {
+        store.commit(backend, &operation_id)
+    })
+    .await
+}
+
+pub(crate) async fn cancel_create_utxos_plan(
+    state: Arc<AppState>,
+    operation_id: String,
+) -> Result<crate::rgb_output_operations::OutputOperation, APIError> {
+    output_operation_task(state, move |store, backend| {
+        store.cancel(backend, &operation_id)
+    })
+    .await
+}
+
+pub(crate) async fn get_create_utxos_operation(
+    state: Arc<AppState>,
+    operation_id: String,
+) -> Result<Option<crate::rgb_output_operations::OutputOperation>, APIError> {
+    output_operation_task(state, move |store, backend| {
+        store.get(backend, &operation_id)
+    })
+    .await
+}
+
+pub(crate) async fn list_create_utxos_operations(
+    state: Arc<AppState>,
+) -> Result<Vec<crate::rgb_output_operations::OutputOperation>, APIError> {
+    output_operation_task(state, move |store, backend| store.list(backend)).await
+}
+
+pub(crate) async fn list_pending_vanilla_transactions(
+    state: Arc<AppState>,
+) -> Result<Vec<crate::rgb_output_operations::PendingOutput>, APIError> {
+    use crate::rgb_output_operations::OutputBackend;
+    output_operation_task(state, move |_store, backend| backend.pending()).await
+}
+
+/// Compatibility entry point: it uses the same ownership journal and prebroadcast cleanup as
+/// the reviewed API. It never exposes an untracked begin/sign/end path.
 pub(crate) async fn create_utxos(
     state: Arc<AppState>,
     request: CreateUtxosRequestData,
 ) -> Result<(), APIError> {
-    let guard = check_unlocked(&state).await?;
-    let unlocked_state = guard.as_ref().unwrap();
-
-    wallet_task(unlocked_state, move |unlocked_state| {
-        let num = request.num.unwrap_or(unlocked_state.config.rgb.utxo_num);
-        let size = request
-            .size
-            .unwrap_or(unlocked_state.config.rgb.utxo_size_sat);
-        if unlocked_state.external_signer_mode {
-            let unsigned_psbt = unlocked_state
-                .rgb_create_utxos_begin(
-                    request.up_to,
-                    num,
-                    size,
-                    request.fee_rate,
-                    request.skip_sync,
-                )
-                .map_err(|e| {
-                    tracing::error!("rgb_create_utxos_begin failed in external signer mode: {e}");
-                    APIError::from(e)
-                })?;
-            let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).map_err(|e| {
-                tracing::error!("rgb_sign_psbt failed in external signer mode: {e}");
-                APIError::from(e)
-            })?;
-            let _created = unlocked_state
-                .rgb_create_utxos_end(signed_psbt, request.skip_sync)
-                .map_err(|e| {
-                    tracing::error!("rgb_create_utxos_end failed in external signer mode: {e}");
-                    APIError::from(e)
-                })?;
-        } else {
-            unlocked_state.rgb_create_utxos(
-                request.up_to,
-                num,
-                size,
-                request.fee_rate,
-                request.skip_sync,
-            )?;
-        }
-        tracing::debug!("UTXO creation complete");
-
+    let operation_id = format!("{:032x}", rand::random::<u128>());
+    let prepared = prepare_create_utxos(Arc::clone(&state), operation_id.clone(), request).await?;
+    if prepared.status != "prepared" {
+        return Err(APIError::InvalidRequest(
+            "RGB output preparation did not complete".into(),
+        ));
+    }
+    let committed = commit_prepared_create_utxos(state, operation_id).await?;
+    if matches!(committed.status.as_str(), "broadcast" | "confirmed") {
         Ok(())
-    })
-    .await
+    } else {
+        Err(APIError::Unexpected("RGB output transaction submission is unresolved; inspect its exact operation before retrying".into()))
+    }
 }
 
 pub(crate) async fn issue_asset_nia(

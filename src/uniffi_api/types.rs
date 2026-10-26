@@ -697,6 +697,65 @@ pub struct SdkCreateUtxosRequest {
     pub skip_sync: bool,
 }
 
+pub struct SdkPrepareCreateUtxosRequest {
+    pub operation_id: String,
+    pub up_to: bool,
+    pub num: Option<u8>,
+    pub size: Option<u32>,
+    pub fee_rate: u64,
+    pub skip_sync: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct SdkCreateUtxosInput {
+    pub txid: String,
+    pub vout: u32,
+}
+
+#[derive(serde::Serialize)]
+pub struct SdkCreateUtxosOperation {
+    pub operation_id: String,
+    pub txid: Option<String>,
+    pub status: String,
+    pub can_cancel: bool,
+    pub can_commit: bool,
+    pub inputs: Vec<SdkCreateUtxosInput>,
+    pub num_outputs: u8,
+    pub size_sat: u32,
+    pub fee_sat: u64,
+    pub fee_rate: u64,
+}
+
+impl From<crate::rgb_output_operations::OutputOperation> for SdkCreateUtxosOperation {
+    fn from(operation: crate::rgb_output_operations::OutputOperation) -> Self {
+        Self {
+            operation_id: operation.operation_id,
+            txid: operation.txid,
+            status: operation.status,
+            can_cancel: operation.can_cancel,
+            can_commit: operation.can_commit,
+            inputs: operation
+                .inputs
+                .into_iter()
+                .map(|input| SdkCreateUtxosInput {
+                    txid: input.txid,
+                    vout: input.vout,
+                })
+                .collect(),
+            num_outputs: operation.num_outputs,
+            size_sat: operation.size_sat,
+            fee_sat: operation.fee_sat,
+            fee_rate: operation.fee_rate,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct SdkPendingVanillaTransaction {
+    pub txid: String,
+    pub r#type: String,
+}
+
 pub struct SdkIssueAssetNiaRequest {
     pub amounts: Vec<u64>,
     pub ticker: String,
