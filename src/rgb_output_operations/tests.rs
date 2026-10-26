@@ -513,14 +513,26 @@ fn interrupted_prepare_ambiguous_ownership_never_aborts() {
     assert!(backend.0.lock().unwrap().cancel_calls.is_empty());
 }
 #[test]
-fn legacy_unowned_reservation_is_explicit_and_cannot_be_discarded() {
+fn legacy_unowned_reservation_is_preserved_while_independent_inputs_are_used() {
     let (_, store) = store();
     let backend = Backend::new();
-    backend.prepare(&request(1)).unwrap();
-    let error = store.prepare(&backend, request(2)).unwrap_err();
-    assert!(error.to_string().contains("unowned input reservation"));
-    assert_eq!(backend.0.lock().unwrap().begin_calls, 1);
-    assert!(backend.0.lock().unwrap().cancel_calls.is_empty());
+    let legacy = backend.prepare(&request(1)).unwrap();
+    let legacy_txid = Psbt::from_str(&legacy.unsigned_psbt)
+        .unwrap()
+        .unsigned_tx
+        .compute_txid()
+        .to_string();
+    let fresh = store.prepare(&backend, request(2)).unwrap();
+    assert_ne!(fresh.txid.as_deref(), Some(legacy_txid.as_str()));
+    store.cancel(&backend, &fresh.operation_id).unwrap();
+    assert_eq!(backend.pending().unwrap().len(), 1);
+    assert_eq!(backend.pending().unwrap()[0].txid, legacy_txid);
+    assert!(!backend
+        .0
+        .lock()
+        .unwrap()
+        .cancel_calls
+        .contains(&legacy_txid));
 }
 #[test]
 fn corruption_of_status_inputs_or_fee_is_rejected_before_wallet_mutation() {
@@ -1027,5 +1039,49 @@ mod funded {
             .file_names()
             .any(|name| name.contains("rln_output_operations_v1/completed/")));
         eprintln!("Funded watch-only setup: signer failure cleanup, reserved-input exclusion, independent funding, real broadcast/SQL-failure recovery, exact txid/fee/count, idempotent recommit, confirmation and snapshot inclusion passed");
+    }
+    #[test]
+    #[ignore = "Requires exact isolated iris_rgb_output_20261026 Bitcoin/Electrum fixture; never runs against shared stack"]
+    fn funded_legacy_reservation_does_not_block_independent_funding_or_reduce_truthful_review() {
+        let (_watch_dir, _sign_dir, backend, miner) = fixture();
+        let wallet_dir = backend.wallet.lock().unwrap().get_wallet_dir();
+        let store = OutputStore::new(wallet_dir.join("rln_output_operations_v1"));
+        fund(&backend, &miner, "0.00200000");
+        let mut legacy_request = request(11);
+        legacy_request.skip_sync = false;
+        // Simulate an old runtime's begin whose journal/signature status is unavailable.
+        // The new runtime must neither replay it nor assume it is safe to cancel.
+        let legacy = backend.prepare(&legacy_request).unwrap();
+        let legacy_psbt = Psbt::from_str(&legacy.unsigned_psbt).unwrap();
+        let legacy_txid = legacy_psbt.unsigned_tx.compute_txid().to_string();
+        let mut unavailable = request(12);
+        unavailable.skip_sync = false;
+        assert!(store.prepare(&backend, unavailable).is_err());
+        assert_eq!(backend.pending().unwrap().len(), 1);
+        assert_eq!(backend.pending().unwrap()[0].txid, legacy_txid);
+        let separate_funding = fund(&backend, &miner, "0.00050000");
+        let mut fresh_request = request(13);
+        fresh_request.skip_sync = false;
+        let fresh = store.prepare(&backend, fresh_request).unwrap();
+        // Real native construction reduces four requested 20k outputs to two, with the exact
+        // fee and input ownership still shown in the public reviewed operation.
+        assert_eq!(fresh.num_outputs, 2);
+        assert!(fresh.fee_sat > 0);
+        assert!(fresh
+            .inputs
+            .iter()
+            .all(|input| input.txid == separate_funding));
+        assert!(!fresh.inputs.iter().any(|input| legacy_psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .any(|old| old.previous_output.txid.to_string() == input.txid
+                && old.previous_output.vout == input.vout)));
+        assert_eq!(backend.pending().unwrap().len(), 2);
+        store.cancel(&backend, &fresh.operation_id).unwrap();
+        assert_eq!(backend.pending().unwrap().len(), 1);
+        assert_eq!(backend.pending().unwrap()[0].txid, legacy_txid);
+        assert!(bitcoin(&["getrawmempool"]).as_array().unwrap().is_empty());
+        eprintln!("Real legacy reservation retained; unavailable inputs reject locally; independent confirmed funding prepares exactly two outputs with native fee and no legacy input reuse");
     }
 }

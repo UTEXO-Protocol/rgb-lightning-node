@@ -58,8 +58,10 @@ CreateUtxos reservation relative to that intent's baseline can be released after
 preparation: that path has never reached broadcast. An ambiguous set is frozen and retained.
 Later preparations cannot accidentally be classified as its reservation. The native library
 excludes all reserved vanilla inputs; independent funds can still support another reviewed
-operation. Older unowned CreateUtxos reservations produce an explicit error and are never
-arbitrarily aborted. Network absence or an elapsed timer cannot prove they were not broadcast.
+operation. Older unowned CreateUtxos reservations remain visible through the native pending
+reservation API and are never arbitrarily aborted. Their inputs stay excluded while separate
+confirmed funding remains usable. Network absence or an elapsed timer cannot prove they were
+not broadcast.
 
 A signer failure releases only the current provably prebroadcast reservation. Before signing,
 commit verifies that this exact reservation still exists. This prevents an abort-success /
@@ -89,7 +91,10 @@ on the isolated Bitcoin regtest fixture. A SQLite trigger fails a native colored
 real broadcast and BDK flush; the test proves the old reservation remains, the original exact
 PSBT completes bookkeeping, no second setup transaction is created, and fee/output count match
 native history after confirmation. It also verifies the real RGB snapshot includes the journal.
-This is host/native evidence, not Android handset acceptance.
+A second funded case keeps an older unowned reservation intact, confirms a separate 50,000-sat
+funding output, and proves native preparation uses only that funding and truthfully reduces the
+requested four 20,000-sat outputs to two. Cancelling the new review leaves the old reservation
+untouched. This is host/native evidence, not Android handset acceptance.
 
 ```sh
 export COMPOSE_FILE="$PWD/tests/fixtures/rgb-output-operations/compose.yaml"

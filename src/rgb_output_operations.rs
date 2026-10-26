@@ -548,29 +548,9 @@ impl OutputStore {
             let mut record = self.read(&id)?.ok_or_else(journal_error)?;
             self.recover_prepare(backend, &mut record)?;
         }
-        let pending = backend.pending()?;
-        let owned = self
-            .store
-            .list("", "")
-            .map_err(|_| journal_error())?
-            .into_iter()
-            .map(|id| self.read(&id))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .flat_map(|record| {
-                record
-                    .operation
-                    .txid
-                    .into_iter()
-                    .chain(record.retained_pending)
-            })
-            .collect::<HashSet<_>>();
-        if pending.iter().any(|pending| {
-            pending.operation_type == "CreateUtxos" && !owned.contains(&pending.txid)
-        }) {
-            return Err(APIError::InvalidRequest("An older RGB output transaction has an unowned input reservation; refresh transaction history before creating another setup".into()));
-        }
+        // Existing unowned reservations are retained in the durable baseline. They cannot
+        // become this operation's interrupted-begin candidate, and native coin selection
+        // excludes their inputs. Independent funds need not be globally blocked by them.
         let mut record = Record {
             version: 1,
             revision: 0,
