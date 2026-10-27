@@ -321,7 +321,6 @@ fn prepare_native_outputs(
     online: rgb_lib::wallet::Online,
     request: &OutputRequest,
 ) -> Result<PreparedOutput, APIError> {
-    use rgb_lib::wallet::RgbWalletOpsOnline;
     let unsigned_psbt = wallet.create_utxos_begin(
         online,
         request.up_to,

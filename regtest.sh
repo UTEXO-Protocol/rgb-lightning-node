@@ -68,7 +68,11 @@ _wait_for_electrs() {
 _wait_for_proxy() {
     # wait for proxy to be responding to requests
     start_time=$(date +%s)
-    until curl -s http://127.0.0.1:3000 >/dev/null 2>&1; do
+    until curl --fail --silent --show-error --max-time 3 \
+        -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"server.info","params":{}}' \
+        http://127.0.0.1:3000/json-rpc \
+        | python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if data.get("result",{}).get("protocol_version")=="1.0" else 1)' >/dev/null 2>&1; do
         current_time=$(date +%s)
         if [ $((current_time - start_time)) -gt $TIMEOUT ]; then
             echo "Timeout waiting for proxy to start"

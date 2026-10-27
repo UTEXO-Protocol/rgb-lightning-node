@@ -119,7 +119,7 @@ where
         .map_err(|error| APIError::Unexpected(format!("{operation} task failed: {error}")))?
 }
 
-fn map_contract_import_error(error: RgbLibError) -> APIError {
+pub(crate) fn map_contract_import_error(error: RgbLibError) -> APIError {
     match error {
         RgbLibError::InvalidConsignment => {
             APIError::InvalidRgbContract("contract validation failed".to_string())
@@ -293,20 +293,6 @@ mod tests {
             assert_eq!(
                 mapped.into_response().status(),
                 axum::http::StatusCode::BAD_REQUEST
-            );
-        }
-    }
-
-    #[cfg(feature = "uniffi")]
-    #[test]
-    fn contract_validation_failures_reach_native_clients_as_invalid_requests() {
-        use crate::uniffi_api::{state::map_api_error, RlnError};
-
-        for error in contract_validation_errors() {
-            let expected = error.to_string();
-            let mapped = map_api_error(map_contract_import_error(error));
-            assert!(
-                matches!(mapped, RlnError::InvalidRequest(details) if details.contains(&expected))
             );
         }
     }

@@ -113,6 +113,27 @@ behavior therefore require separate qualification. A compilation result is
 not that acceptance. No legacy wallet migration or hosted bridge operation
 is established by this change.
 
+CI integration contract
+-----------------------
+The standalone REST binary and the native library share complete-invoice send
+execution. REST does not reference the library-only SDK module. Both callers
+retain their unlocked-session guard through external signing and send completion;
+invoice recipient keys, encryption and expiry admission remain mandatory.
+UniFFI error-mapping tests live with the UniFFI module rather than a shared module
+that is also compiled into the standalone daemon.
+
+The local regtest fixture pins RGB Tools proxy 0.4.0 by immutable image digest and
+requires server.info protocol_version 1.0 before wallet tests. Fixture PoW remains
+on with maximum difficulty 4; production proxy policy is not changed. The older
+0.3.0 image speaks protocol 0.2 and is not compatible with these native sources.
+
+Legacy IFA-link success tests cannot establish parity against a library without
+link rights. Explicit funded rejection tests instead require HTTP 400 and verify
+unchanged assets, outputs and transaction history. Ordinary IFA issuance remains
+supported. This negative acceptance is a documented missing feature, not a claim
+that linked-contract or linked-Lightning payments work. Generic channel-funding
+and sweep limitations above remain separate; their tests are not waived.
+
 Candidate source and qualification
 ----------------------------------
 RGB: 962730a211f0f7569d7ad8ae777052f433d87655

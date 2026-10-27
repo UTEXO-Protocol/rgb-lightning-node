@@ -128,6 +128,62 @@ pub(crate) fn recipient_from_invoice(
     })
 }
 
+/// Shared dispatch for the REST daemon and SDK after complete recipient admission.
+/// The caller must retain the unlocked-session guard until this future completes.
+pub(crate) async fn send_recipients(
+    unlocked_state: std::sync::Arc<crate::utils::UnlockedAppState>,
+    recipient_map: HashMap<String, Vec<Recipient>>,
+    donation: bool,
+    fee_rate: u64,
+    min_confirmations: u8,
+    operation_expiration: u64,
+) -> Result<rgb_lib::wallet::OperationResult, APIError> {
+    let result = if unlocked_state.external_signer_mode {
+        let unlocked_state_copy = unlocked_state.clone();
+        let begin_result = tokio::task::spawn_blocking(move || {
+            unlocked_state_copy.rgb_send_begin(
+                recipient_map,
+                donation,
+                fee_rate,
+                min_confirmations,
+                operation_expiration,
+                false,
+                None,
+            )
+        })
+        .await
+        .unwrap()?;
+        let unlocked_state_copy = unlocked_state.clone();
+        let signed_psbt = tokio::task::spawn_blocking(move || {
+            unlocked_state_copy.rgb_sign_psbt(begin_result.psbt)
+        })
+        .await
+        .unwrap()
+        .map_err(|e| {
+            tracing::error!("rgb_sign_psbt failed during RGB send: {e}");
+            APIError::from(e)
+        })?;
+        let unlocked_state_copy = unlocked_state.clone();
+        tokio::task::spawn_blocking(move || unlocked_state_copy.rgb_send_end(signed_psbt))
+            .await
+            .unwrap()?
+    } else {
+        let unlocked_state_copy = unlocked_state.clone();
+        tokio::task::spawn_blocking(move || {
+            unlocked_state_copy.rgb_send(
+                recipient_map,
+                donation,
+                fee_rate,
+                min_confirmations,
+                operation_expiration,
+            )
+        })
+        .await
+        .unwrap()?
+    };
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

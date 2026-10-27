@@ -3245,6 +3245,8 @@ pub(crate) async fn issue_asset_ifa(
             ));
         }
 
+        crate::rgb_compat::validate_ifa_issuance(&payload.issuance_type)?;
+
         let asset = unlocked_state.rgb_issue_asset_ifa(
             payload.ticker,
             payload.name,
@@ -5570,20 +5572,28 @@ pub(crate) async fn send_rgb_invoice(
     WithRejection(Json(payload), _): WithRejection<Json<SendRgbInvoiceRequest>, APIError>,
 ) -> Result<Json<SendRgbInvoiceResponse>, APIError> {
     no_cancel(async move {
-        let result = crate::sdk::send_rgb_invoice(
-            state,
-            crate::sdk::SendRgbInvoiceRequestData {
-                invoice: payload.invoice,
-                asset_id: payload.asset_id,
-                amount: payload.amount,
-                witness_data: payload.witness_data.map(|w| crate::sdk::WitnessDataInput {
-                    amount_sat: w.amount_sat,
-                    blinding: w.blinding,
-                }),
-                donation: payload.donation,
-                fee_rate: payload.fee_rate,
-                min_confirmations: payload.min_confirmations,
-            },
+        let recipient = crate::rgb_invoice::recipient_from_invoice(
+            payload.invoice,
+            &payload.asset_id,
+            payload.amount,
+            state.static_state.network,
+            payload.witness_data.map(Into::into),
+        )?;
+        let recipient_map = HashMap::from([(payload.asset_id, vec![recipient])]);
+        let expiration = crate::rgb_invoice::operation_expiration(
+            &recipient_map,
+            payload.donation,
+            get_current_timestamp(),
+        )?;
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
+        let result = crate::rgb_invoice::send_recipients(
+            unlocked_state.clone(),
+            recipient_map,
+            payload.donation,
+            payload.fee_rate,
+            payload.min_confirmations,
+            expiration,
         )
         .await?;
         Ok(Json(SendRgbInvoiceResponse {
