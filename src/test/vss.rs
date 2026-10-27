@@ -743,7 +743,7 @@ mod tests {
         let mut found_data = false;
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).unwrap();
-            let name = entry.name().to_string();
+            let name = entry.name().expect("valid ZIP entry name").into_owned();
             // Fingerprint should be replaced with "wallet/"
             assert!(
                 !name.contains(fingerprint),
@@ -1620,7 +1620,7 @@ mod tests {
             .write("target", "", "remove-key", b"retained".to_vec())
             .expect("seed remove target");
 
-        crate::runtime::block_on(connection.execute(Statement::from_string(
+        crate::runtime::block_on(connection.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             format!(
                 "CREATE TRIGGER reject_vss_intent BEFORE INSERT ON kv_store \

@@ -265,7 +265,7 @@ fn unzip(zip_path: &PathBuf, path_out: &Path) -> Result<(), APIError> {
             Some(path) => path_out.join(path),
             None => continue,
         };
-        if file.name().ends_with('/') {
+        if file.is_dir() {
             tracing::debug!("creating directory {i} as {}", outpath.display());
             create_dir_all(&outpath)?;
         } else {

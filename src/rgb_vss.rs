@@ -970,7 +970,14 @@ fn get_fingerprint_from_zip_bytes(data: &[u8]) -> Result<String, Error> {
         details: format!("Failed to read zip archive: {e}"),
     })?;
 
-    let first_entry = archive.name_for_index(0).unwrap_or_default();
+    let first_entry = archive
+        .name_for_index(0)
+        .ok_or_else(|| Error::Internal {
+            details: "VSS snapshot archive is empty".into(),
+        })?
+        .map_err(|_| Error::Internal {
+            details: "Invalid VSS snapshot entry name".into(),
+        })?;
     let fingerprint = first_entry
         .split('/')
         .next()
@@ -1080,7 +1087,10 @@ pub(crate) fn restore_snapshot_bytes(
         let entry = archive
             .by_index(index)
             .map_err(|_| invalid("Invalid VSS archive entry"))?;
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|_| invalid("Invalid VSS archive entry name"))?
+            .into_owned();
         let path = entry
             .enclosed_name()
             .ok_or_else(|| invalid("VSS archive path escapes wallet"))?;
@@ -1285,6 +1295,33 @@ mod tests {
         assert!(path.join(VSS_RESTORE_MARKER).is_file());
         assert!(restore_snapshot_bytes(&valid, root.path(), "aabbccdd").is_err());
         assert_eq!(fs::read(path.join("rgb_lib_db")).unwrap(), b"db");
+    }
+
+    #[test]
+    fn malformed_archive_names_fail_before_wallet_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let empty = archive(&[]);
+        assert!(get_fingerprint_from_zip_bytes(&empty).is_err());
+        assert!(restore_snapshot_bytes(&empty, root.path(), "aabbccdd").is_err());
+
+        let name = b"aabbccdd/rgb_lib_db";
+        let mut invalid = archive(&[
+            ("aabbccdd/rgb_lib_db", b"db"),
+            ("aabbccdd/wallet_manifest.json", b"{}"),
+        ]);
+        let offsets = invalid
+            .windows(name.len())
+            .enumerate()
+            .filter_map(|(offset, bytes)| (bytes == name).then_some(offset))
+            .collect::<Vec<_>>();
+        // Keep local and central-directory names consistent, but make their encoding invalid.
+        assert_eq!(offsets.len(), 2);
+        for offset in offsets {
+            invalid[offset + name.len() - 1] = 0xff;
+        }
+        assert!(get_fingerprint_from_zip_bytes(&invalid).is_err());
+        assert!(restore_snapshot_bytes(&invalid, root.path(), "aabbccdd").is_err());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]

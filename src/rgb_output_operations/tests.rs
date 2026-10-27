@@ -1035,9 +1035,9 @@ mod funded {
         // atomically with its reservations; it is not an unsnapshotted second database.
         let snapshot = backend.wallet.lock().unwrap().prepare_snapshot().unwrap();
         let archive = zip::ZipArchive::new(std::io::Cursor::new(snapshot.data)).unwrap();
-        assert!(archive
-            .file_names()
-            .any(|name| name.contains("rln_output_operations_v1/completed/")));
+        assert!(archive.file_names().any(|name| name
+            .expect("valid snapshot entry name")
+            .contains("rln_output_operations_v1/completed/")));
         eprintln!("Funded watch-only setup: signer failure cleanup, reserved-input exclusion, independent funding, real broadcast/SQL-failure recovery, exact txid/fee/count, idempotent recommit, confirmation and snapshot inclusion passed");
     }
     #[test]
