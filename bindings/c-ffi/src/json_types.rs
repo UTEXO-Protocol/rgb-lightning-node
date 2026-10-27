@@ -839,7 +839,7 @@ impl From<DecodeLnInvoiceResponse> for JsonDecodeLnInvoiceResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct JsonDecodeRgbInvoiceResponse {
     pub recipient_id: String,
-    pub proxy_recipient_id: String,
+    pub proxy_recipient_id: Option<String>,
     pub recipient_type: String,
     pub asset_schema: Option<String>,
     pub asset_id: Option<String>,
@@ -847,6 +847,8 @@ pub(crate) struct JsonDecodeRgbInvoiceResponse {
     pub network: String,
     pub expiration_timestamp: Option<i64>,
     pub transport_endpoints: Vec<String>,
+    pub public_key: Option<String>,
+    pub encryption: String,
 }
 
 impl From<DecodeRgbInvoiceResponse> for JsonDecodeRgbInvoiceResponse {
@@ -861,6 +863,8 @@ impl From<DecodeRgbInvoiceResponse> for JsonDecodeRgbInvoiceResponse {
             network: r.network,
             expiration_timestamp: r.expiration_timestamp,
             transport_endpoints: r.transport_endpoints,
+            public_key: r.public_key,
+            encryption: r.encryption,
         }
     }
 }
@@ -2452,6 +2456,36 @@ pub(crate) struct JsonChannelIdResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_rgb_invoice_json_retains_protocol_one_authentication_and_nullable_proxy_id() {
+        for encryption in ["Required", "Optional", "Unsupported"] {
+            for proxy_recipient_id in [None, Some("legacy-proxy-id".to_string())] {
+                let public_key = Some("ab".repeat(32));
+                let response = DecodeRgbInvoiceResponse {
+                    recipient_id: "recipient".into(),
+                    proxy_recipient_id: proxy_recipient_id.clone(),
+                    recipient_type: "Witness".into(),
+                    asset_schema: None,
+                    asset_id: None,
+                    assignment: "Fungible(100)".into(),
+                    network: "Regtest".into(),
+                    expiration_timestamp: Some(2_000_000_000),
+                    transport_endpoints: vec!["rpc://127.0.0.1:3000/json-rpc".into()],
+                    public_key: public_key.clone(),
+                    encryption: encryption.into(),
+                };
+                let json =
+                    serde_json::to_value(JsonDecodeRgbInvoiceResponse::from(response)).unwrap();
+                assert_eq!(
+                    json["proxy_recipient_id"],
+                    serde_json::json!(proxy_recipient_id)
+                );
+                assert_eq!(json["public_key"], serde_json::json!(public_key));
+                assert_eq!(json["encryption"], encryption);
+            }
+        }
+    }
 
     fn external_unlock_json() -> serde_json::Value {
         serde_json::json!({
