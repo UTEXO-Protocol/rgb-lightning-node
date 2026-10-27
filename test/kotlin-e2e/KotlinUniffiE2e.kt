@@ -416,10 +416,12 @@ private fun waitForClosedChannelBalance(
         node.sync()
         node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
         lastBalance = assetBalanceSpendable(node, assetId)
+        if (System.currentTimeMillis() >= deadline) break
         if (lastBalance == expected) return
         // Channel maturity and its later sweep are different transactions. Mine
         // only after observing a mempool descendant of this exact funding output.
         val candidates = relatedChannelMempoolTransactions(closed)
+        if (System.currentTimeMillis() >= deadline) break
         if (candidates.isNotEmpty()) {
             println("Confirming observed closed-channel transactions: ${candidates.joinToString()}")
             runRegtest("mine", "1")

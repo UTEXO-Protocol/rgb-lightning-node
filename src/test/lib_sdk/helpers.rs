@@ -820,14 +820,18 @@ pub(crate) fn wait_for_closed_channel_balance(
             .expect("sync while waiting for closed-channel settlement");
         refresh_transfers(node);
         let balance = asset_balance_spendable(node, asset_id);
-        if balance == expected_balance {
-            return;
-        }
         assert!(
             Instant::now() < deadline,
             "closed-channel spendable balance ({balance}) did not become {expected_balance}"
         );
+        if balance == expected_balance {
+            return;
+        }
         let candidates = observed_closed_channel_transactions(closed);
+        assert!(
+            Instant::now() < deadline,
+            "closed-channel sweep observation exceeded the settlement deadline"
+        );
         if !candidates.is_empty() {
             println!(
                 "confirming observed sweeps of {}: {candidates:?}",

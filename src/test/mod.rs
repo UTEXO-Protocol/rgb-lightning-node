@@ -3217,14 +3217,18 @@ async fn wait_for_closed_channel_balance(
     loop {
         refresh_transfers(node_address).await;
         let balance = asset_balance_spendable(node_address, asset_id).await;
-        if balance == expected_balance {
-            return;
-        }
         assert!(
             (OffsetDateTime::now_utc() - start).as_seconds_f32() <= 70.0,
             "closed-channel balance ({balance}) did not become {expected_balance}"
         );
+        if balance == expected_balance {
+            return;
+        }
         let candidates = observed_channel_sweeps(closed).await;
+        assert!(
+            (OffsetDateTime::now_utc() - start).as_seconds_f32() <= 70.0,
+            "closed-channel sweep observation exceeded the settlement deadline"
+        );
         if !candidates.is_empty() {
             println!("confirming observed closed-channel sweeps: {candidates:?}");
             mine(false);

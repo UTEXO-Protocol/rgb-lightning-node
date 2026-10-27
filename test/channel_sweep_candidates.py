@@ -14,6 +14,9 @@ import time
 MAX_DEPTH = 32
 MAX_TRANSACTIONS = 256
 PROBE_SECONDS = 8.0
+RPC_SECONDS = 2.0
+MAX_RPC_ATTEMPTS = 3
+READ_ONLY_METHODS = frozenset({"getblockchaininfo", "getrawmempool", "getrawtransaction"})
 TXID = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -77,17 +80,37 @@ def candidates(funding_txid, channel_id, mempool, transaction):
     return sorted(txid for txid in mempool if descends(identifier(txid), 0, set()))
 
 
-def rpc(method, *arguments, deadline):
+def remaining_budget(deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("channel sweep probe exceeded its total time budget")
+    return remaining
+
+
+def rpc(method, *arguments, deadline):
+    if method not in READ_ONLY_METHODS:
+        raise ValueError("channel sweep probe permits only its explicit read-only RPC methods")
     command = ["docker", "compose", "exec", "-T", "-u", "blits", "bitcoind",
                "bitcoin-cli", "-regtest", "-rpcuser=user", "-rpcpassword=password", method]
     command.extend(str(arg) if not isinstance(arg, (dict, list)) else json.dumps(arg)
                    for arg in arguments)
-    result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
-                            capture_output=True, text=True, timeout=min(2.0, remaining), check=True)
-    return json.loads(result.stdout)
+    for attempt in range(MAX_RPC_ATTEMPTS):
+        remaining = remaining_budget(deadline)
+        try:
+            result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
+                                    capture_output=True, text=True,
+                                    timeout=min(RPC_SECONDS, remaining), check=True)
+        except subprocess.TimeoutExpired:
+            # Retry only the identical idempotent read, within the original probe budget.
+            # Nonzero RPC errors, malformed responses and validation failures stay strict.
+            if attempt + 1 == MAX_RPC_ATTEMPTS:
+                raise
+            continue
+        value = json.loads(result.stdout)
+        # Process creation, scheduling and parsing can outlive a subprocess timeout.
+        # Never authorize a result returned after the shared probe deadline.
+        remaining_budget(deadline)
+        return value
 
 
 def main():
@@ -99,8 +122,10 @@ def main():
         return rpc(method, *arguments, deadline=deadline)
     if request("getblockchaininfo").get("chain") != "regtest":
         raise ValueError("fixture probe is restricted to regtest")
-    print(json.dumps(candidates(*sys.argv[1:], request("getrawmempool"),
-                                lambda txid: request("getrawtransaction", txid, "true"))))
+    output = json.dumps(candidates(*sys.argv[1:], request("getrawmempool"),
+                                   lambda txid: request("getrawtransaction", txid, "true")))
+    remaining_budget(deadline)
+    print(output)
 
 
 if __name__ == "__main__":

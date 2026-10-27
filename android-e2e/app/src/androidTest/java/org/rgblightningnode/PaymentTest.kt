@@ -390,10 +390,12 @@ class PaymentTest {
             node.sync()
             node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
             lastBalance = assetBalanceSpendable(node, assetId)
+            if (System.currentTimeMillis() >= deadline) break
             if (lastBalance == expected) return
             val candidates = ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
                 bitcoindRpc(method, *params, timeoutMs = timeout)
             }
+            if (System.currentTimeMillis() >= deadline) break
             if (candidates.isNotEmpty()) {
                 log("Confirming observed closed-channel transactions: ${candidates.joinToString()}")
                 mine(1)
