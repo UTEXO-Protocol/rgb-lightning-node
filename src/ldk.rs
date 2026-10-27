@@ -98,11 +98,11 @@ use rgb_lib::{
     utils::{get_account_data, recipient_id_from_script_buf, script_buf_from_recipient_id},
     wallet::{
         check_indexer_url,
-        rust_only::{AssetColoringInfo, ColoringInfo},
+        rust_only::{load_fascia, AssetColoringInfo, ColoringInfo},
         DatabaseType, Recipient, SinglesigKeys, Wallet as RgbLibWallet, WalletData, WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
-    Fascia, FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,
+    FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -1955,10 +1955,8 @@ async fn handle_ldk_events(
                                     Some(0),
                                 )
                                 .map_err(|e| e.to_string())?;
-                            let fascia_str = fs::read_to_string(&res.details.fascia_path)
+                            let fascia = load_fascia(Path::new(&res.details.fascia_path))
                                 .map_err(|e| e.to_string())?;
-                            let fascia: Fascia =
-                                serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
                             unlocked_state_copy
                                 .rgb_consume_fascia(fascia, None)
                                 .map_err(|e| e.to_string())?;
@@ -2258,8 +2256,7 @@ async fn handle_ldk_events(
                             // Final locktime: this colored tx funds an LN channel.
                             Some(0),
                         )?;
-                        let fascia_str = fs::read_to_string(&res.details.fascia_path).unwrap();
-                        let fascia: Fascia = serde_json::from_str(&fascia_str).unwrap();
+                        let fascia = load_fascia(Path::new(&res.details.fascia_path))?;
                         unlocked_state_copy.rgb_consume_fascia(fascia, None)?;
                         unlocked_state_copy.rgb_create_consignments(res.psbt.clone())?;
                         Ok((res.psbt, res.batch_transfer_idx))
