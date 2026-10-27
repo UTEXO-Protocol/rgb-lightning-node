@@ -8,10 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.utexo.rgblightningnode.AssetRecipients
-import org.utexo.rgblightningnode.AssignmentKind
 import org.utexo.rgblightningnode.ContractId
-import org.utexo.rgblightningnode.RgbRecipient
 import org.utexo.rgblightningnode.SdkCloseChannelRequest
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
 import org.utexo.rgblightningnode.SdkInitRequest
@@ -25,7 +22,7 @@ import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
 import org.utexo.rgblightningnode.SdkRgbInvoiceRequest
 import org.utexo.rgblightningnode.SdkTakerRequest
 import org.utexo.rgblightningnode.SdkUnlockRequest
-import org.utexo.rgblightningnode.SendRgbRequest
+import org.utexo.rgblightningnode.SendRgbInvoiceRequest
 import org.utexo.rgblightningnode.Swap
 import org.utexo.rgblightningnode.SwapStatus
 import java.io.File
@@ -480,33 +477,23 @@ class SwapRoundtripBuyTest {
                 minConfirmations = 1u,
                 witness = false,
             )
-        ).recipientId
+        ).invoice
     }
 
     private fun refreshTransfers(node: SdkNode) {
         node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
     }
 
-    private fun sendRgb(node: SdkNode, assetId: ContractId, recipientId: String, amount: ULong) {
-        node.sendRgb(
-            SendRgbRequest(
+    private fun sendRgb(node: SdkNode, assetId: ContractId, invoice: String, amount: ULong) {
+        node.sendrgbinvoice(
+            SendRgbInvoiceRequest(
+                invoice = invoice,
+                assetId = assetId,
+                amount = amount,
+                witnessData = null,
                 donation = true,
                 feeRate = utxosFeeRate,
                 minConfirmations = 1u,
-                recipientGroups = listOf(
-                    AssetRecipients(
-                        assetId = assetId,
-                        recipients = listOf(
-                            RgbRecipient(
-                                recipientId = recipientId,
-                                witnessData = null,
-                                assignmentKind = AssignmentKind.FUNGIBLE,
-                                assignmentAmount = amount,
-                                transportEndpoints = listOf(proxyEndpoint),
-                            )
-                        ),
-                    )
-                ),
             )
         )
     }
@@ -709,15 +696,15 @@ class SwapRoundtripBuyTest {
 
             closeChannel(requireNotNull(nodeB), channel21Id, infoA.pubkey)
 
-            val recipientIdA = rgbInvoice(nodeC)
-            sendRgb(requireNotNull(nodeA), assetId, recipientIdA, 200u)
+            val invoiceA = rgbInvoice(nodeC)
+            sendRgb(requireNotNull(nodeA), assetId, invoiceA, 200u)
             mine(1)
             refreshTransfers(nodeC)
             refreshTransfers(nodeC)
             refreshTransfers(requireNotNull(nodeA))
 
-            val recipientIdB = rgbInvoice(nodeC)
-            sendRgb(requireNotNull(nodeB), assetId, recipientIdB, 5u)
+            val invoiceB = rgbInvoice(nodeC)
+            sendRgb(requireNotNull(nodeB), assetId, invoiceB, 5u)
             mine(1)
             refreshTransfers(nodeC)
             refreshTransfers(nodeC)

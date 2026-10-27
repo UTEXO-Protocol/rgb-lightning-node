@@ -8,15 +8,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.utexo.rgblightningnode.AssetRecipients
-import org.utexo.rgblightningnode.AssignmentKind
 import org.utexo.rgblightningnode.ContractId
 import org.utexo.rgblightningnode.HtlcStatus
 import org.utexo.rgblightningnode.LnInvoiceRequest
 import org.utexo.rgblightningnode.Payment
 import org.utexo.rgblightningnode.PaymentHash
 import org.utexo.rgblightningnode.PaymentType
-import org.utexo.rgblightningnode.RgbRecipient
 import org.utexo.rgblightningnode.RlnException
 import org.utexo.rgblightningnode.SdkCloseChannelRequest
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
@@ -29,7 +26,7 @@ import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
 import org.utexo.rgblightningnode.SdkRgbInvoiceRequest
 import org.utexo.rgblightningnode.SdkSendPaymentRequest
 import org.utexo.rgblightningnode.SdkUnlockRequest
-import org.utexo.rgblightningnode.SendRgbRequest
+import org.utexo.rgblightningnode.SendRgbInvoiceRequest
 import org.utexo.rgblightningnode.Txid
 import java.io.File
 import java.net.HttpURLConnection
@@ -408,33 +405,23 @@ class RestartTest {
                 minConfirmations = 1u,
                 witness = false,
             )
-        ).recipientId
+        ).invoice
     }
 
     private fun refreshTransfers(node: SdkNode) {
         node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
     }
 
-    private fun sendRgb(node: SdkNode, assetId: ContractId, recipientId: String, amount: ULong) {
-        node.sendRgb(
-            SendRgbRequest(
+    private fun sendRgb(node: SdkNode, assetId: ContractId, invoice: String, amount: ULong) {
+        node.sendrgbinvoice(
+            SendRgbInvoiceRequest(
+                invoice = invoice,
+                assetId = assetId,
+                amount = amount,
+                witnessData = null,
                 donation = true,
                 feeRate = utxosFeeRate,
                 minConfirmations = 1u,
-                recipientGroups = listOf(
-                    AssetRecipients(
-                        assetId = assetId,
-                        recipients = listOf(
-                            RgbRecipient(
-                                recipientId = recipientId,
-                                witnessData = null,
-                                assignmentKind = AssignmentKind.FUNGIBLE,
-                                assignmentAmount = amount,
-                                transportEndpoints = listOf(proxyEndpoint),
-                            )
-                        ),
-                    )
-                ),
             )
         )
     }
@@ -607,15 +594,15 @@ class RestartTest {
             assertEquals(900uL, assetBalanceSpendable(requireNotNull(nodeA), assetId))
             assertEquals(100uL, assetBalanceSpendable(requireNotNull(nodeB), assetId))
 
-            val recipientIdA = rgbInvoice(requireNotNull(nodeC))
-            sendRgb(requireNotNull(nodeA), assetId, recipientIdA, 700u)
+            val invoiceA = rgbInvoice(requireNotNull(nodeC))
+            sendRgb(requireNotNull(nodeA), assetId, invoiceA, 700u)
             mine(1)
             refreshTransfers(requireNotNull(nodeC))
             refreshTransfers(requireNotNull(nodeC))
             refreshTransfers(requireNotNull(nodeA))
 
-            val recipientIdB = rgbInvoice(requireNotNull(nodeC))
-            sendRgb(requireNotNull(nodeB), assetId, recipientIdB, 50u)
+            val invoiceB = rgbInvoice(requireNotNull(nodeC))
+            sendRgb(requireNotNull(nodeB), assetId, invoiceB, 50u)
             mine(1)
             refreshTransfers(requireNotNull(nodeC))
             refreshTransfers(requireNotNull(nodeC))

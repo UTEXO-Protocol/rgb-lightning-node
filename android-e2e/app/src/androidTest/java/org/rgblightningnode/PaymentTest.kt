@@ -10,8 +10,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.runner.RunWith
-import org.utexo.rgblightningnode.AssetRecipients
-import org.utexo.rgblightningnode.AssignmentKind
 import org.utexo.rgblightningnode.ContractId
 import org.utexo.rgblightningnode.HtlcStatus
 import org.utexo.rgblightningnode.InvoiceStatus
@@ -19,7 +17,6 @@ import org.utexo.rgblightningnode.LnInvoiceRequest
 import org.utexo.rgblightningnode.Payment
 import org.utexo.rgblightningnode.PaymentHash
 import org.utexo.rgblightningnode.PaymentType
-import org.utexo.rgblightningnode.RgbRecipient
 import org.utexo.rgblightningnode.RlnException
 import org.utexo.rgblightningnode.SdkCloseChannelRequest
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
@@ -32,7 +29,7 @@ import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
 import org.utexo.rgblightningnode.SdkRgbInvoiceRequest
 import org.utexo.rgblightningnode.SdkSendPaymentRequest
 import org.utexo.rgblightningnode.SdkUnlockRequest
-import org.utexo.rgblightningnode.SendRgbRequest
+import org.utexo.rgblightningnode.SendRgbInvoiceRequest
 import org.utexo.rgblightningnode.TransactionType
 import org.utexo.rgblightningnode.Txid
 import java.io.File
@@ -452,29 +449,19 @@ class PaymentTest {
                 minConfirmations = 1u,
                 witness = false,
             )
-        ).recipientId
+        ).invoice
     }
 
-    private fun sendRgb(node: SdkNode, assetId: ContractId, recipientId: String, amount: ULong) {
-        node.sendRgb(
-            SendRgbRequest(
+    private fun sendRgb(node: SdkNode, assetId: ContractId, invoice: String, amount: ULong) {
+        node.sendrgbinvoice(
+            SendRgbInvoiceRequest(
+                invoice = invoice,
+                assetId = assetId,
+                amount = amount,
+                witnessData = null,
                 donation = true,
                 feeRate = utxosFeeRate,
                 minConfirmations = 1u,
-                recipientGroups = listOf(
-                    AssetRecipients(
-                        assetId = assetId,
-                        recipients = listOf(
-                            RgbRecipient(
-                                recipientId = recipientId,
-                                witnessData = null,
-                                assignmentKind = AssignmentKind.FUNGIBLE,
-                                assignmentAmount = amount,
-                                transportEndpoints = listOf(proxyEndpoint),
-                            )
-                        ),
-                    )
-                ),
             )
         )
     }
@@ -786,15 +773,15 @@ class PaymentTest {
             waitForClosedChannelBalance(nodeA, assetId, 950uL, 180L, closed)
             waitForClosedChannelBalance(nodeB, assetId, 50uL, 180L, closed)
 
-            val recipientId1 = rgbInvoice(nodeC)
-            sendRgb(nodeA, assetId, recipientId1, 925u)
+            val receiveInvoice1 = rgbInvoice(nodeC)
+            sendRgb(nodeA, assetId, receiveInvoice1, 925u)
             mine(1)
             refreshTransfers(nodeC)
             refreshTransfers(nodeC)
             refreshTransfers(nodeA)
 
-            val recipientId2 = rgbInvoice(nodeC)
-            sendRgb(nodeB, assetId, recipientId2, 25u)
+            val receiveInvoice2 = rgbInvoice(nodeC)
+            sendRgb(nodeB, assetId, receiveInvoice2, 25u)
             mine(1)
             refreshTransfers(nodeC)
             refreshTransfers(nodeC)
