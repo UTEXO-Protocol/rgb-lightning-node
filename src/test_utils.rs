@@ -132,6 +132,8 @@ pub fn error_mapping_snapshot_for_tests() -> ErrorMappingSnapshot {
 #[cfg(feature = "uniffi")]
 pub fn export_rgb_contract_bytes_for_tests(node: &crate::SdkNode, asset_id: &str) -> Vec<u8> {
     use rgb_lib::wallet::RgbWalletOpsOffline;
+    use rgb_lib::ConsignmentExt;
+    use rgbstd::containers::{UniversalFile, ValidContract};
 
     let state = node.handle.app_state();
     let unlocked_state = crate::runtime::block_on(async {
@@ -142,9 +144,19 @@ pub fn export_rgb_contract_bytes_for_tests(node: &crate::SdkNode, asset_id: &str
             .cloned()
             .expect("test node is unlocked")
     });
-    // BFA stores each freshly issued contract as a consignment under assets/.
-    // This helper only exports contracts issued by this isolated test node.
+    // The owned issuer's asset file is a validated local cache (VCO), including its
+    // validation status. Export only its ordinary public contract (CON); receivers
+    // must perform their own validation rather than trust that cached status.
     let wallet = unlocked_state.rgb_wallet_wrapper.get_rgb_wallet();
-    std::fs::read(wallet.get_wallet_dir().join("assets").join(asset_id))
-        .expect("read issued RGB contract consignment")
+    let expected_id = asset_id
+        .parse::<rgb_lib::ContractId>()
+        .expect("test asset ID");
+    let contract = ValidContract::load_file(wallet.get_wallet_dir().join("assets").join(asset_id))
+        .expect("load issued RGB contract cache");
+    assert!(contract.contract_id() == expected_id);
+    let mut bytes = Vec::new();
+    UniversalFile::Contract(contract.into_consignment())
+        .save(&mut bytes)
+        .expect("export public RGB contract");
+    bytes
 }

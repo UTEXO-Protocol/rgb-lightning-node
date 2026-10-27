@@ -4847,6 +4847,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rgb-invoicing",
  "rgb-lib",
+ "rgb-ops",
  "rgb-psbt-utils",
  "rln-migration",
  "rustls 0.23.42",

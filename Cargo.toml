@@ -33,7 +33,7 @@ default = [
     "electrum",
     "esplora",
 ]
-test-utils = []
+test-utils = ["dep:rgbstd"]
 vls = ["signer-external/with-vls", "dep:vls-persist"]
 vss = ["dep:hex_bytes", "dep:vss-client", "dep:hkdf", "dep:sha2"]
 remote-signer = ["dep:vls-persist", "dep:tokio-rustls", "dep:rustls-pemfile", "vls"]
@@ -100,6 +100,8 @@ regex = { version = "1.11", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib-bfa.git", rev = "abd41d3afff6d8fb11461e26e843301650e22df3", default-features = false }
 psrgbt = { package = "rgb-psbt-utils", version = "=0.11.2-rc.1", default-features = false }
+# Typed public-contract export for test fixtures; same exact RGB package as the native graph.
+rgbstd = { package = "rgb-ops", version = "=0.11.2-rc.1", default-features = false, features = ["fs", "serde"], optional = true }
 rln-migration = { path = "migration" }
 # Pinned fork/branch for RGB compatibility work; CI and clones do not require a sibling checkout.
 signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer.git", rev = "0fb005ec4b927ddbe13e1646d247b5bb11e8ffed", default-features = false }
