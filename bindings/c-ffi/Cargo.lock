@@ -7709,3 +7709,7 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "lightning-transaction-sync"
+version = "0.2.1"

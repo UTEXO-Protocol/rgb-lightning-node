@@ -55,5 +55,6 @@ lightning-invoice = { path = "../../rust-lightning/lightning-invoice" }
 lightning-net-tokio = { path = "../../rust-lightning/lightning-net-tokio" }
 lightning-persister = { path = "../../rust-lightning/lightning-persister" }
 lightning-rapid-gossip-sync = { path = "../../rust-lightning/lightning-rapid-gossip-sync" }
+lightning-transaction-sync = { path = "../../rust-lightning/lightning-transaction-sync" }
 vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", rev = "45c72edfd58620849eb486925439a76526b415ae" }
 vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", rev = "dddd336fcdf84c4febdd7af8363bda8d1721d893" }
