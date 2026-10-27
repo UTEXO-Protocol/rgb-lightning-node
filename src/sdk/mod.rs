@@ -3366,7 +3366,9 @@ pub(crate) async fn open_channel(
                     blinding: Some(STATIC_BLINDING + 1),
                 }),
                 assignment,
-                transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()],
+                // Match real funding: the encrypted peer connection carries the proof,
+                // rather than a proxy invoice with recipient keys and expiry.
+                transport_endpoints: vec![],
         }]};
 
         let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;

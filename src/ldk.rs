@@ -1936,7 +1936,9 @@ async fn handle_ldk_events(
                                 blinding: Some(STATIC_BLINDING),
                             }),
                             assignment,
-                            transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
+                            // Virtual funding queues the proof and media over the same
+                            // encrypted peer connection as ordinary channel funding.
+                            transport_endpoints: vec![]
                     }]};
                     let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
                     let unlocked_state_copy = unlocked_state.clone();

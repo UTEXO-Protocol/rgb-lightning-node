@@ -4771,7 +4771,9 @@ pub(crate) async fn open_channel(
                             blinding: Some(STATIC_BLINDING + 1),
                         }),
                         assignment,
-                        transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
+                        // Match real funding: consignments travel over the encrypted peer
+                        // connection, so this recipient uses RGB's out-of-band transport.
+                        transport_endpoints: vec![]
                 }]};
 
                 let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
