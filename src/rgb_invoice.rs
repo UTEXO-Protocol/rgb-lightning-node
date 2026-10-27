@@ -16,6 +16,12 @@ pub(crate) fn operation_expiration(
         .checked_add(86400)
         .ok_or_else(|| APIError::InvalidRequest("RGB operation expiration overflow".into()))?;
     for recipient in recipients.values().flatten() {
+        if recipient
+            .expiration_timestamp
+            .is_some_and(|expiry| expiry <= now)
+        {
+            return Err(APIError::InvalidRequest("RGB invoice has expired".into()));
+        }
         if recipient.transport_endpoints.is_empty() {
             continue;
         }
@@ -103,6 +109,11 @@ pub(crate) fn recipient_from_invoice_assignment(
     {
         return Err(APIError::InvalidAmount(
             "RGB assignment does not match the invoice".into(),
+        ));
+    }
+    if witness_data.as_ref().is_some_and(|w| w.amount_sat == 0) {
+        return Err(APIError::InvalidAmount(
+            "Witness RGB invoice requires a positive Bitcoin output amount".into(),
         ));
     }
     let info = RecipientInfo::new(data.recipient_id.clone())?;
@@ -575,9 +586,12 @@ mod batch_tests {
         let mut bad = input(valid.clone(), Assignment::Fungible(7));
         bad.witness_data = None;
         assert!(admit(vec![bad]).is_err());
-        let mut bad = input(valid, Assignment::Fungible(7));
+        let mut bad = input(valid.clone(), Assignment::Fungible(7));
         bad.witness_data.as_mut().unwrap().blinding = Some(1);
         assert!(admit(vec![bad]).is_err());
+        let mut zero = input(valid.clone(), Assignment::Fungible(7));
+        zero.witness_data.as_mut().unwrap().amount_sat = 0;
+        assert!(admit(vec![zero]).is_err());
         // A zero fungible placeholder never authorizes an NFT or inflation right.
         assert!(admit(vec![input(
             invoice(1, Some(0), None, true, true),
