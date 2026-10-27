@@ -5037,7 +5037,7 @@ mod tests {
 
     #[cfg(feature = "electrum")]
     async fn close_wallet_session_fixture(state: Arc<AppState>) {
-        crate::routes::lock(axum::extract::State(Arc::clone(&state)))
+        let _ = crate::routes::lock(axum::extract::State(Arc::clone(&state)))
             .await
             .unwrap();
         let directory = state.static_state.storage_dir_path.clone();
@@ -5177,7 +5177,7 @@ mod tests {
         assert!(state.unlocked_app_state.try_lock().is_err());
         assert!(!completed.load(std::sync::atomic::Ordering::SeqCst));
         resume_tx.send(()).unwrap();
-        timeout(Duration::from_secs(10), locking)
+        let _ = timeout(Duration::from_secs(10), locking)
             .await
             .unwrap()
             .unwrap()
