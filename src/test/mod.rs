@@ -90,7 +90,7 @@ use crate::routes::{
     Recipient, RefreshRequest, RefreshResponse, RestoreRequest, RevokeTokenRequest,
     RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
     SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest, Transaction,
-    Transfer, TransferKind, TransferStatus, UnlockRequest, Unspent, WitnessData,
+    Transfer, TransferStatus, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,

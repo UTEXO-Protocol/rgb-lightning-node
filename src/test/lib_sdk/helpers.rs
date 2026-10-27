@@ -1039,9 +1039,11 @@ pub(crate) fn assert_burn_proof_destination(
     expected: &[u8],
 ) {
     use bitcoin::hex::DisplayHex;
-    let inspected =
-        rgb_lib::wallet::inspect_consignment(proof_path, rgb_lib::wallet::BundleFilter::Terminals)
-            .unwrap();
+    let inspected = rgb_lib::no_wallet::inspect_consignment(
+        proof_path,
+        rgb_lib::no_wallet::BundleFilter::Terminals,
+    )
+    .unwrap();
     assert_eq!(inspected.asset_id, asset.to_string());
     let reasons: Vec<_> = inspected
         .witnesses
@@ -1050,7 +1052,7 @@ pub(crate) fn assert_burn_proof_destination(
         .flat_map(|o| &o.transitions)
         .flat_map(|t| &t.globals)
         .filter_map(|g| match g {
-            rgb_lib::wallet::TransitionGlobal::BurnReason(reason) => Some(reason.clone()),
+            rgb_lib::no_wallet::TransitionGlobal::BurnReason(reason) => Some(reason.clone()),
             _ => None,
         })
         .collect();

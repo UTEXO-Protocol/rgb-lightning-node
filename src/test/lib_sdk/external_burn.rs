@@ -1,6 +1,7 @@
 //! Funded, strict-signer burn tests. Uses only a local regtest chain; never resets the stack.
 use bitcoin::psbt::Psbt;
 use hex::DisplayHex;
+use rgb_lib::wallet::RgbWalletOpsOffline;
 use rgb_lightning_node::signer_integration_wire::{
     decode_signer_request_wire, encode_signer_response_wire, SignerRequest, SignerResponse,
 };

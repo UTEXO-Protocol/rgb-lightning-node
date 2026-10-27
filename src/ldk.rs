@@ -84,6 +84,8 @@ use lightning_dns_resolver::OMDomainResolver;
 use lightning_invoice::{Bolt11InvoiceDescription, PaymentSecret};
 use lightning_net_tokio::SocketDescriptor;
 use rand::RngCore;
+#[cfg(feature = "vss")]
+use rgb_lib::wallet::RgbWalletOpsOffline;
 use rgb_lib::{
     bdk_wallet::keys::{DerivableKey, ExtendedKey},
     bitcoin::{

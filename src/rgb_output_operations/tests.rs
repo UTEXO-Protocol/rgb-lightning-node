@@ -661,8 +661,8 @@ mod funded {
     use rgb_lib::{
         keys::{generate_keys, WitnessVersion},
         wallet::{
-            DatabaseType, IndexerConfig, Online, OnlineOptions, RgbWalletOpsOffline,
-            RgbWalletOpsOnline, SinglesigKeys, Wallet, WalletData,
+            DatabaseType, IndexerConfig, Online, OnlineOptions, RgbWalletOpsOffline, SinglesigKeys,
+            Wallet, WalletData,
         },
         AssetSchema, BitcoinNetwork,
     };
