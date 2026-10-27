@@ -1,5 +1,45 @@
 //! Protocol-1 batch acceptance: mixed assignments and witness receive share one native fee/tx.
 use super::*;
+use base64::{engine::general_purpose, Engine as _};
+use rgb_lib::{wallet::RgbWalletOpsOffline, ConsignmentExt};
+use rgbstd::containers::{UniversalFile, ValidContract};
+
+async fn import_issued_public_contract(sender: SocketAddr, receiver: SocketAddr, asset_id: &str) {
+    let public_contract = {
+        let state = test_get_app_state(sender);
+        let guard = state.get_unlocked_app_state().await;
+        let wallet = Arc::clone(guard.as_ref().expect("issuer is unlocked"));
+        let expected_id = asset_id.parse::<ContractId>().unwrap();
+        let asset_id = asset_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let native = wallet.rgb_wallet_wrapper.get_rgb_wallet();
+            let contract =
+                ValidContract::load_file(native.get_wallet_dir().join("assets").join(asset_id))
+                    .expect("load genuine issuer contract cache");
+            assert!(contract.contract_id() == expected_id);
+            let mut bytes = Vec::new();
+            UniversalFile::Contract(contract.into_consignment())
+                .save(&mut bytes)
+                .expect("encode public contract without cached validation status");
+            bytes
+        })
+        .await
+        .unwrap()
+    };
+    let response = reqwest::Client::new()
+        .post(format!("http://{receiver}/importrgbcontract"))
+        .json(&serde_json::json!({
+            "contract_base64": general_purpose::STANDARD.encode(public_contract),
+            "expected_asset_id": asset_id,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let imported: serde_json::Value = check_response_is_ok(response).await.json().await.unwrap();
+    assert_eq!(imported["asset_id"], asset_id);
+    assert_eq!(imported["already_imported"], false);
+    assert_eq!(asset_balance_spendable(receiver, asset_id).await, 0);
+}
 
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -22,6 +62,10 @@ async fn authenticated_invoice_batch_sends_nia_witness_and_nft_in_one_transactio
     fund_and_create_utxos(receiver, None).await;
     let nia = issue_asset_nia(sender).await.asset_id;
     let nft = issue_asset_uda(sender, None).await.asset_id;
+    // Asset-constrained invoices require their public contracts to be known. Register
+    // genuine issuer exports through the API; registration itself grants no allocations.
+    import_issued_public_contract(sender, receiver, &nia).await;
+    import_issued_public_contract(sender, receiver, &nft).await;
     let nia_invoice = rgb_invoice_with_assignment(
         receiver,
         Some(nia.clone()),

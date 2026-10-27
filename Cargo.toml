@@ -150,6 +150,8 @@ zip = { version = "9.0.5", default-features = false, features = ["time", "zstd"]
 libc = "0.2"
 
 [dev-dependencies]
+# Public-contract fixtures use the same exact native RGB package, without production API expansion.
+rgbstd = { package = "rgb-ops", version = "=0.11.2-rc.1", default-features = false, features = ["fs", "serde"] }
 rgbinvoice = { package = "rgb-invoicing", version = "=0.11.2-rc.1", default-features = false }
 dircmp = "0.2.0"
 rcgen = "0.13"
