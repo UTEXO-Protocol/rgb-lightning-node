@@ -6205,7 +6205,7 @@ mod state_mocks {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.keep();
         let database = open_database_pool(&path).expect("mock database connection");
-        Migrator::up(&database, None).await.expect("run migrations");
+        crate::runtime::block_on(Migrator::up(&database, None)).expect("run migrations");
 
         Arc::new(AppState {
             static_state: Arc::new(StaticState {
