@@ -71,7 +71,9 @@ maintained binding: 128 MiB raw archive, stream-tag-adjusted ciphertext,
 512 MiB expanded, 25,000 entries and an expansion ratio of 2000 per entry.
 Manifest data is bounded to 64 KiB and encryption metadata to 4 KiB.
 Archive paths, entry types, duplicate names and fingerprint are checked in
-an isolated staging directory before rename. Existing wallets are not
+an isolated staging directory before rename. Snapshot entry names must be
+valid UTF-8; ZIP's legacy CP437 fallback cannot reinterpret corrupted paths.
+Existing wallets are not
 overwritten; normal online consistency and wallet-setting checks still run.
 
 Channel funding and durable sweeps
@@ -100,6 +102,10 @@ release protected inputs. consume_transfer_fascia independently resolves the
 exact confirmed native witness and commits RGB stock, spent inputs, reservations
 and phase atomically. It is idempotent after consumption. RLN removes its receipt
 only after successful native consumption; failed reconciliation retains it.
+Self-sweep witness invoices require at least one confirmation. The native
+protected-sweep journal must also gate incoming refresh until canonical
+consumption, preventing normal receive refresh from consuming the same state
+ahead of the protected commit.
 These source integrations require the new graph's funded regression results;
 the presence of the APIs alone is not generic Lightning qualification.
 
@@ -137,6 +143,12 @@ for external signing. Proxy operation keys remain sensitive backup content.
 
 CI integration contract
 -----------------------
+The candidate aligns RLN and its migration crate with the RGB library's
+SeaORM 2.0.4/SQLx 0.9 SQLite graph, and ZIP 9.0.5/Zstandard dependency graph.
+This is dependency/API alignment; it does not rewrite the existing RLN schema
+or add a wallet-data migration. Raw SQL fault-injection tests retain their
+actual statements through SeaORM's explicit raw-statement APIs.
+
 The standalone REST binary and the native library share complete-invoice send
 execution. REST does not reference the library-only SDK module. Both callers
 retain their unlocked-session guard through external signing and send completion;
