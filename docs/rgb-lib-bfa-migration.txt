@@ -144,10 +144,17 @@ for external signing. Proxy operation keys remain sensitive backup content.
 CI integration contract
 -----------------------
 The candidate aligns RLN and its migration crate with the RGB library's
-SeaORM 2.0.4/SQLx 0.9 SQLite graph, and ZIP 9.0.5/Zstandard dependency graph.
+SeaORM 2.0.4/SQLx 0.9 SQLite graph, and the ZIP 9 API/Zstandard dependency
+graph (ZIP 9.1.2 in the committed locks; manifest minimum 9.0.5).
 This is dependency/API alignment; it does not rewrite the existing RLN schema
 or add a wallet-data migration. Raw SQL fault-injection tests retain their
 actual statements through SeaORM's explicit raw-statement APIs.
+
+The parent and C binding lockfiles use the same exact RGB, LDK transaction
+synchronizer, external-signer and VLS sources. The C binding does not retain
+old RGB fork patches or floating VLS branches. The migration crate belongs to
+the parent workspace and uses the parent Cargo.lock; its unused nested lock
+is removed. The separate WASM SDK graph is outside this native migration.
 
 The standalone REST binary and the native library share complete-invoice send
 execution. REST does not reference the library-only SDK module. Both callers
