@@ -141,9 +141,10 @@ async fn restart() {
             panic!("cannot find payment on node 2")
         }
     }
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 900).await;
-    wait_for_balance(node2_addr, &asset_id, 100).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 900, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 100, &close_settlement).await;
 
     println!("6 - restart all");
     shutdown(&[node1_addr, node2_addr]).await;

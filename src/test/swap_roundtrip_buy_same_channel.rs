@@ -147,9 +147,10 @@ async fn swap_roundtrip_buy_same_channel() {
     );
 
     println!("\nclose channels");
-    close_channel(node1_addr, &channel_12.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 990).await;
-    wait_for_balance(node2_addr, &asset_id, 10).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel_12.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 990, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 10, &close_settlement).await;
 
     println!("\nspend assets");
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;

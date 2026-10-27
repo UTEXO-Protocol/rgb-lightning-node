@@ -55,6 +55,18 @@ interface SdkNode {
     [Throws=RlnError]
     void createutxos(SdkCreateUtxosRequest request);
     [Throws=RlnError]
+    SdkCreateUtxosOperation preparecreateutxos(SdkPrepareCreateUtxosRequest request);
+    [Throws=RlnError]
+    SdkCreateUtxosOperation commitpreparedcreateutxos(string operation_id);
+    [Throws=RlnError]
+    SdkCreateUtxosOperation cancelcreateutxosplan(string operation_id);
+    [Throws=RlnError]
+    SdkCreateUtxosOperation? getcreateutxosoperation(string operation_id);
+    [Throws=RlnError]
+    sequence<SdkCreateUtxosOperation> listcreateutxosoperations();
+    [Throws=RlnError]
+    sequence<SdkPendingVanillaTransaction> listpendingvanillatransactions();
+    [Throws=RlnError]
     AssetLinkRecord asset_link(SdkAssetLinkRequest request);
     [Throws=RlnError]
     AssetNia issueassetnia(SdkIssueAssetNiaRequest request);
@@ -134,6 +146,10 @@ interface SdkNode {
     InflateResponse inflate(InflateRequest request);
     [Throws=RlnError]
     SendRgbResponse send_rgb(SendRgbRequest request);
+    [Throws=RlnError]
+    SendRgbResponse sendrgbinvoice(SendRgbInvoiceRequest request);
+    [Throws=RlnError]
+    SendRgbResponse sendrgbinvoices(SendRgbInvoicesRequest request);
     [Throws=RlnError]
     AsyncOrderNewResponse apay_new(string host_node_id);
     [Throws=RlnError]
@@ -510,7 +526,7 @@ dictionary DecodeLnInvoiceResponse {
 
 dictionary DecodeRgbInvoiceResponse {
     string recipient_id;
-    string proxy_recipient_id;
+    string? proxy_recipient_id;
     string recipient_type;
     string? asset_schema;
     ContractId? asset_id;
@@ -518,6 +534,8 @@ dictionary DecodeRgbInvoiceResponse {
     string network;
     i64? expiration_timestamp;
     sequence<string> transport_endpoints;
+    string? public_key;
+    string encryption;
 };
 
 enum InvoiceStatus {
@@ -744,6 +762,38 @@ dictionary SdkCreateUtxosRequest {
     boolean skip_sync;
 };
 
+dictionary SdkPrepareCreateUtxosRequest {
+    string operation_id;
+    boolean up_to;
+    u8? num;
+    u32? size;
+    u64 fee_rate;
+    boolean skip_sync;
+};
+
+dictionary SdkCreateUtxosInput {
+    string txid;
+    u32 vout;
+};
+
+dictionary SdkCreateUtxosOperation {
+    string operation_id;
+    string? txid;
+    string status;
+    boolean can_cancel;
+    boolean can_commit;
+    sequence<SdkCreateUtxosInput> inputs;
+    u8 num_outputs;
+    u32 size_sat;
+    u64 fee_sat;
+    u64 fee_rate;
+};
+
+dictionary SdkPendingVanillaTransaction {
+    string txid;
+    string type;
+};
+
 dictionary SdkIssueAssetNiaRequest {
     sequence<u64> amounts;
     string ticker;
@@ -905,6 +955,35 @@ dictionary SdkSendPaymentResponse {
     PaymentHash? payment_hash;
     string? payment_secret;
     HtlcStatus status;
+};
+
+dictionary SendRgbInvoiceRequest {
+    string invoice;
+    ContractId asset_id;
+    u64 amount;
+    WitnessData? witness_data;
+    boolean donation;
+    u64 fee_rate;
+    u8 min_confirmations;
+};
+
+dictionary RgbInvoiceRecipient {
+    string invoice;
+    WitnessData? witness_data;
+    AssignmentKind assignment_kind;
+    u64? assignment_amount;
+};
+
+dictionary InvoiceAssetRecipients {
+    ContractId asset_id;
+    sequence<RgbInvoiceRecipient> recipients;
+};
+
+dictionary SendRgbInvoicesRequest {
+    boolean donation;
+    u64 fee_rate;
+    u8 min_confirmations;
+    sequence<InvoiceAssetRecipients> recipient_groups;
 };
 
 dictionary SendRgbRequest {

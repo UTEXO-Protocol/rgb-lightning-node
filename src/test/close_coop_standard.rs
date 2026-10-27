@@ -139,11 +139,12 @@ async fn close_coop_standard() {
     assert_eq!(asset_balance_spendable(node1_addr, &asset_id).await, 390);
     assert_eq!(asset_balance_spendable(node3_addr, &asset_id).await, 10);
 
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
     let sweep_txid =
         crate::ldk::test_retry_prepared_rgb_sweep(test_get_app_state(node1_addr)).await;
-    wait_for_balance(node1_addr, &asset_id, 890).await;
-    wait_for_balance(node2_addr, &asset_id, 100).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 890, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 100, &close_settlement).await;
     // Receiving uses zero confirmations; explicitly confirm before checking the prepared batch.
     mine(false);
     refresh_transfers(node1_addr).await;

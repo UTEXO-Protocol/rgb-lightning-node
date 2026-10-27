@@ -16,9 +16,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class EthereumRPC:
+    CHAIN_ID = "0x7a69"
+    FUNDS_IN_TOPIC = "0xf1a18caea297591892fc07ea412a5e617d8e51e1155912d8871793e1d4e70f87"
+
     def __init__(self):
         self.requests = []
         self.reject = False
+        self.reject_method = None
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -26,12 +30,14 @@ class EthereumRPC:
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fixture.requests.append(request)
                 response = {"jsonrpc": "2.0", "id": request["id"]}
-                if fixture.reject:
+                method = request.get("method")
+                valid, result = fixture.answer(request)
+                if not valid:
+                    response["error"] = {"code": -32601, "message": "unexpected method or params"}
+                elif fixture.reject or fixture.reject_method == method:
                     response["error"] = {"code": -32000, "message": "bfa-test-rpc-rejected"}
-                elif request["method"] == "web3_clientVersion":
-                    response["result"] = "rln-bfa-unlock-test/1.0"
                 else:
-                    response["error"] = {"code": -32601, "message": "unexpected method"}
+                    response["result"] = result
                 body = json.dumps(response).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -46,6 +52,26 @@ class EthereumRPC:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}/rpc"
+
+    @classmethod
+    def answer(cls, request):
+        """Only the exact endpoint-admission protocol is simulated, never a mint or burn."""
+        method, params = request.get("method"), request.get("params")
+        if request.get("jsonrpc") != "2.0" or "id" not in request:
+            return False, None
+        if method == "eth_chainId" and params == []:
+            return True, cls.CHAIN_ID
+        if (method == "eth_getBlockByNumber" and isinstance(params, list)
+                and len(params) == 2 and params[0] == "finalized" and params[1] is False):
+            return True, {"number": "0x64"}
+        if method == "eth_getLogs" and params == [{
+            "address": "0x" + "00" * 20,
+            "fromBlock": "0x0",
+            "toBlock": "0x0",
+            "topics": [cls.FUNDS_IN_TOPIC, None, "0x" + "00" * 32],
+        }]:
+            return True, []
+        return False, None
 
     def close(self):
         self.server.shutdown()
@@ -232,6 +258,41 @@ class CffiWallet:
                 self.lib.free_native_external_signer(self.signer)
 
 
+class EthereumRPCProtocolTests(unittest.TestCase):
+    def test_exact_endpoint_admission_shapes(self):
+        calls = [
+            ("eth_chainId", [], EthereumRPC.CHAIN_ID),
+            ("eth_getBlockByNumber", ["finalized", False], {"number": "0x64"}),
+            ("eth_getLogs", [{
+                "address": "0x" + "00" * 20,
+                "fromBlock": "0x0",
+                "toBlock": "0x0",
+                "topics": [EthereumRPC.FUNDS_IN_TOPIC, None, "0x" + "00" * 32],
+            }], []),
+        ]
+        for method, params, result in calls:
+            with self.subTest(method=method):
+                self.assertEqual(EthereumRPC.answer({
+                    "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+                }), (True, result))
+
+    def test_unknown_methods_and_inexact_params_are_not_successes(self):
+        calls = [
+            ("web3_clientVersion", []),
+            ("eth_chainId", {}),
+            ("eth_chainId", None),
+            ("eth_getBlockByNumber", ["latest", False]),
+            ("eth_getBlockByNumber", ["finalized", 0]),
+            ("eth_getLogs", [{}]),
+            ("eth_getLogs", []),
+        ]
+        for method, params in calls:
+            with self.subTest(method=method, params=params):
+                self.assertEqual(EthereumRPC.answer({
+                    "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+                }), (False, None))
+
+
 class ExternalSignerBfaTests(unittest.TestCase):
     wallet_class = UniffiWallet
 
@@ -246,6 +307,28 @@ class ExternalSignerBfaTests(unittest.TestCase):
         self.addCleanup(wallet.close)
         return wallet
 
+    def assert_rpc_admission(self):
+        methods = [r["method"] for r in self.rpc.requests]
+        self.assertTrue(methods)
+        self.assertEqual(methods[0], "eth_chainId")  # RLN discovers the endpoint's actual chain.
+        self.assertGreaterEqual(methods.count("eth_chainId"), 2)  # RGB verifies the configured chain.
+        self.assertIn("eth_getBlockByNumber", methods)
+        self.assertIn("eth_getLogs", methods)
+        for request in self.rpc.requests:
+            self.assertTrue(EthereumRPC.answer(request)[0], "unexpected EVM admission request")
+
+    def assert_rpc_rejected(self, wallet, request, attached, expected_stage):
+        error_type = (wallet.rln.RlnError.InvalidRequest
+                      if isinstance(wallet, UniffiWallet) else RuntimeError)
+        with self.assertRaises(error_type) as error:
+            wallet.unlock(request, attached=attached)
+        message = str(error.exception)
+        if isinstance(wallet, CffiWallet):
+            self.assertTrue(message.startswith("Rln(InvalidRequest): "))
+        self.assertIn("Invalid Ethereum RPC URL:", message)
+        self.assertIn(expected_stage, message)
+        wallet.assert_locked(self)
+
     def test_both_unlock_paths_forward_eth_rpc(self):
         for attached in [False, True]:
             with self.subTest(attached=attached):
@@ -253,7 +336,7 @@ class ExternalSignerBfaTests(unittest.TestCase):
                 wallet = self.wallet()
                 wallet.unlock(dict(unlock_request(), eth_rpc_url=self.rpc.url), attached=attached)
                 wallet.assert_unlocked(self)
-                self.assertEqual([r["method"] for r in self.rpc.requests], ["web3_clientVersion"])
+                self.assert_rpc_admission()
 
     def test_existing_callers_without_eth_rpc_still_unlock(self):
         for attached in [False, True]:
@@ -282,14 +365,40 @@ class ExternalSignerBfaTests(unittest.TestCase):
                 self.rpc.requests.clear()
                 request = dict(unlock_request(), eth_rpc_url=self.rpc.url)
                 self.rpc.reject = True
-                with self.assertRaisesRegex(Exception, "bfa-test-rpc-rejected"):
-                    wallet.unlock(request, attached=attached)
-                wallet.assert_locked(self)
-                self.rpc.reject = False
+                try:
+                    self.assert_rpc_rejected(wallet, request, attached, "EVM RPC returned an error")
+                    self.assertEqual([r["method"] for r in self.rpc.requests], ["eth_chainId"])
+                finally:
+                    self.rpc.reject = False
+                self.rpc.requests.clear()
                 wallet.unlock(request, attached=attached)
                 wallet.assert_unlocked(self)
-                self.assertEqual([r["method"] for r in self.rpc.requests],
-                                 ["web3_clientVersion", "web3_clientVersion"])
+                self.assert_rpc_admission()
+
+    def test_mint_support_failures_leave_wallet_locked_and_allow_valid_retry(self):
+        stages = {
+            "eth_getBlockByNumber": "cannot get the latest finalized block",
+            "eth_getLogs": "cannot get the logs of the oldest blocks",
+        }
+        for attached in [False, True]:
+            for method, expected_stage in stages.items():
+                with self.subTest(attached=attached, rejected_method=method):
+                    wallet = self.wallet()
+                    self.rpc.requests.clear()
+                    self.rpc.reject_method = method
+                    request = dict(unlock_request(), eth_rpc_url=self.rpc.url)
+                    try:
+                        self.assert_rpc_rejected(wallet, request, attached, expected_stage)
+                        methods = [r["method"] for r in self.rpc.requests]
+                        self.assertEqual(methods[-1], method)
+                        if method == "eth_getBlockByNumber":
+                            self.assertNotIn("eth_getLogs", methods)
+                    finally:
+                        self.rpc.reject_method = None
+                    self.rpc.requests.clear()
+                    wallet.unlock(request, attached=attached)
+                    wallet.assert_unlocked(self)
+                    self.assert_rpc_admission()
 
     def test_invalid_rpc_url_is_not_ignored(self):
         for attached in [False, True]:

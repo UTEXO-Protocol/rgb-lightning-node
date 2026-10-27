@@ -766,6 +766,83 @@ pub(crate) fn wait_for_balance(
     }
 }
 
+/// Confirmation context for the channel being closed; never inferred from unrelated mempool work.
+#[path = "../../../test/channel_close_context.rs"]
+mod channel_close_context;
+pub(crate) use channel_close_context::ClosedChannelContext;
+
+fn observed_closed_channel_transactions(closed: &ClosedChannelContext) -> Vec<String> {
+    assert!(
+        closed.requires_bitcoin_broadcast(),
+        "observed sweep settlement requires a non-virtual Bitcoin-funded channel"
+    );
+    let funding_txid = closed
+        .funding_txid
+        .as_ref()
+        .expect("observed sweep settlement requires a Bitcoin-funded channel");
+    let output = Command::new("python3")
+        .arg(repo_root().join("test/channel_sweep_candidates.py"))
+        .args([funding_txid, &closed.channel_id])
+        .current_dir(repo_root())
+        .output()
+        .expect("detect observed sweeps of the exact closed channel");
+    assert!(
+        output.status.success(),
+        "closed-channel sweep detector failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidates: Vec<String> = serde_json::from_slice(&output.stdout)
+        .expect("closed-channel sweep detector must return a JSON txid array");
+    for txid in &candidates {
+        let parsed: bitcoin::Txid = txid.parse().expect("canonical observed sweep txid");
+        assert_eq!(parsed.to_string(), *txid);
+    }
+    candidates
+}
+
+/// Unlike generic balance waits, a closed channel needs a later sweep confirmation.
+/// The detector only reads the fixture and admits mempool descendants of this exact funding
+/// outpoint. Keep mining here explicit so pending receive/confirmation tests remain unchanged.
+pub(crate) fn wait_for_closed_channel_balance(
+    node: &SdkNode,
+    asset_id: &ContractId,
+    expected_balance: u64,
+    timeout: Duration,
+    closed: &ClosedChannelContext,
+) {
+    assert!(
+        closed.requires_bitcoin_broadcast(),
+        "observed sweep settlement requires a non-virtual Bitcoin-funded channel"
+    );
+    let deadline = Instant::now() + timeout;
+    loop {
+        node.sync()
+            .expect("sync while waiting for closed-channel settlement");
+        refresh_transfers(node);
+        let balance = asset_balance_spendable(node, asset_id);
+        assert!(
+            Instant::now() < deadline,
+            "closed-channel spendable balance ({balance}) did not become {expected_balance}"
+        );
+        if balance == expected_balance {
+            return;
+        }
+        let candidates = observed_closed_channel_transactions(closed);
+        assert!(
+            Instant::now() < deadline,
+            "closed-channel sweep observation exceeded the settlement deadline"
+        );
+        if !candidates.is_empty() {
+            println!(
+                "confirming observed sweeps of {}: {candidates:?}",
+                closed.channel_id
+            );
+            mine(1);
+        }
+        sleep(Duration::from_secs(1));
+    }
+}
+
 pub(crate) fn wait_for_payment_present_in_list(
     node: &SdkNode,
     payment_hash: &PaymentHash,
@@ -918,8 +995,8 @@ pub(crate) fn close_channel(
     node: &SdkNode,
     channel_id: lightning::ln::types::ChannelId,
     peer_pubkey: bitcoin::secp256k1::PublicKey,
-) {
-    close_channel_with_force(node, channel_id, peer_pubkey, false);
+) -> ClosedChannelContext {
+    close_channel_with_force(node, channel_id, peer_pubkey, false)
 }
 
 pub(crate) fn close_channel_with_force(
@@ -927,7 +1004,18 @@ pub(crate) fn close_channel_with_force(
     channel_id: lightning::ln::types::ChannelId,
     peer_pubkey: bitcoin::secp256k1::PublicKey,
     force: bool,
-) {
+) -> ClosedChannelContext {
+    let channel = node
+        .list_channels()
+        .expect("channel before close")
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id)
+        .expect("exact channel must exist before closing");
+    let closed = ClosedChannelContext::new(
+        channel.funding_txid.map(|txid| txid.to_string()),
+        channel_id.to_string(),
+        channel.virtual_open_mode,
+    );
     stop_mining();
     node.closechannel(SdkCloseChannelRequest {
         channel_id,
@@ -944,9 +1032,17 @@ pub(crate) fn close_channel_with_force(
         if !channels
             .iter()
             .any(|channel| channel.channel_id == channel_id)
+            && (!closed.requires_bitcoin_broadcast()
+                || !observed_closed_channel_transactions(&closed).is_empty())
         {
+            assert!(
+                Instant::now() < deadline,
+                "closing broadcast was not observed in time"
+            );
+            // Channel removal can precede the asynchronous Bitcoin RPC broadcast.
+            // The original maturity batch must start with the exact close in mempool.
             mine_blocks(true, if force { 144 } else { 6 });
-            return;
+            return closed;
         }
         assert!(Instant::now() < deadline, "channel did not close in time");
         sleep(Duration::from_secs(1));
@@ -956,4 +1052,126 @@ pub(crate) fn close_channel_with_force(
 pub(crate) fn refresh_transfers(node: &SdkNode) {
     node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
         .expect("refreshtransfers");
+}
+
+// Only test consumers use this registry: it preserves receiver-issued invoice
+// bytes across old fixture bookkeeping, never creates recipient credentials.
+static AUTHENTICATED_TEST_INVOICES: Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn rgb_invoice(
+    node: &SdkNode,
+    request: SdkRgbInvoiceRequest,
+) -> Result<rgb_lightning_node::SdkRgbInvoiceResponse, rgb_lightning_node::RlnError> {
+    let response = node.rgbinvoice(request)?;
+    AUTHENTICATED_TEST_INVOICES
+        .lock()
+        .unwrap()
+        .insert(response.recipient_id.0.clone(), response.invoice.clone());
+    Ok(response)
+}
+
+pub(crate) fn send_rgb(
+    node: &SdkNode,
+    request: SendRgbRequest,
+) -> Result<rgb_lightning_node::SendRgbResponse, rgb_lightning_node::RlnError> {
+    if request
+        .recipient_groups
+        .iter()
+        .flat_map(|g| &g.recipients)
+        .all(|r| r.transport_endpoints.is_empty())
+    {
+        return node.send_rgb(request);
+    }
+    let groups = request
+        .recipient_groups
+        .into_iter()
+        .map(|group| {
+            let recipients = group
+                .recipients
+                .into_iter()
+                .map(|r| {
+                    let invoice = AUTHENTICATED_TEST_INVOICES
+                        .lock()
+                        .unwrap()
+                        .get(&r.recipient_id.0)
+                        .expect("test must retain its issued complete invoice")
+                        .clone();
+                    let endpoints: Vec<String> =
+                        r.transport_endpoints.into_iter().map(|e| e.0).collect();
+                    assert_eq!(
+                        rgb_lib::wallet::Invoice::new(invoice.clone())
+                            .unwrap()
+                            .invoice_data()
+                            .transport_endpoints,
+                        endpoints
+                    );
+                    rgb_lightning_node::RgbInvoiceRecipient {
+                        invoice,
+                        witness_data: r.witness_data,
+                        assignment_kind: r.assignment_kind,
+                        assignment_amount: r.assignment_amount,
+                    }
+                })
+                .collect();
+            rgb_lightning_node::InvoiceAssetRecipients {
+                asset_id: group.asset_id,
+                recipients,
+            }
+        })
+        .collect();
+    node.sendrgbinvoices(rgb_lightning_node::SendRgbInvoicesRequest {
+        donation: request.donation,
+        fee_rate: request.fee_rate,
+        min_confirmations: request.min_confirmations,
+        recipient_groups: groups,
+    })
+}
+
+pub(crate) fn assert_burn_proof_destination(
+    proof_path: String,
+    asset: &ContractId,
+    expected: &[u8],
+) {
+    use bitcoin::hex::DisplayHex;
+    let inspected = rgb_lib::no_wallet::inspect_consignment(
+        proof_path,
+        rgb_lib::no_wallet::BundleFilter::Terminals,
+    )
+    .unwrap();
+    assert_eq!(inspected.asset_id, asset.to_string());
+    let reasons: Vec<_> = inspected
+        .witnesses
+        .iter()
+        .flat_map(|w| &w.operations)
+        .flat_map(|o| &o.transitions)
+        .flat_map(|t| &t.globals)
+        .filter_map(|g| match g {
+            rgb_lib::no_wallet::TransitionGlobal::BurnReason(reason) => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasons, vec![expected.to_lower_hex_string()]);
+}
+
+pub(crate) fn native_recipient_from_invoice(
+    invoice: &str,
+    amount: u64,
+) -> rgb_lib::wallet::Recipient {
+    let invoice = rgb_lib::wallet::Invoice::new(invoice.to_string())
+        .unwrap()
+        .invoice_data();
+    assert_eq!(invoice.network, rgb_lib::BitcoinNetwork::Regtest);
+    assert_eq!(invoice.assignment, rgb_lib::Assignment::Fungible(amount));
+    assert!(invoice.public_key.is_some());
+    rgb_lib::wallet::Recipient {
+        recipient_id: invoice.recipient_id,
+        assignment: invoice.assignment,
+        witness_data: None,
+        transport_endpoints: invoice.transport_endpoints,
+        public_key: invoice.public_key,
+        encryption: invoice.encryption,
+        expiration_timestamp: invoice.expiration_timestamp,
+    }
 }

@@ -38,9 +38,10 @@ async fn close_force_other_side() {
 
     keysend(node1_addr, &node2_pubkey, None, Some(&asset_id), Some(100)).await;
 
-    close_channel(node2_addr, &channel.channel_id, &node1_pubkey, true).await;
-    wait_for_balance(node1_addr, &asset_id, 900).await;
-    wait_for_balance(node2_addr, &asset_id, 100).await;
+    let close_settlement =
+        close_channel(node2_addr, &channel.channel_id, &node1_pubkey, true).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 900, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 100, &close_settlement).await;
 
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;
     send_asset(

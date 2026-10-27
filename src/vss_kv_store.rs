@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use crate::rgb_vss::{decrypt_data, encrypt_data, VssEncryptionMetadata};
 use bitcoin::io;
 use bitcoin::secp256k1::SecretKey;
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex::DisplayHex;
 use lightning::util::persist::KVStoreSync;
-use rgb_lib::wallet::vss::{decrypt_data, encrypt_data, VssEncryptionMetadata};
 use uuid::Uuid;
 use vss_client::client::VssClient;
 use vss_client::error::VssError;

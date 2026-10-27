@@ -435,22 +435,21 @@ def openchannel_push_asset_amount_scenario():
         wait_for_balance(node_a, asset_id, 200, 180)
         wait_for_balance(node_b, asset_id, 800, 180)
 
-        recipient_id = rgb_invoice(node_c)
-        node_b.send_rgb(
-            rln.SendRgbRequest(
+        invoice = rgb_invoice(node_c)
+        node_b.sendrgbinvoices(
+            rln.SendRgbInvoicesRequest(
                 donation=True,
                 fee_rate=CREATE_UTXOS_FEE_RATE,
                 min_confirmations=1,
                 recipient_groups=[
-                    rln.AssetRecipients(
+                    rln.InvoiceAssetRecipients(
                         asset_id=asset_id,
                         recipients=[
-                            rln.RgbRecipient(
-                                recipient_id=recipient_id,
+                            rln.RgbInvoiceRecipient(
+                                invoice=invoice,
                                 witness_data=None,
                                 assignment_kind=rln.AssignmentKind.FUNGIBLE,
                                 assignment_amount=100,
-                                transport_endpoints=[PROXY_ENDPOINT_LOCAL],
                             )
                         ],
                     )

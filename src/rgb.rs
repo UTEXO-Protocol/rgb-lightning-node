@@ -1,3 +1,4 @@
+use crate::rgb_compat::{ColorPrepareResult, IfaIssuanceType};
 use crate::signer::{ActiveSignerRef, ExternalSigner, RlnKeysInterface};
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::script::ScriptBuf;
@@ -14,19 +15,17 @@ use lightning::sign::ChangeDestinationSource;
 use lightning::util::async_poll::AsyncResult;
 use lightning::util::persist::KVStoreSync;
 use rgb_lib::{
-    bdk_wallet::{KeychainKind, SignOptions},
+    bdk_wallet::SignOptions,
     bitcoin::psbt::Psbt as BitcoinPsbt,
     wallet::{
-        rust_only::{check_proxy_url, ColorPrepareResult, ColoringInfo},
-        AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets, Balance, BtcBalance,
-        IfaIssuanceType, Media, Metadata, Online, OperationResult, Outpoint, ReceiveData,
-        Recipient, RefreshFilter, RefreshResult, RefreshedTransfer, RgbWalletOpsOffline,
-        RgbWalletOpsOnline, SendBeginResult, SinglesigKeys, SyncOptions,
-        Transaction as RgbLibTransaction, Transfer, TransferKind, TransportEndpoint, Unspent,
-        Wallet as RgbLibWallet,
+        rust_only::ColoringInfo, AssetCFA, AssetFilter, AssetIFA, AssetNIA, AssetUDA, Assets,
+        Balance, BtcBalance, Media, Metadata, Online, OperationResult, ReceiveData, Recipient,
+        RefreshFilter, RefreshResult, RefreshedTransfer, RgbWalletOpsOffline, RgbWalletOpsOnline,
+        SendBeginResult, SinglesigKeys, SyncOptions, Transaction as RgbLibTransaction, Transfer,
+        TransportEndpoint, Unspent, Wallet as RgbLibWallet,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
-    Fascia, RgbContract, RgbTransfer, RgbTxid, UpdateRes, WitnessOrd,
+    Fascia, RgbTransfer, RgbTxid, UpdateRes, WitnessOrd,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -155,30 +154,6 @@ impl CommonState {
         self.rgb_wallet_wrapper.create_consigments(psbt)
     }
 
-    pub(crate) fn rgb_create_utxos(
-        &self,
-        up_to: bool,
-        num: u8,
-        size: u32,
-        fee_rate: u64,
-        skip_sync: bool,
-    ) -> Result<u8, RgbLibError> {
-        self.rgb_wallet_wrapper
-            .create_utxos(up_to, num, size, fee_rate, skip_sync)
-    }
-
-    pub(crate) fn rgb_create_utxos_begin(
-        &self,
-        up_to: bool,
-        num: u8,
-        size: u32,
-        fee_rate: u64,
-        skip_sync: bool,
-    ) -> Result<String, RgbLibError> {
-        self.rgb_wallet_wrapper
-            .create_utxos_begin(up_to, num, size, fee_rate, skip_sync)
-    }
-
     pub(crate) fn rgb_create_utxos_end(
         &self,
         signed_psbt: String,
@@ -238,14 +213,6 @@ impl CommonState {
         Ok((metadata, already_imported))
     }
 
-    pub(crate) fn rgb_import_asset_contract(
-        &self,
-        contract: RgbContract,
-    ) -> Result<(Metadata, bool), RgbLibError> {
-        let imported = self.rgb_wallet_wrapper.import_asset_contract(contract)?;
-        Ok((imported.metadata, imported.already_imported))
-    }
-
     pub(crate) fn rgb_get_btc_balance(&self, skip_sync: bool) -> Result<BtcBalance, RgbLibError> {
         self.rgb_wallet_wrapper.get_btc_balance(skip_sync)
     }
@@ -279,6 +246,17 @@ impl CommonState {
         fee_rate: u64,
         min_confirmations: u8,
     ) -> Result<OperationResult, RgbLibError> {
+        let is_bfa = self
+            .rgb_wallet_wrapper
+            .get_asset_metadata(ContractId::from_str(&asset_id).map_err(|_| {
+                RgbLibError::AssetNotFound {
+                    asset_id: asset_id.clone(),
+                }
+            })?)?
+            .asset_schema
+            == AssetSchema::Bfa;
+        let burn_reason = crate::rgb_compat::burn_reason(burn_recipient.as_deref(), is_bfa)
+            .map_err(|details| RgbLibError::InvalidBurnReason { details })?;
         if self.external_signer_mode {
             // Keep preparation, signing and completion serialized against other wallet operations.
             // Persist Initiated before asking the signer: an interrupted call must retain its inputs.
@@ -288,7 +266,7 @@ impl CommonState {
                 wrapper.online,
                 asset_id,
                 amount,
-                burn_recipient,
+                burn_reason,
                 fee_rate,
                 min_confirmations,
                 false,
@@ -309,13 +287,8 @@ impl CommonState {
                 }
             });
         }
-        self.rgb_wallet_wrapper.burn(
-            asset_id,
-            amount,
-            burn_recipient,
-            fee_rate,
-            min_confirmations,
-        )
+        self.rgb_wallet_wrapper
+            .burn(asset_id, amount, burn_reason, fee_rate, min_confirmations)
     }
 
     pub(crate) fn rgb_inflate(
@@ -360,44 +333,6 @@ impl CommonState {
             inflation_amounts,
             reject_list_url,
             issuance_type,
-        )
-    }
-
-    pub(crate) fn rgb_find_link_right_outpoint(
-        &self,
-        contract_id: ContractId,
-    ) -> Result<Option<Outpoint>, RgbLibError> {
-        self.rgb_list_unspents(false, false)?;
-        Ok(self
-            .rgb_get_asset_metadata(contract_id)?
-            .unspent_link_right_outpoint)
-    }
-
-    pub(crate) fn rgb_find_link_transfer(
-        &self,
-        contract_id: ContractId,
-    ) -> Result<Option<Transfer>, RgbLibError> {
-        Ok(self
-            .rgb_list_transfers(AssetFilter::Id(contract_id.to_string()), None)?
-            .into_iter()
-            .find(|transfer| transfer.kind == TransferKind::Link))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn rgb_link_ifa(
-        &self,
-        parent_contract_id: String,
-        child_contract_id: String,
-        link_right_outpoint: Outpoint,
-        fee_rate: u64,
-        min_confirmations: u8,
-    ) -> Result<OperationResult, RgbLibError> {
-        self.rgb_wallet_wrapper.link_ifa(
-            parent_contract_id,
-            child_contract_id,
-            link_right_outpoint,
-            fee_rate,
-            min_confirmations,
         )
     }
 
@@ -534,6 +469,7 @@ impl CommonState {
             fee_rate,
             min_confirmations,
             expiration_timestamp,
+            Some(self.proxy_endpoint.clone()),
         )
     }
 
@@ -556,6 +492,7 @@ impl CommonState {
             expiration_timestamp,
             dry_run,
             lock_time,
+            Some(self.proxy_endpoint.clone()),
         )
     }
 
@@ -578,6 +515,16 @@ impl CommonState {
     ) -> Result<String, RgbLibError> {
         self.rgb_wallet_wrapper
             .send_btc_begin(address, amount, fee_rate, false)
+    }
+
+    pub(crate) fn rgb_send_btc_channel_funding_begin(
+        &self,
+        address: String,
+        amount: u64,
+        fee_rate: u64,
+    ) -> Result<String, RgbLibError> {
+        self.rgb_wallet_wrapper
+            .send_btc_channel_funding_begin(address, amount, fee_rate)
     }
 
     pub(crate) fn rgb_send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {
@@ -687,17 +634,74 @@ fn validate_burn_signed_psbt(unsigned: &str, signed: &str) -> Result<String, Rgb
     Ok(prepared.to_string())
 }
 
+#[cfg(not(feature = "vss"))]
+type RgbWalletGuard<'a> = MutexGuard<'a, RgbLibWallet>;
+
+#[cfg(feature = "vss")]
+pub(crate) struct RgbWalletGuard<'a> {
+    inner: MutexGuard<'a, RgbLibWallet>,
+    client: Option<Arc<crate::rgb_vss::VssBackupClient>>,
+}
+#[cfg(feature = "vss")]
+impl std::ops::Deref for RgbWalletGuard<'_> {
+    type Target = RgbLibWallet;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+#[cfg(feature = "vss")]
+impl std::ops::DerefMut for RgbWalletGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+#[cfg(feature = "vss")]
+impl Drop for RgbWalletGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let Some(client) = self.client.as_ref().filter(|client| client.auto_backup()) else {
+            return;
+        };
+        // The same wallet mutex covers all callers, including explicit mutable access by bindings.
+        // Only a confirmed remote commit can acknowledge the prepared content token.
+        let result = self
+            .inner
+            .backup_info()
+            .map_err(crate::rgb_vss::Error::from)
+            .and_then(|dirty| {
+                if dirty {
+                    crate::rgb_vss::backup_wallet(&mut self.inner, client).map(|_| ())
+                } else {
+                    Ok(())
+                }
+            });
+        client.record_auto_backup_result(result.err().map(|error| error.to_string()));
+    }
+}
+
 pub(crate) struct RgbLibWalletWrapper {
     pub(crate) wallet: Arc<Mutex<RgbLibWallet>>,
     pub(crate) online: Online,
+    /// Serializes durable output-plan ownership, signing and exact-transaction retries.
+    pub(crate) output_operations: Mutex<()>,
+    #[cfg(feature = "vss")]
+    vss_client: Mutex<Option<Arc<crate::rgb_vss::VssBackupClient>>>,
 }
 
 impl RgbLibWalletWrapper {
     pub(crate) fn new(wallet: Arc<Mutex<RgbLibWallet>>, online: Online) -> Self {
-        RgbLibWalletWrapper { wallet, online }
+        RgbLibWalletWrapper {
+            wallet,
+            online,
+            output_operations: Mutex::new(()),
+            #[cfg(feature = "vss")]
+            vss_client: Mutex::new(None),
+        }
     }
 
-    pub(crate) fn get_rgb_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {
+    fn lock_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {
         // In FFI builds a panic crossing `extern "C"` frames aborts via
         // `panic_cannot_unwind`, cascading to every subsequent wallet op,
         // so we recover from mutex poisoning instead of propagating.
@@ -719,13 +723,67 @@ impl RgbLibWalletWrapper {
         self.wallet.lock().unwrap()
     }
 
-    /// Returns the wallet's configured `VssBackupClient`, if any. This is the
-    /// client constructed by `configure_vss_backup` during common wallet startup; callers
-    /// (e.g. the manual `/vssbackup` route) reuse it instead of building a
-    /// duplicate with the same configuration.
+    pub(crate) fn get_rgb_wallet(&self) -> RgbWalletGuard<'_> {
+        #[cfg(feature = "vss")]
+        {
+            RgbWalletGuard {
+                inner: self.lock_wallet(),
+                client: self.vss_client(),
+            }
+        }
+        #[cfg(not(feature = "vss"))]
+        self.lock_wallet()
+    }
+
     #[cfg(feature = "vss")]
-    pub(crate) fn vss_client(&self) -> Option<Arc<rgb_lib::wallet::vss::VssBackupClient>> {
-        self.get_rgb_wallet().vss_client()
+    pub(crate) fn vss_client(&self) -> Option<Arc<crate::rgb_vss::VssBackupClient>> {
+        self.vss_client.lock().unwrap().clone()
+    }
+
+    #[cfg(feature = "vss")]
+    pub(crate) fn configure_vss_backup(
+        &self,
+        config: crate::rgb_vss::VssBackupConfig,
+    ) -> Result<(), crate::rgb_vss::Error> {
+        if config.auto_backup && config.backup_mode != crate::rgb_vss::VssBackupMode::Blocking {
+            return Err(crate::rgb_vss::Error::Internal {
+                details: "RGB automatic VSS requires acknowledged blocking snapshots".into(),
+            });
+        }
+        let client = Arc::new(crate::rgb_vss::VssBackupClient::new(config)?);
+        *self.vss_client.lock().unwrap() = Some(client);
+        Ok(())
+    }
+
+    #[cfg(feature = "vss")]
+    pub(crate) fn vss_backup(
+        &self,
+        client: &crate::rgb_vss::VssBackupClient,
+    ) -> Result<i64, crate::rgb_vss::Error> {
+        let mut wallet = self.lock_wallet();
+        crate::rgb_vss::backup_wallet(&mut wallet, client)
+    }
+
+    #[cfg(feature = "vss")]
+    pub(crate) fn vss_backup_info(
+        &self,
+        client: &crate::rgb_vss::VssBackupClient,
+    ) -> Result<crate::rgb_vss::VssBackupInfo, crate::rgb_vss::Error> {
+        let backup_required = self.lock_wallet().backup_info()?;
+        let server_version = std::thread::scope(|scope| {
+            scope
+                .spawn(|| client.handle().block_on(client.get_backup_version()))
+                .join()
+        })
+        .map_err(|_| crate::rgb_vss::Error::Internal {
+            details: "VSS info worker failed".into(),
+        })??;
+        Ok(crate::rgb_vss::VssBackupInfo {
+            backup_exists: server_version.is_some(),
+            server_version,
+            backup_required,
+            last_auto_backup_error: client.last_auto_backup_error(),
+        })
     }
 
     // Upstream API retained through the merge; not yet wired into utexo's flow.
@@ -747,11 +805,13 @@ impl RgbLibWalletWrapper {
         min_confirmations: u8,
     ) -> Result<ReceiveData, RgbLibError> {
         self.get_rgb_wallet().blind_receive(
+            Some(self.online),
             asset_id,
             assignment,
             expiration_timestamp,
             transport_endpoints,
             min_confirmations,
+            None,
         )
     }
 
@@ -768,8 +828,56 @@ impl RgbLibWalletWrapper {
         psbt_to_color: &mut BitcoinPsbt,
         coloring_info: ColoringInfo,
     ) -> Result<ColorPrepareResult, RgbLibError> {
+        let prepared = self.get_rgb_wallet().color_psbt_and_prepare_consume(
+            psbt_to_color,
+            coloring_info,
+            1,
+            None,
+        )?;
+        Ok(ColorPrepareResult {
+            batch_transfer_idx: prepared.batch_transfer_idx,
+            transfers: prepared.transfers,
+        })
+    }
+
+    pub(crate) fn cancel_prepared_sweep(&self, batch_transfer_idx: i32) -> Result<(), RgbLibError> {
         self.get_rgb_wallet()
-            .color_psbt_and_prepare_consume(psbt_to_color, coloring_info, 0, None)
+            .cancel_prepared_sweep(batch_transfer_idx)
+    }
+
+    pub(crate) fn mark_prepared_sweep_handed_off(
+        &self,
+        batch_transfer_idx: i32,
+        expected_txid: String,
+    ) -> Result<(), RgbLibError> {
+        self.get_rgb_wallet()
+            .mark_prepared_sweep_handed_off(batch_transfer_idx, expected_txid)
+    }
+
+    // A process can stop after the library commits its unsigned preparation but
+    // before LDK's KV receipt exists. Recover that exact PSBT instead of reserving
+    // another transaction or abandoning the protected library operation.
+    pub(crate) fn recover_prepared_sweep(
+        &self,
+        inputs: &HashSet<OutPoint>,
+    ) -> Result<Option<crate::rgb_sweep::PreparedRgbSweep>, String> {
+        let active = self
+            .get_rgb_wallet()
+            .list_prepared_sweeps()
+            .map_err(|e| format!("cannot inspect native prepared sweeps: {e}"))?;
+        let records = active
+            .into_iter()
+            .map(|prepared| {
+                crate::rgb_sweep::PreparedRgbSweep::new(
+                    prepared.psbt,
+                    ColorPrepareResult {
+                        batch_transfer_idx: prepared.batch_transfer_idx,
+                        transfers: prepared.transfers,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::rgb_sweep::find_prepared_sweep_in_records(records, inputs)
     }
 
     pub(crate) fn consume_transfer_fascia(
@@ -782,43 +890,6 @@ impl RgbLibWalletWrapper {
 
     pub(crate) fn create_consigments(&self, psbt: String) -> Result<(), RgbLibError> {
         self.get_rgb_wallet().create_consignments(psbt)
-    }
-
-    pub(crate) fn create_utxos(
-        &self,
-        up_to: bool,
-        num: u8,
-        size: u32,
-        fee_rate: u64,
-        skip_sync: bool,
-    ) -> Result<u8, RgbLibError> {
-        self.get_rgb_wallet().create_utxos(
-            self.online,
-            up_to,
-            Some(num),
-            Some(size),
-            fee_rate,
-            skip_sync,
-        )
-    }
-
-    pub(crate) fn create_utxos_begin(
-        &self,
-        up_to: bool,
-        num: u8,
-        size: u32,
-        fee_rate: u64,
-        skip_sync: bool,
-    ) -> Result<String, RgbLibError> {
-        self.get_rgb_wallet().create_utxos_begin(
-            self.online,
-            up_to,
-            Some(num),
-            Some(size),
-            fee_rate,
-            skip_sync,
-            false,
-        )
     }
 
     pub(crate) fn create_utxos_end(
@@ -849,7 +920,7 @@ impl RgbLibWalletWrapper {
     }
 
     pub(crate) fn rotate_address(&self) -> Result<String, RgbLibError> {
-        self.get_rgb_wallet().rotate_address(KeychainKind::Internal)
+        self.get_rgb_wallet().get_address()
     }
 
     pub(crate) fn get_asset_balance(
@@ -899,7 +970,7 @@ impl RgbLibWalletWrapper {
         &self,
         asset_id: String,
         amount: u64,
-        burn_recipient: Option<Vec<u8>>,
+        burn_reason: Option<String>,
         fee_rate: u64,
         min_confirmations: u8,
     ) -> Result<OperationResult, RgbLibError> {
@@ -907,7 +978,7 @@ impl RgbLibWalletWrapper {
             self.online,
             asset_id,
             amount,
-            burn_recipient,
+            burn_reason,
             fee_rate,
             min_confirmations,
         )
@@ -952,6 +1023,11 @@ impl RgbLibWalletWrapper {
         reject_list_url: Option<String>,
         issuance_type: Option<IfaIssuanceType>,
     ) -> Result<AssetIFA, RgbLibError> {
+        if !matches!(issuance_type, None | Some(IfaIssuanceType::Legacy)) {
+            return Err(RgbLibError::Internal {
+                details: "IFA link rights are unavailable in the BFA RGB library".into(),
+            });
+        }
         self.get_rgb_wallet().issue_asset_ifa(
             ticker,
             name,
@@ -959,26 +1035,6 @@ impl RgbLibWalletWrapper {
             amounts,
             inflation_amounts,
             reject_list_url,
-            issuance_type,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn link_ifa(
-        &self,
-        parent_contract_id: String,
-        child_contract_id: String,
-        link_right_outpoint: Outpoint,
-        fee_rate: u64,
-        min_confirmations: u8,
-    ) -> Result<OperationResult, RgbLibError> {
-        self.get_rgb_wallet().link_ifa(
-            self.online,
-            parent_contract_id,
-            child_contract_id,
-            link_right_outpoint,
-            fee_rate,
-            min_confirmations,
         )
     }
 
@@ -1104,13 +1160,6 @@ impl RgbLibWalletWrapper {
             .save_new_asset(self.online, consignment, offchain_txid)
     }
 
-    pub(crate) fn import_asset_contract(
-        &self,
-        contract: RgbContract,
-    ) -> Result<rgb_lib::wallet::rust_only::ImportAssetContractResult, RgbLibError> {
-        self.get_rgb_wallet().import_asset_contract(contract)
-    }
-
     pub(crate) fn send(
         &self,
         recipient_map: HashMap<String, Vec<Recipient>>,
@@ -1118,6 +1167,7 @@ impl RgbLibWalletWrapper {
         fee_rate: u64,
         min_confirmations: u8,
         expiration_timestamp: u64,
+        sender_endpoint: Option<String>,
     ) -> Result<OperationResult, RgbLibError> {
         self.get_rgb_wallet().send(
             self.online,
@@ -1126,7 +1176,7 @@ impl RgbLibWalletWrapper {
             fee_rate,
             min_confirmations,
             expiration_timestamp,
-            None,
+            sender_endpoint,
         )
     }
 
@@ -1140,7 +1190,28 @@ impl RgbLibWalletWrapper {
         expiration_timestamp: u64,
         dry_run: bool,
         lock_time: Option<u32>,
+        sender_endpoint: Option<String>,
     ) -> Result<SendBeginResult, RgbLibError> {
+        match lock_time {
+            Some(0) => {
+                return self.get_rgb_wallet().send_channel_funding_begin(
+                    self.online,
+                    recipient_map,
+                    donation,
+                    fee_rate,
+                    min_confirmations,
+                    expiration_timestamp,
+                    sender_endpoint,
+                    dry_run,
+                )
+            }
+            Some(_) => {
+                return Err(RgbLibError::Internal {
+                    details: "Only final-zero-locktime RGB channel funding is supported".into(),
+                })
+            }
+            None => {}
+        }
         self.get_rgb_wallet().send_begin(
             self.online,
             recipient_map,
@@ -1148,8 +1219,8 @@ impl RgbLibWalletWrapper {
             fee_rate,
             min_confirmations,
             expiration_timestamp,
+            sender_endpoint,
             dry_run,
-            lock_time,
         )
     }
 
@@ -1161,7 +1232,7 @@ impl RgbLibWalletWrapper {
         skip_sync: bool,
     ) -> Result<String, RgbLibError> {
         self.get_rgb_wallet()
-            .send_btc(self.online, address, amount, fee_rate, skip_sync, None)
+            .send_btc(self.online, address, amount, fee_rate, skip_sync)
     }
 
     pub(crate) fn send_btc_begin(
@@ -1169,18 +1240,25 @@ impl RgbLibWalletWrapper {
         address: String,
         amount: u64,
         fee_rate: u64,
-        _dry_run: bool,
+        dry_run: bool,
     ) -> Result<String, RgbLibError> {
-        // Funding-only path: pin a final (zero) locktime so LDK accepts the
-        // vanilla channel funding tx regardless of the node's chain-tip lag.
-        self.get_rgb_wallet().send_btc_begin(
+        self.get_rgb_wallet()
+            .send_btc_begin(self.online, address, amount, fee_rate, false, dry_run)
+    }
+
+    pub(crate) fn send_btc_channel_funding_begin(
+        &self,
+        address: String,
+        amount: u64,
+        fee_rate: u64,
+    ) -> Result<String, RgbLibError> {
+        self.get_rgb_wallet().send_btc_channel_funding_begin(
             self.online,
             address,
             amount,
             fee_rate,
             false,
             false,
-            Some(0),
         )
     }
 
@@ -1235,11 +1313,13 @@ impl RgbLibWalletWrapper {
         min_confirmations: u8,
     ) -> Result<ReceiveData, RgbLibError> {
         self.get_rgb_wallet().witness_receive(
+            Some(self.online),
             asset_id,
             assignment,
             expiration_timestamp,
             transport_endpoints,
             min_confirmations,
+            None,
         )
     }
 }
@@ -1412,9 +1492,14 @@ impl WalletSource for RgbLibWalletWrapper {
 
 pub(crate) async fn check_rgb_proxy_endpoint(proxy_endpoint: &str) -> Result<(), APIError> {
     let proxy_url = TransportEndpoint::new(proxy_endpoint.to_string())?.endpoint;
-    tokio::task::spawn_blocking(move || check_proxy_url(&proxy_url))
+    crate::proxy_startup::validate(&proxy_url)
         .await
-        .unwrap()?;
+        .map_err(|error| match error {
+            crate::proxy_startup::ValidationError::Network(details) => APIError::Network(details),
+            crate::proxy_startup::ValidationError::Protocol(version) => {
+                APIError::InvalidProxyProtocol(version)
+            }
+        })?;
     Ok(())
 }
 
@@ -1628,7 +1713,6 @@ mod wallet_source_tests {
                 database_type: DatabaseType::Sqlite,
                 max_allocations_per_utxo: 1,
                 supported_schemas: vec![AssetSchema::Nia],
-                reuse_addresses: false,
             },
             SinglesigKeys {
                 account_xpub_vanilla: keys.account_xpub_vanilla,

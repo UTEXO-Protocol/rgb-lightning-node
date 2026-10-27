@@ -2,9 +2,7 @@
 use crate::helpers::*;
 use bitcoin::hex::FromHex;
 use rgb_lib::keys::{generate_keys, WitnessVersion};
-use rgb_lib::wallet::{
-    DatabaseType, OnlineOptions, RgbWalletOpsOffline, SinglesigKeys, Wallet, WalletData,
-};
+use rgb_lib::wallet::{DatabaseType, OnlineOptions, SinglesigKeys, Wallet, WalletData};
 use rgb_lib::{AssetSchema, BitcoinNetwork};
 use rgb_lightning_node::BurnRequest;
 use serde_json::{json, Value};
@@ -131,17 +129,20 @@ fn mint_bfa(dir: &Path, node: &Node, bridge: &str, container: &str) -> (Wallet, 
             database_type: DatabaseType::Sqlite,
             max_allocations_per_utxo: 5,
             supported_schemas: vec![AssetSchema::Bfa],
-            reuse_addresses: false,
         },
         SinglesigKeys::from_keys(&keys, None),
     )
     .unwrap();
     let online = issuer
         .go_online(OnlineOptions {
-            indexer_url: INDEXER.into(),
+            indexer_config: rgb_lib::wallet::IndexerConfig::Electrum {
+                url: INDEXER.into(),
+            },
             skip_consistency_check: false,
             vanilla_sync_lookback: 20,
-            eth_rpc_url: Some(node.eth_rpc.clone()),
+            failed_witness_receive_grace_secs: 3600,
+            proxy_auth_keys: std::collections::HashMap::new(),
+            evm_rpc_urls: std::collections::HashMap::from([(31337, node.eth_rpc.clone())]),
         })
         .unwrap();
     let funded = Command::new("./regtest.sh")
@@ -164,33 +165,32 @@ fn mint_bfa(dir: &Path, node: &Node, bridge: &str, container: &str) -> (Wallet, 
             "BFA Lightning".into(),
             6,
             1,
+            31337,
             bridge.into(),
             None,
         )
         .unwrap();
     let asset_id = ContractId::from_str(&asset.asset_id).unwrap();
-    let receive = node
-        .rgbinvoice(SdkRgbInvoiceRequest {
+    let receive = crate::helpers::rgb_invoice(
+        &node,
+        SdkRgbInvoiceRequest {
             asset_id: None,
             assignment_kind: Some(AssignmentKind::Fungible),
             assignment_amount: Some(1000),
             duration_seconds: Some(3600),
             min_confirmations: 1,
             witness: false,
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     let prepared = issuer
-        .bridge_begin(
+        .mint_begin(
             online,
             asset.asset_id,
-            rgb_lib::wallet::Recipient {
-                recipient_id: receive.recipient_id.0,
-                witness_data: None,
-                assignment: rgb_lib::Assignment::Fungible(1000),
-                transport_endpoints: vec![proxy()],
-            },
+            crate::helpers::native_recipient_from_invoice(&receive.invoice, 1000),
             2,
             1,
+            proxy(),
         )
         .unwrap();
     let locked = Command::new("docker")
@@ -220,7 +220,7 @@ fn mint_bfa(dir: &Path, node: &Node, bridge: &str, container: &str) -> (Wallet, 
     let receipt: Value = serde_json::from_slice(&locked.stdout).unwrap();
     assert_eq!(receipt["status"], "0x1");
     let signed = issuer.sign_psbt(prepared.psbt, None).unwrap();
-    issuer.bridge_end(online, signed).unwrap();
+    issuer.mint_end(online, signed).unwrap();
     mine(6);
     wait_for_received(node, &asset_id, 1000);
     (issuer, asset_id)
@@ -333,34 +333,39 @@ fn bfa_channels_multihop_restart_close_and_burn() {
     let mut a = Node::new(root.join("a"), NODE_A_PEER_PORT + 200, &eth);
     let mut b = Node::new(root.join("b"), NODE_B_PEER_PORT + 200, &eth);
     let mut c = Node::new(root.join("c"), NODE_C_PEER_PORT + 200, &eth);
-    let (issuer, asset) = mint_bfa(&root.join("issuer"), &a, &bridge, &container);
+    let (_issuer, asset) = mint_bfa(&root.join("issuer"), &a, &bridge, &container);
     eprintln!("BFA minted: {asset}");
 
-    let receive = b
-        .rgbinvoice(SdkRgbInvoiceRequest {
+    let receive = crate::helpers::rgb_invoice(
+        &b,
+        SdkRgbInvoiceRequest {
             asset_id: None,
             assignment_kind: Some(AssignmentKind::Fungible),
             assignment_amount: Some(400),
             duration_seconds: Some(3600),
             min_confirmations: 1,
             witness: false,
-        })
-        .unwrap();
-    a.send_rgb(SendRgbRequest {
-        donation: true,
-        fee_rate: 2,
-        min_confirmations: 1,
-        recipient_groups: vec![AssetRecipients {
-            asset_id: asset,
-            recipients: vec![RgbRecipient {
-                recipient_id: receive.recipient_id,
-                witness_data: None,
-                assignment_kind: AssignmentKind::Fungible,
-                assignment_amount: Some(400),
-                transport_endpoints: vec![TransportEndpoint(proxy())],
+        },
+    )
+    .unwrap();
+    crate::helpers::send_rgb(
+        &a,
+        SendRgbRequest {
+            donation: true,
+            fee_rate: 2,
+            min_confirmations: 1,
+            recipient_groups: vec![AssetRecipients {
+                asset_id: asset,
+                recipients: vec![RgbRecipient {
+                    recipient_id: receive.recipient_id,
+                    witness_data: None,
+                    assignment_kind: AssignmentKind::Fungible,
+                    assignment_amount: Some(400),
+                    transport_endpoints: vec![TransportEndpoint(proxy())],
+                }],
             }],
-        }],
-    })
+        },
+    )
     .unwrap();
     mine(6);
     wait_for_received(&b, &asset, 400);
@@ -390,23 +395,14 @@ fn bfa_channels_multihop_restart_close_and_burn() {
     pay(&c, &a, &asset, 30, 120, 350);
     eprintln!("Restart and C -> B -> A payment complete");
 
-    close_channel(&a, ab, b.node_info().unwrap().pubkey);
-    wait_for_balance(&a, &asset, 480, TIMEOUT);
-    wait_for_balance(&b, &asset, 220, TIMEOUT);
+    let closed_ab = close_channel(&a, ab, b.node_info().unwrap().pubkey);
+    wait_for_closed_channel_balance(&a, &asset, 480, TIMEOUT, &closed_ab);
+    wait_for_closed_channel_balance(&b, &asset, 220, TIMEOUT, &closed_ab);
     eprintln!("A-B cooperative close recovered assets");
-    close_channel_with_force(&b, bc, c.node_info().unwrap().pubkey, true);
-    // Confirm the delayed sweeps produced after the commitment reaches CSV maturity.
-    for _ in 0..12 {
-        mine(6);
-        refresh_transfers(&b);
-        refresh_transfers(&c);
-        if asset_balance_spendable(&b, &asset) == 430 && asset_balance_spendable(&c, &asset) == 90 {
-            break;
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
-    wait_for_balance(&b, &asset, 430, TIMEOUT);
-    wait_for_balance(&c, &asset, 90, TIMEOUT);
+    let closed_bc = close_channel_with_force(&b, bc, c.node_info().unwrap().pubkey, true);
+    // Confirm only observed descendants after the commitment reaches CSV maturity.
+    wait_for_closed_channel_balance(&b, &asset, 430, TIMEOUT, &closed_bc);
+    wait_for_closed_channel_balance(&c, &asset, 90, TIMEOUT, &closed_bc);
     eprintln!("B-C force close recovered assets");
 
     // The recovered assets must remain valid bridge assets, including a subsequent burn proof.
@@ -423,5 +419,5 @@ fn bfa_channels_multihop_restart_close_and_burn() {
     mine(6);
     wait_for_balance(&c, &asset, 80, TIMEOUT);
     let proof = c.get_consignment_path(asset, burned.txid).unwrap();
-    assert_eq!(issuer.get_burn_recipient(proof).unwrap(), recipient);
+    crate::helpers::assert_burn_proof_destination(proof, &asset, &recipient);
 }

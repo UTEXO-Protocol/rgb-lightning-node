@@ -33,8 +33,9 @@ async fn close_coop_zero_balance() {
     .await;
     assert_eq!(asset_balance_spendable(node1_addr, &asset_id).await, 0);
 
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 1).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 1, &close_settlement).await;
     assert_eq!(asset_balance_spendable(node2_addr, &asset_id).await, 0);
 
     let recipient_id = rgb_invoice(node2_addr, None, false).await.recipient_id;

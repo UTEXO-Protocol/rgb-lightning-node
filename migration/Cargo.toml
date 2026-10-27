@@ -9,7 +9,7 @@ name = "rln_migration"
 path = "src/lib.rs"
 
 [dependencies]
-sea-orm-migration = { version = "1.1.19", default-features = false, features = [
+sea-orm-migration = { version = "2.0.4", default-features = false, features = [
     "cli",
     "runtime-tokio-rustls",
     "sqlx-postgres",

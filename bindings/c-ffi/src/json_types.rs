@@ -31,13 +31,13 @@ use rgb_lightning_node::{
     SdkIssueAssetUdaRequest, SdkKeysendRequest, SdkKeysendResponse, SdkLdkChainSync,
     SdkMakerExecuteRequest, SdkMakerInitRequest, SdkMakerInitResponse, SdkOpenChannelRequest,
     SdkOpenChannelResponse, SdkPostAssetMediaRequest, SdkPostAssetMediaResponse,
-    SdkRefreshTransfersRequest, SdkRefreshTransfersResponse, SdkRgbInvoiceRequest,
-    SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse, SdkSendOnionMessageRequest,
-    SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest, SdkUnlockRequest,
-    SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse, SignMessageResponse, Swap, SwapList,
-    SwapStatus, Token, TokenLight, Transaction, TransactionType, Transfer,
-    TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo, VerifyMessageResponse,
-    WitnessData,
+    SdkPrepareCreateUtxosRequest, SdkRefreshTransfersRequest, SdkRefreshTransfersResponse,
+    SdkRgbInvoiceRequest, SdkRgbInvoiceResponse, SdkSendBtcRequest, SdkSendBtcResponse,
+    SdkSendOnionMessageRequest, SdkSendPaymentRequest, SdkSendPaymentResponse, SdkTakerRequest,
+    SdkUnlockRequest, SdkVssClearFenceRequest, SendRgbRequest, SendRgbResponse,
+    SignMessageResponse, Swap, SwapList, SwapStatus, Token, TokenLight, Transaction,
+    TransactionType, Transfer, TransferTransportEndpoint, TransportEndpoint, Txid, Unspent, Utxo,
+    VerifyMessageResponse, WitnessData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -839,7 +839,7 @@ impl From<DecodeLnInvoiceResponse> for JsonDecodeLnInvoiceResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct JsonDecodeRgbInvoiceResponse {
     pub recipient_id: String,
-    pub proxy_recipient_id: String,
+    pub proxy_recipient_id: Option<String>,
     pub recipient_type: String,
     pub asset_schema: Option<String>,
     pub asset_id: Option<String>,
@@ -847,6 +847,8 @@ pub(crate) struct JsonDecodeRgbInvoiceResponse {
     pub network: String,
     pub expiration_timestamp: Option<i64>,
     pub transport_endpoints: Vec<String>,
+    pub public_key: Option<String>,
+    pub encryption: String,
 }
 
 impl From<DecodeRgbInvoiceResponse> for JsonDecodeRgbInvoiceResponse {
@@ -861,6 +863,8 @@ impl From<DecodeRgbInvoiceResponse> for JsonDecodeRgbInvoiceResponse {
             network: r.network,
             expiration_timestamp: r.expiration_timestamp,
             transport_endpoints: r.transport_endpoints,
+            public_key: r.public_key,
+            encryption: r.encryption,
         }
     }
 }
@@ -2037,6 +2041,38 @@ pub(crate) struct JsonCreateUtxosRequest {
     pub skip_sync: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JsonPrepareCreateUtxosRequest {
+    pub operation_id: String,
+    pub up_to: bool,
+    #[serde(default)]
+    pub num: Option<u8>,
+    #[serde(default)]
+    pub size: Option<u32>,
+    pub fee_rate: u64,
+    pub skip_sync: bool,
+}
+
+impl From<JsonPrepareCreateUtxosRequest> for SdkPrepareCreateUtxosRequest {
+    fn from(request: JsonPrepareCreateUtxosRequest) -> Self {
+        Self {
+            operation_id: request.operation_id,
+            up_to: request.up_to,
+            num: request.num,
+            size: request.size,
+            fee_rate: request.fee_rate,
+            skip_sync: request.skip_sync,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JsonCreateUtxosOperationRequest {
+    pub operation_id: String,
+}
+
 impl From<JsonCreateUtxosRequest> for SdkCreateUtxosRequest {
     fn from(j: JsonCreateUtxosRequest) -> Self {
         SdkCreateUtxosRequest {
@@ -2420,6 +2456,36 @@ pub(crate) struct JsonChannelIdResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_rgb_invoice_json_retains_protocol_one_authentication_and_nullable_proxy_id() {
+        for encryption in ["Required", "Optional", "Unsupported"] {
+            for proxy_recipient_id in [None, Some("legacy-proxy-id".to_string())] {
+                let public_key = Some("ab".repeat(32));
+                let response = DecodeRgbInvoiceResponse {
+                    recipient_id: "recipient".into(),
+                    proxy_recipient_id: proxy_recipient_id.clone(),
+                    recipient_type: "Witness".into(),
+                    asset_schema: None,
+                    asset_id: None,
+                    assignment: "Fungible(100)".into(),
+                    network: "Regtest".into(),
+                    expiration_timestamp: Some(2_000_000_000),
+                    transport_endpoints: vec!["rpc://127.0.0.1:3000/json-rpc".into()],
+                    public_key: public_key.clone(),
+                    encryption: encryption.into(),
+                };
+                let json =
+                    serde_json::to_value(JsonDecodeRgbInvoiceResponse::from(response)).unwrap();
+                assert_eq!(
+                    json["proxy_recipient_id"],
+                    serde_json::json!(proxy_recipient_id)
+                );
+                assert_eq!(json["public_key"], serde_json::json!(public_key));
+                assert_eq!(json["encryption"], encryption);
+            }
+        }
+    }
 
     fn external_unlock_json() -> serde_json::Value {
         serde_json::json!({
