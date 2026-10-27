@@ -870,12 +870,31 @@ mod funded {
                 .map(|transaction| transaction.confirmation_time.is_some()))
         }
     }
-    fn bitcoin(args: &[&str]) -> serde_json::Value {
+    fn assert_fixture_admission() {
         assert_eq!(
             std::env::var("COMPOSE_PROJECT_NAME").as_deref(),
             Ok("iris_rgb_output_20261026"),
             "funded tests require the exact isolated compose project"
         );
+        let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("qualification-consumers/rgb-output-native-fixture-20261026/compose.yaml")
+            .canonicalize()
+            .expect("owned isolated fixture Compose file must exist");
+        let configured = PathBuf::from(
+            std::env::var_os("COMPOSE_FILE")
+                .expect("funded tests require an explicit owned COMPOSE_FILE"),
+        )
+        .canonicalize()
+        .expect("configured fixture Compose file must exist");
+        assert_eq!(
+            configured, expected,
+            "funded tests cannot operate any other Compose configuration"
+        );
+    }
+    fn bitcoin(args: &[&str]) -> serde_json::Value {
+        assert_fixture_admission();
         let output = Command::new("docker")
             .args([
                 "compose",
@@ -933,6 +952,8 @@ mod funded {
         );
     }
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir, FundedBackend, String) {
+        // Admission must precede even wallet creation, not merely the first funding call.
+        assert_fixture_admission();
         let create = Command::new("docker")
             .args([
                 "compose",
