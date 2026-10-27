@@ -37,9 +37,10 @@ async fn multi_open_close() {
 
     keysend(node1_addr, &node2_pubkey, None, Some(&asset_id), Some(100)).await;
 
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 900).await;
-    wait_for_balance(node2_addr, &asset_id, 100).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 900, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 100, &close_settlement).await;
 
     let channel = open_channel(
         node1_addr,
@@ -55,10 +56,11 @@ async fn multi_open_close() {
 
     keysend(node1_addr, &node2_pubkey, None, Some(&asset_id), Some(100)).await;
 
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
 
-    wait_for_balance(node1_addr, &asset_id, 800).await;
-    wait_for_balance(node2_addr, &asset_id, 200).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 800, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 200, &close_settlement).await;
 
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;
     send_asset(

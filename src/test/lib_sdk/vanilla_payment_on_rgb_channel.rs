@@ -156,8 +156,8 @@ fn vanilla_payment_on_rgb_channel() {
             chan_2_before.local_balance_sat + amount / 1000
         );
 
-        close_channel(&node_a, channel_id, node_b_pubkey);
-        wait_for_balance(&node_a, &asset_id, 1000, Duration::from_secs(70));
+        let closed = close_channel(&node_a, channel_id, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 1000, Duration::from_secs(70), &closed);
 
         let recipient_id = crate::helpers::rgb_invoice(
             &node_c,

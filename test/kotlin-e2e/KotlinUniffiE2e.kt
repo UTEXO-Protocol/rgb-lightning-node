@@ -370,6 +370,52 @@ private fun waitForBalance(node: SdkNode, assetId: ContractId, expected: ULong, 
     error("spendable balance did not become expected=$expected actual=$lastBalance assetId=$assetId after ${timeoutSec}s")
 }
 
+private data class ClosedChannelContext(val fundingTxid: String?, val channelId: String)
+
+private fun relatedChannelMempoolTransactions(closed: ClosedChannelContext): List<String> {
+    val fundingTxid = requireNotNull(closed.fundingTxid) {
+        "closed-channel settlement needs an observed funding transaction"
+    }
+    val output = runCommand(
+        "python3",
+        REPO_ROOT.resolve("test/channel_sweep_candidates.py").pathString,
+        fundingTxid,
+        closed.channelId,
+    ).trim()
+    // The helper returns only a bounded JSON array of public transaction IDs. Reject
+    // diagnostic text or a malformed result before deciding whether to mine anything.
+    check(output.length <= 100_000 && Regex(
+        """\[\s*(?:"[0-9a-f]{64}"(?:\s*,\s*"[0-9a-f]{64}")*)?\s*\]"""
+    ).matches(output)) { "invalid channel sweep candidate response" }
+    return Regex("[0-9a-f]{64}").findAll(output).map { it.value }.toList()
+}
+
+private fun waitForClosedChannelBalance(
+    node: SdkNode,
+    assetId: ContractId,
+    expected: ULong,
+    timeoutSec: Long,
+    closed: ClosedChannelContext,
+) {
+    val deadline = System.currentTimeMillis() + timeoutSec * 1000L
+    var lastBalance = 0uL
+    while (System.currentTimeMillis() < deadline) {
+        node.sync()
+        node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
+        lastBalance = assetBalanceSpendable(node, assetId)
+        if (lastBalance == expected) return
+        // Channel maturity and its later sweep are different transactions. Mine
+        // only after observing a mempool descendant of this exact funding output.
+        val candidates = relatedChannelMempoolTransactions(closed)
+        if (candidates.isNotEmpty()) {
+            println("Confirming observed closed-channel transactions: ${candidates.joinToString()}")
+            runRegtest("mine", "1")
+        }
+        Thread.sleep(1000L)
+    }
+    error("closed-channel spendable balance did not become expected=$expected actual=$lastBalance assetId=$assetId channelId=${closed.channelId} after ${timeoutSec}s")
+}
+
 private fun waitForLnBalance(node: SdkNode, assetId: ContractId, expected: ULong, timeoutSec: Long) {
     val deadline = System.currentTimeMillis() + timeoutSec * 1000L
     var lastBalance = 0uL
@@ -518,7 +564,11 @@ private fun keysendWithLnBalance(
     )
 }
 
-private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false) {
+private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false): ClosedChannelContext {
+    val closed = ClosedChannelContext(
+        node.listChannels().firstOrNull { it.channelId == channelId }?.fundingTxid?.toString(),
+        channelId,
+    )
     node.closechannel(
         SdkCloseChannelRequest(
             channelId = channelId,
@@ -533,8 +583,14 @@ private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, f
         val channels = node.listChannels()
         lastChannels = channels.joinToString { it.channelId }.ifEmpty { "no channels" }
         if (channels.none { it.channelId == channelId }) {
+            // Channel removal can precede its asynchronous closing broadcast.
+            if (closed.fundingTxid != null && relatedChannelMempoolTransactions(closed).isEmpty()) {
+                Thread.sleep(1000L)
+                continue
+            }
+            if (System.currentTimeMillis() >= deadline) break
             runRegtest("mine", if (force) "144" else "6")
-            return
+            return closed
         }
         Thread.sleep(1000L)
     }
@@ -820,9 +876,9 @@ private fun openchannelPushAssetAmountScenario() {
         check(nodeAPartialAfter.assetLocalAmount == 300uL && nodeAPartialAfter.assetRemoteAmount == 300uL)
         check(nodeBPartialAfter.assetLocalAmount == 300uL && nodeBPartialAfter.assetRemoteAmount == 300uL)
 
-        closeChannel(nodeA, partialChannelId, nodeBPubkey)
-        waitForBalance(nodeA, assetId, 700u, BALANCE_TIMEOUT_SEC)
-        waitForBalance(nodeB, assetId, 300u, BALANCE_TIMEOUT_SEC)
+        val partialClose = closeChannel(nodeA, partialChannelId, nodeBPubkey)
+        waitForClosedChannelBalance(nodeA, assetId, 700u, BALANCE_TIMEOUT_SEC, partialClose)
+        waitForClosedChannelBalance(nodeB, assetId, 300u, BALANCE_TIMEOUT_SEC, partialClose)
 
         val fullPushChannel = nodeA.openchannel(
             SdkOpenChannelRequest(
@@ -873,9 +929,9 @@ private fun openchannelPushAssetAmountScenario() {
         check(nodeAFullAfter.assetLocalAmount == 100uL && nodeAFullAfter.assetRemoteAmount == 500uL)
         check(nodeBFullAfter.assetLocalAmount == 500uL && nodeBFullAfter.assetRemoteAmount == 100uL)
 
-        closeChannel(nodeA, fullChannelId, nodeBPubkey)
-        waitForBalance(nodeA, assetId, 200u, BALANCE_TIMEOUT_SEC)
-        waitForBalance(nodeB, assetId, 800u, BALANCE_TIMEOUT_SEC)
+        val fullClose = closeChannel(nodeA, fullChannelId, nodeBPubkey)
+        waitForClosedChannelBalance(nodeA, assetId, 200u, BALANCE_TIMEOUT_SEC, fullClose)
+        waitForClosedChannelBalance(nodeB, assetId, 800u, BALANCE_TIMEOUT_SEC, fullClose)
 
         val invoice = nodeC.rgbinvoice(
             SdkRgbInvoiceRequest(

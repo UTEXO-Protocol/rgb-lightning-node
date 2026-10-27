@@ -1025,9 +1025,15 @@ fn rgb_native_external_signer_mixed_one_hop_payment_coop_close_settles_to_chain(
             Duration::from_secs(120),
         );
 
-        close_channel(&node_a, channel_id, node_b_pubkey);
-        wait_for_balance(&node_a, &asset_id, 950, Duration::from_secs(120));
-        wait_for_balance(&node_b, &asset_id, PAY_ASSET, Duration::from_secs(120));
+        let closed = close_channel(&node_a, channel_id, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 950, Duration::from_secs(120), &closed);
+        wait_for_closed_channel_balance(
+            &node_b,
+            &asset_id,
+            PAY_ASSET,
+            Duration::from_secs(120),
+            &closed,
+        );
 
         node_a.shutdown();
         node_b.shutdown();

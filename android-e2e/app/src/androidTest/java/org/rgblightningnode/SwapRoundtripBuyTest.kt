@@ -66,11 +66,14 @@ class SwapRoundtripBuyTest {
     private val channelReadyTimeoutSec: Long = 60L
     private var noMineCount: Int = 0
 
-    private fun bitcoindRpc(method: String, vararg params: Any): JSONObject {
+    private fun bitcoindRpc(method: String, vararg params: Any, timeoutMs: Int = 0): JSONObject {
         val url = URL("http://$bitcoindHost:$bitcoindPort/")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
+        // Preserve ordinary RPC behavior; only the bounded sweep observer supplies a timeout.
+        conn.connectTimeout = timeoutMs
+        conn.readTimeout = timeoutMs
         conn.setRequestProperty("Content-Type", "application/json")
         val creds =
             Base64.getEncoder().encodeToString("$bitcoindUser:$bitcoindPass".toByteArray())
@@ -82,10 +85,13 @@ class SwapRoundtripBuyTest {
             put("method", method)
             put("params", JSONArray().apply { params.forEach { put(it) } })
         }.toString()
-        conn.outputStream.use { it.write(body.toByteArray()) }
-
-        val response = conn.inputStream.bufferedReader().readText()
-        return JSONObject(response)
+        return try {
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            val response = conn.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(response)
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun stopMining() {
@@ -404,7 +410,37 @@ class SwapRoundtripBuyTest {
         error("swap status did not become expected=$expectedStatus actual=$lastStatus")
     }
 
-    private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false) {
+    private fun waitForClosedChannelBalance(
+        node: SdkNode,
+        assetId: ContractId,
+        expected: ULong,
+        timeoutSec: Long,
+        closed: ClosedChannelContext,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
+        var lastBalance = 0uL
+        while (System.currentTimeMillis() < deadline) {
+            node.sync()
+            node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
+            lastBalance = assetBalanceSpendable(node, assetId)
+            if (lastBalance == expected) return
+            val candidates = ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                bitcoindRpc(method, *params, timeoutMs = timeout)
+            }
+            if (candidates.isNotEmpty()) {
+                log("Confirming observed closed-channel transactions: ${candidates.joinToString()}")
+                mine(1)
+            }
+            Thread.sleep(1_000L)
+        }
+        error("closed-channel spendable balance did not become expected=$expected actual=$lastBalance channelId=${closed.channelId} after ${timeoutSec}s")
+    }
+
+    private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false): ClosedChannelContext {
+        val closed = ClosedChannelContext(
+            node.listChannels().firstOrNull { it.channelId == channelId }?.fundingTxid?.toString(),
+            channelId,
+        )
         stopMining()
         node.closechannel(
             SdkCloseChannelRequest(
@@ -418,8 +454,16 @@ class SwapRoundtripBuyTest {
         while (System.currentTimeMillis() < deadline) {
             val channels = node.listChannels()
             if (channels.none { it.channelId == channelId }) {
+                // Channel removal can precede its asynchronous closing broadcast.
+                if (closed.fundingTxid != null && ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                    bitcoindRpc(method, *params, timeoutMs = timeout)
+                }.isEmpty()) {
+                    Thread.sleep(1_000L)
+                    continue
+                }
+                if (System.currentTimeMillis() >= deadline) break
                 mine(if (force) 144 else 6, resume = true)
-                return
+                return closed
             }
             Thread.sleep(1_000L)
         }
@@ -659,9 +703,9 @@ class SwapRoundtripBuyTest {
             assertEquals(chanB12Before.localBalanceSat + htlcMinSat, chanB12.localBalanceSat)
             assertEquals(chanB21Before.localBalanceSat - btcLegDiffSat, chanB21.localBalanceSat)
 
-            closeChannel(requireNotNull(nodeA), channel12Id, infoB.pubkey)
-            waitForBalance(requireNotNull(nodeA), assetId, 990uL, 180L)
-            waitForBalance(requireNotNull(nodeB), assetId, 10uL, 180L)
+            val coloredClose = closeChannel(requireNotNull(nodeA), channel12Id, infoB.pubkey)
+            waitForClosedChannelBalance(requireNotNull(nodeA), assetId, 990uL, 180L, coloredClose)
+            waitForClosedChannelBalance(requireNotNull(nodeB), assetId, 10uL, 180L, coloredClose)
 
             closeChannel(requireNotNull(nodeB), channel21Id, infoA.pubkey)
 

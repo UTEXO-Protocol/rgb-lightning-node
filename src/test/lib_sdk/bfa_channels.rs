@@ -395,23 +395,14 @@ fn bfa_channels_multihop_restart_close_and_burn() {
     pay(&c, &a, &asset, 30, 120, 350);
     eprintln!("Restart and C -> B -> A payment complete");
 
-    close_channel(&a, ab, b.node_info().unwrap().pubkey);
-    wait_for_balance(&a, &asset, 480, TIMEOUT);
-    wait_for_balance(&b, &asset, 220, TIMEOUT);
+    let closed_ab = close_channel(&a, ab, b.node_info().unwrap().pubkey);
+    wait_for_closed_channel_balance(&a, &asset, 480, TIMEOUT, &closed_ab);
+    wait_for_closed_channel_balance(&b, &asset, 220, TIMEOUT, &closed_ab);
     eprintln!("A-B cooperative close recovered assets");
-    close_channel_with_force(&b, bc, c.node_info().unwrap().pubkey, true);
-    // Confirm the delayed sweeps produced after the commitment reaches CSV maturity.
-    for _ in 0..12 {
-        mine(6);
-        refresh_transfers(&b);
-        refresh_transfers(&c);
-        if asset_balance_spendable(&b, &asset) == 430 && asset_balance_spendable(&c, &asset) == 90 {
-            break;
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
-    wait_for_balance(&b, &asset, 430, TIMEOUT);
-    wait_for_balance(&c, &asset, 90, TIMEOUT);
+    let closed_bc = close_channel_with_force(&b, bc, c.node_info().unwrap().pubkey, true);
+    // Confirm only observed descendants after the commitment reaches CSV maturity.
+    wait_for_closed_channel_balance(&b, &asset, 430, TIMEOUT, &closed_bc);
+    wait_for_closed_channel_balance(&c, &asset, 90, TIMEOUT, &closed_bc);
     eprintln!("B-C force close recovered assets");
 
     // The recovered assets must remain valid bridge assets, including a subsequent burn proof.

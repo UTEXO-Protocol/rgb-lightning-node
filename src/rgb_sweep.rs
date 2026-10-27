@@ -226,8 +226,8 @@ pub(crate) fn find_prepared_sweep_in_records(
     Ok(matching)
 }
 
-// Conservatively wait for confirmation before applying fascia. rgb-lib only requires that
-// the indexer see the transaction.
+// Wait for confirmation before applying fascia. The pinned native library independently
+// requires the exact canonical sweep transaction to meet its confirmation threshold.
 // Consumption is driven by wallet refresh (API/SDK/ChannelReady), not a separate background job.
 // A transaction that never confirms retains its receipt and Initiated batch for operator repair.
 // Each receipt is independent; even a failed list/read/consume/remove must not abort wallet refresh.

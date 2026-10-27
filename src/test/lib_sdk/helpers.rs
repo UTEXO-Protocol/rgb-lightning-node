@@ -766,6 +766,77 @@ pub(crate) fn wait_for_balance(
     }
 }
 
+/// Confirmation context for the channel being closed; never inferred from unrelated mempool work.
+#[derive(Debug, Clone)]
+pub(crate) struct ClosedChannelContext {
+    funding_txid: Option<String>,
+    channel_id: String,
+}
+
+fn observed_closed_channel_transactions(closed: &ClosedChannelContext) -> Vec<String> {
+    let funding_txid = closed
+        .funding_txid
+        .as_ref()
+        .expect("observed sweep settlement requires a Bitcoin-funded channel");
+    let output = Command::new("python3")
+        .arg(repo_root().join("test/channel_sweep_candidates.py"))
+        .args([funding_txid, &closed.channel_id])
+        .current_dir(repo_root())
+        .output()
+        .expect("detect observed sweeps of the exact closed channel");
+    assert!(
+        output.status.success(),
+        "closed-channel sweep detector failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidates: Vec<String> = serde_json::from_slice(&output.stdout)
+        .expect("closed-channel sweep detector must return a JSON txid array");
+    for txid in &candidates {
+        let parsed: bitcoin::Txid = txid.parse().expect("canonical observed sweep txid");
+        assert_eq!(parsed.to_string(), *txid);
+    }
+    candidates
+}
+
+/// Unlike generic balance waits, a closed channel needs a later sweep confirmation.
+/// The detector only reads the fixture and admits mempool descendants of this exact funding
+/// outpoint. Keep mining here explicit so pending receive/confirmation tests remain unchanged.
+pub(crate) fn wait_for_closed_channel_balance(
+    node: &SdkNode,
+    asset_id: &ContractId,
+    expected_balance: u64,
+    timeout: Duration,
+    closed: &ClosedChannelContext,
+) {
+    assert!(
+        closed.funding_txid.is_some(),
+        "observed sweep settlement requires a Bitcoin-funded channel"
+    );
+    let deadline = Instant::now() + timeout;
+    loop {
+        node.sync()
+            .expect("sync while waiting for closed-channel settlement");
+        refresh_transfers(node);
+        let balance = asset_balance_spendable(node, asset_id);
+        if balance == expected_balance {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closed-channel spendable balance ({balance}) did not become {expected_balance}"
+        );
+        let candidates = observed_closed_channel_transactions(closed);
+        if !candidates.is_empty() {
+            println!(
+                "confirming observed sweeps of {}: {candidates:?}",
+                closed.channel_id
+            );
+            mine(1);
+        }
+        sleep(Duration::from_secs(1));
+    }
+}
+
 pub(crate) fn wait_for_payment_present_in_list(
     node: &SdkNode,
     payment_hash: &PaymentHash,
@@ -918,8 +989,8 @@ pub(crate) fn close_channel(
     node: &SdkNode,
     channel_id: lightning::ln::types::ChannelId,
     peer_pubkey: bitcoin::secp256k1::PublicKey,
-) {
-    close_channel_with_force(node, channel_id, peer_pubkey, false);
+) -> ClosedChannelContext {
+    close_channel_with_force(node, channel_id, peer_pubkey, false)
 }
 
 pub(crate) fn close_channel_with_force(
@@ -927,7 +998,19 @@ pub(crate) fn close_channel_with_force(
     channel_id: lightning::ln::types::ChannelId,
     peer_pubkey: bitcoin::secp256k1::PublicKey,
     force: bool,
-) {
+) -> ClosedChannelContext {
+    let channel = node
+        .list_channels()
+        .expect("channel before close")
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id)
+        .expect("exact channel must exist before closing");
+    let closed = ClosedChannelContext {
+        // Virtual/unfunded legacy close callers keep their existing behavior. Only the
+        // explicit on-chain settlement wait requires a real funding outpoint.
+        funding_txid: channel.funding_txid.map(|txid| txid.to_string()),
+        channel_id: channel_id.to_string(),
+    };
     stop_mining();
     node.closechannel(SdkCloseChannelRequest {
         channel_id,
@@ -944,9 +1027,17 @@ pub(crate) fn close_channel_with_force(
         if !channels
             .iter()
             .any(|channel| channel.channel_id == channel_id)
+            && (closed.funding_txid.is_none()
+                || !observed_closed_channel_transactions(&closed).is_empty())
         {
+            assert!(
+                Instant::now() < deadline,
+                "closing broadcast was not observed in time"
+            );
+            // Channel removal can precede the asynchronous Bitcoin RPC broadcast.
+            // The original maturity batch must start with the exact close in mempool.
             mine_blocks(true, if force { 144 } else { 6 });
-            return;
+            return closed;
         }
         assert!(Instant::now() < deadline, "channel did not close in time");
         sleep(Duration::from_secs(1));

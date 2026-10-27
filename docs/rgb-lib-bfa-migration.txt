@@ -199,6 +199,40 @@ retain the receiver-issued complete invoice instead of reconstructing credential
 from a recipient ID. A dedicated funded mixed NIA witness/NFT test requires a
 single transaction, a single positive fee and settled balances for both assets.
 
+Closed-channel fixture confirmations
+------------------------------------
+A channel's closing confirmations precede its later sweep transaction. The native
+library requires that exact canonical sweep to confirm before consuming RGB state.
+Closed-channel balance fixtures therefore capture the original funding outpoint
+and mine only after observing its actual mempool descendants. Generic balance
+waits do not mine; expected balances, maturity blocks and deadlines are unchanged.
+The shared read-only detector binds the v1 channel ID to its exact P2WSH funding
+output and bounds ancestry, transaction count and total probe time. Before the
+initial maturity blocks, close fixtures also observe that exact funding spend;
+channel removal alone can precede asynchronous Bitcoin broadcast. Its eight
+pure tests run with:
+
+  python3 -m unittest discover -s test -p test_channel_sweep_candidates.py -v
+
+The two explicitly ignored protected_close_settlement SDK regressions are separate
+owned-fixture tests, not skipped integration acceptance. They admit only the
+iris_rgb_output_20261026 Compose project at the sibling qualification-consumers/
+rgb-output-native-fixture-20261026/compose.yaml path, its exact container labels,
+regtest chain, empty mempool, funded iris-output-tests treasury and protocol-1.0
+proxy on port 13004. The checked-in tests/fixtures/rgb-output-operations/compose.yaml
+records that chain configuration. It must never be pointed at a shared stack.
+Once those isolated services are explicitly prepared, run with the exact owned
+COMPOSE_PROJECT_NAME and COMPOSE_FILE environment and:
+
+  cargo test --locked --features uniffi,vls,vss,test-utils --test lib_sdk \
+    protected_close_settlement:: -- --ignored --test-threads=1 --nocapture
+
+The cooperative and force-close cases make genuine RGB and Bitcoin payments,
+verify that repeated refresh cannot credit unconfirmed sweeps, confirm the two
+observed native sweeps, and check settled balances, consumed receipts and refresh
+idempotence. They do not qualify arbitrary crash recovery, reorgs or physical/mobile
+devices.
+
 Candidate source and qualification
 ----------------------------------
 Cargo.toml, Cargo.lock and the rust-lightning gitlink are the exact source graph

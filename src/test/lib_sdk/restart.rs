@@ -193,9 +193,9 @@ fn restart() {
         wait_for_succeeded_payment_in_list(&node_a, &payment_hash, Duration::from_secs(30));
         wait_for_succeeded_payment_in_list(&node_b, &payment_hash, Duration::from_secs(30));
 
-        close_channel(&node_a, channel_id, node_b_pubkey);
-        wait_for_balance(&node_a, &asset_id, 900, Duration::from_secs(70));
-        wait_for_balance(&node_b, &asset_id, 100, Duration::from_secs(70));
+        let closed = close_channel(&node_a, channel_id, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 900, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 100, Duration::from_secs(70), &closed);
 
         println!("6 - restart all");
         node_a.shutdown();

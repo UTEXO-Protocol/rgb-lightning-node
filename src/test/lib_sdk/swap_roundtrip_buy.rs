@@ -361,9 +361,9 @@ fn swap_roundtrip_buy() {
             chan_b_21_before.local_balance_sat - btc_leg_diff
         );
 
-        close_channel(&node_a, channel_id_12, node_b_pubkey);
-        wait_for_balance(&node_a, &asset_id, 990, Duration::from_secs(70));
-        wait_for_balance(&node_b, &asset_id, 10, Duration::from_secs(70));
+        let closed = close_channel(&node_a, channel_id_12, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 990, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 10, Duration::from_secs(70), &closed);
 
         close_channel(&node_b, channel_id_21, node_a_pubkey);
 

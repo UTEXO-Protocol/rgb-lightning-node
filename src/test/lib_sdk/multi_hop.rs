@@ -415,13 +415,13 @@ fn multi_hop() {
         assert_eq!(node_c_info.local_balance_sat, 6_500);
         assert_eq!(node_c_info.num_peers, 1);
 
-        close_channel(&node_b, channel_id_12, node_a_pubkey);
-        wait_for_balance(&node_a, &asset_id, 550, Duration::from_secs(70));
-        wait_for_balance(&node_b, &asset_id, 150, Duration::from_secs(70));
+        let closed = close_channel(&node_b, channel_id_12, node_a_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 550, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 150, Duration::from_secs(70), &closed);
 
-        close_channel(&node_c, channel_id_23, node_b_pubkey);
-        wait_for_balance(&node_b, &asset_id, 400, Duration::from_secs(70));
-        wait_for_balance(&node_c, &asset_id, 50, Duration::from_secs(70));
+        let closed = close_channel(&node_c, channel_id_23, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 400, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_c, &asset_id, 50, Duration::from_secs(70), &closed);
 
         let recipient_id = crate::helpers::rgb_invoice(
             &node_c,

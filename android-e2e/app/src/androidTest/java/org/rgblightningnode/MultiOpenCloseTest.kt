@@ -62,11 +62,14 @@ class MultiOpenCloseTest {
     private val assetSupply: ULong = 1000u
     private val channelReadyTimeoutSec: Long = 120L
 
-    private fun bitcoindRpc(method: String, vararg params: Any): JSONObject {
+    private fun bitcoindRpc(method: String, vararg params: Any, timeoutMs: Int = 0): JSONObject {
         val url = URL("http://$bitcoindHost:$bitcoindPort/")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
+        // Preserve ordinary RPC behavior; only the bounded sweep observer supplies a timeout.
+        conn.connectTimeout = timeoutMs
+        conn.readTimeout = timeoutMs
         conn.setRequestProperty("Content-Type", "application/json")
         val creds =
             Base64.getEncoder().encodeToString("$bitcoindUser:$bitcoindPass".toByteArray())
@@ -78,10 +81,13 @@ class MultiOpenCloseTest {
             put("method", method)
             put("params", JSONArray().apply { params.forEach { put(it) } })
         }.toString()
-        conn.outputStream.use { it.write(body.toByteArray()) }
-
-        val response = conn.inputStream.bufferedReader().readText()
-        return JSONObject(response)
+        return try {
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            val response = conn.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(response)
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun mine(blocks: Int) {
@@ -299,7 +305,37 @@ class MultiOpenCloseTest {
         return response.paymentHash
     }
 
-    private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false) {
+    private fun waitForClosedChannelBalance(
+        node: SdkNode,
+        assetId: ContractId,
+        expected: ULong,
+        timeoutSec: Long,
+        closed: ClosedChannelContext,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
+        var lastBalance = 0uL
+        while (System.currentTimeMillis() < deadline) {
+            node.sync()
+            node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
+            lastBalance = assetBalanceSpendable(node, assetId)
+            if (lastBalance == expected) return
+            val candidates = ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                bitcoindRpc(method, *params, timeoutMs = timeout)
+            }
+            if (candidates.isNotEmpty()) {
+                log("Confirming observed closed-channel transactions: ${candidates.joinToString()}")
+                mine(1)
+            }
+            Thread.sleep(1_000L)
+        }
+        error("closed-channel spendable balance did not become expected=$expected actual=$lastBalance channelId=${closed.channelId} after ${timeoutSec}s")
+    }
+
+    private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false): ClosedChannelContext {
+        val closed = ClosedChannelContext(
+            node.listChannels().firstOrNull { it.channelId == channelId }?.fundingTxid?.toString(),
+            channelId,
+        )
         node.closechannel(
             SdkCloseChannelRequest(
                 channelId = channelId,
@@ -314,8 +350,16 @@ class MultiOpenCloseTest {
             val channels = node.listChannels()
             lastChannels = channels.joinToString { it.channelId }.ifEmpty { "no channels" }
             if (channels.none { it.channelId == channelId }) {
+                // Channel removal can precede its asynchronous closing broadcast.
+                if (closed.fundingTxid != null && ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                    bitcoindRpc(method, *params, timeoutMs = timeout)
+                }.isEmpty()) {
+                    Thread.sleep(1_000L)
+                    continue
+                }
+                if (System.currentTimeMillis() >= deadline) break
                 mine(if (force) 144 else 6)
-                return
+                return closed
             }
             Thread.sleep(1_000L)
         }
@@ -442,9 +486,9 @@ class MultiOpenCloseTest {
             keysend(nodeA, nodeBPubkey, null, assetId, 100u)
 
             val firstChannelId = nodeA.getChannelId(firstOpen.temporaryChannelId)
-            closeChannel(nodeA, firstChannelId, nodeBPubkey)
-            waitForBalance(nodeA, assetId, 900uL, 180L)
-            waitForBalance(nodeBReady, assetId, 100uL, 180L)
+            val firstClose = closeChannel(nodeA, firstChannelId, nodeBPubkey)
+            waitForClosedChannelBalance(nodeA, assetId, 900uL, 180L, firstClose)
+            waitForClosedChannelBalance(nodeBReady, assetId, 100uL, 180L, firstClose)
 
             val secondOpen = nodeA.openchannel(
                 SdkOpenChannelRequest(
@@ -473,9 +517,9 @@ class MultiOpenCloseTest {
             keysend(nodeA, nodeBPubkey, null, assetId, 100u)
 
             val secondChannelId = nodeA.getChannelId(secondOpen.temporaryChannelId)
-            closeChannel(nodeA, secondChannelId, nodeBPubkey)
-            waitForBalance(nodeA, assetId, 800uL, 180L)
-            waitForBalance(nodeBReady, assetId, 200uL, 180L)
+            val secondClose = closeChannel(nodeA, secondChannelId, nodeBPubkey)
+            waitForClosedChannelBalance(nodeA, assetId, 800uL, 180L, secondClose)
+            waitForClosedChannelBalance(nodeBReady, assetId, 200uL, 180L, secondClose)
 
             val recipientIdA = rgbInvoice(nodeCReady)
             sendRgb(nodeA, assetId, recipientIdA, 700u)

@@ -188,9 +188,9 @@ fn openchannel_push_asset_amount() {
         assert_eq!(node_b_channel.asset_local_amount, Some(300));
         assert_eq!(node_b_channel.asset_remote_amount, Some(300));
 
-        close_channel(&node_a, partial_channel_id, node_b_pubkey);
-        wait_for_balance(&node_a, &asset_id, 700, Duration::from_secs(70));
-        wait_for_balance(&node_b, &asset_id, 300, Duration::from_secs(70));
+        let closed = close_channel(&node_a, partial_channel_id, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 700, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 300, Duration::from_secs(70), &closed);
 
         let full_push_channel = node_a
             .openchannel(SdkOpenChannelRequest {
@@ -308,9 +308,9 @@ fn openchannel_push_asset_amount() {
         assert_eq!(node_b_channel.asset_local_amount, Some(500));
         assert_eq!(node_b_channel.asset_remote_amount, Some(100));
 
-        close_channel(&node_a, full_channel_id, node_b_pubkey);
-        wait_for_balance(&node_a, &asset_id, 200, Duration::from_secs(70));
-        wait_for_balance(&node_b, &asset_id, 800, Duration::from_secs(70));
+        let closed = close_channel(&node_a, full_channel_id, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 200, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 800, Duration::from_secs(70), &closed);
 
         let recipient_id = crate::helpers::rgb_invoice(
             &node_c,

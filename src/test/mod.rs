@@ -853,7 +853,26 @@ async fn check_payment_status_by_type(
     None
 }
 
-async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: &str, force: bool) {
+#[derive(Clone, Debug)]
+struct ClosedChannelContext {
+    funding_txid: Option<String>,
+    channel_id: String,
+}
+
+async fn close_channel(
+    node_address: SocketAddr,
+    channel_id: &str,
+    peer_pubkey: &str,
+    force: bool,
+) -> ClosedChannelContext {
+    let closed = ClosedChannelContext {
+        funding_txid: list_channels(node_address)
+            .await
+            .into_iter()
+            .find(|channel| channel.channel_id == channel_id)
+            .and_then(|channel| channel.funding_txid),
+        channel_id: channel_id.to_owned(),
+    };
     println!(
         "{}closing channel {channel_id} from node {node_address}",
         if force { "force-" } else { "cooperatively " }
@@ -880,7 +899,13 @@ async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let channels = list_channels(node_address).await;
-        if !channels.iter().any(|c| c.channel_id == channel_id) {
+        if !channels.iter().any(|c| c.channel_id == channel_id)
+            && (closed.funding_txid.is_none() || !observed_channel_sweeps(&closed).await.is_empty())
+        {
+            assert!(
+                (OffsetDateTime::now_utc() - t_0).as_seconds_f32() <= 30.0,
+                "channel closing broadcast exceeded its deadline"
+            );
             let block_num = match force {
                 true => 144,
                 false => 6,
@@ -892,6 +917,7 @@ async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: 
             panic!("channel is taking too long to close")
         }
     }
+    closed
 }
 
 // Waits until the channel's funding output is spent by a confirmed tx
@@ -3139,6 +3165,68 @@ async fn wait_for_balance(node_address: SocketAddr, asset_id: &str, expected_bal
             panic!("balance ({balance}) is not becoming the expected one ({expected_balance})");
         }
         refresh_transfers(node_address).await;
+    }
+}
+
+// Only explicit closed-channel accounting waits advance observed sweep confirmations.
+// Generic balance waits deliberately preserve unconfirmed receive/funding semantics.
+async fn observed_channel_sweeps(closed: &ClosedChannelContext) -> Vec<String> {
+    let funding_txid = closed
+        .funding_txid
+        .clone()
+        .expect("closed-channel settlement requires Bitcoin funding");
+    let channel_id = closed.channel_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("python3")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("test/channel_sweep_candidates.py"))
+            .args([funding_txid, channel_id])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("read observed channel sweep candidates");
+        assert!(
+            output.status.success(),
+            "channel sweep detector failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let candidates: Vec<String> = serde_json::from_slice(&output.stdout)
+            .expect("sweep detector must return a JSON txid array");
+        for txid in &candidates {
+            let parsed = bitcoin::Txid::from_str(txid).expect("canonical sweep transaction ID");
+            assert_eq!(parsed.to_string(), *txid);
+        }
+        candidates
+    })
+    .await
+    .unwrap()
+}
+
+async fn wait_for_closed_channel_balance(
+    node_address: SocketAddr,
+    asset_id: &str,
+    expected_balance: u64,
+    closed: &ClosedChannelContext,
+) {
+    assert!(
+        closed.funding_txid.is_some(),
+        "closed-channel settlement requires Bitcoin funding"
+    );
+    let start = OffsetDateTime::now_utc();
+    loop {
+        refresh_transfers(node_address).await;
+        let balance = asset_balance_spendable(node_address, asset_id).await;
+        if balance == expected_balance {
+            return;
+        }
+        assert!(
+            (OffsetDateTime::now_utc() - start).as_seconds_f32() <= 70.0,
+            "closed-channel balance ({balance}) did not become {expected_balance}"
+        );
+        let candidates = observed_channel_sweeps(closed).await;
+        if !candidates.is_empty() {
+            println!("confirming observed closed-channel sweeps: {candidates:?}");
+            mine(false);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 

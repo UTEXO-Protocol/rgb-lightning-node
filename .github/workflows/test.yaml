@@ -149,6 +149,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
+      - name: Test read-only channel sweep fixture admission
+        run: python3 -m unittest discover -s test -p test_channel_sweep_candidates.py -v
       - name: Start regtest services
         run: ./regtest.sh start
       - name: Run lib_sdk tests

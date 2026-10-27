@@ -95,9 +95,9 @@ fn close_force_standard() {
         // Mirrors the original test to avoid racing an outdated commitment TX.
         sleep(Duration::from_secs(5));
 
-        close_channel_with_force(&node_a, channel_id, node_b_pubkey, true);
-        wait_for_balance(&node_a, &asset_id, 900, Duration::from_secs(70));
-        wait_for_balance(&node_b, &asset_id, 100, Duration::from_secs(70));
+        let closed = close_channel_with_force(&node_a, channel_id, node_b_pubkey, true);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 900, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 100, Duration::from_secs(70), &closed);
 
         let recipient_id = crate::helpers::rgb_invoice(
             &node_c,

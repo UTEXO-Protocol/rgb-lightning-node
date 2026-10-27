@@ -107,6 +107,29 @@ pub fn enable_private_forwarding_for_tests(node: &crate::SdkNode) {
     lightning.channel_manager.set_current_config(config);
 }
 
+/// Read exact LDK HTLC state for a settled-payment integration fixture.
+/// This test-utils-only query never treats a missing/locked channel as quiescent.
+#[cfg(feature = "uniffi")]
+pub fn channel_has_inflight_htlcs_for_tests(
+    node: &crate::SdkNode,
+    channel_id: lightning::ln::types::ChannelId,
+) -> Result<bool, String> {
+    let state = node.handle.app_state();
+    let unlocked =
+        crate::runtime::block_on(async { state.get_unlocked_app_state().await.as_ref().cloned() })
+            .ok_or_else(|| "test node is locked".to_string())?;
+    let lightning = unlocked.lightning().map_err(|error| error.to_string())?;
+    let channel = lightning
+        .channel_manager
+        .list_channels()
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id)
+        .ok_or_else(|| "test channel is missing".to_string())?;
+    Ok(channel.has_inflight_htlcs
+        || !channel.pending_inbound_htlcs.is_empty()
+        || !channel.pending_outbound_htlcs.is_empty())
+}
+
 pub fn node_handle_from_mock_state_for_tests(state: &TestAppState) -> NodeHandle {
     NodeHandle::from_app_state(state.0.clone())
 }

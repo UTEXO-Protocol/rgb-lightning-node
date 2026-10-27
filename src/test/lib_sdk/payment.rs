@@ -372,9 +372,9 @@ fn success() {
         assert_eq!(chan_1.local_balance_sat, chan_1_before.local_balance_sat);
         assert_eq!(chan_2.local_balance_sat, chan_2_before.local_balance_sat);
 
-        close_channel(&node_a, channel_id, node_b_pubkey);
-        wait_for_balance(&node_a, &asset_id, 950, Duration::from_secs(70));
-        wait_for_balance(&node_b, &asset_id, 50, Duration::from_secs(70));
+        let closed = close_channel(&node_a, channel_id, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 950, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 50, Duration::from_secs(70), &closed);
 
         let recipient_id = crate::helpers::rgb_invoice(
             &node_c,
