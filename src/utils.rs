@@ -1030,26 +1030,33 @@ mod utils_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn restored_database_pools_support_synchronous_password_reads_on_one_worker() {
-        let directory = tempfile::tempdir().unwrap();
-        let password = "restore-runtime-test-password";
-        let mnemonic = Mnemonic::from_entropy(&[7; 32]).unwrap();
-        let initial = open_database_pool(directory.path()).unwrap();
-        crate::runtime::block_on(Migrator::up(&initial, None)).unwrap();
-        encrypt_and_save_mnemonic(password.to_string(), mnemonic.to_string(), &initial).unwrap();
-        crate::runtime::block_on(initial.close()).unwrap();
+        // Execute the restore flow on the sole request worker, rather than the test's
+        // block_on entry thread, so a connection return cannot hide on a free worker.
+        tokio::spawn(async {
+            let directory = tempfile::tempdir().unwrap();
+            let password = "restore-runtime-test-password";
+            let mnemonic = Mnemonic::from_entropy(&[7; 32]).unwrap();
+            let initial = open_database_pool(directory.path()).unwrap();
+            crate::runtime::block_on(Migrator::up(&initial, None)).unwrap();
+            encrypt_and_save_mnemonic(password.to_string(), mnemonic.to_string(), &initial)
+                .unwrap();
+            crate::runtime::block_on(initial.close()).unwrap();
 
-        // Match restore's staged validation and then its replacement pool. Do not yield the
-        // request worker between opening and the synchronous read: this is the ordering that
-        // stranded SeaORM's connection-return task when pool creation used the request runtime.
-        for _ in 0..2 {
-            let pool = open_database_pool(directory.path()).unwrap();
-            assert!(check_password_validity(password, &pool).unwrap() == mnemonic);
-            assert!(matches!(
-                check_password_validity("incorrect-password", &pool),
-                Err(APIError::WrongPassword)
-            ));
-            crate::runtime::block_on(pool.close()).unwrap();
-        }
+            // Match restore's staged validation and then its replacement pool. Do not yield the
+            // request worker between opening and the synchronous read: this is the ordering that
+            // stranded SeaORM's connection-return task when pool creation used the request runtime.
+            for _ in 0..2 {
+                let pool = open_database_pool(directory.path()).unwrap();
+                assert!(check_password_validity(password, &pool).unwrap() == mnemonic);
+                assert!(matches!(
+                    check_password_validity("incorrect-password", &pool),
+                    Err(APIError::WrongPassword)
+                ));
+                crate::runtime::block_on(pool.close()).unwrap();
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
