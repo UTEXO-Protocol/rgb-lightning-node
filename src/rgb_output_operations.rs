@@ -345,12 +345,15 @@ fn colored_output_count(
 ) -> Result<u8, APIError> {
     use bitcoin::bip32::ChildNumber;
     use rgb_lib::bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey};
-    let descriptor: Descriptor<DescriptorPublicKey> = wallet
-        .get_descriptors()
-        .colored
-        .parse()
-        .map_err(|_| journal_error())?;
-    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    // A mnemonic-backed RGB wallet exposes a secret-bearing descriptor, whereas an external
+    // signer's watch-only wallet exposes an xpub descriptor. Normalize both through miniscript's
+    // maintained parser, retaining only its public descriptor. Never log or use the key map to sign.
+    let (descriptor, _) = Descriptor::<DescriptorPublicKey>::parse_descriptor(
+        &secp,
+        &wallet.get_descriptors().colored,
+    )
+    .map_err(|_| journal_error())?;
     let mut count = 0u8;
     for (output, metadata) in psbt.unsigned_tx.output.iter().zip(&psbt.outputs) {
         let mut indices = HashSet::from([0]);

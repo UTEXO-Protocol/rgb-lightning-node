@@ -168,6 +168,131 @@ fn store() -> (tempfile::TempDir, OutputStore) {
     let store = OutputStore::new(directory.path().to_path_buf());
     (directory, store)
 }
+
+/// Build an actual BDK PSBT with the same public/private descriptors and output-origin metadata
+/// as native RGB split construction. Its local graph is synthetic; no network, funding or signer
+/// fallback is involved, and every wallet uses freshly generated test keys.
+fn native_colored_psbt(
+    private_keys: bool,
+    witness_version: rgb_lib::keys::WitnessVersion,
+) -> (tempfile::TempDir, rgb_lib::wallet::Wallet, Psbt) {
+    use rgb_lib::{
+        bdk_wallet::{KeychainKind, Wallet as BdkWallet},
+        keys::generate_keys,
+        wallet::{DatabaseType, SinglesigKeys, Wallet, WalletData},
+        AssetSchema, BitcoinNetwork,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let keys = generate_keys(BitcoinNetwork::Regtest, witness_version);
+    let wallet = Wallet::new(
+        WalletData {
+            data_dir: directory.path().to_string_lossy().into(),
+            bitcoin_network: BitcoinNetwork::Regtest,
+            database_type: DatabaseType::Sqlite,
+            max_allocations_per_utxo: 1,
+            supported_schemas: vec![AssetSchema::Nia],
+        },
+        if private_keys {
+            SinglesigKeys::from_keys(&keys, None)
+        } else {
+            SinglesigKeys::from_keys_no_mnemonic(&keys, None)
+        },
+    )
+    .unwrap();
+    let descriptors = wallet.get_descriptors();
+    let mut bdk = BdkWallet::create(descriptors.colored, descriptors.vanilla)
+        .network(bitcoin::Network::Regtest)
+        .create_wallet_no_persist()
+        .unwrap();
+    let funding = Transaction {
+        version: Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::new(Txid::from_byte_array([1; 32]), 0),
+            ..Default::default()
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(200_000),
+            script_pubkey: bdk
+                .reveal_next_address(KeychainKind::Internal)
+                .script_pubkey(),
+        }],
+    };
+    let input = OutPoint::new(funding.compute_txid(), 0);
+    bdk.apply_unconfirmed_txs([(funding, 1)]);
+    let colored: Vec<_> = bdk.reveal_addresses_to(KeychainKind::External, 7).collect();
+    assert_eq!(colored.len(), 8);
+    let foreign = ScriptBuf::from_bytes([vec![0x51, 0x20], vec![9; 32]].concat());
+    let mut builder = bdk.build_tx();
+    builder
+        .add_utxo(input)
+        .unwrap()
+        .manually_selected_only()
+        .fee_rate(bitcoin::FeeRate::from_sat_per_vb_u32(2))
+        .add_recipient(colored[0].script_pubkey(), Amount::from_sat(20_000))
+        .add_recipient(colored[7].script_pubkey(), Amount::from_sat(20_000))
+        .add_recipient(foreign, Amount::from_sat(20_000));
+    (directory, wallet, builder.finish().unwrap())
+}
+
+#[test]
+fn native_colored_output_count_admits_private_and_public_descriptors() {
+    use rgb_lib::bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey};
+    use rgb_lib::keys::WitnessVersion;
+    for private_keys in [false, true] {
+        for witness in [WitnessVersion::Taproot, WitnessVersion::SegWitV0] {
+            let (_directory, wallet, psbt) = native_colored_psbt(private_keys, witness);
+            // This is the exact former parsing assumption. It deterministically rejects the
+            // secret-bearing descriptor used by the REST daemon's internal-mnemonic profile.
+            assert_eq!(
+                wallet
+                    .get_descriptors()
+                    .colored
+                    .parse::<Descriptor<DescriptorPublicKey>>()
+                    .is_ok(),
+                !private_keys
+            );
+            assert_eq!(colored_output_count(&wallet, &psbt, 20_000).unwrap(), 2);
+            assert!(psbt.outputs.iter().any(|output| {
+                output.bip32_derivation.values().any(|(_, path)| {
+                    path.as_ref().last() == Some(&bitcoin::bip32::ChildNumber::Normal { index: 7 })
+                }) || output.tap_key_origins.values().any(|(_, (_, path))| {
+                    path.as_ref().last() == Some(&bitcoin::bip32::ChildNumber::Normal { index: 7 })
+                })
+            }));
+        }
+    }
+}
+
+#[test]
+fn native_colored_output_count_verifies_scripts_amounts_and_origin_indices() {
+    use rgb_lib::keys::WitnessVersion;
+    let (_directory, wallet, mut psbt) = native_colored_psbt(false, WitnessVersion::Taproot);
+    let colored = psbt
+        .outputs
+        .iter()
+        .position(|output| {
+            output.tap_key_origins.values().any(|(_, (_, path))| {
+                path.as_ref().last() == Some(&bitcoin::bip32::ChildNumber::Normal { index: 7 })
+            })
+        })
+        .unwrap();
+    let foreign_script = ScriptBuf::from_bytes([vec![0x51, 0x20], vec![9; 32]].concat());
+    let foreign = psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .position(|output| output.script_pubkey == foreign_script)
+        .unwrap();
+    psbt.outputs[foreign] = psbt.outputs[colored].clone(); // spoofed metadata is not ownership
+    assert_eq!(colored_output_count(&wallet, &psbt, 20_000).unwrap(), 2);
+    psbt.unsigned_tx.output[colored].value = Amount::from_sat(19_999);
+    assert!(colored_output_count(&wallet, &psbt, 20_000).is_err());
+    psbt.unsigned_tx.output[colored].value = Amount::from_sat(20_000);
+    psbt.outputs[colored].tap_key_origins.clear();
+    assert_eq!(colored_output_count(&wallet, &psbt, 20_000).unwrap(), 1);
+}
+
 #[test]
 fn prepare_is_durable_idempotent_and_reports_actual_fee_and_count() {
     let (directory, store) = store();
