@@ -172,6 +172,28 @@ async fn check_unlocked(
     }
 }
 
+/// Retain session admission through the complete SDK mutation, even if its caller goes away.
+/// Blocking workers cannot be cancelled by dropping their join handles. The guard therefore
+/// belongs to the uncancellable owner, not the caller or an individual native worker.
+async fn with_uncancellable_wallet_session<T, F, Fut>(
+    state: Arc<AppState>,
+    operation: F,
+) -> Result<T, APIError>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<crate::utils::UnlockedAppState>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, APIError>> + Send + 'static,
+{
+    crate::utils::no_cancel(async move {
+        let guard = check_unlocked(&state).await?;
+        let wallet = Arc::clone(guard.as_ref().unwrap());
+        let result = operation(wallet).await;
+        drop(guard);
+        result
+    })
+    .await
+}
+
 fn update_changing_state(state: &Arc<AppState>, updated: bool) {
     let mut changing_state = state.changing_state.lock().unwrap();
     *changing_state = updated;
@@ -2034,23 +2056,23 @@ pub(crate) async fn send_rgb(
         donation,
         get_current_timestamp(),
     )?;
-    let guard = check_unlocked(&state).await?;
-    let unlocked_state = guard.as_ref().unwrap();
+    with_uncancellable_wallet_session(state, move |wallet| async move {
+        let send_result = crate::rgb_invoice::send_recipients(
+            wallet,
+            recipient_map,
+            donation,
+            fee_rate,
+            min_confirmations,
+            operation_expiration,
+        )
+        .await?;
 
-    let send_result = crate::rgb_invoice::send_recipients(
-        unlocked_state.clone(),
-        recipient_map,
-        donation,
-        fee_rate,
-        min_confirmations,
-        operation_expiration,
-    )
-    .await?;
-
-    Ok(SendRgbData {
-        txid: send_result.txid,
-        batch_transfer_idx: send_result.batch_transfer_idx,
+        Ok(SendRgbData {
+            txid: send_result.txid,
+            batch_transfer_idx: send_result.batch_transfer_idx,
+        })
     })
+    .await
 }
 
 pub(crate) async fn send_rgb_from_groups(
@@ -3088,9 +3110,6 @@ pub(crate) async fn rgb_invoice(
     state: Arc<AppState>,
     request: RgbInvoiceRequestData,
 ) -> Result<RgbInvoiceData, APIError> {
-    let guard = check_unlocked(&state).await?;
-    let unlocked_state = guard.as_ref().unwrap();
-
     let assignment = match request.assignment_kind {
         Some(kind) => rgb_assignment_from_kind(kind, request.assignment_amount)?,
         None => RgbLibAssignment::Any,
@@ -3099,36 +3118,38 @@ pub(crate) async fn rgb_invoice(
     let expiration_timestamp =
         crate::bfa_values::invoice_expiration(request.duration_seconds, get_current_timestamp())
             .map_err(APIError::InvalidRequest)?;
-    let wallet_state = Arc::clone(unlocked_state);
-    let receive_data = tokio::task::spawn_blocking(move || {
-        let endpoints = vec![wallet_state.proxy_endpoint.clone()];
-        if request.witness {
-            wallet_state.rgb_witness_receive(
-                request.asset_id,
-                assignment,
-                expiration_timestamp,
-                endpoints,
-                request.min_confirmations,
-            )
-        } else {
-            wallet_state.rgb_blind_receive(
-                request.asset_id,
-                assignment,
-                expiration_timestamp,
-                endpoints,
-                request.min_confirmations,
-            )
-        }
+    with_uncancellable_wallet_session(state, move |wallet| async move {
+        let receive_data = tokio::task::spawn_blocking(move || {
+            let endpoints = vec![wallet.proxy_endpoint.clone()];
+            if request.witness {
+                wallet.rgb_witness_receive(
+                    request.asset_id,
+                    assignment,
+                    expiration_timestamp,
+                    endpoints,
+                    request.min_confirmations,
+                )
+            } else {
+                wallet.rgb_blind_receive(
+                    request.asset_id,
+                    assignment,
+                    expiration_timestamp,
+                    endpoints,
+                    request.min_confirmations,
+                )
+            }
+        })
+        .await
+        .map_err(|_| APIError::Unexpected("RGB receive task failed".into()))??;
+
+        Ok(RgbInvoiceData {
+            recipient_id: receive_data.recipient_id,
+            invoice: receive_data.invoice,
+            expiration_timestamp: Some(receive_data.expiration_timestamp as i64),
+            batch_transfer_idx: receive_data.batch_transfer_idx,
+        })
     })
     .await
-    .map_err(|_| APIError::Unexpected("RGB receive task failed".into()))??;
-
-    Ok(RgbInvoiceData {
-        recipient_id: receive_data.recipient_id,
-        invoice: receive_data.invoice,
-        expiration_timestamp: Some(receive_data.expiration_timestamp as i64),
-        batch_transfer_idx: receive_data.batch_transfer_idx,
-    })
 }
 
 pub(crate) async fn open_channel(
@@ -4934,6 +4955,280 @@ mod tests {
     use std::sync::{Arc, Mutex, RwLock};
     use tokio::sync::Mutex as TokioMutex;
     use tokio_util::sync::CancellationToken;
+
+    // This fixture uses real watch-only wallet construction and a genuine Online handle
+    // admitted against the existing loopback Electrum fixture. No funded chain, external
+    // service, private wallet keys, fabricated Online ID or Lightning runtime is involved.
+    #[cfg(feature = "electrum")]
+    async fn wallet_session_fixture() -> (Arc<AppState>, crate::mainnet_startup_tests::Indexer) {
+        let state = mock_locked_state();
+        let indexer = crate::mainnet_startup_tests::Indexer::new(bitcoin::Network::Regtest).await;
+        let indexer_url = indexer.url.clone();
+        let rgb_directory = state.static_state.storage_dir_path.join("rgb-session");
+        std::fs::create_dir(&rgb_directory).unwrap();
+        let (native, online) = tokio::task::spawn_blocking(move || {
+            let keys = generate_keys(BitcoinNetwork::Regtest, WitnessVersion::Taproot);
+            let mut wallet = rgb_lib::wallet::Wallet::new(
+                rgb_lib::wallet::WalletData {
+                    data_dir: rgb_directory.to_str().unwrap().to_owned(),
+                    bitcoin_network: BitcoinNetwork::Regtest,
+                    database_type: rgb_lib::wallet::DatabaseType::Sqlite,
+                    max_allocations_per_utxo: 1,
+                    supported_schemas: vec![RgbLibAssetSchema::Nia],
+                },
+                rgb_lib::wallet::SinglesigKeys::from_keys_no_mnemonic(&keys, None),
+            )
+            .unwrap();
+            assert!(wallet.get_keys().mnemonic.is_none());
+            let online = wallet
+                .go_online(lightning::rgb_utils::rgb_online_options(
+                    indexer_url,
+                    HashMap::new(),
+                    false,
+                ))
+                .unwrap();
+            (wallet, online)
+        })
+        .await
+        .unwrap();
+        let keys = native.get_keys();
+        let mut bootstrap = sample_bootstrap();
+        bootstrap.identity.master_fingerprint = keys.master_fingerprint;
+        bootstrap.identity.account_xpub_vanilla = keys.account_xpub_vanilla;
+        bootstrap.identity.account_xpub_colored = keys.account_xpub_colored;
+        let node_id = PublicKey::from_str(&bootstrap.identity.node_id).unwrap();
+        let backend = Arc::new(TestBootstrapBackend::new(bootstrap.clone()));
+        let attachment = attach_external_signer_transport(Arc::new(
+            InProcessExternalSignerTransport::new(backend),
+        ))
+        .unwrap();
+        let external_signer =
+            Arc::new(crate::signer::ExternalSigner::from_attachment(&attachment).unwrap());
+        let common = crate::utils::CommonState {
+            config: Arc::clone(&state.static_state.config),
+            signer: Arc::new(crate::signer::DynRlnSigner::from_external(Arc::clone(
+                &external_signer,
+            ))),
+            entropy_source: Arc::new(crate::signer::SystemEntropySource),
+            kv_store: Arc::new(crate::synced_kv_store::SyncedKvStore::local_only(Arc::new(
+                crate::kv_store::SeaOrmKvStore::from_connection(state.db()),
+            ))),
+            rgb_wallet_wrapper: Arc::new(crate::rgb::RgbLibWalletWrapper::new(
+                Arc::new(Mutex::new(native)),
+                online,
+            )),
+            proxy_endpoint: String::new(),
+            external_signer_mode: true,
+            external_signer: Some(external_signer),
+            external_node_id: Some(bootstrap.identity.node_id),
+            node_id,
+            indexer_url: indexer.url.clone(),
+            #[cfg(feature = "vss")]
+            persistence_shutdown: CancellationToken::new(),
+            #[cfg(feature = "vss")]
+            persistence_worker: Mutex::new(None),
+        };
+        *state.unlocked_app_state.lock().await = Some(Arc::new(crate::utils::UnlockedAppState {
+            common: Arc::new(common),
+            lightning: None,
+        }));
+        (state, indexer)
+    }
+
+    #[cfg(feature = "electrum")]
+    async fn close_wallet_session_fixture(state: Arc<AppState>) {
+        crate::routes::lock(axum::extract::State(Arc::clone(&state)))
+            .await
+            .unwrap();
+        let directory = state.static_state.storage_dir_path.clone();
+        crate::runtime::block_on(state.db().close_by_ref()).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "electrum")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sdk_wallet_session_owner_finishes_pipeline_after_caller_abort_without_overlap() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+
+        let (state, _indexer) = wallet_session_fixture().await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let pipeline_events = Arc::clone(&events);
+        // Exercise the production seam used by receive and the complete RGB send.
+        // Real address mutations stand in for its admitted worker stages; this is
+        // session/cancellation qualification, not funded transaction qualification.
+        let caller = tokio::spawn(with_uncancellable_wallet_session(
+            Arc::clone(&state),
+            move |wallet| async move {
+                let mut first_gate = Some((entered_tx, resume_rx));
+                for stage in ["begin", "sign", "end"] {
+                    let gate = first_gate.take();
+                    let events = Arc::clone(&pipeline_events);
+                    wallet_task(&wallet, move |wallet| {
+                        events.lock().unwrap().push(stage);
+                        if let Some((entered, resume)) = gate {
+                            entered.send(()).unwrap();
+                            resume.recv_timeout(Duration::from_secs(10)).unwrap();
+                        }
+                        wallet
+                            .rgb_wallet_wrapper
+                            .get_rgb_wallet()
+                            .get_address()
+                            .map_err(APIError::from)
+                    })
+                    .await?;
+                }
+                finished_tx.send(()).unwrap();
+                Ok(())
+            },
+        ));
+        timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(state.unlocked_app_state.try_lock().is_err());
+
+        // Poll actual session admission while the original worker is held. It
+        // cannot hand a second mutation an admitted wallet after caller abort.
+        let mut admission = Box::pin(check_unlocked(&state));
+        poll_fn(|cx| {
+            assert!(admission.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(admission);
+        let followup_events = Arc::clone(&events);
+        let followup = tokio::spawn(with_uncancellable_wallet_session(
+            Arc::clone(&state),
+            move |wallet| async move {
+                wallet_task(&wallet, move |wallet| {
+                    assert_eq!(*followup_events.lock().unwrap(), ["begin", "sign", "end"]);
+                    followup_events.lock().unwrap().push("followup");
+                    wallet
+                        .rgb_wallet_wrapper
+                        .get_rgb_wallet()
+                        .get_address()
+                        .map_err(APIError::from)
+                })
+                .await
+            },
+        ));
+        assert_eq!(*events.lock().unwrap(), ["begin"]);
+        resume_tx.send(()).unwrap();
+        timeout(Duration::from_secs(10), finished_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(10), followup)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["begin", "sign", "end", "followup"]
+        );
+        assert!(state.unlocked_app_state.try_lock().is_ok());
+        close_wallet_session_fixture(state).await;
+    }
+
+    #[cfg(feature = "electrum")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sdk_wallet_session_owner_keeps_real_lock_waiting_after_caller_abort() {
+        let (state, _indexer) = wallet_session_fixture().await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_completed = Arc::clone(&completed);
+        let caller = tokio::spawn(with_uncancellable_wallet_session(
+            Arc::clone(&state),
+            move |wallet| async move {
+                wallet_task(&wallet, move |wallet| {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    wallet.rgb_wallet_wrapper.get_rgb_wallet().get_address()?;
+                    worker_completed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+            },
+        ));
+        timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let (lock_started_tx, lock_started_rx) = tokio::sync::oneshot::channel();
+        let locking_state = Arc::clone(&state);
+        let locking = tokio::spawn(async move {
+            lock_started_tx.send(()).unwrap();
+            crate::routes::lock(axum::extract::State(locking_state)).await
+        });
+        lock_started_rx.await.unwrap();
+        assert!(!locking.is_finished());
+        assert!(!*state.changing_state.lock().unwrap());
+        assert!(state.unlocked_app_state.try_lock().is_err());
+        assert!(!completed.load(std::sync::atomic::Ordering::SeqCst));
+        resume_tx.send(()).unwrap();
+        timeout(Duration::from_secs(10), locking)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(state.unlocked_app_state.lock().await.is_none());
+        let directory = state.static_state.storage_dir_path.clone();
+        crate::runtime::block_on(state.db().close_by_ref()).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "electrum")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sdk_wallet_session_owner_releases_admission_after_worker_error_and_panic() {
+        let (state, _indexer) = wallet_session_fixture().await;
+        for panic_worker in [false, true] {
+            let result =
+                with_uncancellable_wallet_session(Arc::clone(&state), move |wallet| async move {
+                    wallet_task(&wallet, move |_wallet| -> Result<(), APIError> {
+                        if panic_worker {
+                            panic!("injected blocking worker failure");
+                        }
+                        Err(APIError::InvalidRequest(
+                            "injected receive rejection".into(),
+                        ))
+                    })
+                    .await
+                })
+                .await;
+            if panic_worker {
+                assert!(matches!(result, Err(APIError::Unexpected(_))));
+            } else {
+                assert!(matches!(result, Err(APIError::InvalidRequest(_))));
+            }
+            assert!(state.unlocked_app_state.try_lock().is_ok());
+            with_uncancellable_wallet_session(Arc::clone(&state), |wallet| async move {
+                wallet_task(&wallet, |wallet| {
+                    wallet
+                        .rgb_wallet_wrapper
+                        .get_rgb_wallet()
+                        .get_address()
+                        .map_err(APIError::from)
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        }
+        close_wallet_session_fixture(state).await;
+    }
 
     // Poll the actual admission helper behind the session mutex; no sleep or spawned-task race.
     #[tokio::test]
