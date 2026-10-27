@@ -749,9 +749,7 @@ pub(crate) fn parse_peer_info(
     Ok((pubkey.unwrap(), peer_addr))
 }
 
-pub(crate) async fn open_database_pool(
-    storage_dir_path: &Path,
-) -> Result<DatabaseConnection, AppError> {
+pub(crate) fn open_database_pool(storage_dir_path: &Path) -> Result<DatabaseConnection, AppError> {
     let db_path = get_db_path(storage_dir_path);
     let connection_string = format!("sqlite:{}?mode=rwc", db_path.display());
     let mut opt = ConnectOptions::new(connection_string);
@@ -761,7 +759,11 @@ pub(crate) async fn open_database_pool(
         .connect_timeout(Duration::from_secs(8))
         .idle_timeout(Duration::from_secs(8))
         .max_lifetime(Duration::from_secs(8));
-    Database::connect(opt).await.map_err(|e| {
+    // RlnDatabase executes synchronous queries on DB_RUNTIME. Pool initialization must run
+    // there too: SeaORM's SQLite version probe returns its connection through a spawned
+    // task. Opening on a request runtime and immediately blocking it for a synchronous
+    // query can otherwise strand that task and exhaust this single-connection pool.
+    crate::runtime::block_on(Database::connect(opt)).map_err(|e| {
         AppError::IO(std::io::Error::other(format!(
             "Database connection failed: {e}"
         )))
@@ -784,7 +786,7 @@ pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppEr
     let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
 
     // Initialize the shared database connection
-    let database = crate::runtime::block_on(open_database_pool(&args.storage_dir_path))?;
+    let database = open_database_pool(&args.storage_dir_path)?;
     let db_path = get_db_path(&args.storage_dir_path);
 
     crate::runtime::block_on(Migrator::up(&database, None))
@@ -1025,6 +1027,30 @@ mod utils_tests {
     use super::*;
 
     const HASH_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn restored_database_pools_support_synchronous_password_reads_on_one_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let password = "restore-runtime-test-password";
+        let mnemonic = Mnemonic::from_entropy(&[7; 32]).unwrap();
+        let initial = open_database_pool(directory.path()).unwrap();
+        crate::runtime::block_on(Migrator::up(&initial, None)).unwrap();
+        encrypt_and_save_mnemonic(password.to_string(), mnemonic.to_string(), &initial).unwrap();
+        crate::runtime::block_on(initial.close()).unwrap();
+
+        // Match restore's staged validation and then its replacement pool. Do not yield the
+        // request worker between opening and the synchronous read: this is the ordering that
+        // stranded SeaORM's connection-return task when pool creation used the request runtime.
+        for _ in 0..2 {
+            let pool = open_database_pool(directory.path()).unwrap();
+            assert!(check_password_validity(password, &pool).unwrap() == mnemonic);
+            assert!(matches!(
+                check_password_validity("incorrect-password", &pool),
+                Err(APIError::WrongPassword)
+            ));
+            crate::runtime::block_on(pool.close()).unwrap();
+        }
+    }
 
     #[test]
     fn empty_description_with_hash_mints_hash_invoice() {

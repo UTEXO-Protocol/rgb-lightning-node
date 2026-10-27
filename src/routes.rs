@@ -5110,21 +5110,20 @@ pub(crate) async fn restore(
         // Check the backup can be unlocked while the storage dir is still untouched: installing a
         // backup whose mnemonic cannot be read would initialize the node with data it can never
         // open, and both init and restore then refuse to run.
-        let staged_db = open_database_pool(unpacked.dir())
-            .await
-            .map_err(|e| APIError::Unexpected(e.to_string()))?;
+        let staged_db =
+            open_database_pool(unpacked.dir()).map_err(|e| APIError::Unexpected(e.to_string()))?;
         let staged_check = check_password_validity(&payload.password, &staged_db);
-        // drop, never close: the query above ran on the database runtime, so awaiting a close
-        // here would wait on a wakeup that runtime no longer delivers
-        drop(staged_db);
+        // Drive connection return and closure on their owning runtime before the staged
+        // files can be installed or removed. Preserve a validation error over a close error.
+        let staged_close = crate::runtime::block_on(staged_db.close()).map_err(APIError::from);
         staged_check?;
+        staged_close?;
 
         install_backup(&unpacked, &state.static_state.storage_dir_path)?;
 
         // install_backup overwrote the SQLite file under the pre-restore pool;
         // reopen so subsequent queries (including unlock) see the restored data.
         let new_pool = open_database_pool(&state.static_state.storage_dir_path)
-            .await
             .map_err(|e| APIError::Unexpected(e.to_string()))?;
         {
             let mut guard = state.static_state.database.write().unwrap();
