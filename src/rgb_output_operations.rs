@@ -664,6 +664,8 @@ impl OutputStore {
         Ok(())
     }
 
+    // The shared REST module compiles this SDK recovery path; SDK APIs live in the library.
+    #[allow(dead_code)]
     fn recover_submission<B: OutputBackend>(
         &self,
         backend: &B,
@@ -693,6 +695,8 @@ impl OutputStore {
         self.reconcile(backend, record)
     }
 
+    // Called by library SDK output-status/recovery APIs, absent from the REST binary.
+    #[allow(dead_code)]
     pub(crate) fn get<B: OutputBackend>(
         &self,
         backend: &B,
@@ -707,6 +711,8 @@ impl OutputStore {
         Ok(Some(record.operation))
     }
 
+    // Called by library SDK output-status/recovery APIs, absent from the REST binary.
+    #[allow(dead_code)]
     pub(crate) fn list<B: OutputBackend>(
         &self,
         backend: &B,
@@ -744,6 +750,8 @@ impl OutputStore {
         self.write(record)
     }
 
+    // Called by the library SDK's reviewed prebroadcast cancellation API, not standalone REST.
+    #[allow(dead_code)]
     pub(crate) fn cancel<B: OutputBackend>(
         &self,
         backend: &B,

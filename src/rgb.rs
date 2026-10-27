@@ -154,30 +154,6 @@ impl CommonState {
         self.rgb_wallet_wrapper.create_consigments(psbt)
     }
 
-    pub(crate) fn rgb_create_utxos(
-        &self,
-        up_to: bool,
-        num: u8,
-        size: u32,
-        fee_rate: u64,
-        skip_sync: bool,
-    ) -> Result<u8, RgbLibError> {
-        self.rgb_wallet_wrapper
-            .create_utxos(up_to, num, size, fee_rate, skip_sync)
-    }
-
-    pub(crate) fn rgb_create_utxos_begin(
-        &self,
-        up_to: bool,
-        num: u8,
-        size: u32,
-        fee_rate: u64,
-        skip_sync: bool,
-    ) -> Result<String, RgbLibError> {
-        self.rgb_wallet_wrapper
-            .create_utxos_begin(up_to, num, size, fee_rate, skip_sync)
-    }
-
     pub(crate) fn rgb_create_utxos_end(
         &self,
         signed_psbt: String,
@@ -914,43 +890,6 @@ impl RgbLibWalletWrapper {
 
     pub(crate) fn create_consigments(&self, psbt: String) -> Result<(), RgbLibError> {
         self.get_rgb_wallet().create_consignments(psbt)
-    }
-
-    pub(crate) fn create_utxos(
-        &self,
-        up_to: bool,
-        num: u8,
-        size: u32,
-        fee_rate: u64,
-        skip_sync: bool,
-    ) -> Result<u8, RgbLibError> {
-        self.get_rgb_wallet().create_utxos(
-            self.online,
-            up_to,
-            Some(num),
-            Some(size),
-            fee_rate,
-            skip_sync,
-        )
-    }
-
-    pub(crate) fn create_utxos_begin(
-        &self,
-        up_to: bool,
-        num: u8,
-        size: u32,
-        fee_rate: u64,
-        skip_sync: bool,
-    ) -> Result<String, RgbLibError> {
-        self.get_rgb_wallet().create_utxos_begin(
-            self.online,
-            up_to,
-            Some(num),
-            Some(size),
-            fee_rate,
-            skip_sync,
-            false,
-        )
     }
 
     pub(crate) fn create_utxos_end(

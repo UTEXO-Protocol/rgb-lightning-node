@@ -50,7 +50,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing_test::traced_test;
 
-use crate::core_types::asset_link::{AssetLinkRequest, AssetLinkResponse};
+use crate::core_types::asset_link::AssetLinkRequest;
 use crate::core_types::{
     HTLCStatus, LdkChainSync, SwapStatus, FEE_RATE, HTLC_MIN_MSAT, VIRTUAL_HTLC_MIN_MSAT,
 };
@@ -68,23 +68,23 @@ use crate::ldk::{
 use crate::routes::VssClearFenceRequest;
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetFilter, AssetIFA,
-    AssetMetadataRequest, AssetMetadataResponse, AssetNIA, AssetUDA, Assignment, BackupRequest,
-    BtcBalanceRequest, BtcBalanceResponse, CancelHodlInvoiceRequest, ChangePasswordRequest,
-    Channel, ChannelStatus, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest,
-    ConnectPeerRequest, CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse,
-    DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse, DecodeSwapstringRequest,
-    DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
-    FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
-    GetChannelIdResponse, GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest,
-    GetPaymentResponse, GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse,
-    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
-    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse,
-    IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse,
-    KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest,
-    ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse, ListPeersResponse,
-    ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest,
-    ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
-    MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
+    AssetNIA, AssetUDA, Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse,
+    CancelHodlInvoiceRequest, ChangePasswordRequest, Channel, ChannelStatus,
+    ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest, ConnectPeerRequest,
+    CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse, DecodeRGBInvoiceRequest,
+    DecodeRGBInvoiceResponse, DecodeSwapstringRequest, DecodeSwapstringResponse,
+    DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
+    GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
+    GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest, GetPaymentResponse,
+    GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse, InitRequest, InitResponse,
+    InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest,
+    IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse, IssueAssetNIARequest,
+    IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest,
+    KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse,
+    ListChannelsResponse, ListPaymentsResponse, ListPeersResponse, ListSwapsResponse,
+    ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse,
+    ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest,
+    MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
     OpenChannelResponse, Payment, PaymentDirection, PaymentType, Peer, PostAssetMediaResponse,
     ProvideOutOfBandAckRequest, ProvideOutOfBandAckResponse, ProvideOutOfBandConsignmentResponse,
     Recipient, RefreshRequest, RefreshResponse, RestoreRequest, RevokeTokenRequest,
@@ -745,49 +745,8 @@ async fn asset_balance_offchain_outbound(node_address: SocketAddr, asset_id: &st
         .offchain_outbound
 }
 
-async fn asset_metadata(node_address: SocketAddr, asset_id: &str) -> AssetMetadataResponse {
-    let payload = AssetMetadataRequest {
-        asset_id: asset_id.to_string(),
-    };
-    let res = reqwest::Client::new()
-        .post(format!("http://{node_address}/assetmetadata"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    check_response_is_ok(res)
-        .await
-        .json::<AssetMetadataResponse>()
-        .await
-        .unwrap()
-}
-
 async fn asset_balance_spendable(node_address: SocketAddr, asset_id: &str) -> u64 {
     asset_balance(node_address, asset_id).await.spendable
-}
-
-async fn asset_link_create(
-    node_address: SocketAddr,
-    parent_asset_id: &str,
-    child_asset_id: &str,
-) -> AssetLinkResponse {
-    println!("creating asset link for asset {parent_asset_id} on node {node_address}");
-    let payload = AssetLinkRequest {
-        parent_asset_id: parent_asset_id.to_string(),
-        child_asset_id: child_asset_id.to_string(),
-        min_confirmations: 1,
-    };
-    let res = reqwest::Client::new()
-        .post(format!("http://{node_address}/assetlink"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    check_response_is_ok(res)
-        .await
-        .json::<AssetLinkResponse>()
-        .await
-        .unwrap()
 }
 
 async fn backup(node_address: SocketAddr, backup_path: &str, password: &str) {
@@ -1824,27 +1783,6 @@ async fn list_transactions_by_txid(node_address: SocketAddr, txid: &str) -> Vec<
 
 async fn list_unspents(node_address: SocketAddr) -> Vec<Unspent> {
     list_unspents_full(node_address, None, None).await.unspents
-}
-
-async fn list_settled_unspents(node_address: SocketAddr) -> Vec<Unspent> {
-    let payload = ListUnspentsRequest {
-        settled_only: true,
-        skip_sync: false,
-        index_offset: None,
-        max_unspents: None,
-    };
-    let res = reqwest::Client::new()
-        .post(format!("http://{node_address}/listunspents"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    check_response_is_ok(res)
-        .await
-        .json::<ListUnspentsResponse>()
-        .await
-        .unwrap()
-        .unspents
 }
 
 async fn list_unspents_full(
