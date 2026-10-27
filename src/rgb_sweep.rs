@@ -1,6 +1,7 @@
 //! Durable preparation for RGB sweeps. Apply the fascia only after the sweep is confirmed.
 
 use crate::rgb_compat::ColorPrepareResult;
+use bincode::Options;
 use bitcoin::io;
 use lightning::util::persist::KVStoreSync;
 use rgb_lib::{bitcoin::psbt::Psbt, ConsignmentExt, FileContent};
@@ -8,8 +9,65 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, str::FromStr};
 
 const PRIMARY_NAMESPACE: &str = "rgb_sweeps";
+const MAX_RECEIPT_BYTES: u64 = 32 * 1024 * 1024;
 
-#[derive(Debug, Serialize, Deserialize)]
+// Match bincode::serialize's fixed-width wire encoding while rejecting oversized
+// or trailing data. Both byte admission and decoder limits precede allocation.
+fn receipt_options() -> impl bincode::Options {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_RECEIPT_BYTES)
+        .reject_trailing_bytes()
+}
+
+// Admission of the fixed bincode layout uses checked offsets without allocation,
+// before serde can reserve a vector using an attacker-controlled element count.
+fn admit_receipt_bytes(bytes: &[u8]) -> Result<(), String> {
+    let invalid = || "invalid or oversized prepared RGB sweep receipt".to_string();
+    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(invalid());
+    }
+    fn take<'a>(bytes: &'a [u8], position: &mut usize, length: usize) -> Result<&'a [u8], String> {
+        let end = position
+            .checked_add(length)
+            .ok_or_else(|| "sweep receipt length overflow".to_string())?;
+        let slice = bytes
+            .get(*position..end)
+            .ok_or_else(|| "truncated sweep receipt".to_string())?;
+        *position = end;
+        Ok(slice)
+    }
+    fn length(bytes: &[u8], position: &mut usize, max: usize) -> Result<usize, String> {
+        let raw: u64 = u64::from_le_bytes(
+            take(bytes, position, 8)?
+                .try_into()
+                .map_err(|_| "invalid sweep receipt length".to_string())?,
+        );
+        let value =
+            usize::try_from(raw).map_err(|_| "sweep receipt length overflow".to_string())?;
+        if value == 0 || value > max {
+            return Err("invalid sweep receipt component bound".into());
+        }
+        Ok(value)
+    }
+    let mut position = 0usize;
+    let psbt_bytes = length(bytes, &mut position, 16 * 1024 * 1024)?;
+    take(bytes, &mut position, psbt_bytes)?;
+    take(bytes, &mut position, 4)?; // i32 batch identity, validated against the native record.
+    let proofs = length(bytes, &mut position, 64)?;
+    for _ in 0..proofs {
+        let asset_bytes = length(bytes, &mut position, 256)?;
+        take(bytes, &mut position, asset_bytes)?;
+        let proof_bytes = length(bytes, &mut position, 16 * 1024 * 1024)?;
+        take(bytes, &mut position, proof_bytes)?;
+    }
+    if position != bytes.len() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct PreparedRgbSweep {
     pub(crate) psbt: String,
     pub(crate) batch_transfer_idx: i32,
@@ -38,18 +96,53 @@ impl PreparedRgbSweep {
         Ok(psbt.unsigned_tx.compute_txid().to_string())
     }
 
+    pub(crate) fn validate_then_mark_handoff(
+        &self,
+        canonical: &Self,
+        mark: impl FnOnce(i32, String) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.batch_transfer_idx != canonical.batch_transfer_idx || self.psbt != canonical.psbt {
+            return Err("prepared RGB sweep does not match its canonical native PSBT/batch".into());
+        }
+        fn proofs(
+            receipts: &[(String, Vec<u8>)],
+        ) -> Result<std::collections::HashMap<&str, &[u8]>, String> {
+            let mut out = std::collections::HashMap::new();
+            for (asset, bytes) in receipts {
+                if out.insert(asset.as_str(), bytes.as_slice()).is_some() {
+                    return Err("prepared RGB sweep has duplicate proof asset IDs".into());
+                }
+            }
+            Ok(out)
+        }
+        if proofs(&self.consignments)? != proofs(&canonical.consignments)? {
+            return Err("prepared RGB sweep does not match its canonical native proofs".into());
+        }
+        mark(self.batch_transfer_idx, self.txid()?)
+    }
+
     pub(crate) fn read(store: &impl KVStoreSync, key: &str) -> Result<Option<Self>, String> {
         match store.read(PRIMARY_NAMESPACE, "", key) {
-            Ok(bytes) => bincode::deserialize(&bytes)
-                .map(Some)
-                .map_err(|e| format!("invalid prepared RGB sweep {key}: {e}")),
+            Ok(bytes) => {
+                if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+                    return Err(format!("prepared RGB sweep {key} exceeds its size bound"));
+                }
+                admit_receipt_bytes(&bytes)?;
+                receipt_options()
+                    .deserialize(&bytes)
+                    .map(Some)
+                    .map_err(|e| format!("invalid prepared RGB sweep {key}: {e}"))
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("cannot read prepared RGB sweep {key}: {e}")),
         }
     }
 
     pub(crate) fn persist(&self, store: &impl KVStoreSync, key: &str) -> Result<(), String> {
-        let bytes = bincode::serialize(self).map_err(|e| e.to_string())?;
+        let bytes = receipt_options()
+            .serialize(self)
+            .map_err(|e| e.to_string())?;
+        admit_receipt_bytes(&bytes)?;
         store
             .write(PRIMARY_NAMESPACE, "", key, bytes)
             .map_err(|e| format!("cannot persist prepared RGB sweep {key}: {e}"))
@@ -102,6 +195,33 @@ pub(crate) fn find_prepared_sweep(
     }
     if matching.is_none() && unreadable {
         return Err("repair unreadable RGB sweep receipts before preparing a new sweep".into());
+    }
+    Ok(matching)
+}
+
+// Match library-owned orphan preparations using the same exact-input rule as KV.
+// A protected operation can be handed off again only with its original PSBT/proofs.
+pub(crate) fn find_prepared_sweep_in_records(
+    records: Vec<PreparedRgbSweep>,
+    inputs: &HashSet<bitcoin::OutPoint>,
+) -> Result<Option<PreparedRgbSweep>, String> {
+    let mut matching = None;
+    for prepared in records {
+        let psbt = Psbt::from_str(&prepared.psbt)
+            .map_err(|e| format!("invalid native prepared sweep PSBT: {e}"))?;
+        let saved = psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect::<HashSet<_>>();
+        if saved.is_disjoint(inputs) {
+            continue;
+        }
+        if saved != *inputs || matching.is_some() {
+            return Err("inputs overlap another native prepared RGB sweep".into());
+        }
+        matching = Some(prepared);
     }
     Ok(matching)
 }
@@ -387,5 +507,134 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(logs_contain("a_corrupt"));
+    }
+    #[test]
+    fn native_orphan_recovery_preserves_exact_psbt_and_proofs_before_kv_handoff() {
+        let prepared = with_inputs(&[0, 1]);
+        let recovered = find_prepared_sweep_in_records(vec![prepared.clone()], &inputs(&[1, 0]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.psbt, prepared.psbt);
+        assert_eq!(recovered.consignments, prepared.consignments);
+        assert_eq!(recovered.batch_transfer_idx, prepared.batch_transfer_idx);
+        let store = Store::default();
+        recovered.persist(&store, "recovered").unwrap();
+        assert_eq!(
+            PreparedRgbSweep::read(&store, "recovered")
+                .unwrap()
+                .unwrap()
+                .psbt,
+            prepared.psbt
+        );
+        for partial in [&[0][..], &[1, 2], &[0, 1, 2]] {
+            assert!(
+                find_prepared_sweep_in_records(vec![prepared.clone()], &inputs(partial)).is_err()
+            );
+        }
+        assert!(find_prepared_sweep_in_records(
+            vec![prepared.clone(), prepared.clone()],
+            &inputs(&[0, 1])
+        )
+        .is_err());
+        assert!(
+            find_prepared_sweep_in_records(vec![prepared], &inputs(&[2]))
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn invalid_native_orphan_record_blocks_new_preparation() {
+        let mut prepared = fixture();
+        prepared.psbt = "invalid".into();
+        assert!(find_prepared_sweep_in_records(vec![prepared], &inputs(&[2])).is_err());
+    }
+    #[test]
+    fn canonical_native_receipt_is_required_before_any_handoff_or_signing() {
+        let native = fixture();
+        let mut changed_map = native.clone();
+        let mut psbt = Psbt::from_str(&changed_map.psbt).unwrap();
+        psbt.inputs[0].sighash_type = Some(bitcoin::EcdsaSighashType::All.into());
+        changed_map.psbt = psbt.to_string();
+        assert_eq!(changed_map.txid().unwrap(), native.txid().unwrap());
+        let mut changed_proof = native.clone();
+        changed_proof.consignments[0].1.push(9);
+        let mut swapped_asset = native.clone();
+        swapped_asset.consignments[0].0 = "other".into();
+        let mut duplicate_proof = native.clone();
+        duplicate_proof
+            .consignments
+            .push(duplicate_proof.consignments[0].clone());
+        let mut wrong_batch = native.clone();
+        wrong_batch.batch_transfer_idx += 1;
+        for corrupt in [
+            changed_map,
+            changed_proof,
+            swapped_asset,
+            duplicate_proof,
+            wrong_batch,
+        ] {
+            let mutated = AtomicBool::new(false);
+            assert!(corrupt
+                .validate_then_mark_handoff(&native, |_, _| {
+                    mutated.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .is_err());
+            assert!(
+                !mutated.load(Ordering::SeqCst),
+                "no native mutation or signer may see a corrupt KV receipt"
+            );
+        }
+        native
+            .validate_then_mark_handoff(&native, |batch, txid| {
+                assert_eq!(batch, 42);
+                assert_eq!(txid, native.txid().unwrap());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn kv_receipt_decoder_rejects_forged_lengths_trailing_and_oversized_bytes() {
+        let store = Store::default();
+        store
+            .write(
+                PRIMARY_NAMESPACE,
+                "",
+                "forged",
+                u64::MAX.to_le_bytes().to_vec(),
+            )
+            .unwrap();
+        assert!(PreparedRgbSweep::read(&store, "forged").is_err());
+        let mut forged_count = bincode::serialize(&fixture()).unwrap();
+        let count_offset = 8 + fixture().psbt.len() + 4;
+        forged_count[count_offset..count_offset + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        store
+            .write(PRIMARY_NAMESPACE, "", "forged_count", forged_count)
+            .unwrap();
+        assert!(PreparedRgbSweep::read(&store, "forged_count").is_err());
+        let mut trailing = bincode::serialize(&fixture()).unwrap();
+        trailing.push(0);
+        store
+            .write(PRIMARY_NAMESPACE, "", "trailing", trailing)
+            .unwrap();
+        assert!(PreparedRgbSweep::read(&store, "trailing").is_err());
+        store
+            .write(
+                PRIMARY_NAMESPACE,
+                "",
+                "oversized",
+                vec![0; MAX_RECEIPT_BYTES as usize + 1],
+            )
+            .unwrap();
+        assert!(PreparedRgbSweep::read(&store, "oversized").is_err());
+        fixture().persist(&store, "bounded").unwrap();
+        assert_eq!(
+            PreparedRgbSweep::read(&store, "bounded")
+                .unwrap()
+                .unwrap()
+                .psbt,
+            fixture().psbt
+        );
     }
 }

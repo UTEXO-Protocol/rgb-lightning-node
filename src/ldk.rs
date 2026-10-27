@@ -3736,6 +3736,19 @@ impl RgbOutputSpender {
             );
         }
 
+        if let Some(prepared) = self.rgb_wallet_wrapper.recover_prepared_sweep(&inputs)? {
+            // The library is the durable authority for a preparation whose first
+            // KV write was interrupted. Bind the exact receipt before hand-off.
+            prepared.persist(self.kv_store.as_ref(), &sweep_key)?;
+            return self.finish_prepared_rgb_sweep(
+                descriptors,
+                descriptors_hash,
+                &mut txes,
+                secp_ctx,
+                prepared,
+            );
+        }
+
         let mut vout = 0;
         let mut vanilla_descriptor = true;
 
@@ -3916,12 +3929,12 @@ impl RgbOutputSpender {
             })
             .inspect_err(|_| {
                 // The transaction has not been signed or handed to LDK for broadcast.
-                if let Err(cleanup) =
-                    self.rgb_wallet_wrapper
-                        .fail_transfers(Some(batch_transfer_idx), false, true)
+                if let Err(cleanup) = self
+                    .rgb_wallet_wrapper
+                    .cancel_prepared_sweep(batch_transfer_idx)
                 {
                     tracing::error!(batch_transfer_idx, error = %cleanup,
-                        "cannot fail unpersisted RGB sweep preparation");
+                        "cannot cancel unpersisted RGB sweep preparation");
                 }
             })?;
         self.finish_prepared_rgb_sweep(descriptors, descriptors_hash, &mut txes, secp_ctx, prepared)
@@ -3960,6 +3973,24 @@ impl RgbOutputSpender {
                 "prepared RGB sweep batch is missing or no longer active"
             ));
         }
+
+        // KV is recovery bookkeeping, not the canonical authority for transaction
+        // maps or proof bytes. Admit the complete native record before any mutation
+        // or signer sees it, including same-txid alterations of PSBT metadata.
+        let inputs = unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        let canonical = self
+            .rgb_wallet_wrapper
+            .recover_prepared_sweep(&inputs)?
+            .ok_or_else(|| "canonical native RGB sweep preparation is missing".to_string())?;
+        prepared.validate_then_mark_handoff(&canonical, |batch, expected_txid| {
+            self.rgb_wallet_wrapper
+                .mark_prepared_sweep_handed_off(batch, expected_txid)
+                .map_err(|e| format!("cannot protect prepared RGB sweep hand-off: {e}"))
+        })?;
 
         psbt = self
             .signer

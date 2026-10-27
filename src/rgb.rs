@@ -847,25 +847,69 @@ impl RgbLibWalletWrapper {
         self.get_rgb_wallet().consume_fascia(fascia, witness_ord)
     }
 
-    #[allow(unused_variables)]
     pub(crate) fn color_psbt_and_prepare_consume(
         &self,
         psbt_to_color: &mut BitcoinPsbt,
         coloring_info: ColoringInfo,
     ) -> Result<ColorPrepareResult, RgbLibError> {
-        Err(RgbLibError::Internal {
-            details: "Unavailable in BFA RGB library: prepared RGB channel sweeps".into(),
+        let prepared = self.get_rgb_wallet().color_psbt_and_prepare_consume(
+            psbt_to_color,
+            coloring_info,
+            1,
+            None,
+        )?;
+        Ok(ColorPrepareResult {
+            batch_transfer_idx: prepared.batch_transfer_idx,
+            transfers: prepared.transfers,
         })
     }
 
-    #[allow(unused_variables)]
+    pub(crate) fn cancel_prepared_sweep(&self, batch_transfer_idx: i32) -> Result<(), RgbLibError> {
+        self.get_rgb_wallet()
+            .cancel_prepared_sweep(batch_transfer_idx)
+    }
+
+    pub(crate) fn mark_prepared_sweep_handed_off(
+        &self,
+        batch_transfer_idx: i32,
+        expected_txid: String,
+    ) -> Result<(), RgbLibError> {
+        self.get_rgb_wallet()
+            .mark_prepared_sweep_handed_off(batch_transfer_idx, expected_txid)
+    }
+
+    // A process can stop after the library commits its unsigned preparation but
+    // before LDK's KV receipt exists. Recover that exact PSBT instead of reserving
+    // another transaction or abandoning the protected library operation.
+    pub(crate) fn recover_prepared_sweep(
+        &self,
+        inputs: &HashSet<OutPoint>,
+    ) -> Result<Option<crate::rgb_sweep::PreparedRgbSweep>, String> {
+        let active = self
+            .get_rgb_wallet()
+            .list_prepared_sweeps()
+            .map_err(|e| format!("cannot inspect native prepared sweeps: {e}"))?;
+        let records = active
+            .into_iter()
+            .map(|prepared| {
+                crate::rgb_sweep::PreparedRgbSweep::new(
+                    prepared.psbt,
+                    ColorPrepareResult {
+                        batch_transfer_idx: prepared.batch_transfer_idx,
+                        transfers: prepared.transfers,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::rgb_sweep::find_prepared_sweep_in_records(records, inputs)
+    }
+
     pub(crate) fn consume_transfer_fascia(
         &self,
         batch_transfer_idx: i32,
     ) -> Result<(), RgbLibError> {
-        Err(RgbLibError::Internal {
-            details: "Unavailable in BFA RGB library: prepared RGB channel sweeps".into(),
-        })
+        self.get_rgb_wallet()
+            .consume_transfer_fascia(self.online, batch_transfer_idx)
     }
 
     pub(crate) fn create_consigments(&self, psbt: String) -> Result<(), RgbLibError> {
@@ -1209,10 +1253,25 @@ impl RgbLibWalletWrapper {
         lock_time: Option<u32>,
         sender_endpoint: Option<String>,
     ) -> Result<SendBeginResult, RgbLibError> {
-        if lock_time.is_some() {
-            return Err(RgbLibError::Internal {
-                details: "Custom RGB funding locktime is unavailable in the BFA RGB library".into(),
-            });
+        match lock_time {
+            Some(0) => {
+                return self.get_rgb_wallet().send_channel_funding_begin(
+                    self.online,
+                    recipient_map,
+                    donation,
+                    fee_rate,
+                    min_confirmations,
+                    expiration_timestamp,
+                    sender_endpoint,
+                    dry_run,
+                )
+            }
+            Some(_) => {
+                return Err(RgbLibError::Internal {
+                    details: "Only final-zero-locktime RGB channel funding is supported".into(),
+                })
+            }
+            None => {}
         }
         self.get_rgb_wallet().send_begin(
             self.online,
@@ -1254,13 +1313,14 @@ impl RgbLibWalletWrapper {
         amount: u64,
         fee_rate: u64,
     ) -> Result<String, RgbLibError> {
-        // The new library does not expose the explicit final locktime required by LDK.
-        // Fail before creating/signing a potentially incompatible channel funding transaction.
-        let _ = (address, amount, fee_rate);
-        Err(RgbLibError::Internal {
-            details: "Custom Bitcoin channel funding locktime is not supported by rgb-lib-bfa"
-                .into(),
-        })
+        self.get_rgb_wallet().send_btc_channel_funding_begin(
+            self.online,
+            address,
+            amount,
+            fee_rate,
+            false,
+            false,
+        )
     }
 
     pub(crate) fn send_btc_end(&self, signed_psbt: String) -> Result<String, RgbLibError> {
