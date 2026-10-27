@@ -3840,7 +3840,11 @@ impl RgbOutputSpender {
                             get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS;
                         let receive_data = self
                             .rgb_wallet_wrapper
-                            .witness_receive(None, Assignment::Any, expiration, vec![], 0)
+                            // The protected native sweep is committed only after its exact
+                            // transaction confirms. Never make its self-receive eligible in
+                            // the mempool; the native journal also guards acceptance until
+                            // canonical sweep consumption commits.
+                            .witness_receive(None, Assignment::Any, expiration, vec![], 1)
                             .map_err(|e| format!("cannot get a witness receive script: {e}"))?;
                         self.sweep_recipients
                             .lock()
