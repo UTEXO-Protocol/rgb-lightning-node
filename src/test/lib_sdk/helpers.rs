@@ -767,13 +767,15 @@ pub(crate) fn wait_for_balance(
 }
 
 /// Confirmation context for the channel being closed; never inferred from unrelated mempool work.
-#[derive(Debug, Clone)]
-pub(crate) struct ClosedChannelContext {
-    funding_txid: Option<String>,
-    channel_id: String,
-}
+#[path = "../../../test/channel_close_context.rs"]
+mod channel_close_context;
+pub(crate) use channel_close_context::ClosedChannelContext;
 
 fn observed_closed_channel_transactions(closed: &ClosedChannelContext) -> Vec<String> {
+    assert!(
+        closed.requires_bitcoin_broadcast(),
+        "observed sweep settlement requires a non-virtual Bitcoin-funded channel"
+    );
     let funding_txid = closed
         .funding_txid
         .as_ref()
@@ -809,8 +811,8 @@ pub(crate) fn wait_for_closed_channel_balance(
     closed: &ClosedChannelContext,
 ) {
     assert!(
-        closed.funding_txid.is_some(),
-        "observed sweep settlement requires a Bitcoin-funded channel"
+        closed.requires_bitcoin_broadcast(),
+        "observed sweep settlement requires a non-virtual Bitcoin-funded channel"
     );
     let deadline = Instant::now() + timeout;
     loop {
@@ -1005,12 +1007,11 @@ pub(crate) fn close_channel_with_force(
         .into_iter()
         .find(|channel| channel.channel_id == channel_id)
         .expect("exact channel must exist before closing");
-    let closed = ClosedChannelContext {
-        // Virtual/unfunded legacy close callers keep their existing behavior. Only the
-        // explicit on-chain settlement wait requires a real funding outpoint.
-        funding_txid: channel.funding_txid.map(|txid| txid.to_string()),
-        channel_id: channel_id.to_string(),
-    };
+    let closed = ClosedChannelContext::new(
+        channel.funding_txid.map(|txid| txid.to_string()),
+        channel_id.to_string(),
+        channel.virtual_open_mode,
+    );
     stop_mining();
     node.closechannel(SdkCloseChannelRequest {
         channel_id,
@@ -1027,7 +1028,7 @@ pub(crate) fn close_channel_with_force(
         if !channels
             .iter()
             .any(|channel| channel.channel_id == channel_id)
-            && (closed.funding_txid.is_none()
+            && (!closed.requires_bitcoin_broadcast()
                 || !observed_closed_channel_transactions(&closed).is_empty())
         {
             assert!(

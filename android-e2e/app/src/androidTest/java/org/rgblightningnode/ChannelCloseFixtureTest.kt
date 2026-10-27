@@ -3,6 +3,7 @@ package org.rgblightningnode
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -53,6 +54,71 @@ class ChannelCloseFixtureTest {
         } catch (_: IllegalArgumentException) {
         } catch (_: IllegalStateException) {
         }
+    }
+
+    @Test
+    fun trustedVirtualSyntheticFundingSkipsOnlyGenericBroadcastBarrier() {
+        val fixture = RpcFixture(mutableMapOf(), emptyList())
+        for (synthetic in listOf(funding, "fe".repeat(32))) {
+            val closed = ClosedChannelContext(synthetic, channel, "trusted_no_broadcast")
+            assertFalse(closed.requiresBitcoinBroadcast)
+            assertRejected {
+                ChannelCloseFixture.relatedMempoolTransactions(closed, rpc = fixture::call)
+            }
+        }
+        assertTrue(fixture.calls.isEmpty())
+    }
+
+    @Test
+    fun realAndUnknownModesStillObserveExactFundingOutput() {
+        for (mode in listOf(null, "", "unrecognized", "TRUSTED_NO_BROADCAST", "trusted_no_broadcast ")) {
+            val closed = ClosedChannelContext(funding, channel, mode)
+            assertTrue(closed.requiresBitcoinBroadcast)
+            val fixture = RpcFixture(mutableMapOf(
+                funding to fundingTransaction(),
+                closing to transaction(closing, funding to 2),
+            ), listOf(closing))
+            assertEquals(listOf(closing), ChannelCloseFixture.relatedMempoolTransactions(
+                closed, rpc = fixture::call,
+            ))
+            assertTrue(fixture.calls.contains("getrawtransaction"))
+        }
+    }
+
+    @Test
+    fun realAndUnknownModesCannotBypassFundingIdentityOrP2wsh() {
+        for (mode in listOf(null, "unrecognized", "TRUSTED_NO_BROADCAST", "trusted_no_broadcast ")) {
+            val wrongIdentity = RpcFixture(mutableMapOf(), emptyList())
+            assertRejected {
+                ChannelCloseFixture.relatedMempoolTransactions(
+                    ClosedChannelContext(funding, "ff".repeat(32), mode), rpc = wrongIdentity::call,
+                )
+            }
+            assertTrue(wrongIdentity.calls.isEmpty())
+            val root = fundingTransaction()
+            root.getJSONArray("vout").getJSONObject(2).getJSONObject("scriptPubKey")
+                .put("type", "witness_v0_keyhash")
+            val wrongScript = RpcFixture(mutableMapOf(funding to root), emptyList())
+            assertRejected {
+                ChannelCloseFixture.relatedMempoolTransactions(
+                    ClosedChannelContext(funding, channel, mode), rpc = wrongScript::call,
+                )
+            }
+            assertEquals(listOf("getblockchaininfo", "getrawtransaction"), wrongScript.calls)
+        }
+    }
+
+    @Test
+    fun unfundedGenericCloseCannotBecomeBitcoinSettlementObservation() {
+        val fixture = RpcFixture(mutableMapOf(), emptyList())
+        for (mode in listOf(null, "unrecognized", "trusted_no_broadcast")) {
+            val closed = ClosedChannelContext(null, channel, mode)
+            assertFalse(closed.requiresBitcoinBroadcast)
+            assertRejected {
+                ChannelCloseFixture.relatedMempoolTransactions(closed, rpc = fixture::call)
+            }
+        }
+        assertTrue(fixture.calls.isEmpty())
     }
 
     @Test

@@ -341,6 +341,9 @@ class RestartTest {
         timeoutSec: Long,
         closed: ClosedChannelContext,
     ) {
+        require(closed.requiresBitcoinBroadcast) {
+            "Bitcoin settlement wait requires a real funded channel"
+        }
         val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
         var lastBalance = 0uL
         while (System.currentTimeMillis() < deadline) {
@@ -361,9 +364,11 @@ class RestartTest {
     }
 
     private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false): ClosedChannelContext {
+        val channel = node.listChannels().firstOrNull { it.channelId == channelId }
         val closed = ClosedChannelContext(
-            node.listChannels().firstOrNull { it.channelId == channelId }?.fundingTxid?.toString(),
+            channel?.fundingTxid?.toString(),
             channelId,
+            channel?.virtualOpenMode,
         )
         node.closechannel(
             SdkCloseChannelRequest(
@@ -380,7 +385,7 @@ class RestartTest {
             lastChannels = channels.joinToString { it.channelId }.ifEmpty { "no channels" }
             if (channels.none { it.channelId == channelId }) {
                 // Channel removal can precede its asynchronous closing broadcast.
-                if (closed.fundingTxid != null && ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                if (closed.requiresBitcoinBroadcast && ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
                     bitcoindRpc(method, *params, timeoutMs = timeout)
                 }.isEmpty()) {
                     Thread.sleep(1_000L)

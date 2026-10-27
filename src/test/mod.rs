@@ -853,11 +853,9 @@ async fn check_payment_status_by_type(
     None
 }
 
-#[derive(Clone, Debug)]
-struct ClosedChannelContext {
-    funding_txid: Option<String>,
-    channel_id: String,
-}
+#[path = "../../test/channel_close_context.rs"]
+mod channel_close_context;
+use channel_close_context::ClosedChannelContext;
 
 async fn close_channel(
     node_address: SocketAddr,
@@ -865,14 +863,14 @@ async fn close_channel(
     peer_pubkey: &str,
     force: bool,
 ) -> ClosedChannelContext {
-    let closed = ClosedChannelContext {
-        funding_txid: list_channels(node_address)
-            .await
-            .into_iter()
-            .find(|channel| channel.channel_id == channel_id)
-            .and_then(|channel| channel.funding_txid),
-        channel_id: channel_id.to_owned(),
-    };
+    let channel = list_channels(node_address)
+        .await
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id);
+    let (funding_txid, virtual_open_mode) = channel
+        .map(|channel| (channel.funding_txid, channel.virtual_open_mode))
+        .unwrap_or((None, None));
+    let closed = ClosedChannelContext::new(funding_txid, channel_id.to_owned(), virtual_open_mode);
     println!(
         "{}closing channel {channel_id} from node {node_address}",
         if force { "force-" } else { "cooperatively " }
@@ -900,7 +898,8 @@ async fn close_channel(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let channels = list_channels(node_address).await;
         if !channels.iter().any(|c| c.channel_id == channel_id)
-            && (closed.funding_txid.is_none() || !observed_channel_sweeps(&closed).await.is_empty())
+            && (!closed.requires_bitcoin_broadcast()
+                || !observed_channel_sweeps(&closed).await.is_empty())
         {
             assert!(
                 (OffsetDateTime::now_utc() - t_0).as_seconds_f32() <= 30.0,
@@ -3171,6 +3170,10 @@ async fn wait_for_balance(node_address: SocketAddr, asset_id: &str, expected_bal
 // Only explicit closed-channel accounting waits advance observed sweep confirmations.
 // Generic balance waits deliberately preserve unconfirmed receive/funding semantics.
 async fn observed_channel_sweeps(closed: &ClosedChannelContext) -> Vec<String> {
+    assert!(
+        closed.requires_bitcoin_broadcast(),
+        "closed-channel settlement requires a non-virtual Bitcoin-funded channel"
+    );
     let funding_txid = closed
         .funding_txid
         .clone()
@@ -3207,8 +3210,8 @@ async fn wait_for_closed_channel_balance(
     closed: &ClosedChannelContext,
 ) {
     assert!(
-        closed.funding_txid.is_some(),
-        "closed-channel settlement requires Bitcoin funding"
+        closed.requires_bitcoin_broadcast(),
+        "closed-channel settlement requires a non-virtual Bitcoin-funded channel"
     );
     let start = OffsetDateTime::now_utc();
     loop {

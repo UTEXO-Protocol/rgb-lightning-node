@@ -4,7 +4,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Public identifiers captured before the channel disappears from listChannels. */
-internal data class ClosedChannelContext(val fundingTxid: String?, val channelId: String)
+internal data class ClosedChannelContext(
+    val fundingTxid: String?,
+    val channelId: String,
+    val virtualOpenMode: String? = null,
+) {
+    val requiresBitcoinBroadcast: Boolean
+        get() = fundingTxid != null && virtualOpenMode != "trusted_no_broadcast"
+}
 
 /** Test-only observation. It never submits transactions or mines blocks itself. */
 internal object ChannelCloseFixture {
@@ -19,6 +26,9 @@ internal object ChannelCloseFixture {
         nowNanos: () -> Long = System::nanoTime,
         rpc: (String, Array<out Any>, Int) -> JSONObject,
     ): List<String> {
+        require(closed.requiresBitcoinBroadcast) {
+            "Bitcoin settlement observation requires a real funded channel"
+        }
         val fundingTxid = requireNotNull(closed.fundingTxid) {
             "closed-channel settlement needs an observed funding transaction"
         }
