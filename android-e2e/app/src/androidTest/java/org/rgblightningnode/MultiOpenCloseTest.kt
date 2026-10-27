@@ -187,12 +187,19 @@ class MultiOpenCloseTest {
         return node.assetBalance(assetId).spendable
     }
 
-    private fun waitForBalance(node: SdkNode, assetId: ContractId, expected: ULong, timeoutSec: Long) {
-        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
+    private fun waitForBalance(
+        node: SdkNode,
+        assetId: ContractId,
+        expected: ULong,
+        timeoutSec: Long,
+        absoluteDeadlineMillis: Long = Long.MAX_VALUE,
+    ) {
+        val deadline = minOf(System.currentTimeMillis() + timeoutSec * 1_000L, absoluteDeadlineMillis)
         var lastBalance = 0uL
         while (System.currentTimeMillis() < deadline) {
             val balance = assetBalanceSpendable(node, assetId)
             lastBalance = balance
+            if (System.currentTimeMillis() >= deadline) break
             if (balance == expected) {
                 return
             }
@@ -473,7 +480,9 @@ class MultiOpenCloseTest {
             log("Mining blocks one by one until funding tx is confirmed...")
             mineUntilTxConfirmed(nodeA, fundingTxid)
             mine(openChannelConfirmBlocks)
+            val firstFundingReadyDeadline = System.currentTimeMillis() + channelReadyTimeoutSec * 1_000L
             waitForUsableChannel(nodeA, nodeBReady, assetId, channelReadyTimeoutSec)
+            waitForBalance(nodeA, assetId, 400uL, 70L, absoluteDeadlineMillis = firstFundingReadyDeadline)
 
             assertEquals(400uL, assetBalanceSpendable(nodeA, assetId))
 
@@ -504,7 +513,9 @@ class MultiOpenCloseTest {
             log("Mining blocks one by one until funding tx is confirmed...")
             mineUntilTxConfirmed(nodeA, fundingTxid)
             mine(openChannelConfirmBlocks)
+            val secondFundingReadyDeadline = System.currentTimeMillis() + channelReadyTimeoutSec * 1_000L
             waitForUsableChannel(nodeA, nodeBReady, assetId, channelReadyTimeoutSec)
+            waitForBalance(nodeA, assetId, 400uL, 70L, absoluteDeadlineMillis = secondFundingReadyDeadline)
 
             assertEquals(400uL, assetBalanceSpendable(nodeA, assetId))
 

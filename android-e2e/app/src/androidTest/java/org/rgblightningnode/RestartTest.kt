@@ -188,12 +188,19 @@ class RestartTest {
         return node.assetBalance(assetId).spendable
     }
 
-    private fun waitForBalance(node: SdkNode, assetId: ContractId, expected: ULong, timeoutSec: Long) {
-        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
+    private fun waitForBalance(
+        node: SdkNode,
+        assetId: ContractId,
+        expected: ULong,
+        timeoutSec: Long,
+        absoluteDeadlineMillis: Long = Long.MAX_VALUE,
+    ) {
+        val deadline = minOf(System.currentTimeMillis() + timeoutSec * 1_000L, absoluteDeadlineMillis)
         var lastBalance = 0uL
         while (System.currentTimeMillis() < deadline) {
             val balance = assetBalanceSpendable(node, assetId)
             lastBalance = balance
+            if (System.currentTimeMillis() >= deadline) break
             if (balance == expected) {
                 return
             }
@@ -518,7 +525,9 @@ class RestartTest {
             log("Mining blocks one by one until funding tx is confirmed...")
             mineUntilTxConfirmed(requireNotNull(nodeA), fundingTxid)
             mine(openChannelConfirmBlocks)
+            val fundingReadyDeadline = System.currentTimeMillis() + channelReadyTimeoutSec * 1_000L
             waitForUsableChannel(requireNotNull(nodeA), requireNotNull(nodeB), assetId, channelReadyTimeoutSec)
+            waitForBalance(requireNotNull(nodeA), assetId, 400uL, 70L, absoluteDeadlineMillis = fundingReadyDeadline)
             assertEquals(400uL, assetBalanceSpendable(requireNotNull(nodeA), assetId))
             val channelId = requireNotNull(nodeA).getChannelId(openResponse.temporaryChannelId)
 
