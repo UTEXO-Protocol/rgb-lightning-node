@@ -74,44 +74,66 @@ Archive paths, entry types, duplicate names and fingerprint are checked in
 an isolated staging directory before rename. Existing wallets are not
 overwritten; normal online consistency and wallet-setting checks still run.
 
-Explicit generic runtime compatibility limits
----------------------------------------------
-Iris's maintained on-chain profile is selected by its caller. This change
-does not globally disable Lightning or report unqualified behavior as passed.
-The new RGB library does not implement these old fork extensions:
+Channel funding and durable sweeps
+-----------------------------------
+The candidate RGB prerequisite now supplies dedicated fixed-zero-locktime
+send_channel_funding_begin and send_btc_channel_funding_begin APIs. RLN routes
+its explicit Some(0) channel construction into these builders; nonzero overrides
+remain rejected. The library chooses final locktime before PSBT completion and
+before txid-bound reservation/consignment persistence. Ordinary on-chain send
+builders remain unchanged. A post-persistence PSBT rewrite is not a substitute.
 
-* IFA link rights/link operations and linked-contract metadata;
-* persisted prepared channel sweeps followed by separate consume;
-* explicit final-zero-locktime Bitcoin/RGB channel funding construction.
+Prepared channel sweeps use color_psbt_and_prepare_consume with at least one
+confirmation and no expiration. The library durably records the exact unsigned
+PSBT, fascia, complete consignments and protected batch without consuming RGB
+state. RLN writes its KV receipt, verifies it against the canonical native
+record, then marks handoff before any external signing. PSBT metadata and proof
+bytes must match, even if an altered receipt has the same transaction ID.
+Duplicate proof assets fail closed. KV bytes and fixed-width bincode decoding
+are bounded to 32 MiB, with checked component/count admission before allocation.
 
-These operation boundaries fail explicitly before signing or eagerly
-consuming RGB state. They must not be treated as a successful channel
-funding, sweep, or asset-link result. Optional legacy link metadata is
-unavailable in returned records. Ordinary new-address generation uses the
-new library API; requested address reuse is rejected, not silently enabled.
-Ordinary on-chain Bitcoin send preparation uses the supported native API;
-the channel-funding restriction is separate from that on-chain operation.
+A caller stopped before its first KV write recovers the library-owned operation
+by exact input set, preserving its original PSBT/proofs/fee. Partial overlap and
+unreadable/colliding preparations reject a new sweep. KV-write failure cancels
+only the dedicated never-handed-off preparation; generic transfer failure cannot
+release protected inputs. consume_transfer_fascia independently resolves the
+exact confirmed native witness and commits RGB stock, spent inputs, reservations
+and phase atomically. It is idempotent after consumption. RLN removes its receipt
+only after successful native consumption; failed reconciliation retains it.
+These source integrations require the new graph's funded regression results;
+the presence of the APIs alone is not generic Lightning qualification.
 
-The funding consequence is concrete: this candidate cannot open ordinary
-locally funded BTC or RGB Lightning channels. Colored SDK/HTTP open preflight
-and FundingGenerationReady pass Some(0), which the guarded RGB builder rejects.
-The standard vanilla funding event calls the always-rejecting dedicated BTC
-funding builder. Those errors terminate funding before signing. Colored virtual
-funding is also blocked; its event has a separate replay path. Peer-funded
-incoming channels, existing channels and uncolored synthetic virtual channels
-are different paths and are not proven broken or qualified by this finding.
+Explicit compatibility limits
+------------------------------
+Iris's maintained on-chain profile is selected by its caller. This change does
+not globally disable Lightning. IFA link rights/link operations and linked-contract
+metadata remain unavailable in rgb-lib-bfa. Requests fail explicitly before signing
+or RGB mutation; optional legacy link metadata stays unavailable. Negative IFA
+acceptance is not a claim of linked-contract or linked-Lightning feature parity.
 
-A safe funding prerequisite belongs in rgb-lib-bfa: construct final-zero-locktime
-transactions before txid-bound reservation/consignment persistence, with matching
-dry-run, end and abort semantics for both RGB and vanilla funding. Merely dropping
-the guard or rewriting the returned PSBT can leave the persisted original txid
-inconsistent with the signed transaction. This migration does not claim that API.
+Address generation is fresh-only. Both address and rotateaddress reveal fresh
+native addresses. reuse_addresses=true is rejected by direct SDK creation and
+standalone daemon startup before wallet files are created, preserving existing
+wallet data. Tests cover default/false configuration, funded rotation, restart,
+same-seed recovery and funded VSS restore under this supported fresh-only policy.
+Pinned-address behavior is not recreated or silently enabled.
 
 LDK creates temporary wallet handles outside the maintained on-chain wrapper.
-General Lightning + VSS cross-handle snapshot serialization and channel
-behavior therefore require separate qualification. A compilation result is
-not that acceptance. No legacy wallet migration or hosted bridge operation
-is established by this change.
+General Lightning + VSS cross-handle snapshot serialization and full channel
+lifecycle acceptance remain separately evidenced. No legacy production-wallet
+migration or hosted bridge operation is established by these changes.
+
+External-signer VSS credential limitation
+-----------------------------------------
+External-signer mode still deterministically derives VSS signing/encryption
+credentials from public bootstrap material (node ID, account xpubs, fingerprint
+and protocol version). Those inputs are not a signer-held secret. Anyone knowing
+the complete bootstrap can reconstruct the same VSS credentials; encrypted cloud
+payloads do not establish confidentiality or exclusive cloud authorization against
+that observer. Secret-backed derivation requires an external-signer API change.
+This integration preserves existing behavior and does not claim to fix that limit.
+The internal-mnemonic derivation is a different identity and is not substituted
+for external signing. Proxy operation keys remain sensitive backup content.
 
 CI integration contract
 -----------------------
@@ -132,7 +154,7 @@ link rights. Explicit funded rejection tests instead require HTTP 400 and verify
 unchanged assets, outputs and transaction history. Ordinary IFA issuance remains
 supported. This negative acceptance is a documented missing feature, not a claim
 that linked-contract or linked-Lightning payments work. Generic channel-funding
-and sweep limitations above remain separate; their tests are not waived.
+and sweep regression gates remain required; their tests are not waived.
 
 Authenticated batch sends
 -------------------------
@@ -160,26 +182,19 @@ single transaction, a single positive fee and settled balances for both assets.
 
 Candidate source and qualification
 ----------------------------------
-RGB: 962730a211f0f7569d7ad8ae777052f433d87655
-LDK: 510189d5700a6d1406229ce7523e181c3838715e
-External signer: 0fb005ec4b927ddbe13e1646d247b5bb11e8ffed
-VLS core: 45c72edfd58620849eb486925439a76526b415ae
-VLS protocol signer: dddd336fcdf84c4febdd7af8363bda8d1721d893
+Cargo.toml, Cargo.lock and the rust-lightning gitlink are the exact source graph
+for this candidate. Dependency merges and new funding/sweep primitives invalidate
+any assumption that earlier native binaries or published beta.5 qualify it.
+Earlier host, emulator and platform evidence belongs to its recorded source;
+it is not carried forward as acceptance of the graph in this PR.
 
-The predecessor RGB prerequisite source 7ce6045 and LDK 6f5a57d passed
-cargo check --lib --features uniffi,vls,vss,test-utils, four invoice tests
-and eight VSS tests (including real local protobuf fault injection).
-The VSS cases cover failed chunk/manifest updates, uncertain commit,
-canonical readback before local acknowledgement, malformed encryption,
-bounded staging, and concurrent no-replace directory promotion.
+Source formatting, shell syntax, Python fixture syntax and a disposable public
+proxy 0.4.0 server.info probe are recorded for these repairs. Rust type checking,
+focused admission/phase tests, genuine funded mixed batch and generated SDK flows,
+VSS restore, ordinary/channel funding and prepared sweep lifecycle require the
+final source graph and passing CI/local qualification before merge-readiness.
+The merge-order ancestry gate remains unchanged: the pinned LDK revision must be
+reachable from rust-lightning dev after its prerequisite PR is merged.
 
-The final RGB pin adds artifact-to-token consistency hardening. Linux/macOS
-prerequisite CI passes 73 wallet tests and 15 bitcoind-feature tests per OS.
-The focused VSS suite passes 13 cases; the maintained native adapter passes
-107 tests, C-FFI passes 18 tests and its locked production check passes.
-Actual Darwin Debug Bare/Node consumers pass lifecycle, BIP-322, local VSS
-backup/restore, funded BTC round trips and a post-restore confirmed spend.
-These are Debug host scopes, not platform release or generic Lightning acceptance.
-Platform artifact CI currently lacks private rgb-lib-bfa read access. Funded
-BFA/bridge and coordinated iOS acceptance remain pending. No hosted bridge has
-been operated. This source remains an unpublished migration candidate.
+No hosted bridge has been operated. No merge, package publication or all-platform
+native artifact qualification is established by this unpublished source work.

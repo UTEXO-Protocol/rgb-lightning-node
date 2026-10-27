@@ -769,6 +769,12 @@ pub(crate) async fn open_database_pool(
 }
 
 pub(crate) async fn start_daemon(args: &UserArgs) -> Result<Arc<AppState>, AppError> {
+    if args.reuse_addresses {
+        return Err(AppError::InvalidConfig(
+            "Address reuse is not supported by rgb-lib-bfa".into(),
+        ));
+    }
+
     // rustls 0.23 (via rgb-lib/reqwest 0.13) needs a process-level provider
     // before any TLS use, and rgb-lib only installs one inside `go_online`.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

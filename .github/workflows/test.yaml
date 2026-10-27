@@ -180,6 +180,8 @@ jobs:
         run: VSS=1 ./regtest.sh start
       - name: Run VSS tests (e2e against regtest + VSS server)
         run: SKIP_INIT=1 cargo test --features vss "test::vss::tests" -- --test-threads=1
+      - name: Run fresh-address funded VSS restore regression
+        run: SKIP_INIT=1 cargo test --features vss "test::address_reuse::fresh_address_and_assets_recover_via_vss" -- --test-threads=1
       - name: Run VSS unreachable openchannel e2e test
         run: SKIP_INIT=1 cargo test --features vss "test::vss_unreachable_openchannel" -- --test-threads=1
       - name: Run local SQLite process-kill matrix
