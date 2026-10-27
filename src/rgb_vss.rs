@@ -966,18 +966,18 @@ pub struct VssBackupInfo {
 /// hex characters (e.g., `"a1b2c3d4"`).
 fn get_fingerprint_from_zip_bytes(data: &[u8]) -> Result<String, Error> {
     let reader = std::io::Cursor::new(data);
-    let archive = zip::ZipArchive::new(reader).map_err(|e| Error::Internal {
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| Error::Internal {
         details: format!("Failed to read zip archive: {e}"),
     })?;
 
-    let first_entry = archive
-        .name_for_index(0)
-        .ok_or_else(|| Error::Internal {
-            details: "VSS snapshot archive is empty".into(),
-        })?
-        .map_err(|_| Error::Internal {
-            details: "Invalid VSS snapshot entry name".into(),
-        })?;
+    let entry = archive.by_index(0).map_err(|_| Error::Internal {
+        details: "VSS snapshot has no readable first entry".into(),
+    })?;
+    // Native snapshots use UTF-8 paths. ZIP's legacy CP437 fallback must not
+    // reinterpret corrupted authenticated metadata as a different wallet path.
+    let first_entry = std::str::from_utf8(entry.name_raw()).map_err(|_| Error::Internal {
+        details: "Invalid VSS snapshot entry name".into(),
+    })?;
     let fingerprint = first_entry
         .split('/')
         .next()
@@ -1087,10 +1087,9 @@ pub(crate) fn restore_snapshot_bytes(
         let entry = archive
             .by_index(index)
             .map_err(|_| invalid("Invalid VSS archive entry"))?;
-        let name = entry
-            .name()
+        let name = std::str::from_utf8(entry.name_raw())
             .map_err(|_| invalid("Invalid VSS archive entry name"))?
-            .into_owned();
+            .to_string();
         let path = entry
             .enclosed_name()
             .ok_or_else(|| invalid("VSS archive path escapes wallet"))?;
