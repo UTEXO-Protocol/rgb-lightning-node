@@ -5163,24 +5163,30 @@ pub(crate) async fn rgb_invoice(
         let unlocked_state = guard.as_ref().unwrap();
 
         let assignment = payload.assignment.unwrap_or(Assignment::Any).into();
-
-        let receive_data = if payload.witness {
-            unlocked_state.rgb_witness_receive(
-                payload.asset_id,
-                assignment,
-                payload.expiration_timestamp,
-                payload.transport_endpoints,
-                payload.min_confirmations,
-            )?
-        } else {
-            unlocked_state.rgb_blind_receive(
-                payload.asset_id,
-                assignment,
-                payload.expiration_timestamp,
-                payload.transport_endpoints,
-                payload.min_confirmations,
-            )?
-        };
+        let wallet_state = Arc::clone(unlocked_state);
+        // Both receive variants reserve authenticated invoices through the blocking proxy
+        // client. Keep admission in this cancellation-protected task until that work finishes.
+        let receive_data = tokio::task::spawn_blocking(move || {
+            if payload.witness {
+                wallet_state.rgb_witness_receive(
+                    payload.asset_id,
+                    assignment,
+                    payload.expiration_timestamp,
+                    payload.transport_endpoints,
+                    payload.min_confirmations,
+                )
+            } else {
+                wallet_state.rgb_blind_receive(
+                    payload.asset_id,
+                    assignment,
+                    payload.expiration_timestamp,
+                    payload.transport_endpoints,
+                    payload.min_confirmations,
+                )
+            }
+        })
+        .await
+        .map_err(|_| APIError::Unexpected("RGB receive task failed".into()))??;
 
         Ok(Json(RgbInvoiceResponse {
             recipient_id: receive_data.recipient_id,
