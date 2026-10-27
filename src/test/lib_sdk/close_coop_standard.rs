@@ -143,19 +143,22 @@ fn close_coop_standard() {
             450,
         );
 
-        let recipient_id = node_c
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let recipient_id = crate::helpers::rgb_invoice(
+            &node_c,
+            SdkRgbInvoiceRequest {
                 asset_id: None,
                 assignment_kind: None,
                 assignment_amount: None,
                 duration_seconds: None,
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("node C rgbinvoice pre-close")
-            .recipient_id;
-        node_a
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("node C rgbinvoice pre-close")
+        .recipient_id;
+        crate::helpers::send_rgb(
+            &node_a,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -171,8 +174,9 @@ fn close_coop_standard() {
                         )],
                     }],
                 }],
-            })
-            .expect("node A send_rgb pre-close");
+            },
+        )
+        .expect("node A send_rgb pre-close");
         mine(1);
         refresh_transfers(&node_c);
         refresh_transfers(&node_c);
@@ -198,19 +202,22 @@ fn close_coop_standard() {
             .expect("node A list_peers after disconnect");
         assert!(!peers.iter().any(|peer| peer.pubkey == node_b_pubkey));
 
-        let recipient_id = node_c
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let recipient_id = crate::helpers::rgb_invoice(
+            &node_c,
+            SdkRgbInvoiceRequest {
                 asset_id: None,
                 assignment_kind: None,
                 assignment_amount: None,
                 duration_seconds: None,
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("node C rgbinvoice post-close node A")
-            .recipient_id;
-        node_a
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("node C rgbinvoice post-close node A")
+        .recipient_id;
+        crate::helpers::send_rgb(
+            &node_a,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -226,26 +233,30 @@ fn close_coop_standard() {
                         )],
                     }],
                 }],
-            })
-            .expect("node A send_rgb post-close");
+            },
+        )
+        .expect("node A send_rgb post-close");
         mine(1);
         refresh_transfers(&node_c);
         refresh_transfers(&node_c);
         refresh_transfers(&node_a);
 
-        let recipient_id = node_c
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let recipient_id = crate::helpers::rgb_invoice(
+            &node_c,
+            SdkRgbInvoiceRequest {
                 asset_id: None,
                 assignment_kind: None,
                 assignment_amount: None,
                 duration_seconds: None,
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("node C rgbinvoice post-close node B")
-            .recipient_id;
-        node_b
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("node C rgbinvoice post-close node B")
+        .recipient_id;
+        crate::helpers::send_rgb(
+            &node_b,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -261,8 +272,9 @@ fn close_coop_standard() {
                         )],
                     }],
                 }],
-            })
-            .expect("node B send_rgb post-close");
+            },
+        )
+        .expect("node B send_rgb post-close");
         mine(1);
         refresh_transfers(&node_c);
         refresh_transfers(&node_c);

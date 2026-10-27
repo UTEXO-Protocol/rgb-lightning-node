@@ -2748,6 +2748,11 @@ async fn rgb_invoice_oob(
     rgb_invoice_raw(node_address, asset_id, assignment, witness, vec![]).await
 }
 
+// Test fixtures retain the exact authenticated invoice. Recipient IDs alone cannot
+// reconstruct protocol-1 keys and must never be upgraded by fabricating them.
+static TEST_RGB_INVOICES: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 async fn rgb_invoice_raw(
     node_address: SocketAddr,
     asset_id: Option<String>,
@@ -2790,11 +2795,16 @@ async fn rgb_invoice_raw(
         .send()
         .await
         .unwrap();
-    check_response_is_ok(res)
+    let invoice = check_response_is_ok(res)
         .await
         .json::<RgbInvoiceResponse>()
         .await
+        .unwrap();
+    TEST_RGB_INVOICES
+        .lock()
         .unwrap()
+        .insert(invoice.recipient_id.clone(), invoice.invoice.clone());
+    invoice
 }
 
 async fn send_asset(
@@ -2828,6 +2838,63 @@ async fn send_assets(
         "batch sending {} asset(s) from node {node_address}",
         recipient_map.len()
     );
+    if recipient_map
+        .values()
+        .flatten()
+        .any(|r| !r.transport_endpoints.is_empty())
+    {
+        let groups = recipient_map
+            .into_iter()
+            .map(|(asset_id, recipients)| {
+                let recipients = recipients
+                    .into_iter()
+                    .map(|r| {
+                        let invoice = TEST_RGB_INVOICES
+                            .lock()
+                            .unwrap()
+                            .get(&r.recipient_id)
+                            .expect("test must retain its issued full invoice")
+                            .clone();
+                        assert_eq!(
+                            rgb_lib::wallet::Invoice::new(invoice.clone())
+                                .unwrap()
+                                .invoice_data()
+                                .transport_endpoints,
+                            r.transport_endpoints
+                        );
+                        crate::routes::RgbInvoiceRecipient {
+                            invoice,
+                            assignment: r.assignment,
+                            witness_data: r.witness_data,
+                        }
+                    })
+                    .collect();
+                crate::routes::RgbInvoiceAssetRecipients {
+                    asset_id,
+                    recipients,
+                }
+            })
+            .collect();
+        let response = reqwest::Client::new()
+            .post(format!("http://{node_address}/sendrgbinvoices"))
+            .json(&crate::routes::SendRgbInvoicesRequest {
+                recipient_groups: groups,
+                donation,
+                fee_rate: FEE_RATE,
+                min_confirmations: 1,
+            })
+            .send()
+            .await
+            .unwrap();
+        return check_response_is_ok(response)
+            .await
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()["txid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    }
     let payload = SendRgbRequest {
         donation,
         fee_rate: FEE_RATE,
@@ -3463,6 +3530,7 @@ pub fn set_mock_fee(fee: u32) {
 mod address_reuse;
 mod asset_link;
 mod auth_db_persistence;
+mod authenticated_invoice_batch;
 mod authentication;
 mod backup_and_restore;
 mod chain_backend_dispatch;

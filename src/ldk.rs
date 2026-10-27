@@ -97,8 +97,7 @@ use rgb_lib::{
     wallet::{
         check_indexer_url,
         rust_only::{AssetColoringInfo, ColoringInfo},
-        DatabaseType, Recipient, RgbWalletOpsOffline, SinglesigKeys, Wallet as RgbLibWallet,
-        WalletData, WitnessData,
+        DatabaseType, Recipient, SinglesigKeys, Wallet as RgbLibWallet, WalletData, WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
     Fascia, FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,

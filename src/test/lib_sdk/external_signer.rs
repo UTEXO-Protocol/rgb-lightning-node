@@ -1352,19 +1352,22 @@ fn external_signer_send_rgb_delivers_consignment_to_recipient() {
             .expect("node B issueassetnia")
             .asset_id;
 
-        let seed_recipient_id = node_a
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let seed_recipient_id = crate::helpers::rgb_invoice(
+            &node_a,
+            SdkRgbInvoiceRequest {
                 asset_id: None,
                 assignment_kind: None,
                 assignment_amount: None,
                 duration_seconds: Some(3600),
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("node A rgbinvoice (seed)")
-            .recipient_id;
-        node_b
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("node A rgbinvoice (seed)")
+        .recipient_id;
+        crate::helpers::send_rgb(
+            &node_b,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -1380,8 +1383,9 @@ fn external_signer_send_rgb_delivers_consignment_to_recipient() {
                         )],
                     }],
                 }],
-            })
-            .expect("node B send_rgb (seed)");
+            },
+        )
+        .expect("node B send_rgb (seed)");
         mine(1);
         refresh_transfers(&node_a);
         refresh_transfers(&node_a);
@@ -1394,19 +1398,22 @@ fn external_signer_send_rgb_delivers_consignment_to_recipient() {
 
         // the send under test: node A runs in external-signer mode, so /sendrgb goes through the
         // begin/sign/end split and must still generate and post a consignment
-        let recipient_id = node_b
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let recipient_id = crate::helpers::rgb_invoice(
+            &node_b,
+            SdkRgbInvoiceRequest {
                 asset_id: None,
                 assignment_kind: None,
                 assignment_amount: None,
                 duration_seconds: Some(3600),
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("node B rgbinvoice")
-            .recipient_id;
-        node_a
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("node B rgbinvoice")
+        .recipient_id;
+        crate::helpers::send_rgb(
+            &node_a,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -1422,8 +1429,9 @@ fn external_signer_send_rgb_delivers_consignment_to_recipient() {
                         )],
                     }],
                 }],
-            })
-            .expect("node A (external signer) send_rgb");
+            },
+        )
+        .expect("node A (external signer) send_rgb");
 
         mine(1);
         refresh_transfers(&node_b);

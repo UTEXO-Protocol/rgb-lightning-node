@@ -1756,6 +1756,61 @@ impl SdkNode {
         })
     }
 
+    /// Send one authenticated native batch without flattening invoices to recipient IDs.
+    pub fn sendrgbinvoices(
+        &self,
+        request: SendRgbInvoicesRequest,
+    ) -> Result<SendRgbResponse, RlnError> {
+        crate::rgb_invoice::validate_batch_bounds(
+            request
+                .recipient_groups
+                .iter()
+                .map(|g| g.recipients.iter().map(|r| r.invoice.as_str())),
+        )
+        .map_err(state::map_api_error)?;
+        let recipient_groups = request
+            .recipient_groups
+            .into_iter()
+            .map(|group| sdk::InvoiceAssetRecipientsInput {
+                asset_id: group.asset_id.to_string(),
+                recipients: group
+                    .recipients
+                    .into_iter()
+                    .map(|recipient| sdk::InvoiceRecipientInput {
+                        invoice: recipient.invoice,
+                        witness_data: recipient.witness_data.map(|w| sdk::WitnessDataInput {
+                            amount_sat: w.amount_sat,
+                            blinding: w.blinding,
+                        }),
+                        assignment_kind: match recipient.assignment_kind {
+                            AssignmentKind::Fungible => sdk::AssignmentKindData::Fungible,
+                            AssignmentKind::NonFungible => sdk::AssignmentKindData::NonFungible,
+                            AssignmentKind::InflationRight => {
+                                sdk::AssignmentKindData::InflationRight
+                            }
+                            AssignmentKind::ReplaceRight => sdk::AssignmentKindData::ReplaceRight,
+                            AssignmentKind::Any => sdk::AssignmentKindData::Any,
+                        },
+                        assignment_amount: recipient.assignment_amount,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let response = block_on_sdk(sdk::send_rgb_invoices(
+            self.handle.app_state(),
+            sdk::SendRgbInvoicesRequestData {
+                donation: request.donation,
+                fee_rate: request.fee_rate,
+                min_confirmations: request.min_confirmations,
+                recipient_groups,
+            },
+        ))?;
+        Ok(SendRgbResponse {
+            txid: Txid::from_str(&response.txid).map_err(RlnError::internal)?,
+            batch_transfer_idx: response.batch_transfer_idx,
+        })
+    }
+
     pub fn send_rgb(&self, request: SendRgbRequest) -> Result<SendRgbResponse, RlnError> {
         send_rgb_from_state(self.handle.app_state(), request)
     }

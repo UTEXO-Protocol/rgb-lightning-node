@@ -391,6 +391,25 @@ pub(crate) struct SendRgbInvoiceRequestData {
     pub(crate) min_confirmations: u8,
 }
 
+pub(crate) struct InvoiceRecipientInput {
+    pub(crate) invoice: String,
+    pub(crate) witness_data: Option<WitnessDataInput>,
+    pub(crate) assignment_kind: AssignmentKindData,
+    pub(crate) assignment_amount: Option<u64>,
+}
+
+pub(crate) struct InvoiceAssetRecipientsInput {
+    pub(crate) asset_id: String,
+    pub(crate) recipients: Vec<InvoiceRecipientInput>,
+}
+
+pub(crate) struct SendRgbInvoicesRequestData {
+    pub(crate) donation: bool,
+    pub(crate) fee_rate: u64,
+    pub(crate) min_confirmations: u8,
+    pub(crate) recipient_groups: Vec<InvoiceAssetRecipientsInput>,
+}
+
 pub(crate) struct SendRgbRequestData {
     pub(crate) donation: bool,
     pub(crate) fee_rate: u64,
@@ -1944,6 +1963,58 @@ pub(crate) async fn send_rgb_invoice(
     send_rgb(
         state,
         HashMap::from([(request.asset_id, vec![recipient])]),
+        request.donation,
+        request.fee_rate,
+        request.min_confirmations,
+    )
+    .await
+}
+
+pub(crate) async fn send_rgb_invoices(
+    state: Arc<AppState>,
+    request: SendRgbInvoicesRequestData,
+) -> Result<SendRgbData, APIError> {
+    crate::rgb_invoice::validate_batch_bounds(
+        request
+            .recipient_groups
+            .iter()
+            .map(|g| g.recipients.iter().map(|r| r.invoice.as_str())),
+    )?;
+    // Validate every group and recipient before acquiring a mutable session or asking the signer.
+    if request.recipient_groups.len() > crate::rgb_invoice::MAX_BATCH_ASSETS {
+        return Err(APIError::InvalidRequest(
+            "Too many RGB batch asset groups".into(),
+        ));
+    }
+    let groups = request
+        .recipient_groups
+        .into_iter()
+        .map(|group| {
+            let recipients = group
+                .recipients
+                .into_iter()
+                .map(|recipient| {
+                    Ok(crate::rgb_invoice::InvoiceRecipient {
+                        invoice: recipient.invoice,
+                        assignment: rgb_assignment_from_kind(
+                            recipient.assignment_kind,
+                            recipient.assignment_amount,
+                        )?,
+                        witness_data: recipient.witness_data.map(|w| RgbLibWitnessData {
+                            amount_sat: w.amount_sat,
+                            blinding: w.blinding,
+                        }),
+                    })
+                })
+                .collect::<Result<Vec<_>, APIError>>()?;
+            Ok((group.asset_id, recipients))
+        })
+        .collect::<Result<Vec<_>, APIError>>()?;
+    let recipients =
+        crate::rgb_invoice::recipients_from_invoices(groups, state.static_state.network)?;
+    send_rgb(
+        state,
+        recipients,
         request.donation,
         request.fee_rate,
         request.min_confirmations,

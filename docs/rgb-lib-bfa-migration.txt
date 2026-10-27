@@ -134,6 +134,30 @@ supported. This negative acceptance is a documented missing feature, not a claim
 that linked-contract or linked-Lightning payments work. Generic channel-funding
 and sweep limitations above remain separate; their tests are not waived.
 
+Authenticated batch sends
+-------------------------
+REST /sendrgbinvoices and SDK sendrgbinvoices accept complete invoices for a
+single native batch. Each group names one asset; each recipient carries its
+original invoice, concrete assignment and optional witness data. The SDK uses
+InvoiceAssetRecipients/RgbInvoiceRecipient/SendRgbInvoicesRequest and the existing
+AssignmentKind vocabulary. REST uses recipient_groups with asset_id and recipients
+containing invoice, assignment (the existing tagged Assignment) and witness_data.
+The existing single fungible sendrgbinvoice API and legacy constructors are kept.
+Legacy keyless proxy requests remain rejected; out-of-band legacy sends remain
+supported. A batch is never emulated by multiple independent sends.
+
+Every invoice is checked against the selected network, asset and assignment,
+including Any versus a zero fungible placeholder. Witness requirements, proxy
+recipient keys, encryption and expiration are preserved from the original invoice.
+Admission rejects duplicate canonical asset groups and duplicate recipient aliases
+within an asset. Both transports enforce at most 64 asset groups, 256 recipients,
+16 KiB per invoice and 1 MiB total invoice bytes before conversion/dispatch. All
+invoices must pass before unlocking/signing/mutating; one shared operation deadline
+then leaves the normal ACK/broadcast margin. The old SDK/REST funding fixtures now
+retain the receiver-issued complete invoice instead of reconstructing credentials
+from a recipient ID. A dedicated funded mixed NIA witness/NFT test requires a
+single transaction, a single positive fee and settled balances for both assets.
+
 Candidate source and qualification
 ----------------------------------
 RGB: 962730a211f0f7569d7ad8ae777052f433d87655

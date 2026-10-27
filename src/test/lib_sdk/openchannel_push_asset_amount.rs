@@ -312,19 +312,22 @@ fn openchannel_push_asset_amount() {
         wait_for_balance(&node_a, &asset_id, 200, Duration::from_secs(70));
         wait_for_balance(&node_b, &asset_id, 800, Duration::from_secs(70));
 
-        let recipient_id = node_c
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let recipient_id = crate::helpers::rgb_invoice(
+            &node_c,
+            SdkRgbInvoiceRequest {
                 asset_id: None,
                 assignment_kind: None,
                 assignment_amount: None,
                 duration_seconds: None,
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("node C rgbinvoice final")
-            .recipient_id;
-        node_b
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("node C rgbinvoice final")
+        .recipient_id;
+        crate::helpers::send_rgb(
+            &node_b,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -340,8 +343,9 @@ fn openchannel_push_asset_amount() {
                         )],
                     }],
                 }],
-            })
-            .expect("node B send_rgb final");
+            },
+        )
+        .expect("node B send_rgb final");
         mine(1);
         refresh_transfers(&node_c);
         refresh_transfers(&node_c);

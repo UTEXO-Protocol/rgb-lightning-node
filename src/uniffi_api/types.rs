@@ -936,6 +936,25 @@ pub struct SendRgbInvoiceRequest {
     pub min_confirmations: u8,
 }
 
+pub struct RgbInvoiceRecipient {
+    pub invoice: String,
+    pub witness_data: Option<WitnessData>,
+    pub assignment_kind: AssignmentKind,
+    pub assignment_amount: Option<u64>,
+}
+
+pub struct InvoiceAssetRecipients {
+    pub asset_id: ContractId,
+    pub recipients: Vec<RgbInvoiceRecipient>,
+}
+
+pub struct SendRgbInvoicesRequest {
+    pub donation: bool,
+    pub fee_rate: u64,
+    pub min_confirmations: u8,
+    pub recipient_groups: Vec<InvoiceAssetRecipients>,
+}
+
 pub struct SendRgbRequest {
     pub donation: bool,
     pub fee_rate: u64,

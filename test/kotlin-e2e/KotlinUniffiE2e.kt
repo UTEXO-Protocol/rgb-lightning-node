@@ -1,4 +1,4 @@
-import org.utexo.rgblightningnode.AssetRecipients
+import org.utexo.rgblightningnode.InvoiceAssetRecipients
 import org.utexo.rgblightningnode.AssignmentKind
 import org.utexo.rgblightningnode.ContractId
 import org.utexo.rgblightningnode.HtlcStatus
@@ -7,7 +7,7 @@ import org.utexo.rgblightningnode.LnInvoiceRequest
 import org.utexo.rgblightningnode.Payment
 import org.utexo.rgblightningnode.PaymentHash
 import org.utexo.rgblightningnode.PaymentType
-import org.utexo.rgblightningnode.RgbRecipient
+import org.utexo.rgblightningnode.RgbInvoiceRecipient
 import org.utexo.rgblightningnode.RlnException
 import org.utexo.rgblightningnode.SdkCloseChannelRequest
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
@@ -21,7 +21,7 @@ import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
 import org.utexo.rgblightningnode.SdkRgbInvoiceRequest
 import org.utexo.rgblightningnode.SdkSendPaymentRequest
 import org.utexo.rgblightningnode.SdkUnlockRequest
-import org.utexo.rgblightningnode.SendRgbRequest
+import org.utexo.rgblightningnode.SendRgbInvoicesRequest
 import org.utexo.rgblightningnode.Txid
 import java.nio.file.Files
 import java.nio.file.Path
@@ -877,7 +877,7 @@ private fun openchannelPushAssetAmountScenario() {
         waitForBalance(nodeA, assetId, 200u, BALANCE_TIMEOUT_SEC)
         waitForBalance(nodeB, assetId, 800u, BALANCE_TIMEOUT_SEC)
 
-        val recipientId = nodeC.rgbinvoice(
+        val invoice = nodeC.rgbinvoice(
             SdkRgbInvoiceRequest(
                 assetId = null,
                 assignmentKind = null,
@@ -886,23 +886,22 @@ private fun openchannelPushAssetAmountScenario() {
                 minConfirmations = 1u,
                 witness = false,
             )
-        ).recipientId
+        ).invoice
 
-        nodeB.sendRgb(
-            SendRgbRequest(
+        nodeB.sendrgbinvoices(
+            SendRgbInvoicesRequest(
                 donation = true,
                 feeRate = CREATE_UTXOS_FEE_RATE,
                 minConfirmations = 1u,
                 recipientGroups = listOf(
-                    AssetRecipients(
+                    InvoiceAssetRecipients(
                         assetId = assetId,
                         recipients = listOf(
-                            RgbRecipient(
-                                recipientId = recipientId,
+                            RgbInvoiceRecipient(
+                                invoice = invoice,
                                 witnessData = null,
                                 assignmentKind = AssignmentKind.FUNGIBLE,
                                 assignmentAmount = 100u,
-                                transportEndpoints = listOf(PROXY_ENDPOINT_LOCAL),
                             )
                         ),
                     )

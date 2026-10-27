@@ -293,22 +293,21 @@ def send_asset_for_second_channel(
     asset_id,
     asset_amount: int,
 ):
-    recipient_id = rgb_invoice(receiver)
-    sender.send_rgb(
-        rln.SendRgbRequest(
+    invoice = rgb_invoice(receiver)
+    sender.sendrgbinvoices(
+        rln.SendRgbInvoicesRequest(
             donation=True,
             fee_rate=1,
             min_confirmations=1,
             recipient_groups=[
-                rln.AssetRecipients(
+                rln.InvoiceAssetRecipients(
                     asset_id=asset_id,
                     recipients=[
-                        rln.RgbRecipient(
-                            recipient_id=recipient_id,
+                        rln.RgbInvoiceRecipient(
+                            invoice=invoice,
                             witness_data=None,
                             assignment_kind=rln.AssignmentKind.FUNGIBLE,
                             assignment_amount=asset_amount,
-                            transport_endpoints=["rpc://127.0.0.1:3000/json-rpc"],
                         )
                     ],
                 )

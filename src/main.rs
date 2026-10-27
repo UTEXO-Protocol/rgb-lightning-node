@@ -104,8 +104,8 @@ use crate::routes::{
     list_unspents, ln_invoice, lock, maker_execute, maker_init, network_info, node_info,
     open_channel, post_asset_media, provide_out_of_band_ack, provide_out_of_band_consignment,
     refresh_transfers, restore, revoke_token, rgb_invoice, rotate_address, send_btc,
-    send_onion_message, send_payment, send_rgb, send_rgb_invoice, shutdown, sign_message, sync,
-    taker, unlock,
+    send_onion_message, send_payment, send_rgb, send_rgb_invoice, send_rgb_invoices, shutdown,
+    sign_message, sync, taker, unlock,
 };
 #[cfg(feature = "vss")]
 use crate::routes::{vss_backup, vss_backup_info, vss_clear_fence};
@@ -265,6 +265,7 @@ pub(crate) async fn app(args: UserArgs) -> Result<(Router, Arc<AppState>), AppEr
         .route("/sendpayment", post(send_payment))
         .route("/sendrgb", post(send_rgb))
         .route("/sendrgbinvoice", post(send_rgb_invoice))
+        .route("/sendrgbinvoices", post(send_rgb_invoices))
         .route("/shutdown", post(shutdown))
         .route("/signmessage", post(sign_message))
         .route("/sync", post(sync))

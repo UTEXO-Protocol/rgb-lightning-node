@@ -5561,6 +5561,85 @@ pub(crate) struct SendRgbInvoiceRequest {
     pub(crate) min_confirmations: u8,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RgbInvoiceRecipient {
+    pub(crate) invoice: String,
+    pub(crate) assignment: Assignment,
+    pub(crate) witness_data: Option<WitnessData>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RgbInvoiceAssetRecipients {
+    pub(crate) asset_id: String,
+    pub(crate) recipients: Vec<RgbInvoiceRecipient>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SendRgbInvoicesRequest {
+    pub(crate) recipient_groups: Vec<RgbInvoiceAssetRecipients>,
+    pub(crate) donation: bool,
+    pub(crate) fee_rate: u64,
+    pub(crate) min_confirmations: u8,
+}
+
+pub(crate) async fn send_rgb_invoices(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<SendRgbInvoicesRequest>, APIError>,
+) -> Result<Json<SendRgbInvoiceResponse>, APIError> {
+    no_cancel(async move {
+        crate::rgb_invoice::validate_batch_bounds(
+            payload
+                .recipient_groups
+                .iter()
+                .map(|g| g.recipients.iter().map(|r| r.invoice.as_str())),
+        )?;
+        let groups = payload
+            .recipient_groups
+            .into_iter()
+            .map(|group| {
+                (
+                    group.asset_id,
+                    group
+                        .recipients
+                        .into_iter()
+                        .map(|recipient| crate::rgb_invoice::InvoiceRecipient {
+                            invoice: recipient.invoice,
+                            assignment: recipient.assignment.into(),
+                            witness_data: recipient.witness_data.map(Into::into),
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let recipients =
+            crate::rgb_invoice::recipients_from_invoices(groups, state.static_state.network)?;
+        let expiration = crate::rgb_invoice::operation_expiration(
+            &recipients,
+            payload.donation,
+            get_current_timestamp(),
+        )?;
+        let guard = state.check_unlocked().await?;
+        let unlocked_state = guard.as_ref().unwrap();
+        let result = crate::rgb_invoice::send_recipients(
+            unlocked_state.clone(),
+            recipients,
+            payload.donation,
+            payload.fee_rate,
+            payload.min_confirmations,
+            expiration,
+        )
+        .await?;
+        Ok(Json(SendRgbInvoiceResponse {
+            txid: result.txid,
+            batch_transfer_idx: result.batch_transfer_idx,
+        }))
+    })
+    .await
+}
+
 #[derive(Serialize)]
 pub(crate) struct SendRgbInvoiceResponse {
     pub(crate) txid: String,
@@ -5609,6 +5688,9 @@ pub(crate) async fn send_rgb(
     WithRejection(Json(payload), _): WithRejection<Json<SendRgbRequest>, APIError>,
 ) -> Result<Json<SendRgbResponse>, APIError> {
     no_cancel(async move {
+        if payload.recipient_map.values().flatten().any(|recipient| !recipient.transport_endpoints.is_empty()) {
+            return Err(APIError::InvalidRequest("Proxy RGB recipients require a complete authenticated invoice; use sendrgbinvoice or sendrgbinvoices".into()));
+        }
         let guard = state.check_unlocked().await?;
         let unlocked_state = guard.as_ref().unwrap();
 

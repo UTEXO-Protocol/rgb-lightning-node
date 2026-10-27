@@ -957,3 +957,123 @@ pub(crate) fn refresh_transfers(node: &SdkNode) {
     node.refreshtransfers(SdkRefreshTransfersRequest { skip_sync: false })
         .expect("refreshtransfers");
 }
+
+// Only test consumers use this registry: it preserves receiver-issued invoice
+// bytes across old fixture bookkeeping, never creates recipient credentials.
+static AUTHENTICATED_TEST_INVOICES: Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn rgb_invoice(
+    node: &SdkNode,
+    request: SdkRgbInvoiceRequest,
+) -> Result<rgb_lightning_node::SdkRgbInvoiceResponse, rgb_lightning_node::RlnError> {
+    let response = node.rgbinvoice(request)?;
+    AUTHENTICATED_TEST_INVOICES
+        .lock()
+        .unwrap()
+        .insert(response.recipient_id.0.clone(), response.invoice.clone());
+    Ok(response)
+}
+
+pub(crate) fn send_rgb(
+    node: &SdkNode,
+    request: SendRgbRequest,
+) -> Result<rgb_lightning_node::SendRgbResponse, rgb_lightning_node::RlnError> {
+    if request
+        .recipient_groups
+        .iter()
+        .flat_map(|g| &g.recipients)
+        .all(|r| r.transport_endpoints.is_empty())
+    {
+        return node.send_rgb(request);
+    }
+    let groups = request
+        .recipient_groups
+        .into_iter()
+        .map(|group| {
+            let recipients = group
+                .recipients
+                .into_iter()
+                .map(|r| {
+                    let invoice = AUTHENTICATED_TEST_INVOICES
+                        .lock()
+                        .unwrap()
+                        .get(&r.recipient_id.0)
+                        .expect("test must retain its issued complete invoice")
+                        .clone();
+                    let endpoints: Vec<String> =
+                        r.transport_endpoints.into_iter().map(|e| e.0).collect();
+                    assert_eq!(
+                        rgb_lib::wallet::Invoice::new(invoice.clone())
+                            .unwrap()
+                            .invoice_data()
+                            .transport_endpoints,
+                        endpoints
+                    );
+                    rgb_lightning_node::RgbInvoiceRecipient {
+                        invoice,
+                        witness_data: r.witness_data,
+                        assignment_kind: r.assignment_kind,
+                        assignment_amount: r.assignment_amount,
+                    }
+                })
+                .collect();
+            rgb_lightning_node::InvoiceAssetRecipients {
+                asset_id: group.asset_id,
+                recipients,
+            }
+        })
+        .collect();
+    node.sendrgbinvoices(rgb_lightning_node::SendRgbInvoicesRequest {
+        donation: request.donation,
+        fee_rate: request.fee_rate,
+        min_confirmations: request.min_confirmations,
+        recipient_groups: groups,
+    })
+}
+
+pub(crate) fn assert_burn_proof_destination(
+    proof_path: String,
+    asset: &ContractId,
+    expected: &[u8],
+) {
+    use bitcoin::hex::DisplayHex;
+    let inspected =
+        rgb_lib::wallet::inspect_consignment(proof_path, rgb_lib::wallet::BundleFilter::Terminals)
+            .unwrap();
+    assert_eq!(inspected.asset_id, asset.to_string());
+    let reasons: Vec<_> = inspected
+        .witnesses
+        .iter()
+        .flat_map(|w| &w.operations)
+        .flat_map(|o| &o.transitions)
+        .flat_map(|t| &t.globals)
+        .filter_map(|g| match g {
+            rgb_lib::wallet::TransitionGlobal::BurnReason(reason) => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasons, vec![expected.to_lower_hex_string()]);
+}
+
+pub(crate) fn native_recipient_from_invoice(
+    invoice: &str,
+    amount: u64,
+) -> rgb_lib::wallet::Recipient {
+    let invoice = rgb_lib::wallet::Invoice::new(invoice.to_string())
+        .unwrap()
+        .invoice_data();
+    assert_eq!(invoice.network, rgb_lib::BitcoinNetwork::Regtest);
+    assert_eq!(invoice.assignment, rgb_lib::Assignment::Fungible(amount));
+    assert!(invoice.public_key.is_some());
+    rgb_lib::wallet::Recipient {
+        recipient_id: invoice.recipient_id,
+        assignment: invoice.assignment,
+        witness_data: None,
+        transport_endpoints: invoice.transport_endpoints,
+        public_key: invoice.public_key,
+        encryption: invoice.encryption,
+        expiration_timestamp: invoice.expiration_timestamp,
+    }
+}

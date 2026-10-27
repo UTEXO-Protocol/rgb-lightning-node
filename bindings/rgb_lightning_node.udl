@@ -149,6 +149,8 @@ interface SdkNode {
     [Throws=RlnError]
     SendRgbResponse sendrgbinvoice(SendRgbInvoiceRequest request);
     [Throws=RlnError]
+    SendRgbResponse sendrgbinvoices(SendRgbInvoicesRequest request);
+    [Throws=RlnError]
     AsyncOrderNewResponse apay_new(string host_node_id);
     [Throws=RlnError]
     AsyncOrderNewResponse apay_new_with_address(string host_node_id, string username, string domain);
@@ -963,6 +965,25 @@ dictionary SendRgbInvoiceRequest {
     boolean donation;
     u64 fee_rate;
     u8 min_confirmations;
+};
+
+dictionary RgbInvoiceRecipient {
+    string invoice;
+    WitnessData? witness_data;
+    AssignmentKind assignment_kind;
+    u64? assignment_amount;
+};
+
+dictionary InvoiceAssetRecipients {
+    ContractId asset_id;
+    sequence<RgbInvoiceRecipient> recipients;
+};
+
+dictionary SendRgbInvoicesRequest {
+    boolean donation;
+    u64 fee_rate;
+    u8 min_confirmations;
+    sequence<InvoiceAssetRecipients> recipient_groups;
 };
 
 dictionary SendRgbRequest {
