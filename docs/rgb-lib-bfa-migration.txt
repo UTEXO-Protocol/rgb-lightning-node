@@ -214,7 +214,7 @@ pure tests run with:
 
   python3 -m unittest discover -s test -p test_channel_sweep_candidates.py -v
 
-The two explicitly ignored protected_close_settlement SDK regressions are separate
+The explicitly ignored protected_close_settlement SDK regressions are separate
 owned-fixture tests, not skipped integration acceptance. They admit only the
 iris_rgb_output_20261026 Compose project at the sibling qualification-consumers/
 rgb-output-native-fixture-20261026/compose.yaml path, its exact container labels,
@@ -232,6 +232,14 @@ verify that repeated refresh cannot credit unconfirmed sweeps, confirm the two
 observed native sweeps, and check settled balances, consumed receipts and refresh
 idempotence. They do not qualify arbitrary crash recovery, reorgs or physical/mobile
 devices.
+
+The standard-channel payment case also exercises the same settled-keysend helper
+as the ordinary SDK force-close fixture: a 3M-msat initial push, no RGB push,
+then one 150-unit payment and one 50-unit return payment. One shared 60-second
+deadline covers advertised next-HTLC capacity, both peers' exact allocations,
+one-shot submission, matching successful payments and no HTLC state in flight.
+Failed payments abort; the fixture does not retry or alter amounts. This removes
+the assumption that one peer's PaymentSent event proves reverse liquidity.
 
 Candidate source and qualification
 ----------------------------------

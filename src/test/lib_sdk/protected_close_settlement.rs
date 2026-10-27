@@ -374,6 +374,165 @@ fn protected_force_close_requires_observed_sweep_confirmation_before_credit() {
     run_protected_close(true);
 }
 
+#[test]
+#[ignore = "requires exactly admitted owned regtest fixture and isolated protocol-1 proxy"]
+#[serial_test::serial]
+fn force_close_bidirectional_payments_wait_for_exact_settlement() {
+    let fixture = Fixture::admit();
+    let directory = WalletDirectories(Some(
+        tempfile::Builder::new()
+            .prefix("rln-force-payment-readiness-")
+            .tempdir()
+            .unwrap(),
+    ));
+    let nodes = Nodes {
+        a: node(&directory.path().join("a"), 13411, 15111),
+        b: node(&directory.path().join("b"), 13412, 15112),
+    };
+    for node in [&nodes.a, &nodes.b] {
+        fixture.rpc(
+            true,
+            "sendtoaddress",
+            &[json!(node.address().unwrap().address), json!(0.02)],
+        );
+    }
+    fixture.mine(1);
+    for node in [&nodes.a, &nodes.b] {
+        wait("confirmed funding", || {
+            (node.btc_balance(false).unwrap().vanilla.spendable >= 1_500_000).then_some(())
+        });
+        node.createutxos(SdkCreateUtxosRequest {
+            up_to: false,
+            num: Some(10),
+            size: Some(100_000),
+            fee_rate: 7,
+            skip_sync: false,
+        })
+        .unwrap();
+    }
+    fixture.mine(1);
+    for node in [&nodes.a, &nodes.b] {
+        node.sync().unwrap();
+    }
+    let asset = nodes
+        .a
+        .issueassetnia(SdkIssueAssetNiaRequest {
+            amounts: vec![1000],
+            ticker: "UTEST".into(),
+            name: "Owned payment readiness test".into(),
+            precision: 0,
+        })
+        .unwrap()
+        .asset_id;
+    let a_pub = nodes.a.node_info().unwrap().pubkey;
+    let b_pub = nodes.b.node_info().unwrap().pubkey;
+    nodes
+        .a
+        .connectpeer(format!("{b_pub}@127.0.0.1:15112"))
+        .unwrap();
+    nodes
+        .a
+        .openchannel(SdkOpenChannelRequest {
+            peer_pubkey_and_opt_addr: format!("{b_pub}@127.0.0.1:15112"),
+            capacity_sat: 100_000,
+            push_msat: 3_000_000,
+            public: true,
+            with_anchors: true,
+            fee_base_msat: None,
+            fee_proportional_millionths: None,
+            temporary_channel_id: None,
+            asset_id: Some(asset),
+            asset_amount: Some(600),
+            push_asset_amount: None,
+            virtual_open_mode: None,
+        })
+        .unwrap();
+    let funding = wait("channel funding transaction", || {
+        nodes
+            .a
+            .list_channels()
+            .unwrap()
+            .into_iter()
+            .find_map(|channel| channel.funding_txid)
+    });
+    wait("funding broadcast", || {
+        fixture
+            .mempool()
+            .contains(&funding.to_string())
+            .then_some(())
+    });
+    fixture.mine(6);
+    // Reproduce the existing failing fixture's admission: both sync, only A usable.
+    wait("A usable channel", || {
+        nodes.a.sync().unwrap();
+        nodes.b.sync().unwrap();
+        nodes
+            .a
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|channel| channel.asset_id.as_ref() == Some(&asset) && channel.is_usable)
+            .then_some(())
+    });
+    settled_balance(&nodes.a, &asset, 400);
+
+    let snapshot = |stage: &str| {
+        for (label, node, peer) in [("A", &nodes.a, b_pub), ("B", &nodes.b, a_pub)] {
+            let channels: Vec<_> = node
+                .list_channels()
+                .unwrap()
+                .into_iter()
+                .filter(|channel| channel.peer_pubkey == peer)
+                .map(|channel| {
+                    json!({
+                        "ready": channel.ready,
+                        "usable": channel.is_usable,
+                        "next_minimum_msat": channel.next_outbound_htlc_minimum_msat,
+                        "next_limit_msat": channel.next_outbound_htlc_limit_msat,
+                        "asset_local": channel.asset_local_amount,
+                        "asset_remote": channel.asset_remote_amount,
+                        "inflight": rgb_lightning_node::test_utils::channel_has_inflight_htlcs_for_tests(node, channel.channel_id).unwrap(),
+                    })
+                })
+                .collect();
+            println!("payment-readiness stage={stage} node={label} channels={channels:?}");
+        }
+    };
+    let channel_id = nodes.a.list_channels().unwrap()[0].channel_id;
+    let initial_receiver = nodes.b.list_channels().unwrap().remove(0);
+    assert!(initial_receiver.next_outbound_htlc_limit_msat < 3_000_000);
+    snapshot("before-A-to-B-150");
+    super::close_force_standard::settled_keysend(
+        &nodes.a,
+        &nodes.b,
+        b_pub,
+        channel_id,
+        &asset,
+        150,
+        (450, 150),
+    );
+    snapshot("settled-A-to-B-150");
+    assert!(nodes.b.list_channels().unwrap()[0].next_outbound_htlc_limit_msat >= 3_000_000);
+    super::close_force_standard::settled_keysend(
+        &nodes.b,
+        &nodes.a,
+        a_pub,
+        channel_id,
+        &asset,
+        50,
+        (100, 500),
+    );
+    snapshot("settled-B-to-A-50");
+    assert_eq!(
+        nodes.a.list_channels().unwrap()[0].asset_local_amount,
+        Some(500)
+    );
+    assert_eq!(
+        nodes.b.list_channels().unwrap()[0].asset_local_amount,
+        Some(100)
+    );
+}
+
 fn run_protected_close(force: bool) {
     let fixture = Fixture::admit(); // Before creating wallets or funding/mining anything.
     let directory = WalletDirectories(Some(

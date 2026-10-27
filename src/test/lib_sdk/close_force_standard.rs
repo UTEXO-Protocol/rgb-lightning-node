@@ -1,6 +1,140 @@
 use crate::helpers::*;
 use serial_test::serial;
-use std::{fs, thread::sleep, time::Duration};
+use std::{
+    fs,
+    thread::sleep,
+    time::{Duration, Instant},
+};
+
+// This fixture intentionally closes a fully settled bidirectional-payment channel.
+// PaymentSent alone does not establish reverse liquidity or the final commitment state.
+pub(super) fn settled_keysend(
+    sender: &SdkNode,
+    receiver: &SdkNode,
+    destination: bitcoin::secp256k1::PublicKey,
+    channel_id: lightning::ln::types::ChannelId,
+    asset_id: &ContractId,
+    asset_amount: u64,
+    expected_after: (u64, u64),
+) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let expected_before = (
+        expected_after.0.checked_add(asset_amount).unwrap(),
+        expected_after.1.checked_sub(asset_amount).unwrap(),
+    );
+    let channel_state = |node: &SdkNode| {
+        let channel = node
+            .list_channels()
+            .expect("settled keysend list_channels")
+            .into_iter()
+            .find(|channel| channel.channel_id == channel_id)
+            .expect("settled keysend exact channel must exist");
+        let inflight =
+            rgb_lightning_node::test_utils::channel_has_inflight_htlcs_for_tests(node, channel_id)
+                .expect("settled keysend exact HTLC state");
+        (channel, inflight)
+    };
+    let mut payment_hash = None;
+    loop {
+        sender.sync().expect("settled keysend sender sync");
+        receiver.sync().expect("settled keysend receiver sync");
+        let (sender_channel, sender_inflight) = channel_state(sender);
+        let (receiver_channel, receiver_inflight) = channel_state(receiver);
+        let both_ready = sender_channel.ready
+            && sender_channel.is_usable
+            && receiver_channel.ready
+            && receiver_channel.is_usable;
+        let quiescent = !sender_inflight && !receiver_inflight;
+        let balances_match = |expected: (u64, u64)| {
+            sender_channel.asset_local_amount == Some(expected.0)
+                && sender_channel.asset_remote_amount == Some(expected.1)
+                && receiver_channel.asset_local_amount == Some(expected.1)
+                && receiver_channel.asset_remote_amount == Some(expected.0)
+        };
+        let diagnostic = || {
+            format!(
+                "asset_amount={asset_amount}, sent={}, ready={both_ready}, next_min={}, next_limit={}, sender_rgb={:?}, receiver_rgb={:?}, inflight={sender_inflight}/{receiver_inflight}",
+                payment_hash.is_some(),
+                sender_channel.next_outbound_htlc_minimum_msat,
+                sender_channel.next_outbound_htlc_limit_msat,
+                sender_channel.asset_local_amount,
+                receiver_channel.asset_local_amount,
+            )
+        };
+        assert!(
+            Instant::now() < deadline,
+            "settled keysend timed out: {}",
+            diagnostic()
+        );
+        if let Some(hash) = payment_hash.as_ref() {
+            let payments = [sender, receiver].map(|node| {
+                node.list_payments()
+                    .expect("settled keysend list_payments")
+                    .into_iter()
+                    .find(|payment| payment.payment_hash == *hash)
+            });
+            let statuses = payments.each_ref().map(|payment| {
+                match payment.as_ref().map(|payment| &payment.status) {
+                    None => "absent",
+                    Some(HtlcStatus::Pending) => "pending",
+                    Some(HtlcStatus::Claimable) => "claimable",
+                    Some(HtlcStatus::Claiming) => "claiming",
+                    Some(HtlcStatus::Succeeded) => "succeeded",
+                    Some(HtlcStatus::Cancelled) => "cancelled",
+                    Some(HtlcStatus::Failed) => "failed",
+                }
+            });
+            assert!(
+                !payments
+                    .iter()
+                    .any(|payment| payment.as_ref().is_some_and(|payment| matches!(
+                        payment.status,
+                        HtlcStatus::Failed | HtlcStatus::Cancelled
+                    ))),
+                "settled keysend reached a terminal failure: sender_status={}, receiver_status={}, {}",
+                statuses[0],
+                statuses[1],
+                diagnostic()
+            );
+            if both_ready
+                && quiescent
+                && balances_match(expected_after)
+                && payments.iter().all(|payment| {
+                    payment
+                        .as_ref()
+                        .is_some_and(|payment| matches!(payment.status, HtlcStatus::Succeeded))
+                })
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "settled keysend completed after deadline"
+                );
+                return;
+            }
+        } else if both_ready
+            && quiescent
+            && balances_match(expected_before)
+            && sender_channel.next_outbound_htlc_minimum_msat <= PAYMENT_MSAT
+            && sender_channel.next_outbound_htlc_limit_msat >= PAYMENT_MSAT
+        {
+            let sent = sender
+                .keysend(SdkKeysendRequest {
+                    dest_pubkey: destination,
+                    amt_msat: PAYMENT_MSAT,
+                    asset_id: Some(*asset_id),
+                    asset_amount: Some(asset_amount),
+                })
+                .expect("settled keysend one-shot submission");
+            assert!(
+                matches!(sent.status, HtlcStatus::Pending | HtlcStatus::Succeeded),
+                "settled keysend submission failed: {}",
+                diagnostic()
+            );
+            payment_hash = Some(sent.payment_hash);
+        }
+        sleep(Duration::from_secs(1));
+    }
+}
 
 #[test]
 #[serial]
@@ -89,11 +223,24 @@ fn close_force_standard() {
             .get_channel_id(open_channel.temporary_channel_id)
             .expect("node A get_channel_id");
 
-        keysend(&node_a, node_b_pubkey, None, Some(&asset_id), Some(150));
-        keysend(&node_b, node_a_pubkey, None, Some(&asset_id), Some(50));
-
-        // Mirrors the original test to avoid racing an outdated commitment TX.
-        sleep(Duration::from_secs(5));
+        settled_keysend(
+            &node_a,
+            &node_b,
+            node_b_pubkey,
+            channel_id,
+            &asset_id,
+            150,
+            (450, 150),
+        );
+        settled_keysend(
+            &node_b,
+            &node_a,
+            node_a_pubkey,
+            channel_id,
+            &asset_id,
+            50,
+            (100, 500),
+        );
 
         let closed = close_channel_with_force(&node_a, channel_id, node_b_pubkey, true);
         wait_for_closed_channel_balance(&node_a, &asset_id, 900, Duration::from_secs(70), &closed);
