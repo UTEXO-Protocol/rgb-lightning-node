@@ -1,12 +1,13 @@
 //! Durable preparation for RGB sweeps. Apply the fascia only after the sweep is confirmed.
 
-use bitcoin::io;
 use lightning::util::persist::KVStoreSync;
 use rgb_lib::{
     bitcoin::psbt::Psbt, wallet::rust_only::ColorPrepareResult, ConsignmentExt, FileContent,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, str::FromStr};
+
+use crate::utils::{kv_read, kv_write};
 
 const PRIMARY_NAMESPACE: &str = "rgb_sweeps";
 
@@ -40,20 +41,11 @@ impl PreparedRgbSweep {
     }
 
     pub(crate) fn read(store: &impl KVStoreSync, key: &str) -> Result<Option<Self>, String> {
-        match store.read(PRIMARY_NAMESPACE, "", key) {
-            Ok(bytes) => bincode::deserialize(&bytes)
-                .map(Some)
-                .map_err(|e| format!("invalid prepared RGB sweep {key}: {e}")),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("cannot read prepared RGB sweep {key}: {e}")),
-        }
+        kv_read(store, PRIMARY_NAMESPACE, key)
     }
 
     pub(crate) fn persist(&self, store: &impl KVStoreSync, key: &str) -> Result<(), String> {
-        let bytes = bincode::serialize(self).map_err(|e| e.to_string())?;
-        store
-            .write(PRIMARY_NAMESPACE, "", key, bytes)
-            .map_err(|e| format!("cannot persist prepared RGB sweep {key}: {e}"))
+        kv_write(store, PRIMARY_NAMESPACE, key, self)
     }
 }
 
@@ -152,50 +144,10 @@ pub(crate) fn reconcile_prepared_sweeps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_store::TestKvStore as Store;
     use bitcoin::{
         absolute, hashes::Hash, transaction, Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut,
     };
-    use std::{
-        collections::BTreeMap,
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Mutex,
-        },
-    };
-
-    #[derive(Default)]
-    struct Store {
-        entries: Mutex<BTreeMap<String, Vec<u8>>>,
-        fail_remove: AtomicBool,
-    }
-
-    impl KVStoreSync for Store {
-        fn read(&self, _: &str, _: &str, key: &str) -> Result<Vec<u8>, io::Error> {
-            self.entries
-                .lock()
-                .unwrap()
-                .get(key)
-                .cloned()
-                .ok_or_else(|| io::ErrorKind::NotFound.into())
-        }
-        fn write(&self, _: &str, _: &str, key: &str, data: Vec<u8>) -> Result<(), io::Error> {
-            self.entries.lock().unwrap().insert(key.to_string(), data);
-            Ok(())
-        }
-        fn remove(&self, _: &str, _: &str, key: &str, _: bool) -> Result<(), io::Error> {
-            if self.fail_remove.load(Ordering::SeqCst) {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "injected storage failure",
-                ));
-            }
-            self.entries.lock().unwrap().remove(key);
-            Ok(())
-        }
-        fn list(&self, _: &str, _: &str) -> Result<Vec<String>, io::Error> {
-            Ok(self.entries.lock().unwrap().keys().cloned().collect())
-        }
-    }
 
     fn fixture() -> PreparedRgbSweep {
         let psbt = Psbt::from_unsigned_tx(Transaction {
@@ -257,7 +209,7 @@ mod tests {
     fn removal_failure_retains_the_receipt_for_idempotent_consume() {
         let store = Store::default();
         fixture().persist(&store, "sweep").unwrap();
-        store.fail_remove.store(true, Ordering::SeqCst);
+        store.set_fail_remove(true);
         let mut consumed = Vec::new();
         reconcile_prepared_sweeps(
             &store,
@@ -268,7 +220,7 @@ mod tests {
             },
         );
         assert!(PreparedRgbSweep::read(&store, "sweep").unwrap().is_some());
-        store.fail_remove.store(false, Ordering::SeqCst);
+        store.set_fail_remove(false);
         reconcile_prepared_sweeps(
             &store,
             |_| Ok(true),
