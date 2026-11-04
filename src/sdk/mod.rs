@@ -9,6 +9,7 @@ use crate::async_order::{
     write_async_payments_next_hash_index, AsyncOrderNewResultWire,
     AsyncOrderOutboundInvoiceResultWire,
 };
+use crate::bump_force_close::{ChannelCloseBumpRecord, ChannelCloseBumpStatus};
 use crate::core_types::asset_link::{AssetLinkRequest, AssetLinkResponse};
 use crate::core_types::async_order::{
     AsyncOrderNewRequest, AsyncOrderNewResponse, AsyncOrderOutboundInvoiceRequest,
@@ -2546,6 +2547,48 @@ pub(crate) async fn close_channel(
     }
 
     Ok(())
+}
+
+pub(crate) struct BumpForceCloseFeeData {
+    pub(crate) channel_id: String,
+    pub(crate) claim_id: String,
+    pub(crate) status: ChannelCloseBumpStatus,
+    pub(crate) commitment_txid: String,
+    pub(crate) child_txid: Option<String>,
+    pub(crate) target_fee_rate_sat_vb: f64,
+    pub(crate) updated_at: u64,
+    pub(crate) message: Option<String>,
+}
+
+pub(crate) async fn bump_force_close_fee(
+    state: Arc<AppState>,
+    channel_id: String,
+) -> Result<BumpForceCloseFeeData, APIError> {
+    state.check_lightning_supported()?;
+    let guard = check_unlocked(&state).await?;
+    let unlocked_state = guard.as_ref().unwrap().lightning()?;
+
+    let channel_id_vec = hex_str_to_vec(&channel_id);
+    if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
+        return Err(APIError::InvalidChannelID);
+    }
+    let channel_id = ChannelId(channel_id_vec.unwrap().try_into().unwrap());
+
+    let record =
+        ChannelCloseBumpRecord::read(unlocked_state.kv_store.as_ref(), &channel_id.to_string())
+            .map_err(APIError::Unexpected)?
+            .ok_or(APIError::UnknownChannelId)?;
+
+    Ok(BumpForceCloseFeeData {
+        channel_id: record.channel_id,
+        claim_id: record.claim_id,
+        status: record.status,
+        commitment_txid: record.commitment_txid,
+        child_txid: record.child_txid,
+        target_fee_rate_sat_vb: f64::from(record.target_fee_rate_sat_per_kw) / 250.0,
+        updated_at: record.updated_at,
+        message: record.message,
+    })
 }
 
 /// In external signer mode, on-chain RGB flows that need signing use `rgb_sign_psbt` (never the
