@@ -26,6 +26,7 @@ mod async_kv_store;
 mod async_order;
 mod auth;
 mod backup;
+mod bump_force_close;
 mod config;
 mod core_types;
 mod crypto;

@@ -15,6 +15,7 @@ use bitcoin::{BlockHash, ScriptBuf, Transaction as BitcoinTransaction, Txid};
 use chrono::{DateTime, Local, Utc};
 use electrum_client::ElectrumApi;
 use http::response::Builder;
+use lightning::chain::chaininterface::ConfirmationTarget;
 #[cfg(all(feature = "transaction-sync", feature = "electrum"))]
 use lightning::chain::transaction::TransactionData;
 #[cfg(all(feature = "transaction-sync", feature = "electrum"))]
@@ -68,22 +69,23 @@ use crate::routes::VssClearFenceRequest;
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetFilter, AssetIFA,
     AssetMetadataRequest, AssetMetadataResponse, AssetNIA, AssetUDA, Assignment, BackupRequest,
-    BtcBalanceRequest, BtcBalanceResponse, CancelHodlInvoiceRequest, ChangePasswordRequest,
-    Channel, ChannelStatus, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest,
-    ConnectPeerRequest, CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse,
-    DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse, DecodeSwapstringRequest,
-    DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
-    FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
-    GetChannelIdResponse, GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest,
-    GetPaymentResponse, GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse,
-    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
-    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse,
-    IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse,
-    KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest,
-    ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse, ListPeersResponse,
-    ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest,
-    ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
-    MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
+    BtcBalanceRequest, BtcBalanceResponse, BumpForceCloseFeeRequest, BumpForceCloseFeeResponse,
+    CancelHodlInvoiceRequest, ChangePasswordRequest, Channel, ChannelStatus,
+    ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest, ConnectPeerRequest,
+    CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse, DecodeRGBInvoiceRequest,
+    DecodeRGBInvoiceResponse, DecodeSwapstringRequest, DecodeSwapstringResponse,
+    DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
+    GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
+    GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest, GetPaymentResponse,
+    GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse, InitRequest, InitResponse,
+    InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest,
+    IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse, IssueAssetNIARequest,
+    IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest,
+    KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse,
+    ListChannelsResponse, ListPaymentsResponse, ListPeersResponse, ListSwapsResponse,
+    ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse,
+    ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest,
+    MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
     OpenChannelResponse, Payment, PaymentDirection, PaymentType, Peer, PostAssetMediaResponse,
     ProvideOutOfBandAckRequest, ProvideOutOfBandAckResponse, ProvideOutOfBandConsignmentResponse,
     Recipient, RefreshRequest, RefreshResponse, RestoreRequest, RevokeTokenRequest,
@@ -893,12 +895,16 @@ async fn check_payment_status_by_type(
     None
 }
 
-async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: &str, force: bool) {
+async fn request_close_channel(
+    node_address: SocketAddr,
+    channel_id: &str,
+    peer_pubkey: &str,
+    force: bool,
+) {
     println!(
         "{}closing channel {channel_id} from node {node_address}",
         if force { "force-" } else { "cooperatively " }
     );
-    stop_mining();
     let payload = CloseChannelRequest {
         channel_id: channel_id.to_string(),
         peer_pubkey: peer_pubkey.to_string(),
@@ -915,6 +921,11 @@ async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: 
         .json::<EmptyResponse>()
         .await
         .unwrap();
+}
+
+async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: &str, force: bool) {
+    stop_mining();
+    request_close_channel(node_address, channel_id, peer_pubkey, force).await;
 
     let t_0 = OffsetDateTime::now_utc();
     loop {
@@ -1624,6 +1635,33 @@ async fn list_swaps(node_address: SocketAddr) -> ListSwapsResponse {
         .await
         .unwrap();
     check_response_is_ok(res).await.json().await.unwrap()
+}
+
+async fn bump_force_close_fee(
+    node_address: SocketAddr,
+    channel_id: &str,
+) -> Option<BumpForceCloseFeeResponse> {
+    println!("getting force-close fee bump status for channel {channel_id} on node {node_address}");
+    let payload = BumpForceCloseFeeRequest {
+        channel_id: channel_id.to_string(),
+    };
+    let res = reqwest::Client::new()
+        .post(format!("http://{node_address}/bumpforceclosefee"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return None;
+    }
+    if res.status() != reqwest::StatusCode::OK {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        panic!(
+            "force-close fee bump request for channel {channel_id} failed with {status}: {body}"
+        );
+    }
+    Some(res.json::<BumpForceCloseFeeResponse>().await.unwrap())
 }
 
 async fn get_swap(node_address: SocketAddr, payment_hash: &str, taker: bool) -> Swap {
@@ -3459,7 +3497,12 @@ pub fn set_mock_fee(fee: u32) {
     crate::fee_mock::set_mock_fee_for_tests(Some(fee));
 }
 
+pub fn set_mock_fee_for_target(target: ConfirmationTarget, fee: Option<u32>) {
+    crate::fee_mock::set_target_fee_for_tests(target, fee);
+}
+
 mod address_reuse;
+mod anchor_cpfp_force_close;
 mod asset_link;
 mod auth_db_persistence;
 mod authentication;

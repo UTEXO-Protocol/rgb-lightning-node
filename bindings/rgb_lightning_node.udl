@@ -53,6 +53,8 @@ interface SdkNode {
     [Throws=RlnError]
     void closechannel(SdkCloseChannelRequest request);
     [Throws=RlnError]
+    BumpForceCloseFeeResponse bumpforceclosefee(ChannelId channel_id);
+    [Throws=RlnError]
     void createutxos(SdkCreateUtxosRequest request);
     [Throws=RlnError]
     AssetLinkRecord asset_link(SdkAssetLinkRequest request);
@@ -216,6 +218,17 @@ dictionary VerifyMessageResponse {
 
 dictionary EstimateFeeResponse {
     f64 fee_rate;
+};
+
+dictionary BumpForceCloseFeeResponse {
+    ChannelId channel_id;
+    string claim_id;
+    string status;
+    Txid commitment_txid;
+    Txid? child_txid;
+    f64 target_fee_rate_sat_vb;
+    u64 updated_at;
+    string? message;
 };
 
 dictionary CheckIndexerUrlResponse {

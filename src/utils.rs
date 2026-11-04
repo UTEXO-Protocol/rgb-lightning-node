@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::asset_link::AssetLinkMessageHandler;
 use crate::async_order::{AsyncOrderMessageHandler, AsyncPaymentsPreimageRoot};
+use crate::bump_force_close::BumpTracker;
 use crate::crypto::{decrypt_mnemonic, encrypt_mnemonic};
 use crate::ldk::{ChannelIdsMap, Router, VirtualChannelDraftStore, VirtualChannelSessionStore};
 use crate::rgb::{get_rgb_channel_info_optional, RgbLibWalletWrapper};
@@ -232,6 +233,7 @@ pub(crate) struct LightningState {
     pub(crate) monitor_kv_store: Arc<crate::async_kv_store::RemoteFirstKvStore>,
     pub(crate) rgb_file_transfer_handler: Arc<RgbFileTransferHandler>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
+    pub(crate) bump_tracker: Arc<BumpTracker>,
     pub(crate) maker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) taker_swaps: Arc<Mutex<SwapMap>>,
     pub(crate) router: Arc<Router>,
@@ -840,6 +842,133 @@ pub(crate) fn get_current_timestamp() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+/// Reads and bincode-decodes a record from a KVStore namespace; a missing key is `None`.
+pub(crate) fn kv_read<T: serde::de::DeserializeOwned>(
+    store: &impl KVStoreSync,
+    namespace: &str,
+    key: &str,
+) -> Result<Option<T>, String> {
+    match store.read(namespace, "", key) {
+        Ok(bytes) => bincode::deserialize(&bytes)
+            .map(Some)
+            .map_err(|e| format!("invalid {namespace} record {key}: {e}")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {namespace} record {key}: {e}")),
+    }
+}
+
+/// Bincode-encodes and stores a record in a KVStore namespace.
+pub(crate) fn kv_write<T: serde::Serialize>(
+    store: &impl KVStoreSync,
+    namespace: &str,
+    key: &str,
+    value: &T,
+) -> Result<(), String> {
+    let bytes = bincode::serialize(value).map_err(|e| e.to_string())?;
+    store
+        .write(namespace, "", key, bytes)
+        .map_err(|e| format!("cannot persist {namespace} record {key}: {e}"))
+}
+
+/// In-memory [`KVStoreSync`] shared by the unit tests of the modules that persist records.
+#[cfg(test)]
+pub(crate) mod test_store {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    use bitcoin::io;
+    use lightning::util::persist::KVStoreSync;
+
+    #[derive(Default)]
+    pub(crate) struct TestKvStore {
+        entries: Mutex<BTreeMap<(String, String, String), Vec<u8>>>,
+        fail_remove: AtomicBool,
+    }
+
+    impl TestKvStore {
+        pub(crate) fn set_fail_remove(&self, fail: bool) {
+            self.fail_remove.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    impl KVStoreSync for TestKvStore {
+        fn read(
+            &self,
+            primary_namespace: &str,
+            secondary_namespace: &str,
+            key: &str,
+        ) -> Result<Vec<u8>, io::Error> {
+            self.entries
+                .lock()
+                .unwrap()
+                .get(&(
+                    primary_namespace.to_string(),
+                    secondary_namespace.to_string(),
+                    key.to_string(),
+                ))
+                .cloned()
+                .ok_or_else(|| io::ErrorKind::NotFound.into())
+        }
+
+        fn write(
+            &self,
+            primary_namespace: &str,
+            secondary_namespace: &str,
+            key: &str,
+            data: Vec<u8>,
+        ) -> Result<(), io::Error> {
+            self.entries.lock().unwrap().insert(
+                (
+                    primary_namespace.to_string(),
+                    secondary_namespace.to_string(),
+                    key.to_string(),
+                ),
+                data,
+            );
+            Ok(())
+        }
+
+        fn remove(
+            &self,
+            primary_namespace: &str,
+            secondary_namespace: &str,
+            key: &str,
+            _lazy: bool,
+        ) -> Result<(), io::Error> {
+            if self.fail_remove.load(Ordering::SeqCst) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "injected storage failure",
+                ));
+            }
+            self.entries.lock().unwrap().remove(&(
+                primary_namespace.to_string(),
+                secondary_namespace.to_string(),
+                key.to_string(),
+            ));
+            Ok(())
+        }
+
+        fn list(
+            &self,
+            primary_namespace: &str,
+            secondary_namespace: &str,
+        ) -> Result<Vec<String>, io::Error> {
+            Ok(self
+                .entries
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(primary, secondary, _)| {
+                    primary == primary_namespace && secondary == secondary_namespace
+                })
+                .map(|(_, _, key)| key.clone())
+                .collect())
+        }
+    }
 }
 
 pub(crate) fn get_max_local_rgb_amount<'r>(

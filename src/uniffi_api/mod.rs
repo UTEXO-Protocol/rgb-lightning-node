@@ -1189,6 +1189,30 @@ impl SdkNode {
         })
     }
 
+    pub fn bumpforceclosefee(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<BumpForceCloseFeeResponse, RlnError> {
+        let state = self.handle.app_state();
+        let sdk_channel_id = channel_id.to_string();
+        let data = block_on_sdk(sdk::bump_force_close_fee(state, sdk_channel_id))?;
+        Ok(BumpForceCloseFeeResponse {
+            channel_id,
+            claim_id: data.claim_id,
+            status: data.status.as_str().to_string(),
+            commitment_txid: Txid::from_str(&data.commitment_txid).map_err(RlnError::internal)?,
+            child_txid: data
+                .child_txid
+                .as_deref()
+                .map(Txid::from_str)
+                .transpose()
+                .map_err(RlnError::internal)?,
+            target_fee_rate_sat_vb: data.target_fee_rate_sat_vb,
+            updated_at: data.updated_at,
+            message: data.message,
+        })
+    }
+
     pub fn check_indexer_url(
         &self,
         indexer_url: String,

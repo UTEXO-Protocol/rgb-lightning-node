@@ -126,6 +126,17 @@ pub struct EstimateFeeResponse {
     pub fee_rate: f64,
 }
 
+pub struct BumpForceCloseFeeResponse {
+    pub channel_id: ChannelId,
+    pub claim_id: String,
+    pub status: String,
+    pub commitment_txid: Txid,
+    pub child_txid: Option<Txid>,
+    pub target_fee_rate_sat_vb: f64,
+    pub updated_at: u64,
+    pub message: Option<String>,
+}
+
 pub struct CheckIndexerUrlResponse {
     pub indexer_protocol: String,
 }

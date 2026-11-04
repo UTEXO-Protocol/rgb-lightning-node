@@ -31,6 +31,7 @@ use rgb_lib::{
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::{error::APIError, utils::CommonState};
@@ -1251,6 +1252,7 @@ pub(crate) struct RgbBumpWalletSource {
     pub(crate) signer: ActiveSignerRef,
     pub(crate) external_signer: Option<Arc<ExternalSigner>>,
     pub(crate) external_signer_mode: bool,
+    pub(crate) signer_failed: Arc<AtomicBool>,
 }
 
 impl WalletSource for RgbBumpWalletSource {
@@ -1263,54 +1265,69 @@ impl WalletSource for RgbBumpWalletSource {
     }
 
     fn sign_psbt<'a>(&'a self, tx: Psbt) -> AsyncResult<'a, Transaction, ()> {
+        let failed = Arc::clone(&self.signer_failed);
         if !self.external_signer_mode {
-            return WalletSource::sign_psbt(self.inner.as_ref(), tx);
+            let inner = Arc::clone(&self.inner);
+            return Box::pin(async move {
+                let result = WalletSource::sign_psbt(inner.as_ref(), tx).await;
+                if result.is_err() {
+                    failed.store(true, Ordering::SeqCst);
+                }
+                result
+            });
         }
         let signer = Arc::clone(&self.signer);
         let ext = self.external_signer.clone();
         Box::pin(async move {
-            let unsigned_psbt = tx.to_string();
-            let descriptors = match rgb_signer_descriptors_for_psbt_with_context(
-                ext.as_deref(),
-                unsigned_psbt.as_str(),
-            ) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "RGB bump wallet: descriptor preparation for external signer failed"
-                    );
-                    return Err(());
-                }
-            };
-            let signed_hex = match signer.sign_rgb_psbt(descriptors, unsigned_psbt) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "RGB bump wallet: external signer PSBT signing failed"
-                    );
-                    return Err(());
-                }
-            };
-            let signed_psbt = match Psbt::from_str(&signed_hex) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "RGB bump wallet: failed to parse PSBT returned by external signer"
-                    );
-                    return Err(());
-                }
-            };
-            match signed_psbt.extract_tx() {
-                Ok(t) => Ok(t),
-                Err(ExtractTxError::MissingInputValue { tx }) => Ok(tx),
-                Err(e) => {
-                    tracing::error!(error = %e, "RGB bump wallet: extract_tx failed");
-                    Err(())
+            let result = async {
+                let unsigned_psbt = tx.to_string();
+                let descriptors = match rgb_signer_descriptors_for_psbt_with_context(
+                    ext.as_deref(),
+                    unsigned_psbt.as_str(),
+                ) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "RGB bump wallet: descriptor preparation for external signer failed"
+                        );
+                        return Err(());
+                    }
+                };
+                let signed_hex = match signer.sign_rgb_psbt(descriptors, unsigned_psbt) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "RGB bump wallet: external signer PSBT signing failed"
+                        );
+                        return Err(());
+                    }
+                };
+                let signed_psbt = match Psbt::from_str(&signed_hex) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "RGB bump wallet: failed to parse PSBT returned by external signer"
+                        );
+                        return Err(());
+                    }
+                };
+                match signed_psbt.extract_tx() {
+                    Ok(t) => Ok(t),
+                    Err(ExtractTxError::MissingInputValue { tx }) => Ok(tx),
+                    Err(e) => {
+                        tracing::error!(error = %e, "RGB bump wallet: extract_tx failed");
+                        Err(())
+                    }
                 }
             }
+            .await;
+            if result.is_err() {
+                failed.store(true, Ordering::SeqCst);
+            }
+            result
         })
     }
 }
