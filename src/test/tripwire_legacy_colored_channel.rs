@@ -138,7 +138,7 @@ async fn rewrite_manager_with_legacy_marker(node_test_dir: &str, counterparty_pu
         .await
         .expect("open node db");
     let row = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             "SELECT value FROM kv_store WHERE primary_namespace = '' AND \
              secondary_namespace = '' AND key = 'manager'",
@@ -151,7 +151,7 @@ async fn rewrite_manager_with_legacy_marker(node_test_dir: &str, counterparty_pu
     let spliced = splice_legacy_marker(&blob, counterparty_pubkey);
     assert!(spliced.len() > blob.len(), "splice must grow the blob");
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         sea_orm::DatabaseBackend::Sqlite,
         "UPDATE kv_store SET value = ? WHERE primary_namespace = '' AND \
          secondary_namespace = '' AND key = 'manager'",

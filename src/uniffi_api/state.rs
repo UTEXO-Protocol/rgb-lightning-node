@@ -219,6 +219,7 @@ pub(crate) fn map_api_error(err: APIError) -> RlnError {
         | APIError::InvalidTransportEndpoints(_)
         | APIError::MediaFileEmpty
         | APIError::MediaFileNotProvided
+        | APIError::MissingProxyEndpoint
         | APIError::MissingSwapPaymentPreimage
         | APIError::OutputBelowDustLimit
         | APIError::UnsupportedBurn(_)
@@ -249,6 +250,30 @@ pub(super) fn map_app_error(err: AppError) -> RlnError {
         other => {
             tracing::error!("UniFFI app error mapped to internal: {:?}", other);
             RlnError::Internal(msg)
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_import_error_tests {
+    use super::*;
+
+    #[test]
+    fn contract_validation_failures_reach_native_clients_as_invalid_requests() {
+        for error in [
+            rgb_lib::Error::ContractIdMismatch {
+                expected: "rgb:OG9No4hZ-UrxoWmR-09ohtOk-ppxBN7h-g~KkQro-ncKc9A4".into(),
+                actual: "rgb:bslIXT4U-xgVHutV-XwymZwu-4chvqMh-D~jaKFe-ZCTMTwQ".into(),
+            },
+            rgb_lib::Error::ConsignmentValidationFailed {
+                details: "detected a failure that makes the consignment invalid".into(),
+            },
+        ] {
+            let expected = error.to_string();
+            let mapped = map_api_error(crate::rgb_import::map_contract_import_error(error));
+            assert!(
+                matches!(mapped, RlnError::InvalidRequest(details) if details.contains(&expected))
+            );
         }
     }
 }

@@ -8,15 +8,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.utexo.rgblightningnode.AssetRecipients
-import org.utexo.rgblightningnode.AssignmentKind
 import org.utexo.rgblightningnode.ContractId
 import org.utexo.rgblightningnode.HtlcStatus
 import org.utexo.rgblightningnode.LnInvoiceRequest
 import org.utexo.rgblightningnode.Payment
 import org.utexo.rgblightningnode.PaymentHash
 import org.utexo.rgblightningnode.PaymentType
-import org.utexo.rgblightningnode.RgbRecipient
 import org.utexo.rgblightningnode.RlnException
 import org.utexo.rgblightningnode.SdkCloseChannelRequest
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
@@ -29,7 +26,7 @@ import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
 import org.utexo.rgblightningnode.SdkRgbInvoiceRequest
 import org.utexo.rgblightningnode.SdkSendPaymentRequest
 import org.utexo.rgblightningnode.SdkUnlockRequest
-import org.utexo.rgblightningnode.SendRgbRequest
+import org.utexo.rgblightningnode.SendRgbInvoiceRequest
 import org.utexo.rgblightningnode.Txid
 import java.io.File
 import java.net.HttpURLConnection
@@ -63,11 +60,14 @@ class RestartTest {
     private val assetSupply: ULong = 1000u
     private val channelReadyTimeoutSec: Long = 120L
 
-    private fun bitcoindRpc(method: String, vararg params: Any): JSONObject {
+    private fun bitcoindRpc(method: String, vararg params: Any, timeoutMs: Int = 0): JSONObject {
         val url = URL("http://$bitcoindHost:$bitcoindPort/")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
+        // Preserve ordinary RPC behavior; only the bounded sweep observer supplies a timeout.
+        conn.connectTimeout = timeoutMs
+        conn.readTimeout = timeoutMs
         conn.setRequestProperty("Content-Type", "application/json")
         val creds =
             Base64.getEncoder().encodeToString("$bitcoindUser:$bitcoindPass".toByteArray())
@@ -79,10 +79,13 @@ class RestartTest {
             put("method", method)
             put("params", JSONArray().apply { params.forEach { put(it) } })
         }.toString()
-        conn.outputStream.use { it.write(body.toByteArray()) }
-
-        val response = conn.inputStream.bufferedReader().readText()
-        return JSONObject(response)
+        return try {
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            val response = conn.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(response)
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun mine(blocks: Int) {
@@ -185,12 +188,19 @@ class RestartTest {
         return node.assetBalance(assetId).spendable
     }
 
-    private fun waitForBalance(node: SdkNode, assetId: ContractId, expected: ULong, timeoutSec: Long) {
-        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
+    private fun waitForBalance(
+        node: SdkNode,
+        assetId: ContractId,
+        expected: ULong,
+        timeoutSec: Long,
+        absoluteDeadlineMillis: Long = Long.MAX_VALUE,
+    ) {
+        val deadline = minOf(System.currentTimeMillis() + timeoutSec * 1_000L, absoluteDeadlineMillis)
         var lastBalance = 0uL
         while (System.currentTimeMillis() < deadline) {
             val balance = assetBalanceSpendable(node, assetId)
             lastBalance = balance
+            if (System.currentTimeMillis() >= deadline) break
             if (balance == expected) {
                 return
             }
@@ -331,7 +341,44 @@ class RestartTest {
         )
     }
 
-    private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false) {
+    private fun waitForClosedChannelBalance(
+        node: SdkNode,
+        assetId: ContractId,
+        expected: ULong,
+        timeoutSec: Long,
+        closed: ClosedChannelContext,
+    ) {
+        require(closed.requiresBitcoinBroadcast) {
+            "Bitcoin settlement wait requires a real funded channel"
+        }
+        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
+        var lastBalance = 0uL
+        while (System.currentTimeMillis() < deadline) {
+            node.sync()
+            node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
+            lastBalance = assetBalanceSpendable(node, assetId)
+            if (System.currentTimeMillis() >= deadline) break
+            if (lastBalance == expected) return
+            val candidates = ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                bitcoindRpc(method, *params, timeoutMs = timeout)
+            }
+            if (System.currentTimeMillis() >= deadline) break
+            if (candidates.isNotEmpty()) {
+                log("Confirming observed closed-channel transactions: ${candidates.joinToString()}")
+                mine(1)
+            }
+            Thread.sleep(1_000L)
+        }
+        error("closed-channel spendable balance did not become expected=$expected actual=$lastBalance channelId=${closed.channelId} after ${timeoutSec}s")
+    }
+
+    private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false): ClosedChannelContext {
+        val channel = node.listChannels().firstOrNull { it.channelId == channelId }
+        val closed = ClosedChannelContext(
+            channel?.fundingTxid?.toString(),
+            channelId,
+            channel?.virtualOpenMode,
+        )
         node.closechannel(
             SdkCloseChannelRequest(
                 channelId = channelId,
@@ -346,8 +393,16 @@ class RestartTest {
             val channels = node.listChannels()
             lastChannels = channels.joinToString { it.channelId }.ifEmpty { "no channels" }
             if (channels.none { it.channelId == channelId }) {
+                // Channel removal can precede its asynchronous closing broadcast.
+                if (closed.requiresBitcoinBroadcast && ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                    bitcoindRpc(method, *params, timeoutMs = timeout)
+                }.isEmpty()) {
+                    Thread.sleep(1_000L)
+                    continue
+                }
+                if (System.currentTimeMillis() >= deadline) break
                 mine(if (force) 144 else 6)
-                return
+                return closed
             }
             Thread.sleep(1_000L)
         }
@@ -364,33 +419,23 @@ class RestartTest {
                 minConfirmations = 1u,
                 witness = false,
             )
-        ).recipientId
+        ).invoice
     }
 
     private fun refreshTransfers(node: SdkNode) {
         node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
     }
 
-    private fun sendRgb(node: SdkNode, assetId: ContractId, recipientId: String, amount: ULong) {
-        node.sendRgb(
-            SendRgbRequest(
+    private fun sendRgb(node: SdkNode, assetId: ContractId, invoice: String, amount: ULong) {
+        node.sendrgbinvoice(
+            SendRgbInvoiceRequest(
+                invoice = invoice,
+                assetId = assetId,
+                amount = amount,
+                witnessData = null,
                 donation = true,
                 feeRate = utxosFeeRate,
                 minConfirmations = 1u,
-                recipientGroups = listOf(
-                    AssetRecipients(
-                        assetId = assetId,
-                        recipients = listOf(
-                            RgbRecipient(
-                                recipientId = recipientId,
-                                witnessData = null,
-                                assignmentKind = AssignmentKind.FUNGIBLE,
-                                assignmentAmount = amount,
-                                transportEndpoints = listOf(proxyEndpoint),
-                            )
-                        ),
-                    )
-                ),
             )
         )
     }
@@ -480,7 +525,9 @@ class RestartTest {
             log("Mining blocks one by one until funding tx is confirmed...")
             mineUntilTxConfirmed(requireNotNull(nodeA), fundingTxid)
             mine(openChannelConfirmBlocks)
+            val fundingReadyDeadline = System.currentTimeMillis() + channelReadyTimeoutSec * 1_000L
             waitForUsableChannel(requireNotNull(nodeA), requireNotNull(nodeB), assetId, channelReadyTimeoutSec)
+            waitForBalance(requireNotNull(nodeA), assetId, 400uL, 70L, absoluteDeadlineMillis = fundingReadyDeadline)
             assertEquals(400uL, assetBalanceSpendable(requireNotNull(nodeA), assetId))
             val channelId = requireNotNull(nodeA).getChannelId(openResponse.temporaryChannelId)
 
@@ -548,9 +595,9 @@ class RestartTest {
                 30L,
             )
 
-            closeChannel(requireNotNull(nodeA), channelId, nodeBPubkey)
-            waitForBalance(requireNotNull(nodeA), assetId, 900uL, 180L)
-            waitForBalance(requireNotNull(nodeB), assetId, 100uL, 180L)
+            val closed = closeChannel(requireNotNull(nodeA), channelId, nodeBPubkey)
+            waitForClosedChannelBalance(requireNotNull(nodeA), assetId, 900uL, 180L, closed)
+            waitForClosedChannelBalance(requireNotNull(nodeB), assetId, 100uL, 180L, closed)
 
             safeShutdown(nodeA); safeShutdown(nodeB)
             pauseAfterShutdown()
@@ -563,15 +610,15 @@ class RestartTest {
             assertEquals(900uL, assetBalanceSpendable(requireNotNull(nodeA), assetId))
             assertEquals(100uL, assetBalanceSpendable(requireNotNull(nodeB), assetId))
 
-            val recipientIdA = rgbInvoice(requireNotNull(nodeC))
-            sendRgb(requireNotNull(nodeA), assetId, recipientIdA, 700u)
+            val invoiceA = rgbInvoice(requireNotNull(nodeC))
+            sendRgb(requireNotNull(nodeA), assetId, invoiceA, 700u)
             mine(1)
             refreshTransfers(requireNotNull(nodeC))
             refreshTransfers(requireNotNull(nodeC))
             refreshTransfers(requireNotNull(nodeA))
 
-            val recipientIdB = rgbInvoice(requireNotNull(nodeC))
-            sendRgb(requireNotNull(nodeB), assetId, recipientIdB, 50u)
+            val invoiceB = rgbInvoice(requireNotNull(nodeC))
+            sendRgb(requireNotNull(nodeB), assetId, invoiceB, 50u)
             mine(1)
             refreshTransfers(requireNotNull(nodeC))
             refreshTransfers(requireNotNull(nodeC))

@@ -114,13 +114,20 @@ jobs:
             grep -vE "Syncing\.\.\.|Sync completed" "$f" || true
           done
 
+      - name: Archive node logs on failure
+        if: failure()
+        run: |
+          if [ -d target/uniffi/python-e2e/data ]; then
+            # Native RGB asset paths contain colons, which upload-artifact rejects as raw paths.
+            tar -czf node-logs.tar.gz -C target/uniffi/python-e2e data
+          fi
+
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: node-logs-${{ matrix.scenario }}
-          path: target/uniffi/python-e2e/data/**
-          include-hidden-files: true
+          path: node-logs.tar.gz
           if-no-files-found: ignore
 
       - name: Stop regtest services

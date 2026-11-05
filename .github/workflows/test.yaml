@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [rest-uniffi-with-vls, wasm-without-vls]
+        mode: [rest-uniffi-with-vls, native-vss, wasm-without-vls]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,6 +40,12 @@ jobs:
             cargo test --features "uniffi,vls" --lib 'sdk::tests::attached_external_unlock_with_mismatched_bootstrap_fails' -- --test-threads=1
             cargo test --features "uniffi,vls" --lib 'sdk::tests::attached_external_unlock_without_registered_signer_is_unavailable' -- --test-threads=1
             cargo test --features "uniffi,vls" --lib 'signer::in_process_transport::tests::' -- --test-threads=1
+          elif [ "${{ matrix.mode }}" = "native-vss" ]; then
+            # The default feature graph omits VSS. Exercise its actual wallet/recovery
+            # fixtures on the pinned native graph, including the C binding's own lock.
+            cargo check --locked --features "uniffi,vls,vss,test-utils" --all-targets
+            cargo test --locked --features "uniffi,vls,vss,test-utils" --lib -- --test-threads=1
+            cargo check --locked --manifest-path bindings/c-ffi/Cargo.toml
           elif [ "${{ matrix.mode }}" = "wasm-without-vls" ]; then
             # WASM SDK crate is tracked in a separate workspace/repo path in current layout.
             # It never pulls VLS, so this gate is inherently non-VLS.
@@ -149,6 +155,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
+      - name: Test read-only channel sweep fixture admission
+        run: python3 -m unittest discover -s test -p test_channel_sweep_candidates.py -v
       - name: Start regtest services
         run: ./regtest.sh start
       - name: Run lib_sdk tests
@@ -180,6 +188,8 @@ jobs:
         run: VSS=1 ./regtest.sh start
       - name: Run VSS tests (e2e against regtest + VSS server)
         run: SKIP_INIT=1 cargo test --features vss "test::vss::tests" -- --test-threads=1
+      - name: Run fresh-address funded VSS restore regression
+        run: SKIP_INIT=1 cargo test --features vss "test::address_reuse::fresh_address_and_assets_recover_via_vss" -- --test-threads=1
       - name: Run VSS unreachable openchannel e2e test
         run: SKIP_INIT=1 cargo test --features vss "test::vss_unreachable_openchannel" -- --test-threads=1
       - name: Run local SQLite process-kill matrix

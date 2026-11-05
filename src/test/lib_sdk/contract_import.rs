@@ -116,18 +116,21 @@ fn contract_import_roundtrips_through_sdk() {
         );
 
         fund_and_create_utxos(&recipient, "recipient");
-        let invoice = recipient
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let invoice = crate::helpers::rgb_invoice(
+            &recipient,
+            SdkRgbInvoiceRequest {
                 asset_id: Some(ifa.asset_id.clone()),
                 assignment_kind: Some(AssignmentKind::Fungible),
                 assignment_amount: Some(250_000),
                 duration_seconds: Some(600),
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("fresh imported asset can create a named invoice");
-        issuer
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("fresh imported asset can create a named invoice");
+        crate::helpers::send_rgb(
+            &issuer,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -143,8 +146,9 @@ fn contract_import_roundtrips_through_sdk() {
                         )],
                     }],
                 }],
-            })
-            .expect("send real IFA units to imported contract");
+            },
+        )
+        .expect("send real IFA units to imported contract");
         mine(1);
         wait_for_balance(
             &recipient,

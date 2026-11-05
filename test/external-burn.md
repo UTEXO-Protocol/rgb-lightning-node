@@ -36,17 +36,23 @@ Endpoint overrides:
 ## BFA proof
 
 This opt-in test also needs Anvil (chain ID 31337) and the `TestERC20` and
-`BaseBridge` contracts from the pinned rgb-lib source's `tests/contracts`.
-Deploy both to local Anvil and approve BaseBridge to spend at least 1000 token
+`MinimalBridge` contracts from the pinned bfa.5 rgb-lib source's `tests/contracts`.
+Deploy both to local Anvil and approve MinimalBridge to spend at least 1000 token
 base units from Anvil's standard account
 `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`.
+
+Install the pinned `MockArbSys` runtime at
+`0x0000000000000000000000000000000000000064` on Anvil. The bridge must expose
+`getFundsInBlock(uint256,uint256)` and `fundsIn(uint256,uint256,uint64)`;
+the test binds its RGB `before_block` and token lock to the same exclusive
+block bound. The previous bridge ABI is not compatible with bfa.5.
 
 The Anvil container must provide `cast` and listen internally on port 8545.
 Set the external RPC URL, bridge address and container name explicitly:
 
 ```sh
 export RLN_BURN_ETH_RPC=http://127.0.0.1:29545
-export RLN_BURN_BRIDGE=<local-deployed-BaseBridge-address>
+export RLN_BURN_BRIDGE=<local-deployed-MinimalBridge-address>
 export RLN_BURN_ANVIL_CONTAINER=<local-anvil-container>
 cargo test --locked --features uniffi,vls,test-utils --test lib_sdk \
   external_burn_bfa_proof -- --ignored --nocapture

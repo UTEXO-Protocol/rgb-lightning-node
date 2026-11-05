@@ -666,7 +666,7 @@ def rgb_invoice(node: rln.SdkNode):
             min_confirmations=1,
             witness=False,
         )
-    ).recipient_id
+    ).invoice
 
 
 def safe_shutdown(node):

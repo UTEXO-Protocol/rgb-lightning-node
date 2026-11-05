@@ -65,7 +65,7 @@ jobs:
 
           git init "$tmpdir"
           git -C "$tmpdir" remote add utexo "$EXPECTED_URL"
-          git -C "$tmpdir" fetch --no-tags --filter=blob:none utexo \
+          git -C "$tmpdir" fetch --no-auto-maintenance --no-tags --filter=blob:none utexo \
             "+refs/heads/${EXPECTED_BRANCH}:refs/remotes/utexo/${EXPECTED_BRANCH}"
 
           if ! git -C "$tmpdir" merge-base --is-ancestor "$commit" "refs/remotes/utexo/${EXPECTED_BRANCH}"; then

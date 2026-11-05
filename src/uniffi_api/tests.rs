@@ -608,6 +608,31 @@ mod uniffi_smoke_tests {
     }
 
     #[test]
+    fn sdk_create_rejects_address_reuse_before_wallet_files_exist() {
+        let temporary = tempfile::tempdir().unwrap();
+        let wallet = temporary.path().join("not-created");
+        let result = SdkNode::create(SdkInitRequest {
+            storage_dir_path: wallet.display().to_string(),
+            daemon_listening_port: 0,
+            ldk_peer_listening_port: 0,
+            network: "regtest".into(),
+            max_media_upload_size_mb: 1,
+            enable_virtual_channels_v0: None,
+            virtual_peer_pubkeys: None,
+            lsp_base_url: None,
+            lsp_bearer_token: None,
+            vss_url: None,
+            vss_allow_http: false,
+            vss_allow_empty_restore: false,
+            reuse_addresses: true,
+        });
+        assert!(
+            matches!(result,Err(RlnError::InvalidRequest(message)) if message.contains("Address reuse is not supported"))
+        );
+        assert!(!wallet.exists());
+    }
+
+    #[test]
     fn sdk_create_rejects_invalid_vss_url() {
         let res = SdkNode::create(SdkInitRequest {
             storage_dir_path: "/tmp/rln_vss_validation_test".to_string(),

@@ -651,6 +651,50 @@ pub(crate) fn create_utxos(
     ok_void()
 }
 
+pub(crate) fn prepare_create_utxos(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let request: JsonPrepareCreateUtxosRequest = parse_req(request_json)?;
+    json(node.preparecreateutxos(request.into())?)
+}
+
+pub(crate) fn commit_prepared_create_utxos(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let request: JsonCreateUtxosOperationRequest = parse_req(request_json)?;
+    json(node.commitpreparedcreateutxos(request.operation_id)?)
+}
+
+pub(crate) fn cancel_create_utxos_plan(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let request: JsonCreateUtxosOperationRequest = parse_req(request_json)?;
+    json(node.cancelcreateutxosplan(request.operation_id)?)
+}
+
+pub(crate) fn get_create_utxos_operation(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> Result<String, Error> {
+    let node = require_handle(node)?;
+    let request: JsonCreateUtxosOperationRequest = parse_req(request_json)?;
+    json(node.getcreateutxosoperation(request.operation_id)?)
+}
+
+pub(crate) fn list_create_utxos_operations(node: &COpaqueStruct) -> Result<String, Error> {
+    json(require_handle(node)?.listcreateutxosoperations()?)
+}
+
+pub(crate) fn list_pending_vanilla_transactions(node: &COpaqueStruct) -> Result<String, Error> {
+    json(require_handle(node)?.listpendingvanillatransactions()?)
+}
+
 pub(crate) fn list_transactions(
     node: &COpaqueStruct,
     skip_sync: bool,

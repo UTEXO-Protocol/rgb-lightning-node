@@ -633,6 +633,66 @@ pub extern "C" fn rln_create_utxos(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rln_prepare_create_utxos(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_prepare_create_utxos",
+        api::prepare_create_utxos(node, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_commit_prepared_create_utxos(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_commit_prepared_create_utxos",
+        api::commit_prepared_create_utxos(node, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_cancel_create_utxos_plan(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_cancel_create_utxos_plan",
+        api::cancel_create_utxos_plan(node, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_get_create_utxos_operation(
+    node: &COpaqueStruct,
+    request_json: *const c_char,
+) -> CResultString {
+    ffi_call!(
+        "rln_get_create_utxos_operation",
+        api::get_create_utxos_operation(node, request_json)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_list_create_utxos_operations(node: &COpaqueStruct) -> CResultString {
+    ffi_call!(
+        "rln_list_create_utxos_operations",
+        api::list_create_utxos_operations(node)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rln_list_pending_vanilla_transactions(node: &COpaqueStruct) -> CResultString {
+    ffi_call!(
+        "rln_list_pending_vanilla_transactions",
+        api::list_pending_vanilla_transactions(node)
+    )
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rln_list_transactions(
     node: &COpaqueStruct,
     skip_sync: bool,

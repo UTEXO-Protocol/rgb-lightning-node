@@ -77,8 +77,9 @@ async fn vanilla_payment_on_rgb_channel() {
         chan_2_before.local_balance_sat + amount / 1000
     );
 
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 1000).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 1000, &close_settlement).await;
 
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;
     send_asset(

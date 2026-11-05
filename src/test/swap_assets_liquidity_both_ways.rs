@@ -258,25 +258,25 @@ async fn swap_assets_liquidity_both_ways() {
     // part 3: close channels, spend assets on-chain, check final balances
 
     println!("\nclose channels");
-    close_channel(
+    let close_settlement = close_channel(
         maker_addr,
         &channel_mt_asset_1.channel_id,
         &taker_pubkey,
         false,
     )
     .await;
-    wait_for_balance(maker_addr, &asset_id_1, 400).await;
-    wait_for_balance(taker_addr, &asset_id_1, 600).await;
+    wait_for_closed_channel_balance(maker_addr, &asset_id_1, 400, &close_settlement).await;
+    wait_for_closed_channel_balance(taker_addr, &asset_id_1, 600, &close_settlement).await;
 
-    close_channel(
+    let close_settlement = close_channel(
         taker_addr,
         &channel_mt_asset_2.channel_id,
         &maker_pubkey,
         false,
     )
     .await;
-    wait_for_balance(maker_addr, &asset_id_2, 1000).await;
-    wait_for_balance(taker_addr, &asset_id_2, 0).await;
+    wait_for_closed_channel_balance(maker_addr, &asset_id_2, 1000, &close_settlement).await;
+    wait_for_closed_channel_balance(taker_addr, &asset_id_2, 0, &close_settlement).await;
 
     println!("\nspend assets");
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;

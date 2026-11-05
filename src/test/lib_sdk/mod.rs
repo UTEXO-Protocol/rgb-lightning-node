@@ -15,6 +15,7 @@ mod invoice;
 mod multi_hop;
 mod openchannel_push_asset_amount;
 mod payment;
+mod protected_close_settlement;
 mod restart;
 mod send_receive;
 mod swap_roundtrip_buy;

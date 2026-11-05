@@ -107,6 +107,29 @@ pub fn enable_private_forwarding_for_tests(node: &crate::SdkNode) {
     lightning.channel_manager.set_current_config(config);
 }
 
+/// Read exact LDK HTLC state for a settled-payment integration fixture.
+/// This test-utils-only query never treats a missing/locked channel as quiescent.
+#[cfg(feature = "uniffi")]
+pub fn channel_has_inflight_htlcs_for_tests(
+    node: &crate::SdkNode,
+    channel_id: lightning::ln::types::ChannelId,
+) -> Result<bool, String> {
+    let state = node.handle.app_state();
+    let unlocked =
+        crate::runtime::block_on(async { state.get_unlocked_app_state().await.as_ref().cloned() })
+            .ok_or_else(|| "test node is locked".to_string())?;
+    let lightning = unlocked.lightning().map_err(|error| error.to_string())?;
+    let channel = lightning
+        .channel_manager
+        .list_channels()
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id)
+        .ok_or_else(|| "test channel is missing".to_string())?;
+    Ok(channel.has_inflight_htlcs
+        || !channel.pending_inbound_htlcs.is_empty()
+        || !channel.pending_outbound_htlcs.is_empty())
+}
+
 pub fn node_handle_from_mock_state_for_tests(state: &TestAppState) -> NodeHandle {
     NodeHandle::from_app_state(state.0.clone())
 }
@@ -131,7 +154,9 @@ pub fn error_mapping_snapshot_for_tests() -> ErrorMappingSnapshot {
 
 #[cfg(feature = "uniffi")]
 pub fn export_rgb_contract_bytes_for_tests(node: &crate::SdkNode, asset_id: &str) -> Vec<u8> {
-    use rgb_lib::FileContent;
+    use rgb_lib::wallet::RgbWalletOpsOffline;
+    use rgb_lib::ConsignmentExt;
+    use rgbstd::containers::{UniversalFile, ValidContract};
 
     let state = node.handle.app_state();
     let unlocked_state = crate::runtime::block_on(async {
@@ -142,14 +167,19 @@ pub fn export_rgb_contract_bytes_for_tests(node: &crate::SdkNode, asset_id: &str
             .cloned()
             .expect("test node is unlocked")
     });
-    let contract = unlocked_state
-        .rgb_wallet_wrapper
-        .get_rgb_wallet()
-        .export_asset_contract(asset_id.to_string())
-        .expect("export issued RGB contract");
+    // The owned issuer's asset file is a validated local cache (VCO), including its
+    // validation status. Export only its ordinary public contract (CON); receivers
+    // must perform their own validation rather than trust that cached status.
+    let wallet = unlocked_state.rgb_wallet_wrapper.get_rgb_wallet();
+    let expected_id = asset_id
+        .parse::<rgb_lib::ContractId>()
+        .expect("test asset ID");
+    let contract = ValidContract::load_file(wallet.get_wallet_dir().join("assets").join(asset_id))
+        .expect("load issued RGB contract cache");
+    assert!(contract.contract_id() == expected_id);
     let mut bytes = Vec::new();
-    contract
+    UniversalFile::Contract(contract.into_consignment())
         .save(&mut bytes)
-        .expect("serialize issued RGB contract");
+        .expect("export public RGB contract");
     bytes
 }

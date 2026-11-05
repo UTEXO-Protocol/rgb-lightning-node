@@ -20,6 +20,7 @@ pub(crate) struct APIErrorResponse {
 #[derive(Debug, thiserror::Error)]
 pub enum APIError {
     #[error("Address reuse is disabled")]
+    #[allow(dead_code)] // Retained in the wire error vocabulary for disabled fork APIs.
     AddressReuseDisabled,
 
     #[error("Allocations already available")]
@@ -195,9 +196,11 @@ pub enum APIError {
     InvalidConsignment,
 
     #[error("Invalid contract link: {0}")]
+    #[allow(dead_code)] // Retained in the wire error vocabulary for disabled fork APIs.
     InvalidContractLink(String),
 
     #[error("Invalid right outpoint: {0}")]
+    #[allow(dead_code)] // Retained in the wire error vocabulary for disabled fork APIs.
     InvalidRightOutpoint(String),
 
     #[error("Invalid description: {0}")]
@@ -347,6 +350,9 @@ pub enum APIError {
     #[error("No indexer_url was supplied, in the unlock request or in the config file")]
     MissingIndexerUrl,
 
+    #[error("No protocol-1.0 proxy_endpoint was supplied in the unlock request or config file; public networks require an explicit RGB proxy")]
+    MissingProxyEndpoint,
+
     #[error("Unable to find payment preimage, be sure you've provided the correct swap info")]
     MissingSwapPaymentPreimage,
 
@@ -391,6 +397,7 @@ pub enum APIError {
     Unexpected(String),
 
     #[error("Restored VSS backup is inconsistent: {0}")]
+    #[allow(dead_code)] // Retained in the wire error vocabulary for disabled fork APIs.
     RestoredBackupInconsistent(String),
 
     #[error("Unknown channel ID")]
@@ -464,7 +471,6 @@ impl From<axum::extract::multipart::MultipartRejection> for APIError {
 impl From<RgbLibError> for APIError {
     fn from(error: RgbLibError) -> Self {
         match error {
-            RgbLibError::AddressReuseDisabled => APIError::AddressReuseDisabled,
             RgbLibError::AllocationsAlreadyAvailable => APIError::AllocationsAlreadyAvailable,
             RgbLibError::AssetNotFound { .. } => APIError::UnknownContractId,
             RgbLibError::BatchTransferNotFound { .. } => APIError::BatchTransferNotFound,
@@ -495,23 +501,14 @@ impl From<RgbLibError> for APIError {
                 APIError::InsufficientFunds(needed - available)
             }
             RgbLibError::InvalidAddress { details } => APIError::InvalidAddress(details),
+            RgbLibError::InvalidBurnReason { details } => APIError::InvalidBurnRecipient(details),
             RgbLibError::InvalidAmountZero => APIError::InvalidAmount(s!("0")),
             RgbLibError::InvalidAssignment => APIError::InvalidAssignment,
             RgbLibError::InvalidAttachments { details } => APIError::InvalidAttachments(details),
-            RgbLibError::InvalidContractLink { details } => APIError::InvalidContractLink(details),
-            RgbLibError::InvalidRightOutpoint { details } => {
-                APIError::InvalidRightOutpoint(details)
-            }
             RgbLibError::InvalidDetails { details } => APIError::InvalidDetails(details),
             RgbLibError::InvalidElectrum { details } => APIError::InvalidIndexer(details),
             RgbLibError::InvalidEstimationBlocks => APIError::InvalidEstimationBlocks,
-            RgbLibError::InvalidEthRpcUrl { details } => APIError::InvalidEthRpcUrl(details),
-            RgbLibError::InvalidBurnRecipient { len } => {
-                APIError::InvalidBurnRecipient(format!("must be 32 bytes, got {len}"))
-            }
-            RgbLibError::MissingBurnRecipient => {
-                APIError::InvalidBurnRecipient(s!("required for a BFA burn"))
-            }
+            RgbLibError::InvalidEvmRpcUrl { details } => APIError::InvalidEthRpcUrl(details),
             RgbLibError::NoBurnAmount => {
                 APIError::InvalidAmount(s!("burn request with zero amount"))
             }
@@ -551,9 +548,6 @@ impl From<RgbLibError> for APIError {
             RgbLibError::OutputBelowDustLimit => APIError::OutputBelowDustLimit,
             RgbLibError::Proxy { details } => APIError::Network(format!("proxy err: {details}")),
             RgbLibError::RecipientIDAlreadyUsed => APIError::RecipientIDAlreadyUsed,
-            RgbLibError::RestoredBackupInconsistent { details } => {
-                APIError::RestoredBackupInconsistent(details)
-            }
             RgbLibError::TooHighInflationAmounts => {
                 APIError::InvalidAmount(s!("inflation amount exceeds the max possible supply"))
             }
@@ -692,6 +686,7 @@ impl IntoResponse for APIError {
             | APIError::MaxFeeExceeded(_)
             | APIError::MinFeeNotMet(_)
             | APIError::MissingIndexerUrl
+            | APIError::MissingProxyEndpoint
             | APIError::NoAvailableUtxos
             | APIError::NoRoute
             | APIError::NotInitialized
@@ -852,11 +847,9 @@ mod tests {
     #[test]
     fn burn_errors_map_to_client_errors() {
         assert!(matches!(
-            APIError::from(RgbLibError::MissingBurnRecipient),
-            APIError::InvalidBurnRecipient(_)
-        ));
-        assert!(matches!(
-            APIError::from(RgbLibError::InvalidBurnRecipient { len: 20 }),
+            APIError::from(RgbLibError::InvalidBurnReason {
+                details: s!("invalid destination commitment"),
+            }),
             APIError::InvalidBurnRecipient(_)
         ));
         assert!(matches!(
@@ -870,7 +863,7 @@ mod tests {
             APIError::UnsupportedBurn(_)
         ));
         assert!(matches!(
-            APIError::from(RgbLibError::InvalidEthRpcUrl {
+            APIError::from(RgbLibError::InvalidEvmRpcUrl {
                 details: s!("Ethereum RPC URL is required for BFA"),
             }),
             APIError::InvalidEthRpcUrl(_)

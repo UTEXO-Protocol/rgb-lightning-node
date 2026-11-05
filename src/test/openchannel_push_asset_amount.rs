@@ -107,15 +107,15 @@ async fn openchannel_push_asset_amount() {
     assert_eq!(node2_channel.asset_local_amount, Some(300));
     assert_eq!(node2_channel.asset_remote_amount, Some(300));
 
-    close_channel(
+    let close_settlement = close_channel(
         node1_addr,
         &partial_push_channel.channel_id,
         &node2_pubkey,
         false,
     )
     .await;
-    wait_for_balance(node1_addr, &asset_id, 700).await;
-    wait_for_balance(node2_addr, &asset_id, 300).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 700, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 300, &close_settlement).await;
 
     let full_push_channel = open_channel_with_custom_data(
         node1_addr,
@@ -187,15 +187,15 @@ async fn openchannel_push_asset_amount() {
     assert_eq!(node2_channel.asset_local_amount, Some(500));
     assert_eq!(node2_channel.asset_remote_amount, Some(100));
 
-    close_channel(
+    let close_settlement = close_channel(
         node1_addr,
         &full_push_channel.channel_id,
         &node2_pubkey,
         false,
     )
     .await;
-    wait_for_balance(node1_addr, &asset_id, 200).await;
-    wait_for_balance(node2_addr, &asset_id, 800).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 200, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 800, &close_settlement).await;
 
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;
     send_asset(

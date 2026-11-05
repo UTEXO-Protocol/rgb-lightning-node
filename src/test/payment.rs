@@ -168,9 +168,10 @@ async fn success() {
     assert_eq!(chan_1.local_balance_sat, chan_1_before.local_balance_sat);
     assert_eq!(chan_2.local_balance_sat, chan_2_before.local_balance_sat);
 
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 950).await;
-    wait_for_balance(node2_addr, &asset_id, 50).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 950, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 50, &close_settlement).await;
 
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;
     send_asset(

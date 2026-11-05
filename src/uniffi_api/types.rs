@@ -418,7 +418,7 @@ pub struct DecodeLnInvoiceResponse {
 
 pub struct DecodeRgbInvoiceResponse {
     pub recipient_id: String,
-    pub proxy_recipient_id: String,
+    pub proxy_recipient_id: Option<String>,
     pub recipient_type: String,
     pub asset_schema: Option<String>,
     pub asset_id: Option<ContractId>,
@@ -426,6 +426,8 @@ pub struct DecodeRgbInvoiceResponse {
     pub network: String,
     pub expiration_timestamp: Option<i64>,
     pub transport_endpoints: Vec<String>,
+    pub public_key: Option<String>,
+    pub encryption: String,
 }
 
 pub enum InvoiceStatus {
@@ -695,6 +697,65 @@ pub struct SdkCreateUtxosRequest {
     pub skip_sync: bool,
 }
 
+pub struct SdkPrepareCreateUtxosRequest {
+    pub operation_id: String,
+    pub up_to: bool,
+    pub num: Option<u8>,
+    pub size: Option<u32>,
+    pub fee_rate: u64,
+    pub skip_sync: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct SdkCreateUtxosInput {
+    pub txid: String,
+    pub vout: u32,
+}
+
+#[derive(serde::Serialize)]
+pub struct SdkCreateUtxosOperation {
+    pub operation_id: String,
+    pub txid: Option<String>,
+    pub status: String,
+    pub can_cancel: bool,
+    pub can_commit: bool,
+    pub inputs: Vec<SdkCreateUtxosInput>,
+    pub num_outputs: u8,
+    pub size_sat: u32,
+    pub fee_sat: u64,
+    pub fee_rate: u64,
+}
+
+impl From<crate::rgb_output_operations::OutputOperation> for SdkCreateUtxosOperation {
+    fn from(operation: crate::rgb_output_operations::OutputOperation) -> Self {
+        Self {
+            operation_id: operation.operation_id,
+            txid: operation.txid,
+            status: operation.status,
+            can_cancel: operation.can_cancel,
+            can_commit: operation.can_commit,
+            inputs: operation
+                .inputs
+                .into_iter()
+                .map(|input| SdkCreateUtxosInput {
+                    txid: input.txid,
+                    vout: input.vout,
+                })
+                .collect(),
+            num_outputs: operation.num_outputs,
+            size_sat: operation.size_sat,
+            fee_sat: operation.fee_sat,
+            fee_rate: operation.fee_rate,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct SdkPendingVanillaTransaction {
+    pub txid: String,
+    pub r#type: String,
+}
+
 pub struct SdkIssueAssetNiaRequest {
     pub amounts: Vec<u64>,
     pub ticker: String,
@@ -863,6 +924,35 @@ pub struct SdkInitRequest {
     pub vss_allow_http: bool,
     pub vss_allow_empty_restore: bool,
     pub reuse_addresses: bool,
+}
+
+pub struct SendRgbInvoiceRequest {
+    pub invoice: String,
+    pub asset_id: ContractId,
+    pub amount: u64,
+    pub witness_data: Option<WitnessData>,
+    pub donation: bool,
+    pub fee_rate: u64,
+    pub min_confirmations: u8,
+}
+
+pub struct RgbInvoiceRecipient {
+    pub invoice: String,
+    pub witness_data: Option<WitnessData>,
+    pub assignment_kind: AssignmentKind,
+    pub assignment_amount: Option<u64>,
+}
+
+pub struct InvoiceAssetRecipients {
+    pub asset_id: ContractId,
+    pub recipients: Vec<RgbInvoiceRecipient>,
+}
+
+pub struct SendRgbInvoicesRequest {
+    pub donation: bool,
+    pub fee_rate: u64,
+    pub min_confirmations: u8,
+    pub recipient_groups: Vec<InvoiceAssetRecipients>,
 }
 
 pub struct SendRgbRequest {

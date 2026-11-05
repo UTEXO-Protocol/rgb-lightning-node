@@ -152,9 +152,13 @@ body must include `ldk_chain_sync`, which names the [sync mode](#sync-modes) and
 carries that mode's own configuration. The RGB wallet's `indexer_url` is
 independent of it: any indexer can be paired with any sync mode, so `BlockSync`
 against bitcoind with an esplora `indexer_url` is a valid combination.
-`indexer_url` and `proxy_endpoint` may be omitted from the body, in which case
-they come from the `[chain]` section of the config file; if neither supplies an
-indexer URL the unlock fails with `MissingIndexerUrl`.
+`indexer_url` and `proxy_endpoint` may be omitted from the body when supplied by
+the `[chain]` section of the config file. If neither source supplies an indexer
+URL, unlock fails with `MissingIndexerUrl`. Public networks also require an
+explicit RGB proxy implementing protocol `1.0`; omission fails with
+`MissingProxyEndpoint`. Regtest alone defaults to
+`rpc://127.0.0.1:3000/json-rpc`. Every resolved proxy, including that local
+default, is checked for protocol `1.0` before startup completes.
 
 ### Configuration file
 
@@ -504,12 +508,12 @@ RGB consignments can be exchanged in three ways:
   ACKs are relayed automatically by an [RGB proxy server]. Use
   `/checkproxyendpoint` to validate a URL.
 
-Example proxy URLs (only when using proxy transport):
+Proxy configuration (only when using proxy transport):
 
 | Environment | `transport_endpoints` |
 |-------------|-----------------------|
 | Local | `rpc://127.0.0.1:3000/json-rpc` |
-| Public | `rpcs://proxy.iriswallet.com/0.2/json-rpc` |
+| Public | Supply the deployment's protocol-1.0 endpoint explicitly; there is no public default. |
 
 ## Sync modes
 

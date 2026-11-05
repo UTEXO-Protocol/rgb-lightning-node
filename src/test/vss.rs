@@ -671,10 +671,10 @@ mod tests {
 
         let (signing_key, store_id) = generate_test_keys();
         let config =
-            rgb_lib::wallet::vss::VssBackupConfig::new(VSS_URL.to_string(), store_id, signing_key)
+            crate::rgb_vss::VssBackupConfig::new(VSS_URL.to_string(), store_id, signing_key)
                 .with_encryption(true);
 
-        let client = rgb_lib::wallet::vss::VssBackupClient::new(config).expect("encrypted client");
+        let client = crate::rgb_vss::VssBackupClient::new(config).expect("encrypted client");
         assert!(client.encryption_enabled());
 
         let fingerprint = "a1b2c3d4";
@@ -702,65 +702,19 @@ mod tests {
     }
 
     #[test]
-    fn vss_backup_client_unencrypted_roundtrip() {
-        if !vss_server_available() {
-            eprintln!("SKIP: VSS server not available at {VSS_URL}");
-            return;
-        }
-
+    fn vss_backup_client_rejects_unencrypted_backups_before_io() {
+        // New RGB snapshots contain sensitive database and operation keys. Plaintext is
+        // rejected before creating a client, so this assertion needs no VSS server.
         let (signing_key, store_id) = generate_test_keys();
         let config =
-            rgb_lib::wallet::vss::VssBackupConfig::new(VSS_URL.to_string(), store_id, signing_key)
+            crate::rgb_vss::VssBackupConfig::new(VSS_URL.to_string(), store_id, signing_key)
                 .with_encryption(false);
 
-        let client =
-            rgb_lib::wallet::vss::VssBackupClient::new(config).expect("unencrypted client");
-        assert!(!client.encryption_enabled());
-
-        let fingerprint = "e5f6a7b8";
-        let original_payload = b"plaintext channel data for unencrypted backup test";
-        let zip_data = create_test_wallet_zip(fingerprint, original_payload);
-
-        let rt = client.handle().clone();
-
-        // Upload unencrypted (sanitized — fingerprint stripped, bdk_db excluded)
-        let version = rt
-            .block_on(client.upload_backup(zip_data.clone()))
-            .expect("upload unencrypted backup");
-        assert!(version > 0);
-
-        // Download — returns sanitized zip (fingerprint replaced with "wallet/")
-        let downloaded = rt
-            .block_on(client.download_backup())
-            .expect("download unencrypted backup");
-
-        // For unencrypted backups, the zip is sanitized:
-        // - fingerprint dir replaced with "wallet/"
-        // - bdk_db files excluded
-        // So downloaded != original zip, but the test data file should be preserved
-        let reader = std::io::Cursor::new(&downloaded);
-        let mut archive = zip::ZipArchive::new(reader).expect("valid zip");
-
-        let mut found_data = false;
-        for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).unwrap();
-            let name = entry.name().to_string();
-            // Fingerprint should be replaced with "wallet/"
-            assert!(
-                !name.contains(fingerprint),
-                "sanitized zip should not contain original fingerprint, found: {name}"
-            );
-            if name.ends_with("test_data.bin") {
-                found_data = true;
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut entry, &mut buf).unwrap();
-                assert_eq!(buf, original_payload, "payload content mismatch");
-            }
-        }
-        assert!(found_data, "test_data.bin should be in sanitized zip");
-
-        // Cleanup
-        rt.block_on(client.delete_backup()).expect("cleanup");
+        assert!(matches!(
+            crate::rgb_vss::VssBackupClient::new(config),
+            Err(crate::rgb_vss::Error::Internal { details })
+                if details == "Plaintext VSS cannot protect the new RGB database"
+        ));
     }
 
     /// After a graceful shutdown the fence persists, blocking restore on a
@@ -1219,11 +1173,144 @@ mod tests {
         }
     }
 
-    /// Happy path of the unlock-side RGB restore: VSS has a backup, the local
-    /// wallet directory is absent → the wallet is brought back from VSS so
-    /// that `RgbLibWallet::new` finds it on disk.
+    /// The unlock-side restore must reopen a genuine encrypted native snapshot,
+    /// including its manifest, public wallet identity and persisted address state.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rgb_vss_restore_brings_back_wallet_dir() {
+        use rgb_lib::{
+            keys::{generate_keys, WitnessVersion},
+            wallet::{
+                BtcBalance, DatabaseType, RgbWalletOpsOffline, SinglesigKeys, Wallet, WalletData,
+            },
+            AssetSchema, BitcoinNetwork,
+        };
+
+        if !vss_server_available() {
+            eprintln!("SKIP: VSS server not available at {VSS_URL}");
+            return;
+        }
+
+        let (signing_key, store_id) = generate_test_keys();
+        let rgb_store_id = format!("{store_id}_rgb");
+        // Only public account keys reach the native wallet: this is an unfunded,
+        // watch-only fixture, with no signer or private-key fallback.
+        let wallet_keys = {
+            let generated = generate_keys(BitcoinNetwork::Regtest, WitnessVersion::Taproot);
+            SinglesigKeys::from_keys_no_mnemonic(&generated, None)
+        };
+        assert!(wallet_keys.mnemonic.is_none());
+        let fingerprint = wallet_keys.master_fingerprint.clone();
+        let source_dir = tempfile::tempdir().expect("source wallet directory");
+        let mut wallet = Wallet::new(
+            WalletData {
+                data_dir: source_dir.path().to_str().expect("source path").to_string(),
+                bitcoin_network: BitcoinNetwork::Regtest,
+                database_type: DatabaseType::Sqlite,
+                max_allocations_per_utxo: 1,
+                supported_schemas: vec![AssetSchema::Nia],
+            },
+            wallet_keys.clone(),
+        )
+        .expect("watch-only source wallet");
+        let original_address = wallet.get_address().expect("initial address");
+        let descriptors = wallet.get_descriptors();
+        let snapshot_token = wallet
+            .prepare_snapshot()
+            .expect("real native snapshot")
+            .token;
+        assert!(wallet.backup_info().expect("dirty before remote commit"));
+
+        let upload_config = crate::rgb_vss::VssBackupConfig::new(
+            VSS_URL.to_string(),
+            rgb_store_id.clone(),
+            signing_key,
+        )
+        .with_encryption(true);
+        let client = crate::rgb_vss::VssBackupClient::new(upload_config).expect("backup client");
+        assert!(client.encryption_enabled());
+        assert!(
+            crate::rgb_vss::backup_wallet(&mut wallet, &client).expect("encrypted native backup")
+                > 0
+        );
+        assert!(!wallet.backup_info().expect("acknowledged remote snapshot"));
+        assert!(wallet
+            .acknowledge_snapshot(&snapshot_token)
+            .expect("exact uploaded content remains acknowledged"));
+
+        // A subsequent real mutation invalidates the old content token. The cloud
+        // snapshot still contains the address index from before this mutation.
+        let expected_next_address = wallet.get_address().expect("next source address");
+        assert_ne!(original_address, expected_next_address);
+        assert!(wallet.backup_info().expect("new address is pending backup"));
+        assert!(!wallet
+            .acknowledge_snapshot(&snapshot_token)
+            .expect("stale content cannot acknowledge a mutation"));
+        assert!(wallet
+            .backup_info()
+            .expect("stale acknowledgement remains dirty"));
+        drop(wallet);
+
+        let target = tempfile::tempdir().expect("fresh restore directory");
+        crate::ldk::maybe_restore_rgb_from_vss(
+            VSS_URL,
+            rgb_store_id,
+            signing_key,
+            target.path(),
+            &fingerprint,
+            false,
+        )
+        .await
+        .expect("restore genuine encrypted native snapshot");
+        let restored_dir = target.path().join(&fingerprint);
+        assert!(restored_dir.join("wallet_manifest.json").is_file());
+        assert!(restored_dir.join("rgb_lib_db").is_file());
+
+        // Loading from the restored manifest proves more than file existence: the
+        // current library must admit and reopen the database using public keys only.
+        let mut restored = Wallet::load(
+            target.path().to_str().expect("restore path"),
+            &fingerprint,
+            None,
+        )
+        .expect("reopen restored watch-only wallet");
+        let restored_keys = restored.get_keys();
+        assert!(restored_keys.mnemonic.is_none());
+        assert_eq!(
+            restored_keys.master_fingerprint,
+            wallet_keys.master_fingerprint
+        );
+        assert_eq!(
+            restored_keys.account_xpub_vanilla,
+            wallet_keys.account_xpub_vanilla
+        );
+        assert_eq!(
+            restored_keys.account_xpub_colored,
+            wallet_keys.account_xpub_colored
+        );
+        assert_eq!(restored.get_descriptors(), descriptors);
+        assert_eq!(
+            restored
+                .get_address()
+                .expect("restored address progression"),
+            expected_next_address
+        );
+        assert_eq!(
+            restored
+                .get_btc_balance(None, true)
+                .expect("offline unfunded balance"),
+            BtcBalance::default()
+        );
+        assert!(restored
+            .list_assets(vec![AssetSchema::Nia])
+            .expect("restored RGB asset state")
+            .nia
+            .expect("NIA schema was configured")
+            .is_empty());
+        client.delete_backup().await.expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rgb_vss_restore_rejects_incomplete_snapshot_without_installation() {
         if !vss_server_available() {
             eprintln!("SKIP: VSS server not available at {VSS_URL}");
             return;
@@ -1232,41 +1319,43 @@ mod tests {
         let (signing_key, store_id) = generate_test_keys();
         let rgb_store_id = format!("{store_id}_rgb");
         let fingerprint = "deadbeef";
-        let payload = b"rgb wallet bytes".to_vec();
-
-        // Pre-populate VSS with a backup for this rgb_store_id.
-        let upload_config = rgb_lib::wallet::vss::VssBackupConfig::new(
-            VSS_URL.to_string(),
-            rgb_store_id.clone(),
-            signing_key,
+        let client = crate::rgb_vss::VssBackupClient::new(
+            crate::rgb_vss::VssBackupConfig::new(
+                VSS_URL.to_string(),
+                rgb_store_id.clone(),
+                signing_key,
+            )
+            .with_encryption(true),
         )
-        .with_encryption(true);
-        let client =
-            rgb_lib::wallet::vss::VssBackupClient::new(upload_config).expect("backup client");
+        .expect("encrypted backup client");
+        // Retain the old synthetic archive as a negative fixture. A random file
+        // under a fingerprint is not an admissible RGB wallet snapshot.
         client
-            .upload_backup(create_test_wallet_zip(fingerprint, &payload))
+            .upload_backup(create_test_wallet_zip(fingerprint, b"rgb wallet bytes"))
             .await
-            .expect("upload backup");
-
-        // Fresh target dir on disk (simulates a wiped device).
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let target = tmp.path();
-
-        crate::ldk::maybe_restore_rgb_from_vss(
+            .expect("upload incomplete encrypted archive");
+        let target = tempfile::tempdir().expect("restore target");
+        let result = crate::ldk::maybe_restore_rgb_from_vss(
             VSS_URL,
             rgb_store_id,
             signing_key,
-            target,
+            target.path(),
             fingerprint,
             false,
         )
-        .await
-        .expect("restore");
-
-        let restored = target.join(fingerprint).join("test_data.bin");
-        assert!(restored.exists(), "wallet file must be restored");
-        assert_eq!(std::fs::read(&restored).expect("read"), payload);
-
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::APIError::FailedVssInit(details))
+                if details.contains("VSS snapshot is missing the wallet manifest or database")
+        ));
+        assert!(!target.path().join(fingerprint).exists());
+        assert_eq!(
+            std::fs::read_dir(target.path())
+                .expect("target directory")
+                .count(),
+            0
+        );
         client.delete_backup().await.expect("cleanup");
     }
 
@@ -1323,14 +1412,13 @@ mod tests {
         std::fs::write(&sentinel, b"local-state-must-survive").expect("write sentinel");
 
         // Even if VSS has a stale backup, the local copy wins.
-        let upload_config = rgb_lib::wallet::vss::VssBackupConfig::new(
+        let upload_config = crate::rgb_vss::VssBackupConfig::new(
             VSS_URL.to_string(),
             rgb_store_id.clone(),
             signing_key,
         )
         .with_encryption(true);
-        let client =
-            rgb_lib::wallet::vss::VssBackupClient::new(upload_config).expect("backup client");
+        let client = crate::rgb_vss::VssBackupClient::new(upload_config).expect("backup client");
         client
             .upload_backup(create_test_wallet_zip(fingerprint, b"stale-vss-bytes"))
             .await
@@ -1623,7 +1711,7 @@ mod tests {
             .write("target", "", "remove-key", b"retained".to_vec())
             .expect("seed remove target");
 
-        crate::runtime::block_on(connection.execute(Statement::from_string(
+        crate::runtime::block_on(connection.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             format!(
                 "CREATE TRIGGER reject_vss_intent BEFORE INSERT ON kv_store \

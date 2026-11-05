@@ -124,6 +124,9 @@ fn vss_restores_btc_assets_and_channels_on_fresh_device() {
         .get_channel_id(open_channel.temporary_channel_id)
         .expect("node A get_channel_id");
 
+    // Channel usability and the asynchronous RGB accounting refresh are separate.
+    // Back up only after the unchanged funding-change baseline has actually settled.
+    wait_for_balance(&node_a, &asset_id, 400, Duration::from_secs(120));
     // After channel funding, 400 stays liquid, 600 is committed to the channel.
     assert_eq!(asset_balance_spendable(&node_a, &asset_id), 400);
     let btc_after_channel = node_a

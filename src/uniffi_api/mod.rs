@@ -82,6 +82,11 @@ fn attach_host_with_expected_key_source(
 }
 
 fn handle_from_request(request: SdkInitRequest) -> Result<NodeHandle, RlnError> {
+    if request.reuse_addresses {
+        return Err(RlnError::InvalidRequest(
+            "Address reuse is not supported by rgb-lib-bfa".into(),
+        ));
+    }
     let network = network_from_str(&request.network)?;
     if let Some(url) = &request.vss_url {
         #[cfg(feature = "vss")]
@@ -307,14 +312,14 @@ fn map_media(data: crate::sdk::Media) -> Media {
 
 fn map_ifa_issuance_type(
     issuance_type: IfaIssuanceType,
-) -> Result<rgb_lib::wallet::IfaIssuanceType, RlnError> {
+) -> Result<crate::rgb_compat::IfaIssuanceType, RlnError> {
     Ok(match issuance_type {
-        IfaIssuanceType::Legacy => rgb_lib::wallet::IfaIssuanceType::Legacy,
-        IfaIssuanceType::LinkRightOnly => rgb_lib::wallet::IfaIssuanceType::LinkRightOnly,
+        IfaIssuanceType::Legacy => crate::rgb_compat::IfaIssuanceType::Legacy,
+        IfaIssuanceType::LinkRightOnly => crate::rgb_compat::IfaIssuanceType::LinkRightOnly,
         IfaIssuanceType::LinkedFromParent {
             contract_id,
             request_link_right,
-        } => rgb_lib::wallet::IfaIssuanceType::LinkedFromParent {
+        } => crate::rgb_compat::IfaIssuanceType::LinkedFromParent {
             contract_id: contract_id.to_string(),
             request_link_right,
         },
@@ -521,6 +526,79 @@ impl SdkNode {
             },
         ))?;
         Ok(())
+    }
+
+    pub fn preparecreateutxos(
+        &self,
+        request: SdkPrepareCreateUtxosRequest,
+    ) -> Result<SdkCreateUtxosOperation, RlnError> {
+        block_on_sdk(sdk::prepare_create_utxos(
+            self.handle.app_state(),
+            request.operation_id,
+            sdk::CreateUtxosRequestData {
+                up_to: request.up_to,
+                num: request.num,
+                size: request.size,
+                fee_rate: request.fee_rate,
+                skip_sync: request.skip_sync,
+            },
+        ))
+        .map(Into::into)
+    }
+
+    pub fn commitpreparedcreateutxos(
+        &self,
+        operation_id: String,
+    ) -> Result<SdkCreateUtxosOperation, RlnError> {
+        block_on_sdk(sdk::commit_prepared_create_utxos(
+            self.handle.app_state(),
+            operation_id,
+        ))
+        .map(Into::into)
+    }
+
+    pub fn cancelcreateutxosplan(
+        &self,
+        operation_id: String,
+    ) -> Result<SdkCreateUtxosOperation, RlnError> {
+        block_on_sdk(sdk::cancel_create_utxos_plan(
+            self.handle.app_state(),
+            operation_id,
+        ))
+        .map(Into::into)
+    }
+
+    pub fn getcreateutxosoperation(
+        &self,
+        operation_id: String,
+    ) -> Result<Option<SdkCreateUtxosOperation>, RlnError> {
+        block_on_sdk(sdk::get_create_utxos_operation(
+            self.handle.app_state(),
+            operation_id,
+        ))
+        .map(|operation| operation.map(Into::into))
+    }
+
+    pub fn listcreateutxosoperations(&self) -> Result<Vec<SdkCreateUtxosOperation>, RlnError> {
+        block_on_sdk(sdk::list_create_utxos_operations(self.handle.app_state()))
+            .map(|operations| operations.into_iter().map(Into::into).collect())
+    }
+
+    pub fn listpendingvanillatransactions(
+        &self,
+    ) -> Result<Vec<SdkPendingVanillaTransaction>, RlnError> {
+        block_on_sdk(sdk::list_pending_vanilla_transactions(
+            self.handle.app_state(),
+        ))
+        .map(|pending| {
+            pending
+                .into_iter()
+                .map(|pending| SdkPendingVanillaTransaction {
+                    txid: pending.txid,
+                    r#type: pending.operation_type,
+                })
+                .collect()
+        })
     }
 
     pub fn issueassetnia(&self, request: SdkIssueAssetNiaRequest) -> Result<AssetNia, RlnError> {
@@ -1479,6 +1557,8 @@ impl SdkNode {
             network: format!("{:?}", resp.network),
             expiration_timestamp: resp.expiration_timestamp,
             transport_endpoints: resp.transport_endpoints,
+            public_key: resp.public_key,
+            encryption: resp.encryption,
         })
     }
 
@@ -1648,6 +1728,87 @@ impl SdkNode {
         ))?;
         let txid = Txid::from_str(&response.txid).map_err(RlnError::internal)?;
         Ok(InflateResponse { txid })
+    }
+
+    /// Send a fungible asset without discarding authenticated proxy invoice fields.
+    pub fn sendrgbinvoice(
+        &self,
+        request: SendRgbInvoiceRequest,
+    ) -> Result<SendRgbResponse, RlnError> {
+        let response = block_on_sdk(sdk::send_rgb_invoice(
+            self.handle.app_state(),
+            sdk::SendRgbInvoiceRequestData {
+                invoice: request.invoice,
+                asset_id: request.asset_id.to_string(),
+                amount: request.amount,
+                witness_data: request.witness_data.map(|w| sdk::WitnessDataInput {
+                    amount_sat: w.amount_sat,
+                    blinding: w.blinding,
+                }),
+                donation: request.donation,
+                fee_rate: request.fee_rate,
+                min_confirmations: request.min_confirmations,
+            },
+        ))?;
+        Ok(SendRgbResponse {
+            txid: Txid::from_str(&response.txid).map_err(RlnError::internal)?,
+            batch_transfer_idx: response.batch_transfer_idx,
+        })
+    }
+
+    /// Send one authenticated native batch without flattening invoices to recipient IDs.
+    pub fn sendrgbinvoices(
+        &self,
+        request: SendRgbInvoicesRequest,
+    ) -> Result<SendRgbResponse, RlnError> {
+        crate::rgb_invoice::validate_batch_bounds(
+            request
+                .recipient_groups
+                .iter()
+                .map(|g| g.recipients.iter().map(|r| r.invoice.as_str())),
+        )
+        .map_err(state::map_api_error)?;
+        let recipient_groups = request
+            .recipient_groups
+            .into_iter()
+            .map(|group| sdk::InvoiceAssetRecipientsInput {
+                asset_id: group.asset_id.to_string(),
+                recipients: group
+                    .recipients
+                    .into_iter()
+                    .map(|recipient| sdk::InvoiceRecipientInput {
+                        invoice: recipient.invoice,
+                        witness_data: recipient.witness_data.map(|w| sdk::WitnessDataInput {
+                            amount_sat: w.amount_sat,
+                            blinding: w.blinding,
+                        }),
+                        assignment_kind: match recipient.assignment_kind {
+                            AssignmentKind::Fungible => sdk::AssignmentKindData::Fungible,
+                            AssignmentKind::NonFungible => sdk::AssignmentKindData::NonFungible,
+                            AssignmentKind::InflationRight => {
+                                sdk::AssignmentKindData::InflationRight
+                            }
+                            AssignmentKind::ReplaceRight => sdk::AssignmentKindData::ReplaceRight,
+                            AssignmentKind::Any => sdk::AssignmentKindData::Any,
+                        },
+                        assignment_amount: recipient.assignment_amount,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let response = block_on_sdk(sdk::send_rgb_invoices(
+            self.handle.app_state(),
+            sdk::SendRgbInvoicesRequestData {
+                donation: request.donation,
+                fee_rate: request.fee_rate,
+                min_confirmations: request.min_confirmations,
+                recipient_groups,
+            },
+        ))?;
+        Ok(SendRgbResponse {
+            txid: Txid::from_str(&response.txid).map_err(RlnError::internal)?,
+            batch_transfer_idx: response.batch_transfer_idx,
+        })
     }
 
     pub fn send_rgb(&self, request: SendRgbRequest) -> Result<SendRgbResponse, RlnError> {
@@ -2053,3 +2214,8 @@ impl crate::signer::ExternalSignerTransport for UniffiExternalSignerTransport {
 
 #[cfg(test)]
 mod tests;
+
+pub fn sdk_sendrgbinvoice(request: SendRgbInvoiceRequest) -> Result<SendRgbResponse, RlnError> {
+    let handle = NodeHandle::from_app_state(get_uniffi_app_state()?);
+    SdkNode { handle }.sendrgbinvoice(request)
+}

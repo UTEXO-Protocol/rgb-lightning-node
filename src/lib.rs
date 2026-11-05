@@ -26,6 +26,7 @@ mod async_kv_store;
 mod async_order;
 mod auth;
 mod backup;
+mod bfa_values;
 mod config;
 mod core_types;
 mod crypto;
@@ -33,6 +34,7 @@ mod custom_msg_rpc;
 mod database;
 mod disk;
 mod error;
+mod evm_rpc;
 #[cfg(test)]
 #[path = "test/fee_mock.rs"]
 mod fee_mock;
@@ -51,10 +53,16 @@ mod mainnet_tests;
 mod mainnet_vss_tests;
 mod node;
 mod node_info;
+mod proxy_startup;
 mod rgb;
+mod rgb_compat;
 mod rgb_file_transfer;
 mod rgb_import;
+mod rgb_invoice;
+mod rgb_output_operations;
 mod rgb_sweep;
+#[cfg(feature = "vss")]
+pub mod rgb_vss;
 mod routes;
 mod runtime;
 mod sdk;

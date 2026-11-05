@@ -131,9 +131,10 @@ async fn transaction_sync_roundtrip(test_dir_base: &str, ln_indexer_url: String)
 
     // cooperatively close the node1 -> node2 channel and check the asset returns on-chain to both
     // the initiating and the counterparty node
-    close_channel(node2_addr, &channel_12.channel_id, &node1_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 550).await;
-    wait_for_balance(node2_addr, &asset_id, 150).await;
+    let close_settlement =
+        close_channel(node2_addr, &channel_12.channel_id, &node1_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 550, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 150, &close_settlement).await;
 }
 
 #[cfg(feature = "electrum")]

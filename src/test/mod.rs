@@ -1,3 +1,4 @@
+use crate::rgb_compat::IfaIssuanceType;
 #[cfg(feature = "esplora")]
 use crate::utils::ESPLORA_URL_REGTEST;
 use amplify::s;
@@ -32,7 +33,7 @@ use lightning_transaction_sync::ElectrumSyncClient;
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use reqwest::{Response, StatusCode};
-use rgb_lib::{wallet::IfaIssuanceType, BitcoinNetwork, ContractId};
+use rgb_lib::{BitcoinNetwork, ContractId};
 use sea_orm::{ConnectOptions, Database};
 use std::collections::HashMap;
 use std::fs::File;
@@ -49,7 +50,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing_test::traced_test;
 
-use crate::core_types::asset_link::{AssetLinkRequest, AssetLinkResponse};
+use crate::core_types::asset_link::AssetLinkRequest;
 use crate::core_types::{
     HTLCStatus, LdkChainSync, SwapStatus, FEE_RATE, HTLC_MIN_MSAT, VIRTUAL_HTLC_MIN_MSAT,
 };
@@ -67,29 +68,29 @@ use crate::ldk::{
 use crate::routes::VssClearFenceRequest;
 use crate::routes::{
     AddressResponse, AssetBalanceRequest, AssetBalanceResponse, AssetCFA, AssetFilter, AssetIFA,
-    AssetMetadataRequest, AssetMetadataResponse, AssetNIA, AssetUDA, Assignment, BackupRequest,
-    BtcBalanceRequest, BtcBalanceResponse, CancelHodlInvoiceRequest, ChangePasswordRequest,
-    Channel, ChannelStatus, ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest,
-    ConnectPeerRequest, CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse,
-    DecodeRGBInvoiceRequest, DecodeRGBInvoiceResponse, DecodeSwapstringRequest,
-    DecodeSwapstringResponse, DisconnectPeerRequest, EmptyResponse, FailTransfersRequest,
-    FailTransfersResponse, GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest,
-    GetChannelIdResponse, GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest,
-    GetPaymentResponse, GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse,
-    InitRequest, InitResponse, InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse,
-    IssueAssetCFARequest, IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse,
-    IssueAssetNIARequest, IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse,
-    KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest,
-    ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse, ListPeersResponse,
-    ListSwapsResponse, ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest,
-    ListTransfersResponse, ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest,
-    MakerInitRequest, MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
+    AssetNIA, AssetUDA, Assignment, BackupRequest, BtcBalanceRequest, BtcBalanceResponse,
+    CancelHodlInvoiceRequest, ChangePasswordRequest, Channel, ChannelStatus,
+    ClaimHodlInvoiceRequest, ClaimHodlInvoiceResponse, CloseChannelRequest, ConnectPeerRequest,
+    CreateUtxosRequest, DecodeLNInvoiceRequest, DecodeLNInvoiceResponse, DecodeRGBInvoiceRequest,
+    DecodeRGBInvoiceResponse, DecodeSwapstringRequest, DecodeSwapstringResponse,
+    DisconnectPeerRequest, EmptyResponse, FailTransfersRequest, FailTransfersResponse,
+    GetAssetMediaRequest, GetAssetMediaResponse, GetChannelIdRequest, GetChannelIdResponse,
+    GetConsignmentRequest, GetConsignmentResponse, GetPaymentRequest, GetPaymentResponse,
+    GetSwapRequest, GetSwapResponse, InflateRequest, InflateResponse, InitRequest, InitResponse,
+    InvoiceStatus, InvoiceStatusRequest, InvoiceStatusResponse, IssueAssetCFARequest,
+    IssueAssetCFAResponse, IssueAssetIFARequest, IssueAssetIFAResponse, IssueAssetNIARequest,
+    IssueAssetNIAResponse, IssueAssetUDARequest, IssueAssetUDAResponse, KeysendRequest,
+    KeysendResponse, LNInvoiceRequest, LNInvoiceResponse, ListAssetsRequest, ListAssetsResponse,
+    ListChannelsResponse, ListPaymentsResponse, ListPeersResponse, ListSwapsResponse,
+    ListTransactionsRequest, ListTransactionsResponse, ListTransfersRequest, ListTransfersResponse,
+    ListUnspentsRequest, ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest,
+    MakerInitResponse, NetworkInfoResponse, NodeInfoResponse, OpenChannelRequest,
     OpenChannelResponse, Payment, PaymentDirection, PaymentType, Peer, PostAssetMediaResponse,
     ProvideOutOfBandAckRequest, ProvideOutOfBandAckResponse, ProvideOutOfBandConsignmentResponse,
     Recipient, RefreshRequest, RefreshResponse, RestoreRequest, RevokeTokenRequest,
     RgbInvoiceRequest, RgbInvoiceResponse, SendBtcRequest, SendBtcResponse, SendPaymentRequest,
     SendPaymentResponse, SendRgbRequest, SendRgbResponse, Swap, TakerRequest, Transaction,
-    Transfer, TransferKind, TransferStatus, UnlockRequest, Unspent, WitnessData,
+    Transfer, TransferStatus, UnlockRequest, Unspent, WitnessData,
 };
 use crate::utils::{
     get_db_path, hex_str, hex_str_to_vec, validate_and_parse_payment_hash, AppState,
@@ -744,49 +745,8 @@ async fn asset_balance_offchain_outbound(node_address: SocketAddr, asset_id: &st
         .offchain_outbound
 }
 
-async fn asset_metadata(node_address: SocketAddr, asset_id: &str) -> AssetMetadataResponse {
-    let payload = AssetMetadataRequest {
-        asset_id: asset_id.to_string(),
-    };
-    let res = reqwest::Client::new()
-        .post(format!("http://{node_address}/assetmetadata"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    check_response_is_ok(res)
-        .await
-        .json::<AssetMetadataResponse>()
-        .await
-        .unwrap()
-}
-
 async fn asset_balance_spendable(node_address: SocketAddr, asset_id: &str) -> u64 {
     asset_balance(node_address, asset_id).await.spendable
-}
-
-async fn asset_link_create(
-    node_address: SocketAddr,
-    parent_asset_id: &str,
-    child_asset_id: &str,
-) -> AssetLinkResponse {
-    println!("creating asset link for asset {parent_asset_id} on node {node_address}");
-    let payload = AssetLinkRequest {
-        parent_asset_id: parent_asset_id.to_string(),
-        child_asset_id: child_asset_id.to_string(),
-        min_confirmations: 1,
-    };
-    let res = reqwest::Client::new()
-        .post(format!("http://{node_address}/assetlink"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    check_response_is_ok(res)
-        .await
-        .json::<AssetLinkResponse>()
-        .await
-        .unwrap()
 }
 
 async fn backup(node_address: SocketAddr, backup_path: &str, password: &str) {
@@ -893,7 +853,24 @@ async fn check_payment_status_by_type(
     None
 }
 
-async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: &str, force: bool) {
+#[path = "../../test/channel_close_context.rs"]
+mod channel_close_context;
+use channel_close_context::ClosedChannelContext;
+
+async fn close_channel(
+    node_address: SocketAddr,
+    channel_id: &str,
+    peer_pubkey: &str,
+    force: bool,
+) -> ClosedChannelContext {
+    let channel = list_channels(node_address)
+        .await
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id);
+    let (funding_txid, virtual_open_mode) = channel
+        .map(|channel| (channel.funding_txid, channel.virtual_open_mode))
+        .unwrap_or((None, None));
+    let closed = ClosedChannelContext::new(funding_txid, channel_id.to_owned(), virtual_open_mode);
     println!(
         "{}closing channel {channel_id} from node {node_address}",
         if force { "force-" } else { "cooperatively " }
@@ -920,7 +897,14 @@ async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let channels = list_channels(node_address).await;
-        if !channels.iter().any(|c| c.channel_id == channel_id) {
+        if !channels.iter().any(|c| c.channel_id == channel_id)
+            && (!closed.requires_bitcoin_broadcast()
+                || !observed_channel_sweeps(&closed).await.is_empty())
+        {
+            assert!(
+                (OffsetDateTime::now_utc() - t_0).as_seconds_f32() <= 30.0,
+                "channel closing broadcast exceeded its deadline"
+            );
             let block_num = match force {
                 true => 144,
                 false => 6,
@@ -932,6 +916,7 @@ async fn close_channel(node_address: SocketAddr, channel_id: &str, peer_pubkey: 
             panic!("channel is taking too long to close")
         }
     }
+    closed
 }
 
 // Waits until the channel's funding output is spent by a confirmed tx
@@ -1823,27 +1808,6 @@ async fn list_transactions_by_txid(node_address: SocketAddr, txid: &str) -> Vec<
 
 async fn list_unspents(node_address: SocketAddr) -> Vec<Unspent> {
     list_unspents_full(node_address, None, None).await.unspents
-}
-
-async fn list_settled_unspents(node_address: SocketAddr) -> Vec<Unspent> {
-    let payload = ListUnspentsRequest {
-        settled_only: true,
-        skip_sync: false,
-        index_offset: None,
-        max_unspents: None,
-    };
-    let res = reqwest::Client::new()
-        .post(format!("http://{node_address}/listunspents"))
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    check_response_is_ok(res)
-        .await
-        .json::<ListUnspentsResponse>()
-        .await
-        .unwrap()
-        .unspents
 }
 
 async fn list_unspents_full(
@@ -2747,6 +2711,11 @@ async fn rgb_invoice_oob(
     rgb_invoice_raw(node_address, asset_id, assignment, witness, vec![]).await
 }
 
+// Test fixtures retain the exact authenticated invoice. Recipient IDs alone cannot
+// reconstruct protocol-1 keys and must never be upgraded by fabricating them.
+static TEST_RGB_INVOICES: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 async fn rgb_invoice_raw(
     node_address: SocketAddr,
     asset_id: Option<String>,
@@ -2789,11 +2758,16 @@ async fn rgb_invoice_raw(
         .send()
         .await
         .unwrap();
-    check_response_is_ok(res)
+    let invoice = check_response_is_ok(res)
         .await
         .json::<RgbInvoiceResponse>()
         .await
+        .unwrap();
+    TEST_RGB_INVOICES
+        .lock()
         .unwrap()
+        .insert(invoice.recipient_id.clone(), invoice.invoice.clone());
+    invoice
 }
 
 async fn send_asset(
@@ -2827,6 +2801,63 @@ async fn send_assets(
         "batch sending {} asset(s) from node {node_address}",
         recipient_map.len()
     );
+    if recipient_map
+        .values()
+        .flatten()
+        .any(|r| !r.transport_endpoints.is_empty())
+    {
+        let groups = recipient_map
+            .into_iter()
+            .map(|(asset_id, recipients)| {
+                let recipients = recipients
+                    .into_iter()
+                    .map(|r| {
+                        let invoice = TEST_RGB_INVOICES
+                            .lock()
+                            .unwrap()
+                            .get(&r.recipient_id)
+                            .expect("test must retain its issued full invoice")
+                            .clone();
+                        assert_eq!(
+                            rgb_lib::wallet::Invoice::new(invoice.clone())
+                                .unwrap()
+                                .invoice_data()
+                                .transport_endpoints,
+                            r.transport_endpoints
+                        );
+                        crate::routes::RgbInvoiceRecipient {
+                            invoice,
+                            assignment: r.assignment,
+                            witness_data: r.witness_data,
+                        }
+                    })
+                    .collect();
+                crate::routes::RgbInvoiceAssetRecipients {
+                    asset_id,
+                    recipients,
+                }
+            })
+            .collect();
+        let response = reqwest::Client::new()
+            .post(format!("http://{node_address}/sendrgbinvoices"))
+            .json(&crate::routes::SendRgbInvoicesRequest {
+                recipient_groups: groups,
+                donation,
+                fee_rate: FEE_RATE,
+                min_confirmations: 1,
+            })
+            .send()
+            .await
+            .unwrap();
+        return check_response_is_ok(response)
+            .await
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()["txid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    }
     let payload = SendRgbRequest {
         donation,
         fee_rate: FEE_RATE,
@@ -3133,6 +3164,76 @@ async fn wait_for_balance(node_address: SocketAddr, asset_id: &str, expected_bal
             panic!("balance ({balance}) is not becoming the expected one ({expected_balance})");
         }
         refresh_transfers(node_address).await;
+    }
+}
+
+// Only explicit closed-channel accounting waits advance observed sweep confirmations.
+// Generic balance waits deliberately preserve unconfirmed receive/funding semantics.
+async fn observed_channel_sweeps(closed: &ClosedChannelContext) -> Vec<String> {
+    assert!(
+        closed.requires_bitcoin_broadcast(),
+        "closed-channel settlement requires a non-virtual Bitcoin-funded channel"
+    );
+    let funding_txid = closed
+        .funding_txid
+        .clone()
+        .expect("closed-channel settlement requires Bitcoin funding");
+    let channel_id = closed.channel_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("python3")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("test/channel_sweep_candidates.py"))
+            .args([funding_txid, channel_id])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("read observed channel sweep candidates");
+        assert!(
+            output.status.success(),
+            "channel sweep detector failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let candidates: Vec<String> = serde_json::from_slice(&output.stdout)
+            .expect("sweep detector must return a JSON txid array");
+        for txid in &candidates {
+            let parsed = bitcoin::Txid::from_str(txid).expect("canonical sweep transaction ID");
+            assert_eq!(parsed.to_string(), *txid);
+        }
+        candidates
+    })
+    .await
+    .unwrap()
+}
+
+async fn wait_for_closed_channel_balance(
+    node_address: SocketAddr,
+    asset_id: &str,
+    expected_balance: u64,
+    closed: &ClosedChannelContext,
+) {
+    assert!(
+        closed.requires_bitcoin_broadcast(),
+        "closed-channel settlement requires a non-virtual Bitcoin-funded channel"
+    );
+    let start = OffsetDateTime::now_utc();
+    loop {
+        refresh_transfers(node_address).await;
+        let balance = asset_balance_spendable(node_address, asset_id).await;
+        assert!(
+            (OffsetDateTime::now_utc() - start).as_seconds_f32() <= 70.0,
+            "closed-channel balance ({balance}) did not become {expected_balance}"
+        );
+        if balance == expected_balance {
+            return;
+        }
+        let candidates = observed_channel_sweeps(closed).await;
+        assert!(
+            (OffsetDateTime::now_utc() - start).as_seconds_f32() <= 70.0,
+            "closed-channel sweep observation exceeded the settlement deadline"
+        );
+        if !candidates.is_empty() {
+            println!("confirming observed closed-channel sweeps: {candidates:?}");
+            mine(false);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -3462,6 +3563,7 @@ pub fn set_mock_fee(fee: u32) {
 mod address_reuse;
 mod asset_link;
 mod auth_db_persistence;
+mod authenticated_invoice_batch;
 mod authentication;
 mod backup_and_restore;
 mod chain_backend_dispatch;

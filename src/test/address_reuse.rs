@@ -1,3 +1,4 @@
+//! rgb-lib-bfa uses fresh addresses. Pinned-address reuse is explicitly unsupported.
 use super::*;
 
 const TEST_DIR_BASE: &str = "tmp/address_reuse/";
@@ -5,291 +6,210 @@ const FUND_SATS: u64 = 100_000_000;
 #[cfg(feature = "vss")]
 const VSS_URL: &str = "http://localhost:8081/vss";
 
-async fn rotate_address_res(node_address: SocketAddr) -> Response {
-    reqwest::Client::new()
-        .post(format!("http://{node_address}/rotateaddress"))
+async fn rotate_address(node: SocketAddr) -> String {
+    let response = reqwest::Client::new()
+        .post(format!("http://{node}/rotateaddress"))
         .send()
         .await
-        .unwrap()
-}
-
-async fn rotate_address(node_address: SocketAddr) -> String {
-    let res = rotate_address_res(node_address).await;
-    check_response_is_ok(res)
+        .unwrap();
+    check_response_is_ok(response)
         .await
         .json::<AddressResponse>()
         .await
         .unwrap()
         .address
 }
-
 fn fund_and_mine(address: String, sats: u64) {
     fund_wallet(address, sats);
     mine(false);
 }
-
-async fn settled_btc(node_address: SocketAddr) -> u64 {
-    btc_balance(node_address).await.vanilla.settled
+async fn settled_btc(node: SocketAddr) -> u64 {
+    btc_balance(node).await.vanilla.settled
 }
 
-/// With reuse on, `/address` pins a single address and BTC sent to it
-/// repeatedly accumulates on that same address.
-#[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[traced_test]
-async fn reuse_enabled_pins_address_and_accumulates_funds() {
-    initialize();
-
-    let test_dir = format!("{TEST_DIR_BASE}reuse_on");
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, true, false, None).await;
-
-    let pinned = address(node_addr).await;
-    assert_eq!(pinned, address(node_addr).await, "address must stay pinned");
-
-    fund_and_mine(pinned.clone(), FUND_SATS);
-    assert!(settled_btc(node_addr).await >= FUND_SATS);
-
-    // The pin is unchanged after receiving, and a second payment to the same
-    // address accumulates rather than landing on a fresh one.
-    assert_eq!(address(node_addr).await, pinned);
-    fund_and_mine(pinned.clone(), FUND_SATS);
+#[tokio::test]
+async fn reuse_configuration_is_rejected_before_rest_wallet_creation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let wallet = temporary.path().join("not-created");
+    let result = app(UserArgs {
+        storage_dir_path: wallet.clone(),
+        reuse_addresses: true,
+        ..Default::default()
+    })
+    .await;
     assert!(
-        settled_btc(node_addr).await >= 2 * FUND_SATS,
-        "funds sent to the reused address must accumulate"
+        matches!(result,Err(crate::error::AppError::InvalidConfig(message)) if message.contains("Address reuse is not supported"))
     );
-}
-
-/// With reuse off (default), `/address` returns a fresh address each call.
-#[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[traced_test]
-async fn reuse_disabled_returns_fresh_addresses() {
-    initialize();
-
-    let test_dir = format!("{TEST_DIR_BASE}reuse_off");
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, false, false, None).await;
-
-    assert_ne!(address(node_addr).await, address(node_addr).await);
-}
-
-/// `/rotateaddress` advances the pin to a new address that subsequent
-/// `/address` calls return, and which can receive funds.
-#[serial_test::serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[traced_test]
-async fn rotate_advances_pin_and_new_address_receives_funds() {
-    initialize();
-
-    let test_dir = format!("{TEST_DIR_BASE}rotate_on");
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, true, false, None).await;
-
-    let pinned = address(node_addr).await;
-    fund_and_mine(pinned.clone(), FUND_SATS);
-    assert!(settled_btc(node_addr).await >= FUND_SATS);
-
-    let rotated = rotate_address(node_addr).await;
-    assert_ne!(rotated, pinned);
-    assert_eq!(
-        rotated,
-        address(node_addr).await,
-        "the pin must move to the rotated address"
-    );
-
-    fund_and_mine(rotated, FUND_SATS);
     assert!(
-        settled_btc(node_addr).await >= 2 * FUND_SATS,
-        "funds sent to the rotated address must be spendable"
+        !wallet.exists(),
+        "unsupported reuse must not initialize logs, DB or wallet state"
     );
 }
 
-/// `/rotateaddress` is rejected when reuse is disabled.
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn rotate_disabled_errors() {
+async fn default_address_calls_generate_fresh_addresses() {
     initialize();
+    let (node, _) = start_node(&format!("{TEST_DIR_BASE}default"), NODE1_PEER_PORT, false).await;
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..3 {
+        assert!(seen.insert(address(node).await));
+    }
+    shutdown(&[node]).await;
+}
 
-    let test_dir = format!("{TEST_DIR_BASE}rotate_off");
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, false, false, None).await;
-
-    let res = rotate_address_res(node_addr).await;
-    check_response_is_nok(
-        res,
-        reqwest::StatusCode::BAD_REQUEST,
-        "Address reuse is disabled",
-        "AddressReuseDisabled",
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn explicit_reuse_false_generates_fresh_addresses() {
+    initialize();
+    let (node, _, _) = start_node_with_reuse_addresses(
+        &format!("{TEST_DIR_BASE}explicit_false"),
+        NODE1_PEER_PORT,
+        false,
+        false,
+        None,
     )
     .await;
+    assert_ne!(address(node).await, address(node).await);
+    shutdown(&[node]).await;
 }
 
-/// The pinned address and its balance survive a restart that keeps local state.
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn reuse_pinned_address_and_balance_survive_restart() {
+async fn rotation_generates_a_fresh_address_and_both_addresses_receive_funds() {
     initialize();
-
-    let test_dir = format!("{TEST_DIR_BASE}restart");
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, true, false, None).await;
-
-    let pinned = address(node_addr).await;
-    fund_and_mine(pinned.clone(), FUND_SATS);
-    let balance = settled_btc(node_addr).await;
-    assert!(balance >= FUND_SATS);
-
-    shutdown(&[node_addr]).await;
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, true, true, None).await;
-
-    assert_eq!(
-        address(node_addr).await,
-        pinned,
-        "pinned address must be stable across a restart"
-    );
-    assert!(
-        settled_btc(node_addr).await >= balance,
-        "balance must be retained across a restart"
-    );
+    let (node, _) = start_node(&format!("{TEST_DIR_BASE}rotation"), NODE1_PEER_PORT, false).await;
+    let original = address(node).await;
+    let rotated = rotate_address(node).await;
+    assert_ne!(original, rotated);
+    let next = address(node).await;
+    assert_ne!(next, original);
+    assert_ne!(next, rotated);
+    fund_and_mine(original, FUND_SATS);
+    fund_and_mine(rotated, FUND_SATS);
+    assert!(settled_btc(node).await >= 2 * FUND_SATS);
+    shutdown(&[node]).await;
 }
 
-/// The pinned address is deterministic from the seed: after wiping all local
-/// state and re-initializing from the same mnemonic, `/address` returns the
-/// same pinned address and the on-chain funds are recovered.
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn reuse_pinned_address_recovers_from_seed() {
+async fn fresh_address_funds_survive_restart() {
     initialize();
+    let directory = format!("{TEST_DIR_BASE}restart");
+    let (node, _, _) =
+        start_node_with_reuse_addresses(&directory, NODE1_PEER_PORT, false, false, None).await;
+    fund_and_mine(address(node).await, FUND_SATS);
+    fund_and_mine(rotate_address(node).await, FUND_SATS);
+    let before = settled_btc(node).await;
+    assert!(before >= 2 * FUND_SATS);
+    shutdown(&[node]).await;
+    let (node, _, _) =
+        start_node_with_reuse_addresses(&directory, NODE1_PEER_PORT, false, true, None).await;
+    assert!(settled_btc(node).await >= before);
+    shutdown(&[node]).await;
+}
 
-    let test_dir = format!("{TEST_DIR_BASE}seed_recovery");
-    let (node_addr, _, mnemonic) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, true, false, None).await;
-
-    let pinned = address(node_addr).await;
-    fund_and_mine(pinned.clone(), FUND_SATS);
-    let balance = settled_btc(node_addr).await;
-    assert!(balance >= FUND_SATS);
-
-    // Wipe local state and recover from the seed alone.
-    shutdown(&[node_addr]).await;
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, true, false, Some(&mnemonic))
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[traced_test]
+async fn fresh_address_funds_recover_from_same_seed() {
+    initialize();
+    let directory = format!("{TEST_DIR_BASE}seed");
+    let (node, _, seed) =
+        start_node_with_reuse_addresses(&directory, NODE1_PEER_PORT, false, false, None).await;
+    fund_and_mine(address(node).await, FUND_SATS);
+    fund_and_mine(rotate_address(node).await, FUND_SATS);
+    let before = settled_btc(node).await;
+    assert!(before >= 2 * FUND_SATS);
+    shutdown(&[node]).await;
+    let (node, _, _) =
+        start_node_with_reuse_addresses(&directory, NODE1_PEER_PORT, false, false, Some(&seed))
             .await;
-
-    assert_eq!(
-        address(node_addr).await,
-        pinned,
-        "pinned address must be re-derived from the seed after a wipe"
-    );
     assert!(
-        settled_btc(node_addr).await >= balance,
-        "on-chain funds must be recovered from the seed after a wipe"
+        settled_btc(node).await >= before,
+        "same-seed scan must recover confirmed BTC at all generated fixture addresses"
     );
+    shutdown(&[node]).await;
 }
 
-/// The rotated pin is persisted and survives a restart that keeps local state.
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn rotate_persists_across_restart() {
+async fn revealed_address_index_persists_across_restart() {
     initialize();
-
-    let test_dir = format!("{TEST_DIR_BASE}rotate_restart");
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, true, false, None).await;
-
-    let base = address(node_addr).await;
-    let rotated = rotate_address(node_addr).await;
-    assert_ne!(rotated, base);
-    assert_eq!(rotated, address(node_addr).await);
-
-    shutdown(&[node_addr]).await;
-    let (node_addr, _, _) =
-        start_node_with_reuse_addresses(&test_dir, NODE1_PEER_PORT, true, true, None).await;
-
-    assert_eq!(
-        address(node_addr).await,
-        rotated,
-        "rotated pin must persist across a restart"
-    );
+    let directory = format!("{TEST_DIR_BASE}index");
+    let (node, _, _) =
+        start_node_with_reuse_addresses(&directory, NODE1_PEER_PORT, false, false, None).await;
+    let revealed = std::collections::HashSet::from([
+        address(node).await,
+        rotate_address(node).await,
+        address(node).await,
+    ]);
+    assert_eq!(revealed.len(), 3);
+    shutdown(&[node]).await;
+    let (node, _, _) =
+        start_node_with_reuse_addresses(&directory, NODE1_PEER_PORT, false, true, None).await;
+    assert!(!revealed.contains(&address(node).await));
+    assert!(!revealed.contains(&rotate_address(node).await));
+    shutdown(&[node]).await;
 }
 
-/// End-to-end VSS recovery with reuse enabled: a reuse node issues an asset,
-/// is wiped, and restarts from the same seed + VSS. The pinned address, the
-/// on-chain funds and the RGB asset must all come back.
 #[cfg(feature = "vss")]
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[traced_test]
-async fn reuse_address_and_assets_recover_via_vss() {
-    if !vss_server_available() {
-        eprintln!("SKIP: VSS server not available at {VSS_URL}");
-        return;
-    }
+async fn fresh_address_and_assets_recover_via_vss() {
+    assert!(
+        std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:8081".parse().unwrap(),
+            std::time::Duration::from_secs(2)
+        )
+        .is_ok(),
+        "required VSS fixture is unavailable"
+    );
     initialize();
-
-    let test_dir = format!("{TEST_DIR_BASE}vss");
-    let (node_addr, _, mnemonic) =
-        start_node_with_vss(&test_dir, NODE1_PEER_PORT, false, VSS_URL, None, true).await;
-
-    // Rotate first so recovery has to restore a non-default pin from VSS.
-    let base = address(node_addr).await;
-    let pinned = rotate_address(node_addr).await;
-    assert_ne!(pinned, base);
-    fund_and_create_utxos(node_addr, None).await;
-
-    let asset_id = issue_asset_nia(node_addr).await.asset_id;
+    let directory = format!("{TEST_DIR_BASE}vss");
+    let (node, _, seed) =
+        start_node_with_vss(&directory, NODE1_PEER_PORT, false, VSS_URL, None, false).await;
+    let identity = node_info(node).await.pubkey;
+    let revealed =
+        std::collections::HashSet::from([address(node).await, rotate_address(node).await]);
+    fund_and_create_utxos(node, None).await;
+    let asset = issue_asset_nia(node).await.asset_id;
+    assert_eq!(asset_balance_spendable(node, &asset).await, ISSUE_AMT);
     assert_eq!(
-        asset_balance_spendable(node_addr, &asset_id).await,
-        ISSUE_AMT
+        vss_backup_info(node).await["backup_exists"],
+        serde_json::json!(true)
     );
-
-    // Blocking RGB backup: the asset's VSS backup is durable once issue returns.
-    assert_eq!(
-        vss_backup_info(node_addr).await["backup_exists"],
-        serde_json::json!(true),
-        "rgb backup must exist after issue"
-    );
-
-    let pre_wipe_btc = settled_btc(node_addr).await;
-
-    wipe_node_dir(node_addr, &test_dir).await;
-    let (node_addr, _, _) = start_node_with_vss(
-        &test_dir,
+    let before = settled_btc(node).await;
+    wipe_node_dir(node, &directory).await;
+    let (node, _, _) = start_node_with_vss(
+        &directory,
         NODE1_PEER_PORT,
         true,
         VSS_URL,
-        Some(&mnemonic),
-        true,
+        Some(&seed),
+        false,
     )
     .await;
-
     assert_eq!(
-        address(node_addr).await,
-        pinned,
-        "rotated pin must be recovered with reuse + VSS"
+        node_info(node).await.pubkey,
+        identity,
+        "restored runtime identity must match its seed-derived cloud store"
     );
     assert!(
-        settled_btc(node_addr).await >= pre_wipe_btc,
-        "on-chain funds must be recovered after VSS restore"
+        !revealed.contains(&address(node).await),
+        "restored BDK address indices must retain the fresh-only policy"
     );
+    assert!(settled_btc(node).await >= before);
+    assert_eq!(asset_balance_spendable(node, &asset).await, ISSUE_AMT);
     assert_eq!(
-        asset_balance_spendable(node_addr, &asset_id).await,
-        ISSUE_AMT,
-        "asset balance must be recovered from VSS"
+        vss_backup_info(node).await["backup_exists"],
+        serde_json::json!(true)
     );
-}
-
-#[cfg(feature = "vss")]
-fn vss_server_available() -> bool {
-    std::net::TcpStream::connect_timeout(
-        &"127.0.0.1:8081".parse().unwrap(),
-        std::time::Duration::from_secs(2),
-    )
-    .is_ok()
+    shutdown(&[node]).await;
 }

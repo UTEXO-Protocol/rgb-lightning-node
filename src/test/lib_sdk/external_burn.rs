@@ -1,6 +1,7 @@
 //! Funded, strict-signer burn tests. Uses only a local regtest chain; never resets the stack.
 use bitcoin::psbt::Psbt;
 use hex::DisplayHex;
+use rgb_lib::wallet::RgbWalletOpsOffline;
 use rgb_lightning_node::signer_integration_wire::{
     decode_signer_request_wire, encode_signer_response_wire, SignerRequest, SignerResponse,
 };
@@ -189,18 +190,21 @@ impl ExternalSignerHost for BurnSigner {
 }
 
 fn receive(issuer: &SdkNode, receiver: &SdkNode, asset: ContractId, amount: u64) {
-    let invoice = receiver
-        .rgbinvoice(SdkRgbInvoiceRequest {
+    let invoice = crate::helpers::rgb_invoice(
+        receiver,
+        SdkRgbInvoiceRequest {
             asset_id: None,
             assignment_kind: Some(AssignmentKind::Fungible),
             assignment_amount: Some(amount),
             duration_seconds: Some(3600),
             min_confirmations: 1,
             witness: false,
-        })
-        .unwrap();
-    issuer
-        .send_rgb(SendRgbRequest {
+        },
+    )
+    .unwrap();
+    crate::helpers::send_rgb(
+        issuer,
+        SendRgbRequest {
             donation: true,
             fee_rate: 2,
             min_confirmations: 1,
@@ -214,8 +218,9 @@ fn receive(issuer: &SdkNode, receiver: &SdkNode, asset: ContractId, amount: u64)
                     transport_endpoints: vec![TransportEndpoint(proxy())],
                 }],
             }],
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     mine();
     wait(|| {
         receiver
@@ -426,8 +431,7 @@ fn external_burn_funded_and_recovery() {
 fn external_burn_bfa_proof() {
     use rgb_lib::keys::{generate_keys, WitnessVersion};
     use rgb_lib::wallet::{
-        DatabaseType, OnlineOptions, Recipient, RgbWalletOpsOffline, SinglesigKeys,
-        Wallet as RgbWallet, WalletData,
+        DatabaseType, OnlineOptions, SinglesigKeys, Wallet as RgbWallet, WalletData,
     };
     use rgb_lib::{AssetSchema, BitcoinNetwork};
 
@@ -476,17 +480,18 @@ fn external_burn_bfa_proof() {
             database_type: DatabaseType::Sqlite,
             max_allocations_per_utxo: 5,
             supported_schemas: vec![AssetSchema::Bfa],
-            reuse_addresses: false,
         },
         SinglesigKeys::from_keys(&keys, None),
     )
     .unwrap();
     let online = issuer
         .go_online(OnlineOptions {
-            indexer_url: indexer(),
+            indexer_config: rgb_lib::wallet::IndexerConfig::Electrum { url: indexer() },
             skip_consistency_check: false,
             vanilla_sync_lookback: 20,
-            eth_rpc_url: Some(eth_url.clone()),
+            failed_witness_receive_grace_secs: 3600,
+            proxy_auth_keys: std::collections::HashMap::new(),
+            evm_rpc_urls: std::collections::HashMap::from([(31337, eth_url.clone())]),
         })
         .unwrap();
     rpc(
@@ -512,7 +517,10 @@ fn external_burn_bfa_proof() {
             "Burn BFA".into(),
             6,
             1,
+            31337,
             bridge.clone(),
+            None,
+            false,
             None,
         )
         .unwrap();
@@ -541,18 +549,25 @@ fn external_burn_bfa_proof() {
             witness: false,
         })
         .unwrap();
+    let before_block = u64::from_str_radix(
+        eth_rpc("eth_blockNumber", json!([]))
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+        16,
+    )
+    .unwrap()
+    .checked_add(1000)
+    .unwrap();
     let prepared = issuer
-        .bridge_begin(
+        .mint_begin(
             online,
             asset.asset_id.clone(),
-            Recipient {
-                recipient_id: invoice.recipient_id.0,
-                witness_data: None,
-                assignment: rgb_lib::Assignment::Fungible(1000),
-                transport_endpoints: vec![proxy()],
-            },
+            crate::helpers::native_recipient_from_invoice(&invoice.invoice, 1000),
+            before_block,
             2,
             1,
+            proxy(),
         )
         .unwrap();
     let lock = std::process::Command::new("docker")
@@ -562,9 +577,10 @@ fn external_burn_bfa_proof() {
             "cast",
             "send",
             &bridge,
-            "fundsIn(uint256,uint256)",
+            "fundsIn(uint256,uint256,uint64)",
             "1000",
             &format!("0x{}", prepared.details.opid),
+            &before_block.to_string(),
             "--unlocked",
             "--from",
             "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
@@ -589,7 +605,7 @@ fn external_burn_bfa_proof() {
         "0x1"
     );
     let signed = issuer.sign_psbt(prepared.psbt, None).unwrap();
-    issuer.bridge_end(online, signed).unwrap();
+    issuer.mint_end(online, signed).unwrap();
     mine();
     wait(|| {
         wallet
@@ -622,6 +638,6 @@ fn external_burn_bfa_proof() {
         let proof = wallet.0.get_consignment(asset_id, burned.txid).unwrap();
         assert!(!proof.is_empty());
         assert_eq!(std::fs::read(&proof_path).unwrap(), proof);
-        assert_eq!(issuer.get_burn_recipient(proof_path).unwrap(), recipient);
+        crate::helpers::assert_burn_proof_destination(proof_path, &asset_id, &recipient);
     }
 }

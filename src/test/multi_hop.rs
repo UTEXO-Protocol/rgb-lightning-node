@@ -266,13 +266,15 @@ async fn multi_hop() {
     assert_eq!(node3_info.local_balance_sat, 6500); // + payment
     assert_eq!(node3_info.num_peers, 1);
 
-    close_channel(node2_addr, &channel_12.channel_id, &node1_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 550).await;
-    wait_for_balance(node2_addr, &asset_id, 150).await;
+    let close_settlement =
+        close_channel(node2_addr, &channel_12.channel_id, &node1_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 550, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 150, &close_settlement).await;
 
-    close_channel(node3_addr, &channel_23.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node2_addr, &asset_id, 400).await;
-    wait_for_balance(node3_addr, &asset_id, 50).await;
+    let close_settlement =
+        close_channel(node3_addr, &channel_23.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 400, &close_settlement).await;
+    wait_for_closed_channel_balance(node3_addr, &asset_id, 50, &close_settlement).await;
 
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;
     send_asset(

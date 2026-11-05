@@ -71,9 +71,10 @@ async fn open_after_double_send() {
         ln_invoice(node1_addr, None, Some(&asset_id), Some(50), 900).await;
     let _ = send_payment(node2_addr, invoice).await;
 
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 750).await;
-    wait_for_balance(node2_addr, &asset_id, 250).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 750, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 250, &close_settlement).await;
 
     let recipient_id = rgb_invoice(node3_addr, None, false).await.recipient_id;
     send_asset(

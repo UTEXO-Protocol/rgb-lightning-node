@@ -8,10 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.utexo.rgblightningnode.AssetRecipients
-import org.utexo.rgblightningnode.AssignmentKind
 import org.utexo.rgblightningnode.ContractId
-import org.utexo.rgblightningnode.RgbRecipient
 import org.utexo.rgblightningnode.SdkCloseChannelRequest
 import org.utexo.rgblightningnode.SdkCreateUtxosRequest
 import org.utexo.rgblightningnode.SdkInitRequest
@@ -25,7 +22,7 @@ import org.utexo.rgblightningnode.SdkRefreshTransfersRequest
 import org.utexo.rgblightningnode.SdkRgbInvoiceRequest
 import org.utexo.rgblightningnode.SdkTakerRequest
 import org.utexo.rgblightningnode.SdkUnlockRequest
-import org.utexo.rgblightningnode.SendRgbRequest
+import org.utexo.rgblightningnode.SendRgbInvoiceRequest
 import org.utexo.rgblightningnode.Swap
 import org.utexo.rgblightningnode.SwapStatus
 import java.io.File
@@ -66,11 +63,14 @@ class SwapRoundtripBuyTest {
     private val channelReadyTimeoutSec: Long = 60L
     private var noMineCount: Int = 0
 
-    private fun bitcoindRpc(method: String, vararg params: Any): JSONObject {
+    private fun bitcoindRpc(method: String, vararg params: Any, timeoutMs: Int = 0): JSONObject {
         val url = URL("http://$bitcoindHost:$bitcoindPort/")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
+        // Preserve ordinary RPC behavior; only the bounded sweep observer supplies a timeout.
+        conn.connectTimeout = timeoutMs
+        conn.readTimeout = timeoutMs
         conn.setRequestProperty("Content-Type", "application/json")
         val creds =
             Base64.getEncoder().encodeToString("$bitcoindUser:$bitcoindPass".toByteArray())
@@ -82,10 +82,13 @@ class SwapRoundtripBuyTest {
             put("method", method)
             put("params", JSONArray().apply { params.forEach { put(it) } })
         }.toString()
-        conn.outputStream.use { it.write(body.toByteArray()) }
-
-        val response = conn.inputStream.bufferedReader().readText()
-        return JSONObject(response)
+        return try {
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            val response = conn.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(response)
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun stopMining() {
@@ -404,7 +407,44 @@ class SwapRoundtripBuyTest {
         error("swap status did not become expected=$expectedStatus actual=$lastStatus")
     }
 
-    private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false) {
+    private fun waitForClosedChannelBalance(
+        node: SdkNode,
+        assetId: ContractId,
+        expected: ULong,
+        timeoutSec: Long,
+        closed: ClosedChannelContext,
+    ) {
+        require(closed.requiresBitcoinBroadcast) {
+            "Bitcoin settlement wait requires a real funded channel"
+        }
+        val deadline = System.currentTimeMillis() + timeoutSec * 1_000L
+        var lastBalance = 0uL
+        while (System.currentTimeMillis() < deadline) {
+            node.sync()
+            node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
+            lastBalance = assetBalanceSpendable(node, assetId)
+            if (System.currentTimeMillis() >= deadline) break
+            if (lastBalance == expected) return
+            val candidates = ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                bitcoindRpc(method, *params, timeoutMs = timeout)
+            }
+            if (System.currentTimeMillis() >= deadline) break
+            if (candidates.isNotEmpty()) {
+                log("Confirming observed closed-channel transactions: ${candidates.joinToString()}")
+                mine(1)
+            }
+            Thread.sleep(1_000L)
+        }
+        error("closed-channel spendable balance did not become expected=$expected actual=$lastBalance channelId=${closed.channelId} after ${timeoutSec}s")
+    }
+
+    private fun closeChannel(node: SdkNode, channelId: String, peerPubkey: String, force: Boolean = false): ClosedChannelContext {
+        val channel = node.listChannels().firstOrNull { it.channelId == channelId }
+        val closed = ClosedChannelContext(
+            channel?.fundingTxid?.toString(),
+            channelId,
+            channel?.virtualOpenMode,
+        )
         stopMining()
         node.closechannel(
             SdkCloseChannelRequest(
@@ -418,8 +458,16 @@ class SwapRoundtripBuyTest {
         while (System.currentTimeMillis() < deadline) {
             val channels = node.listChannels()
             if (channels.none { it.channelId == channelId }) {
+                // Channel removal can precede its asynchronous closing broadcast.
+                if (closed.requiresBitcoinBroadcast && ChannelCloseFixture.relatedMempoolTransactions(closed) { method, params, timeout ->
+                    bitcoindRpc(method, *params, timeoutMs = timeout)
+                }.isEmpty()) {
+                    Thread.sleep(1_000L)
+                    continue
+                }
+                if (System.currentTimeMillis() >= deadline) break
                 mine(if (force) 144 else 6, resume = true)
-                return
+                return closed
             }
             Thread.sleep(1_000L)
         }
@@ -436,33 +484,23 @@ class SwapRoundtripBuyTest {
                 minConfirmations = 1u,
                 witness = false,
             )
-        ).recipientId
+        ).invoice
     }
 
     private fun refreshTransfers(node: SdkNode) {
         node.refreshtransfers(SdkRefreshTransfersRequest(skipSync = false))
     }
 
-    private fun sendRgb(node: SdkNode, assetId: ContractId, recipientId: String, amount: ULong) {
-        node.sendRgb(
-            SendRgbRequest(
+    private fun sendRgb(node: SdkNode, assetId: ContractId, invoice: String, amount: ULong) {
+        node.sendrgbinvoice(
+            SendRgbInvoiceRequest(
+                invoice = invoice,
+                assetId = assetId,
+                amount = amount,
+                witnessData = null,
                 donation = true,
                 feeRate = utxosFeeRate,
                 minConfirmations = 1u,
-                recipientGroups = listOf(
-                    AssetRecipients(
-                        assetId = assetId,
-                        recipients = listOf(
-                            RgbRecipient(
-                                recipientId = recipientId,
-                                witnessData = null,
-                                assignmentKind = AssignmentKind.FUNGIBLE,
-                                assignmentAmount = amount,
-                                transportEndpoints = listOf(proxyEndpoint),
-                            )
-                        ),
-                    )
-                ),
             )
         )
     }
@@ -659,21 +697,21 @@ class SwapRoundtripBuyTest {
             assertEquals(chanB12Before.localBalanceSat + htlcMinSat, chanB12.localBalanceSat)
             assertEquals(chanB21Before.localBalanceSat - btcLegDiffSat, chanB21.localBalanceSat)
 
-            closeChannel(requireNotNull(nodeA), channel12Id, infoB.pubkey)
-            waitForBalance(requireNotNull(nodeA), assetId, 990uL, 180L)
-            waitForBalance(requireNotNull(nodeB), assetId, 10uL, 180L)
+            val coloredClose = closeChannel(requireNotNull(nodeA), channel12Id, infoB.pubkey)
+            waitForClosedChannelBalance(requireNotNull(nodeA), assetId, 990uL, 180L, coloredClose)
+            waitForClosedChannelBalance(requireNotNull(nodeB), assetId, 10uL, 180L, coloredClose)
 
             closeChannel(requireNotNull(nodeB), channel21Id, infoA.pubkey)
 
-            val recipientIdA = rgbInvoice(nodeC)
-            sendRgb(requireNotNull(nodeA), assetId, recipientIdA, 200u)
+            val invoiceA = rgbInvoice(nodeC)
+            sendRgb(requireNotNull(nodeA), assetId, invoiceA, 200u)
             mine(1)
             refreshTransfers(nodeC)
             refreshTransfers(nodeC)
             refreshTransfers(requireNotNull(nodeA))
 
-            val recipientIdB = rgbInvoice(nodeC)
-            sendRgb(requireNotNull(nodeB), assetId, recipientIdB, 5u)
+            val invoiceB = rgbInvoice(nodeC)
+            sendRgb(requireNotNull(nodeB), assetId, invoiceB, 5u)
             mine(1)
             refreshTransfers(nodeC)
             refreshTransfers(nodeC)

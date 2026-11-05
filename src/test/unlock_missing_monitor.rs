@@ -9,7 +9,7 @@ async fn delete_monitor_rows(node_test_dir: &str) -> u64 {
         .await
         .expect("open node db");
     let res = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             "DELETE FROM kv_store WHERE primary_namespace IN ('monitors', 'monitor_updates')",
         ))

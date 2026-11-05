@@ -852,8 +852,7 @@ mod common_config_tests {
 
     fn local_store() -> (Arc<SeaOrmKvStore>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
-        let database =
-            crate::runtime::block_on(crate::utils::open_database_pool(directory.path())).unwrap();
+        let database = crate::utils::open_database_pool(directory.path()).unwrap();
         crate::runtime::block_on(rln_migration::Migrator::up(&database, None)).unwrap();
         (
             Arc::new(SeaOrmKvStore::from_connection(Arc::new(database))),

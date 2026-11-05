@@ -47,6 +47,8 @@ CResultString rln_btc_balance(const COpaqueStruct *node, bool skip_sync);
 
 CResultString rln_burn(const COpaqueStruct *node, const char *request_json);
 
+CResultString rln_cancel_create_utxos_plan(const COpaqueStruct *node, const char *request_json);
+
 CResultString rln_cancel_hodl_invoice(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_check_indexer_url(const COpaqueStruct *node, const char *indexer_url);
@@ -56,6 +58,8 @@ CResultString rln_check_proxy_endpoint(const COpaqueStruct *node, const char *pr
 CResultString rln_claim_hodl_invoice(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_close_channel(const COpaqueStruct *node, const char *request_json);
+
+CResultString rln_commit_prepared_create_utxos(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_connect_peer(const COpaqueStruct *node, const char *peer_pubkey_and_addr);
 
@@ -90,6 +94,8 @@ CResultString rln_get_consignment_path(const COpaqueStruct *node,
                                        const char *asset_id,
                                        const char *txid);
 
+CResultString rln_get_create_utxos_operation(const COpaqueStruct *node, const char *request_json);
+
 CResultString rln_get_payment(const COpaqueStruct *node,
                               const char *payment_hash_hex,
                               const char *payment_type);
@@ -119,9 +125,13 @@ CResultString rln_list_assets(const COpaqueStruct *node, const char *filter_asse
 
 CResultString rln_list_channels(const COpaqueStruct *node);
 
+CResultString rln_list_create_utxos_operations(const COpaqueStruct *node);
+
 CResultString rln_list_payments(const COpaqueStruct *node);
 
 CResultString rln_list_peers(const COpaqueStruct *node);
+
+CResultString rln_list_pending_vanilla_transactions(const COpaqueStruct *node);
 
 CResultString rln_list_swaps(const COpaqueStruct *node);
 
@@ -154,6 +164,8 @@ CResultString rln_node_info(const COpaqueStruct *node);
 CResultString rln_open_channel(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_post_asset_media(const COpaqueStruct *node, const char *request_json);
+
+CResultString rln_prepare_create_utxos(const COpaqueStruct *node, const char *request_json);
 
 CResultString rln_refresh_transfers(const COpaqueStruct *node, const char *request_json);
 

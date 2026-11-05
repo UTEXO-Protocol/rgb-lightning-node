@@ -1,0 +1,30 @@
+name: iris_rgb_output_20261026
+services:
+  bitcoind:
+    platform: linux/amd64
+    image: registry.gitlab.com/hashbeam/docker/bitcoind@sha256:5473c951ca8a703f7c15d9a353f99135e0a1f0cc7ef976f29d073160950098bf
+    pull_policy: never
+    command: ["-fallbackfee=0.0002", "-rest", "-rpcallowip=0.0.0.0/0"]
+    environment:
+      MYUID: 1000
+      MYGID: 1000
+      RPCAUTH: "user:84c66d54d736d8b02aaa5b02e07e759b$$cc56c229b2a49ae2bfd5932cc8a6135d435bb9a7ac037ddd351d65936082c03d"
+    ports: ["127.0.0.1:18443:18443"]
+    volumes: ["./runtime/bitcoin:/srv/app/.bitcoin"]
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=user", "-rpcpassword=password", "getblockchaininfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+  electrs:
+    platform: linux/amd64
+    image: olivbau/blockstream-electrs@sha256:53f7ff95fafedfc94cc6d7239edacde41ca1190955879fcfacf805394b1169c3
+    pull_policy: never
+    command: >-
+      --network regtest --daemon-rpc-addr bitcoind:18443
+      --cookie user:password --jsonrpc-import --db-dir /data
+      --http-addr 0.0.0.0:3002 --electrum-rpc-addr 0.0.0.0:50001
+    ports: ["127.0.0.1:50001:50001", "127.0.0.1:3002:3002"]
+    volumes: ["./runtime/electrs:/data"]
+    depends_on:
+      bitcoind: {condition: service_healthy}

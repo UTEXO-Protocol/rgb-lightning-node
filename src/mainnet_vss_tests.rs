@@ -149,7 +149,7 @@ async fn handle(
                 && request
                     .transaction_items
                     .iter()
-                    .any(|item| item.key == "backup/data")
+                    .any(|item| item.key == "backup/manifest")
         }) {
             state.backup_gate.take()
         } else {
@@ -319,7 +319,7 @@ impl Wallet {
         let proxy = format!("rpc://{}/json-rpc", listener.local_addr().unwrap());
         let router = Router::new().route("/json-rpc", post(|Json(request): Json<Value>| async move {
             assert_eq!(request["method"], "server.info");
-            Json(json!({"jsonrpc":"2.0", "id":request["id"], "result":{"protocol_version":"0.2", "version":"fixture", "uptime":1}}))
+            Json(json!({"jsonrpc":"2.0", "id":request["id"], "result":{"protocol_version":"1.0", "version":"fixture", "uptime":1}}))
         }));
         let proxy_task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let state = start_daemon(&UserArgs {
@@ -338,7 +338,7 @@ impl Wallet {
             lsp_bearer_token: None,
             vss_url: Some(server.url.clone()),
             vss_allow_empty_restore: false,
-            reuse_addresses: true,
+            reuse_addresses: false,
             remote_signer_listen_addr: None,
             config: Default::default(),
         })
@@ -449,18 +449,45 @@ async fn mainnet_vss_wallet_backup_reopen_and_fresh_device_restore() {
         .unwrap()
         .is_none());
     let first_fence = server.rows(&node_store)[FENCE].clone();
+    // Derive a separate reference sequence so restart and cloud restore must retain
+    // the persisted reveal index, rather than just return another valid address.
+    let keys = wallet
+        .state
+        .unlocked_app_state
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .rgb_get_keys();
+    let reference_dir = tempfile::tempdir().unwrap();
+    let mut reference = rgb_lib::wallet::Wallet::new(
+        rgb_lib::wallet::WalletData {
+            data_dir: reference_dir.path().display().to_string(),
+            bitcoin_network: BitcoinNetwork::Mainnet,
+            database_type: rgb_lib::wallet::DatabaseType::Sqlite,
+            max_allocations_per_utxo: 1,
+            supported_schemas: vec![rgb_lib::AssetSchema::Nia],
+        },
+        keys,
+    )
+    .unwrap();
+    let expected: Vec<_> = (0..4).map(|_| reference.get_address().unwrap()).collect();
     let initial = sdk::address(wallet.state.clone()).await.unwrap().address;
     let rotated = sdk::rotate_address(wallet.state.clone())
         .await
         .unwrap()
         .address;
     assert_ne!(initial, rotated);
+    assert_eq!(initial, expected[0]);
+    assert_eq!(rotated, expected[1]);
     let version = sdk::vss_backup(wallet.state.clone()).await.unwrap();
     let backup = server.rows(&rgb_store);
-    assert_eq!(backup["backup/data"].version, version);
-    assert!(!backup["backup/data"].value.is_empty());
+    assert_eq!(backup["backup/manifest"].version, version);
     let manifest: Value = serde_json::from_slice(&backup["backup/manifest"].value).unwrap();
     assert_eq!(manifest["encrypted"], true);
+    assert_eq!(manifest["version"], 2);
+    let chunk_prefix = manifest["chunk_prefix"].as_str().unwrap();
+    assert!(!backup[&format!("{chunk_prefix}0")].value.is_empty());
     assert!(backup.contains_key("backup/metadata"));
 
     let other = Wallet::new(&server).await;
@@ -480,7 +507,7 @@ async fn mainnet_vss_wallet_backup_reopen_and_fresh_device_restore() {
     assert_ne!(server.rows(&node_store)[FENCE].value, first_fence.value);
     assert_eq!(
         sdk::address(wallet.state.clone()).await.unwrap().address,
-        rotated
+        expected[2]
     );
     wallet.lock().await;
     let request_start = server.state.lock().unwrap().requests.len();
@@ -489,7 +516,7 @@ async fn mainnet_vss_wallet_backup_reopen_and_fresh_device_restore() {
         .unwrap();
     assert_eq!(
         sdk::address(other.state.clone()).await.unwrap().address,
-        rotated
+        expected[3]
     );
     assert!(other
         .state
@@ -505,7 +532,9 @@ async fn mainnet_vss_wallet_backup_reopen_and_fresh_device_restore() {
     let state = server.state.lock().unwrap();
     assert!(state.requests[request_start..]
         .iter()
-        .any(|r| r.method == "get" && r.store == rgb_store && r.keys == ["backup/data"]));
+        .any(|r| r.method == "get"
+            && r.store == rgb_store
+            && r.keys.iter().any(|key| key.starts_with("backup/chunk/"))));
     assert!(state.requests.iter().all(|r| r.authenticated));
     assert!(state.stores[&node_store]
         .values
@@ -623,9 +652,10 @@ async fn mainnet_vss_preserves_legacy_records_and_intents_while_wallet_backup_wo
             assert_eq!(local.read("vss_pending", "", key).unwrap(), value);
         }
     }
-    assert!(!server.rows(&format!("{node_store}_rgb"))["backup/data"]
-        .value
-        .is_empty());
+    let backup = server.rows(&format!("{node_store}_rgb"));
+    let manifest: Value = serde_json::from_slice(&backup["backup/manifest"].value).unwrap();
+    let chunk_prefix = manifest["chunk_prefix"].as_str().unwrap();
+    assert!(!backup[&format!("{chunk_prefix}0")].value.is_empty());
     let state = server.state.lock().unwrap();
     assert!(state
         .requests
@@ -741,7 +771,7 @@ async fn mainnet_vss_lock_waits_for_canceled_manual_backup_callers() {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert!(server.rows(&rgb_store)["backup/data"].version > previous);
+        assert!(server.rows(&rgb_store)["backup/manifest"].version > previous);
         assert!(!server.rows(&node_store).contains_key(FENCE));
         assert!(wallet.state.unlocked_app_state.lock().await.is_none());
         assert!(!*wallet.state.changing_state.lock().unwrap());
@@ -752,7 +782,7 @@ async fn mainnet_vss_lock_waits_for_canceled_manual_backup_callers() {
             .rposition(|r| {
                 r.store == rgb_store
                     && r.method == "put"
-                    && r.keys.iter().any(|key| key == "backup/data")
+                    && r.keys.iter().any(|key| key == "backup/manifest")
             })
             .unwrap();
         let release_position = state

@@ -6,7 +6,7 @@ use lightning::chain::{BestBlock, Confirm, Filter, WatchedOutput};
 use lightning::log_warn;
 use lightning::routing::utxo::{UtxoFuture, UtxoLookup, UtxoLookupError, UtxoResult};
 use lightning::util::logger::Logger;
-use rgb_lib::wallet::rust_only::IndexerProtocol as RgbLibIndexerProtocol;
+use rgb_lib::wallet::IndexerProtocol as RgbLibIndexerProtocol;
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::AtomicU32;
@@ -81,6 +81,11 @@ impl IndexerClient {
     ) -> io::Result<Self> {
         let fees = Arc::new(default_fee_buckets());
         let backend = match protocol {
+            RgbLibIndexerProtocol::Bitcoind => {
+                return Err(io::Error::other(
+                    "bitcoind is unavailable for transaction sync",
+                ))
+            }
             #[cfg(feature = "electrum")]
             RgbLibIndexerProtocol::Electrum => {
                 let client = Arc::new(ElectrumClient::new(&server_url).map_err(|e| {
@@ -307,6 +312,9 @@ impl IndexerSyncClient {
         logger: Arc<FilesystemLogger>,
     ) -> io::Result<Self> {
         match protocol {
+            RgbLibIndexerProtocol::Bitcoind => Err(io::Error::other(
+                "bitcoind is unavailable for transaction sync",
+            )),
             #[cfg(feature = "electrum")]
             RgbLibIndexerProtocol::Electrum => {
                 let client = ElectrumSyncClient::new(server_url, logger).map_err(|e| {

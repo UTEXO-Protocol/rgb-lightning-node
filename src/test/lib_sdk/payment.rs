@@ -372,23 +372,26 @@ fn success() {
         assert_eq!(chan_1.local_balance_sat, chan_1_before.local_balance_sat);
         assert_eq!(chan_2.local_balance_sat, chan_2_before.local_balance_sat);
 
-        close_channel(&node_a, channel_id, node_b_pubkey);
-        wait_for_balance(&node_a, &asset_id, 950, Duration::from_secs(70));
-        wait_for_balance(&node_b, &asset_id, 50, Duration::from_secs(70));
+        let closed = close_channel(&node_a, channel_id, node_b_pubkey);
+        wait_for_closed_channel_balance(&node_a, &asset_id, 950, Duration::from_secs(70), &closed);
+        wait_for_closed_channel_balance(&node_b, &asset_id, 50, Duration::from_secs(70), &closed);
 
-        let recipient_id = node_c
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let recipient_id = crate::helpers::rgb_invoice(
+            &node_c,
+            SdkRgbInvoiceRequest {
                 asset_id: None,
                 assignment_kind: None,
                 assignment_amount: None,
                 duration_seconds: None,
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("node C rgbinvoice for first send")
-            .recipient_id;
-        node_a
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("node C rgbinvoice for first send")
+        .recipient_id;
+        crate::helpers::send_rgb(
+            &node_a,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -404,26 +407,30 @@ fn success() {
                         )],
                     }],
                 }],
-            })
-            .expect("node A send_rgb to node C");
+            },
+        )
+        .expect("node A send_rgb to node C");
         mine(1);
         refresh_transfers(&node_c);
         refresh_transfers(&node_c);
         refresh_transfers(&node_a);
 
-        let recipient_id = node_c
-            .rgbinvoice(SdkRgbInvoiceRequest {
+        let recipient_id = crate::helpers::rgb_invoice(
+            &node_c,
+            SdkRgbInvoiceRequest {
                 asset_id: None,
                 assignment_kind: None,
                 assignment_amount: None,
                 duration_seconds: None,
                 min_confirmations: 1,
                 witness: false,
-            })
-            .expect("node C rgbinvoice for second send")
-            .recipient_id;
-        node_b
-            .send_rgb(SendRgbRequest {
+            },
+        )
+        .expect("node C rgbinvoice for second send")
+        .recipient_id;
+        crate::helpers::send_rgb(
+            &node_b,
+            SendRgbRequest {
                 donation: true,
                 fee_rate: CREATE_UTXOS_FEE_RATE,
                 min_confirmations: 1,
@@ -439,8 +446,9 @@ fn success() {
                         )],
                     }],
                 }],
-            })
-            .expect("node B send_rgb to node C");
+            },
+        )
+        .expect("node B send_rgb to node C");
         mine(1);
         refresh_transfers(&node_c);
         refresh_transfers(&node_c);

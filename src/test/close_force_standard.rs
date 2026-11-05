@@ -43,11 +43,12 @@ async fn close_force_standard() {
     // TX (one that still has an HTLC output)
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    close_channel(node1_addr, &channel.channel_id, &node2_pubkey, true).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel.channel_id, &node2_pubkey, true).await;
     let sweep_txid =
         crate::ldk::test_retry_prepared_rgb_sweep(test_get_app_state(node1_addr)).await;
-    wait_for_balance(node1_addr, &asset_id, 900).await;
-    wait_for_balance(node2_addr, &asset_id, 100).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 900, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 100, &close_settlement).await;
     // Receiving uses zero confirmations; explicitly confirm before checking the prepared batch.
     mine(false);
     refresh_transfers(node1_addr).await;

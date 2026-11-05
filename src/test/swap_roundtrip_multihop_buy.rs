@@ -277,13 +277,15 @@ async fn swap_roundtrip_multihop_buy() {
     );
 
     println!("\nclose channels");
-    close_channel(node1_addr, &channel_12.channel_id, &node2_pubkey, false).await;
-    wait_for_balance(node1_addr, &asset_id, 590).await;
-    wait_for_balance(node2_addr, &asset_id, 110).await;
+    let close_settlement =
+        close_channel(node1_addr, &channel_12.channel_id, &node2_pubkey, false).await;
+    wait_for_closed_channel_balance(node1_addr, &asset_id, 590, &close_settlement).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 110, &close_settlement).await;
 
-    close_channel(node2_addr, &channel_23.channel_id, &node3_pubkey, false).await;
-    wait_for_balance(node2_addr, &asset_id, 400).await;
-    wait_for_balance(node3_addr, &asset_id, 10).await;
+    let close_settlement =
+        close_channel(node2_addr, &channel_23.channel_id, &node3_pubkey, false).await;
+    wait_for_closed_channel_balance(node2_addr, &asset_id, 400, &close_settlement).await;
+    wait_for_closed_channel_balance(node3_addr, &asset_id, 10, &close_settlement).await;
 
     close_channel(node3_addr, &channel_32.channel_id, &node2_pubkey, false).await;
 

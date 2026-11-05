@@ -1,7 +1,5 @@
 use crate::asset_link::{
     AssetLinkAuthorizeParamsWire, AssetLinkAuthorizer, AssetLinkMessageHandler,
-    ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH, ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY,
-    ASSET_LINK_ERROR_UNKNOWN_ASSET, ASSET_LINK_ERROR_UNKNOWN_LINK,
 };
 use crate::async_order::{
     AsyncOrderInvoiceProvider, AsyncOrderMessageHandler, AsyncOrderOutboundInvoiceResultWire,
@@ -86,6 +84,8 @@ use lightning_dns_resolver::OMDomainResolver;
 use lightning_invoice::{Bolt11InvoiceDescription, PaymentSecret};
 use lightning_net_tokio::SocketDescriptor;
 use rand::RngCore;
+#[cfg(feature = "vss")]
+use rgb_lib::wallet::RgbWalletOpsOffline;
 use rgb_lib::{
     bdk_wallet::keys::{DerivableKey, ExtendedKey},
     bitcoin::{
@@ -97,12 +97,12 @@ use rgb_lib::{
     keys::WitnessVersion,
     utils::{get_account_data, recipient_id_from_script_buf, script_buf_from_recipient_id},
     wallet::{
-        rust_only::{check_indexer_url, AssetColoringInfo, ColoringInfo},
-        DatabaseType, OnlineOptions, Recipient, SinglesigKeys, Wallet as RgbLibWallet, WalletData,
-        WitnessData,
+        check_indexer_url,
+        rust_only::{load_fascia, AssetColoringInfo, ColoringInfo},
+        DatabaseType, Recipient, SinglesigKeys, Wallet as RgbLibWallet, WalletData, WitnessData,
     },
     AssetSchema, Assignment, BitcoinNetwork, ConsignmentExt, ContractId, Error as RgbLibError,
-    Fascia, FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,
+    FileContent, RgbTransfer, RgbTxid, TransferStatus, WitnessOrd,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -116,7 +116,7 @@ use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 #[cfg(any(test, feature = "vss"))]
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
@@ -128,9 +128,7 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "vss")]
 use crate::async_kv_store::RemoteFirstKvStore;
-use crate::core_types::{
-    HTLCStatus, LdkChainSync, NodeKeySource, SwapStatus, UnlockRequest, PENDING_SWAP_TIMEOUT_SECS,
-};
+use crate::core_types::{HTLCStatus, LdkChainSync, NodeKeySource, SwapStatus, UnlockRequest};
 use crate::database::RlnDatabase;
 use crate::disk::{self, FilesystemLogger};
 use crate::gossip::{GossipSource, GossipSourceConfig};
@@ -140,7 +138,6 @@ const OUTBOUND_PAYMENTS_KEY: &str = "outbound_payments";
 const CHANNEL_IDS_KEY: &str = "channel_ids";
 const MAKER_SWAPS_KEY: &str = "maker_swaps";
 const TAKER_SWAPS_KEY: &str = "taker_swaps";
-const ASSET_LINK_SWAP_AUTHORIZATION_MAX_EXPIRY_SECS: u64 = 24 * 60 * 60;
 const OUTPUT_SPENDER_TXES_KEY: &str = "output_spender_txes";
 const PSBT_NAMESPACE: &str = "psbt";
 const PENDING_FUNDING_NAMESPACE: &str = "pending_funding";
@@ -185,13 +182,12 @@ use crate::signer::{
     ActiveSignerRef, DynRlnChannelSigner, DynRlnSigner, LightningEntropySource, RlnKeysInterface,
     SystemEntropySource,
 };
-use crate::swap::{SwapData, SwapInfo};
+use crate::swap::SwapData;
 use crate::utils::{
     check_port_is_available, connect_peer_if_necessary, description_from_invoice,
-    description_hash_from_invoice, do_connect_peer, get_current_timestamp,
-    get_max_local_rgb_amount, hex_str, validate_and_parse_payment_hash,
-    validate_and_parse_payment_preimage, AppState, CommonState, LightningState, StaticState,
-    UnlockedAppState, FATAL_ERROR, PROXY_ENDPOINT_LOCAL, PROXY_ENDPOINT_PUBLIC,
+    description_hash_from_invoice, do_connect_peer, get_current_timestamp, hex_str,
+    validate_and_parse_payment_hash, validate_and_parse_payment_preimage, AppState, CommonState,
+    LightningState, StaticState, UnlockedAppState, FATAL_ERROR, PROXY_ENDPOINT_LOCAL,
 };
 
 const RGB_TRANSFER_CHAN_EXPIRATION_SECS: u64 = 86400;
@@ -1318,180 +1314,19 @@ impl CustomMsgPeerAccessControl for LiveChannelAccess {
     }
 }
 
-struct NodeAssetLinkAuthorizer {
-    unlocked_state_weak: Weak<LightningState>,
-    channel_manager: Arc<ChannelManager>,
-    kv_store: Arc<SyncedKvStore>,
-    taker_swaps: Arc<Mutex<SwapMap>>,
-}
-
-fn reserved_outbound_rgb_amount(
-    taker_swaps: &SwapMap,
-    outbound_contract_id: ContractId,
-    current_time: u64,
-) -> u64 {
-    taker_swaps
-        .swaps
-        .values()
-        .filter(|swap| {
-            if swap.swap_info.from_asset != Some(outbound_contract_id) {
-                return false;
-            }
-
-            match swap.status {
-                SwapStatus::Waiting => current_time <= swap.swap_info.expiry,
-                SwapStatus::Pending => swap.initiated_at.is_none_or(|initiated_at| {
-                    current_time <= initiated_at.saturating_add(PENDING_SWAP_TIMEOUT_SECS)
-                }),
-                SwapStatus::Succeeded | SwapStatus::Expired | SwapStatus::Failed => false,
-            }
-        })
-        .fold(0, |reserved_amount, swap| {
-            reserved_amount.saturating_add(swap.swap_info.qty_from)
-        })
-}
+// IFA authorization is rejected without retaining Lightning state.
+struct NodeAssetLinkAuthorizer;
 
 impl AssetLinkAuthorizer for NodeAssetLinkAuthorizer {
+    #[allow(unused_variables)]
     fn authorize_swap(
         &self,
         sender_node_id: PublicKey,
         params: &AssetLinkAuthorizeParamsWire,
     ) -> Result<(), JsonRpcErrorWire> {
-        let payment_hash = validate_and_parse_payment_hash(&params.payment_hash)
-            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_payment_hash"))?;
-        let asset_contract_id = ContractId::from_str(&params.asset_id)
-            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_asset_id"))?;
-        let linked_contract_id = ContractId::from_str(&params.linked_asset_id)
-            .map_err(|_| JsonRpcErrorWire::invalid_params("invalid_linked_asset_id"))?;
-        if params.amount == 0 {
-            return Err(JsonRpcErrorWire::invalid_params("invalid_amount"));
-        }
-        if params.expiry_sec == 0 {
-            return Err(JsonRpcErrorWire::invalid_params("invalid_expiry_sec"));
-        }
-
-        let unlocked_state = self.unlocked_state_weak.upgrade().ok_or_else(|| {
-            JsonRpcErrorWire::internal_error("asset_link_state_unavailable".to_owned())
-        })?;
-        let asset_metadata = unlocked_state
-            .rgb_get_asset_metadata(asset_contract_id)
-            .map_err(|_| {
-                JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_ASSET, "unknown_link")
-            })?;
-        let linked_asset_metadata = unlocked_state
-            .rgb_get_asset_metadata(linked_contract_id)
-            .map_err(|_| {
-                JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_ASSET, "unknown_link")
-            })?;
-
-        let asset_is_parent_of_linked_asset = asset_metadata.linked_to_asset_id.as_deref()
-            == Some(params.linked_asset_id.as_str())
-            && linked_asset_metadata.linked_from_asset_id.as_deref()
-                == Some(params.asset_id.as_str());
-
-        let linked_asset_is_parent_of_asset = linked_asset_metadata.linked_to_asset_id.as_deref()
-            == Some(params.asset_id.as_str())
-            && asset_metadata.linked_from_asset_id.as_deref()
-                == Some(params.linked_asset_id.as_str());
-
-        let parent_contract_id = if asset_is_parent_of_linked_asset {
-            Some(asset_contract_id)
-        } else if linked_asset_is_parent_of_asset {
-            Some(linked_contract_id)
-        } else {
-            None
-        };
-
-        let Some(parent_contract_id) = parent_contract_id else {
-            return Err(JsonRpcErrorWire::application_error(
-                ASSET_LINK_ERROR_UNKNOWN_LINK,
-                "unknown_link",
-            ));
-        };
-
-        if asset_metadata.asset_schema != AssetSchema::Ifa
-            || linked_asset_metadata.asset_schema != AssetSchema::Ifa
-        {
-            return Err(JsonRpcErrorWire::application_error(
-                ASSET_LINK_ERROR_UNKNOWN_LINK,
-                "unknown_link",
-            ));
-        }
-
-        let link_is_settled = unlocked_state
-            .rgb_find_link_transfer(parent_contract_id)
-            .map_err(|_| {
-                JsonRpcErrorWire::application_error(ASSET_LINK_ERROR_UNKNOWN_LINK, "unknown_link")
-            })?
-            .is_some_and(|transfer| transfer.status == TransferStatus::Settled);
-        if !link_is_settled {
-            return Err(JsonRpcErrorWire::application_error(
-                ASSET_LINK_ERROR_UNKNOWN_LINK,
-                "unknown_link",
-            ));
-        }
-
-        let max_balance = get_max_local_rgb_amount(
-            asset_contract_id,
-            self.channel_manager.list_channels().iter(),
-            self.kv_store.as_ref(),
-        );
-        let mut taker_swaps = self.taker_swaps.lock().unwrap();
-        if taker_swaps.swaps.contains_key(&payment_hash) {
-            return Err(JsonRpcErrorWire::application_error(
-                ASSET_LINK_ERROR_DUPLICATE_PAYMENT_HASH,
-                "duplicate_payment_hash",
-            ));
-        }
-
-        let authorization_time = get_current_timestamp();
-        let reserved_amount =
-            reserved_outbound_rgb_amount(&taker_swaps, asset_contract_id, authorization_time);
-        let available_amount = max_balance.saturating_sub(reserved_amount);
-        if params.amount > available_amount {
-            return Err(JsonRpcErrorWire::application_error(
-                ASSET_LINK_ERROR_INSUFFICIENT_LIQUIDITY,
-                "insufficient_liquidity",
-            ));
-        }
-
-        let expiry_sec = params
-            .expiry_sec
-            .min(ASSET_LINK_SWAP_AUTHORIZATION_MAX_EXPIRY_SECS);
-        let one_to_one_redemption_amount = params.amount;
-        let swap_info = SwapInfo {
-            qty_from: one_to_one_redemption_amount,
-            qty_to: one_to_one_redemption_amount,
-            from_asset: Some(asset_contract_id),
-            to_asset: Some(linked_contract_id),
-            expiry: authorization_time.saturating_add(expiry_sec),
-        };
-        assert_eq!(
-            swap_info.qty_from, swap_info.qty_to,
-            "linked-asset redemption must remain 1:1"
-        );
-        let mut swap_data = SwapData::create_from_swap_info(&swap_info);
-        swap_data.authorized_peer = Some(sender_node_id);
-        taker_swaps.swaps.insert(payment_hash, swap_data);
-        if let Err(e) = self
-            .kv_store
-            .write("", "", TAKER_SWAPS_KEY, taker_swaps.encode())
-        {
-            taker_swaps.swaps.remove(&payment_hash);
-            return Err(JsonRpcErrorWire::internal_error(format!(
-                "taker_swaps_write_failed: {e}"
-            )));
-        }
-
-        tracing::info!(
-            peer = %sender_node_id,
-            payment_hash = %hex_str(&payment_hash.0),
-            asset_id = %params.asset_id,
-            linked_asset_id = %params.linked_asset_id,
-            amount = params.amount,
-            "authorized linked-asset payment"
-        );
-        Ok(())
+        Err(JsonRpcErrorWire::invalid_params(
+            "IFA linking is unavailable in the BFA RGB library",
+        ))
     }
 }
 
@@ -2089,22 +1924,21 @@ async fn handle_ldk_events(
                         AssetSchema::Uda => Assignment::NonFungible,
                     };
                     let recipient_id =
-                        match recipient_id_from_script_buf(script_buf, static_state.network) {
-                            Ok(recipient_id) => recipient_id,
-                            Err(e) => {
-                                reject_virtual_open(format!("invalid funding recipient: {e}"));
-                                return Ok(());
-                            }
-                        };
+                        recipient_id_from_script_buf(script_buf, static_state.network);
                     let recipient_map = map! {
                         asset_id.clone() => vec![Recipient {
+                        public_key: None,
+                        encryption: rgb_lib::Encryption::Unsupported,
+                        expiration_timestamp: None,
                             recipient_id,
                             witness_data: Some(WitnessData {
                                 amount_sat: channel_value_satoshis,
                                 blinding: Some(STATIC_BLINDING),
                             }),
                             assignment,
-                            transport_endpoints: vec![unlocked_state.proxy_endpoint.clone()]
+                            // Virtual funding queues the proof and media over the same
+                            // encrypted peer connection as ordinary channel funding.
+                            transport_endpoints: vec![]
                     }]};
                     let fee_rate_sat_vb = unlocked_state.config.rgb.fee_rate_sat_vb;
                     let unlocked_state_copy = unlocked_state.clone();
@@ -2121,10 +1955,8 @@ async fn handle_ldk_events(
                                     Some(0),
                                 )
                                 .map_err(|e| e.to_string())?;
-                            let fascia_str = fs::read_to_string(&res.details.fascia_path)
+                            let fascia = load_fascia(Path::new(&res.details.fascia_path))
                                 .map_err(|e| e.to_string())?;
-                            let fascia: Fascia =
-                                serde_json::from_str(&fascia_str).map_err(|e| e.to_string())?;
                             unlocked_state_copy
                                 .rgb_consume_fascia(fascia, None)
                                 .map_err(|e| e.to_string())?;
@@ -2393,20 +2225,13 @@ async fn handle_ldk_events(
                 };
 
                 let recipient_id =
-                    match recipient_id_from_script_buf(script_buf.clone(), static_state.network) {
-                        Ok(recipient_id) => recipient_id,
-                        Err(e) => {
-                            return handle_funding_prepare_err(
-                                e,
-                                &unlocked_state.channel_manager,
-                                &temporary_channel_id,
-                                &counterparty_node_id,
-                            );
-                        }
-                    };
+                    recipient_id_from_script_buf(script_buf.clone(), static_state.network);
 
                 let recipient_map = map! {
                     asset_id.clone() => vec![Recipient {
+                        public_key: None,
+                        encryption: rgb_lib::Encryption::Unsupported,
+                        expiration_timestamp: None,
                         recipient_id: recipient_id.clone(),
                         witness_data: Some(WitnessData {
                             amount_sat: channel_value_satoshis,
@@ -2431,8 +2256,7 @@ async fn handle_ldk_events(
                             // Final locktime: this colored tx funds an LN channel.
                             Some(0),
                         )?;
-                        let fascia_str = fs::read_to_string(&res.details.fascia_path).unwrap();
-                        let fascia: Fascia = serde_json::from_str(&fascia_str).unwrap();
+                        let fascia = load_fascia(Path::new(&res.details.fascia_path))?;
                         unlocked_state_copy.rgb_consume_fascia(fascia, None)?;
                         unlocked_state_copy.rgb_create_consignments(res.psbt.clone())?;
                         Ok((res.psbt, res.batch_transfer_idx))
@@ -2477,7 +2301,7 @@ async fn handle_ldk_events(
                 // the channel (so the caller can retry) rather than panic the event
                 // task. handle_funding_prepare_err force-closes on terminal errors
                 // and replays the event on transient network errors.
-                let raw_psbt = match unlocked_state.rgb_send_btc_begin(
+                let raw_psbt = match unlocked_state.rgb_send_btc_channel_funding_begin(
                     addr.to_address(),
                     channel_value_satoshis,
                     unlocked_state.config.rgb.fee_rate_sat_vb,
@@ -3913,6 +3737,19 @@ impl RgbOutputSpender {
             );
         }
 
+        if let Some(prepared) = self.rgb_wallet_wrapper.recover_prepared_sweep(&inputs)? {
+            // The library is the durable authority for a preparation whose first
+            // KV write was interrupted. Bind the exact receipt before hand-off.
+            prepared.persist(self.kv_store.as_ref(), &sweep_key)?;
+            return self.finish_prepared_rgb_sweep(
+                descriptors,
+                descriptors_hash,
+                &mut txes,
+                secp_ctx,
+                prepared,
+            );
+        }
+
         let mut vout = 0;
         let mut vanilla_descriptor = true;
 
@@ -4004,7 +3841,11 @@ impl RgbOutputSpender {
                             get_current_timestamp() + RGB_TRANSFER_CHAN_EXPIRATION_SECS;
                         let receive_data = self
                             .rgb_wallet_wrapper
-                            .witness_receive(None, Assignment::Any, expiration, vec![], 0)
+                            // The protected native sweep is committed only after its exact
+                            // transaction confirms. Never make its self-receive eligible in
+                            // the mempool; the native journal also guards acceptance until
+                            // canonical sweep consumption commits.
+                            .witness_receive(None, Assignment::Any, expiration, vec![], 1)
                             .map_err(|e| format!("cannot get a witness receive script: {e}"))?;
                         self.sweep_recipients
                             .lock()
@@ -4093,12 +3934,12 @@ impl RgbOutputSpender {
             })
             .inspect_err(|_| {
                 // The transaction has not been signed or handed to LDK for broadcast.
-                if let Err(cleanup) =
-                    self.rgb_wallet_wrapper
-                        .fail_transfers(Some(batch_transfer_idx), false, true)
+                if let Err(cleanup) = self
+                    .rgb_wallet_wrapper
+                    .cancel_prepared_sweep(batch_transfer_idx)
                 {
                     tracing::error!(batch_transfer_idx, error = %cleanup,
-                        "cannot fail unpersisted RGB sweep preparation");
+                        "cannot cancel unpersisted RGB sweep preparation");
                 }
             })?;
         self.finish_prepared_rgb_sweep(descriptors, descriptors_hash, &mut txes, secp_ctx, prepared)
@@ -4137,6 +3978,24 @@ impl RgbOutputSpender {
                 "prepared RGB sweep batch is missing or no longer active"
             ));
         }
+
+        // KV is recovery bookkeeping, not the canonical authority for transaction
+        // maps or proof bytes. Admit the complete native record before any mutation
+        // or signer sees it, including same-txid alterations of PSBT metadata.
+        let inputs = unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        let canonical = self
+            .rgb_wallet_wrapper
+            .recover_prepared_sweep(&inputs)?
+            .ok_or_else(|| "canonical native RGB sweep preparation is missing".to_string())?;
+        prepared.validate_then_mark_handoff(&canonical, |batch, expected_txid| {
+            self.rgb_wallet_wrapper
+                .mark_prepared_sweep_handed_off(batch, expected_txid)
+                .map_err(|e| format!("cannot protect prepared RGB sweep hand-off: {e}"))
+        })?;
 
         psbt = self
             .signer
@@ -4477,16 +4336,16 @@ pub(crate) async fn maybe_restore_rgb_from_vss(
     })?;
 
     let config =
-        rgb_lib::wallet::vss::VssBackupConfig::new(vss_url.to_string(), rgb_store_id, signing_key)
+        crate::rgb_vss::VssBackupConfig::new(vss_url.to_string(), rgb_store_id, signing_key)
             .with_encryption(true);
     let data_dir_str = data_dir.to_string_lossy().to_string();
 
-    match rgb_lib::wallet::vss::restore_from_vss(config, &data_dir_str).await {
+    match crate::rgb_vss::restore_from_vss(config, &data_dir_str, expected_fingerprint).await {
         Ok(path) => {
             tracing::info!(restored_path = %path.display(), "Restored RGB wallet from VSS");
             Ok(())
         }
-        Err(rgb_lib::Error::VssBackupNotFound) => {
+        Err(crate::rgb_vss::Error::VssBackupNotFound) => {
             tracing::info!("No RGB VSS backup found, starting fresh");
             Ok(())
         }
@@ -4518,6 +4377,25 @@ fn sync_ln_eth_rpc_url(
         // Empty explicitly disables BFA instead of reusing an old persisted endpoint.
         kv_store.write_config(ETH_RPC_URL_FNAME, eth_rpc_url.unwrap_or_default());
     }
+}
+
+fn sync_ln_evm_rpc_urls(
+    kv_store: &dyn KVStoreSync,
+    bitcoin_network: BitcoinNetwork,
+    evm_rpc_urls: &HashMap<u64, String>,
+) -> Result<(), APIError> {
+    if bitcoin_network != BitcoinNetwork::Mainnet {
+        // This mirror is read by Lightning helpers. The on-chain wallet has
+        // already received the current map directly, including on mainnet.
+        // Leave historical Lightning configuration inert on mainnet.
+        kv_store.write_config(
+            lightning::rgb_utils::EVM_RPC_URLS_FNAME,
+            &serde_json::to_string(evm_rpc_urls).map_err(|_| {
+                APIError::Unexpected("cannot serialize EVM RPC configuration".into())
+            })?,
+        );
+    }
+    Ok(())
 }
 
 // A dead background processor must take the node down, not leave it serving without event
@@ -4860,6 +4738,19 @@ fn resolve_indexer_url<'a>(
     request.or(config).ok_or(APIError::MissingIndexerUrl)
 }
 
+// Public deployments must select a proxy implementing this graph's protocol.
+// The old implicit public proxy implements 0.2 and cannot serve 1.0 invoices.
+fn resolve_proxy_endpoint<'a>(
+    request: Option<&'a str>,
+    config: Option<&'a str>,
+    network: BitcoinNetwork,
+) -> Result<&'a str, APIError> {
+    request
+        .or(config)
+        .or_else(|| (network == BitcoinNetwork::Regtest).then_some(PROXY_ENDPOINT_LOCAL))
+        .ok_or(APIError::MissingProxyEndpoint)
+}
+
 /// Common startup resources. No Lightning backend or worker is created here.
 struct NodeStartup {
     app_state: Arc<AppState>,
@@ -4873,7 +4764,7 @@ struct NodeStartup {
     kv_store: Arc<SyncedKvStore>,
     indexer_url: String,
     #[cfg(feature = "transaction-sync")]
-    indexer_protocol: rgb_lib::wallet::rust_only::IndexerProtocol,
+    indexer_protocol: rgb_lib::wallet::IndexerProtocol,
     proxy_endpoint: String,
     #[cfg(feature = "vss")]
     monitor_kv_store: Option<Arc<RemoteFirstKvStore>>,
@@ -5024,13 +4915,14 @@ impl NodeStartup {
             mnemonic: rgb_wallet_mnemonic,
             witness_version: WitnessVersion::Taproot,
         };
-        let reuse_addresses = static_state.reuse_addresses;
         let indexer_url_owned = indexer_url.to_string();
         let eth_rpc_url = unlock_request
             .eth_rpc_url
             .clone()
             .or_else(|| static_state.config.chain.eth_rpc_url.clone());
         let ln_eth_rpc_url = eth_rpc_url.clone();
+        let evm_rpc_urls = crate::evm_rpc::resolve_evm_rpc_urls(eth_rpc_url.as_deref()).await?;
+        let ln_evm_rpc_urls = evm_rpc_urls.clone();
         #[cfg(feature = "vss")]
         let rgb_vss_backup = match (&static_state.vss_url, &vss_identity) {
             (Some(vss_url), Some(identity)) => Some((
@@ -5053,55 +4945,58 @@ impl NodeStartup {
                         bitcoin_network,
                         eth_rpc_url.is_some(),
                     ),
-                    reuse_addresses,
                 },
                 keys,
             )
-            .expect("valid rgb-lib wallet");
-            let rgb_online = rgb_wallet.go_online(OnlineOptions {
-                indexer_url: indexer_url_owned,
-                skip_consistency_check: false,
-                vanilla_sync_lookback: 20,
-                eth_rpc_url,
-            })?;
+            .map_err(APIError::from)?;
+            let rgb_online = rgb_wallet.go_online(lightning::rgb_utils::rgb_online_options(
+                indexer_url_owned,
+                evm_rpc_urls,
+                false,
+            ))?;
             #[cfg(feature = "vss")]
-            if let Some((vss_url, rgb_store_id, signing_key)) = rgb_vss_backup {
-                let vss_config =
-                    rgb_lib::wallet::vss::VssBackupConfig::new(vss_url, rgb_store_id, signing_key)
-                        .with_encryption(true)
-                        .with_auto_backup(true)
-                        .with_backup_mode(rgb_lib::wallet::vss::VssBackupMode::Blocking);
-                // Fail closed: a misconfigured backup must not silently run local-only.
-                rgb_wallet.configure_vss_backup(vss_config).map_err(|e| {
-                    APIError::FailedVssInit(format!(
-                        "Failed to configure VSS backup for RGB wallet: {e}"
-                    ))
-                })?;
-                tracing::info!("VSS auto-backup (blocking) enabled for RGB wallet");
-                // Auto-backup only tracks local changes; an empty remote (fresh
-                // wallet or wiped store) needs an explicit upload.
-                if let Some(client) = rgb_wallet.vss_client() {
-                    let rt = client.handle().clone();
-                    let info = rt
-                        .block_on(rgb_wallet.vss_backup_info(&client))
-                        .map_err(|e| APIError::FailedVssInit(format!("VSS backup info: {e}")))?;
-                    if !info.backup_exists {
-                        rt.block_on(rgb_wallet.vss_backup(&client)).map_err(|e| {
-                            APIError::FailedVssInit(format!("initial RGB VSS backup failed: {e}"))
+            {
+                // Certify a staged restore only after genuine non-skipped consistency checks.
+                let marker = rgb_wallet
+                    .get_wallet_dir()
+                    .join(crate::rgb_vss::VSS_RESTORE_MARKER);
+                if marker.exists() {
+                    crate::rgb_output_operations::OutputStore::new(
+                        rgb_wallet.get_wallet_dir().join("rln_output_operations_v1"),
+                    )
+                    .mark_restored(
+                        &rgb_wallet
+                            .list_pending_vanilla_txs()?
+                            .into_iter()
+                            .map(|pending| pending.txid)
+                            .collect::<Vec<_>>(),
+                    )?;
+                    std::fs::remove_file(&marker).map_err(|error| {
+                        APIError::FailedVssInit(format!(
+                            "Cannot acknowledge restored wallet: {error}"
+                        ))
+                    })?;
+                    std::fs::File::open(rgb_wallet.get_wallet_dir())
+                        .and_then(|file| file.sync_all())
+                        .map_err(|error| {
+                            APIError::FailedVssInit(format!(
+                                "Cannot sync restored wallet acknowledgement: {error}"
+                            ))
                         })?;
-                        tracing::info!("Uploaded RGB wallet backup to empty VSS store");
-                    }
                 }
             }
             Ok::<_, APIError>((rgb_wallet, rgb_online))
         })
         .await
         .map_err(|e| APIError::Unexpected(format!("rgb-lib wallet setup task failed: {e}")))??;
-        sync_ln_eth_rpc_url(
-            kv_store.as_ref(),
-            bitcoin_network,
-            ln_eth_rpc_url.as_deref(),
-        );
+        {
+            sync_ln_eth_rpc_url(
+                kv_store.as_ref(),
+                bitcoin_network,
+                ln_eth_rpc_url.as_deref(),
+            );
+            sync_ln_evm_rpc_urls(kv_store.as_ref(), bitcoin_network, &ln_evm_rpc_urls)?;
+        }
         save_config(
             &static_state.db(),
             kv_store.as_ref(),
@@ -5137,6 +5032,34 @@ impl NodeStartup {
             Arc::new(Mutex::new(rgb_wallet)),
             rgb_online,
         ));
+        #[cfg(feature = "vss")]
+        if let Some((url, store_id, key)) = rgb_vss_backup {
+            let wrapper = Arc::clone(&rgb_wallet_wrapper);
+            tokio::task::spawn_blocking(move || {
+                wrapper
+                    .configure_vss_backup(
+                        crate::rgb_vss::VssBackupConfig::new(url, store_id, key)
+                            .with_encryption(true)
+                            .with_auto_backup(true)
+                            .with_backup_mode(crate::rgb_vss::VssBackupMode::Blocking),
+                    )
+                    .map_err(|error| APIError::FailedVssInit(error.to_string()))?;
+                let client = wrapper.vss_client().expect("configured client");
+                let info = wrapper
+                    .vss_backup_info(&client)
+                    .map_err(|error| APIError::FailedVssInit(error.to_string()))?;
+                if !info.backup_exists || info.backup_required {
+                    wrapper
+                        .vss_backup(&client)
+                        .map_err(|error| APIError::FailedVssInit(error.to_string()))?;
+                }
+                Ok::<_, APIError>(())
+            })
+            .await
+            .map_err(|error| {
+                APIError::FailedVssInit(format!("VSS configuration worker failed: {error}"))
+            })??;
+        }
 
         let node_id = match self.external_node_id.as_deref() {
             Some(node_id) => PublicKey::from_str(node_id).map_err(|error| {
@@ -5234,13 +5157,15 @@ async fn prepare_node(
     mut unlock_request: UnlockRequest,
 ) -> Result<NodeStartup, APIError> {
     let static_state = &app_state.static_state;
+    if static_state.reuse_addresses {
+        return Err(APIError::InvalidRequest(
+            "Address reuse is not supported by rgb-lib-bfa".into(),
+        ));
+    }
     let mainnet = static_state.network == BitcoinNetwork::Mainnet;
 
     // Unlock request params take precedence, the config file provides defaults.
     let file_config = &static_state.config;
-    unlock_request.proxy_endpoint = unlock_request
-        .proxy_endpoint
-        .or_else(|| file_config.chain.proxy_endpoint.clone());
     unlock_request.announce_alias = unlock_request
         .announce_alias
         .or_else(|| file_config.node.announce_alias.clone());
@@ -5454,26 +5379,25 @@ async fn prepare_node(
         unlock_request.indexer_url.as_deref(),
         static_state.config.chain.indexer_url.as_deref(),
     )?;
-    let indexer_protocol = check_indexer_url(indexer_url, bitcoin_network)?;
+    let proxy_endpoint = resolve_proxy_endpoint(
+        unlock_request.proxy_endpoint.as_deref(),
+        static_state.config.chain.proxy_endpoint.as_deref(),
+        bitcoin_network,
+    )?;
+    let indexer_to_check = indexer_url.to_string();
+    let indexer_protocol = tokio::task::spawn_blocking(move || {
+        check_indexer_url(&indexer_to_check, None, bitcoin_network)
+    })
+    .await
+    .map_err(|_| APIError::InvalidIndexer("Indexer validation task failed".into()))??;
     tracing::info!(
         "Connected to an indexer with the {} protocol",
         indexer_protocol
     );
-    let proxy_endpoint = if let Some(proxy_endpoint) = &unlock_request.proxy_endpoint {
-        check_rgb_proxy_endpoint(proxy_endpoint).await?;
-        tracing::info!("Using a custom proxy");
-        proxy_endpoint
-    } else {
-        tracing::info!("Using the default proxy");
-        match bitcoin_network {
-            BitcoinNetwork::Signet
-            | BitcoinNetwork::SignetCustom
-            | BitcoinNetwork::Testnet
-            | BitcoinNetwork::Testnet4
-            | BitcoinNetwork::Mainnet => PROXY_ENDPOINT_PUBLIC,
-            BitcoinNetwork::Regtest => PROXY_ENDPOINT_LOCAL,
-        }
-    };
+    // The regtest default is subject to the same protocol and network checks
+    // as explicit endpoints; a default must never bypass proxy admission.
+    check_rgb_proxy_endpoint(proxy_endpoint).await?;
+    tracing::info!("Connected to an RGB proxy with protocol 1.0");
     save_config(
         &app_state.db(),
         kv_store.as_ref(),
@@ -5629,7 +5553,7 @@ async fn start_lightning(
             let ln_indexer_protocol = if ln_indexer_url == indexer_url {
                 indexer_protocol.clone()
             } else {
-                check_indexer_url(ln_indexer_url, bitcoin_network)?
+                check_indexer_url(ln_indexer_url, None, bitcoin_network)?
             };
             let indexer_client = Arc::new(
                 IndexerClient::new(
@@ -6533,12 +6457,7 @@ async fn start_lightning(
         next_payment_idx,
     });
 
-    asset_link_handler.set_authorizer(Arc::new(NodeAssetLinkAuthorizer {
-        unlocked_state_weak: Arc::downgrade(&unlocked_state),
-        channel_manager: Arc::clone(&channel_manager),
-        kv_store: Arc::clone(&kv_store),
-        taker_swaps: Arc::clone(&taker_swaps),
-    }));
+    asset_link_handler.set_authorizer(Arc::new(NodeAssetLinkAuthorizer));
 
     // Refresh the RGS snapshot on a fixed interval (RGS mode only). The first
     // tick fires immediately, so a freshly unlocked node syncs right away.
@@ -7361,6 +7280,75 @@ mod tests {
             Err(APIError::MissingIndexerUrl)
         ));
     }
+
+    #[test]
+    fn proxy_endpoint_request_precedes_config_and_regtest_default() {
+        for network in [BitcoinNetwork::Regtest, BitcoinNetwork::Signet] {
+            assert_eq!(
+                resolve_proxy_endpoint(
+                    Some("rpcs://request.example/json-rpc"),
+                    Some("rpcs://config.example/json-rpc"),
+                    network,
+                )
+                .unwrap(),
+                "rpcs://request.example/json-rpc"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_endpoint_config_is_used_on_every_network() {
+        for network in [
+            BitcoinNetwork::Regtest,
+            BitcoinNetwork::Signet,
+            BitcoinNetwork::SignetCustom,
+            BitcoinNetwork::Testnet,
+            BitcoinNetwork::Testnet4,
+            BitcoinNetwork::Mainnet,
+        ] {
+            assert_eq!(
+                resolve_proxy_endpoint(None, Some("rpcs://config.example/json-rpc"), network)
+                    .unwrap(),
+                "rpcs://config.example/json-rpc"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_endpoint_omission_is_only_defaulted_on_regtest() {
+        assert_eq!(
+            resolve_proxy_endpoint(None, None, BitcoinNetwork::Regtest).unwrap(),
+            PROXY_ENDPOINT_LOCAL
+        );
+        for network in [
+            BitcoinNetwork::Signet,
+            BitcoinNetwork::SignetCustom,
+            BitcoinNetwork::Testnet,
+            BitcoinNetwork::Testnet4,
+            BitcoinNetwork::Mainnet,
+        ] {
+            let error = resolve_proxy_endpoint(None, None, network).unwrap_err();
+            assert!(matches!(error, APIError::MissingProxyEndpoint));
+            assert!(error.to_string().contains("protocol-1.0"));
+        }
+    }
+
+    #[test]
+    fn explicit_empty_proxy_is_not_replaced_by_another_endpoint() {
+        assert_eq!(
+            resolve_proxy_endpoint(
+                Some(""),
+                Some("rpcs://config.example/json-rpc"),
+                BitcoinNetwork::Regtest
+            )
+            .unwrap(),
+            ""
+        );
+        assert_eq!(
+            resolve_proxy_endpoint(None, Some(""), BitcoinNetwork::Regtest).unwrap(),
+            ""
+        );
+    }
     use crate::kv_store::SeaOrmKvStore;
     use lightning::rgb_utils::RgbInfo;
     use rln_migration::{Migrator, MigratorTrait};
@@ -7696,6 +7684,41 @@ mod tests {
             store.read_config(ETH_RPC_URL_FNAME).unwrap(),
             "http://historical-endpoint.invalid"
         );
+    }
+
+    #[test]
+    fn bfa_ln_evm_map_matches_current_unlock_and_clears_stale_config() {
+        let store = build_kv_store();
+        let key = lightning::rgb_utils::EVM_RPC_URLS_FNAME;
+        store.write_config(key, r#"{"42161":"https://old-endpoint.invalid"}"#);
+        let configured = HashMap::from([(42161, "https://current-endpoint.invalid".into())]);
+        sync_ln_evm_rpc_urls(store.as_ref(), BitcoinNetwork::Regtest, &configured).unwrap();
+        assert_eq!(
+            serde_json::from_str::<HashMap<u64, String>>(&store.read_config(key).unwrap()).unwrap(),
+            configured
+        );
+        sync_ln_evm_rpc_urls(store.as_ref(), BitcoinNetwork::Regtest, &HashMap::new()).unwrap();
+        assert_eq!(store.read_config(key).unwrap(), "{}");
+    }
+
+    #[test]
+    fn bfa_ln_evm_map_preserves_inactive_mainnet_state_with_or_without_configuration() {
+        let store = build_kv_store();
+        let key = lightning::rgb_utils::EVM_RPC_URLS_FNAME;
+        let historical = r#"{"42161":"https://historical-endpoint.invalid"}"#;
+        store.write_config(key, historical);
+        assert!(!crate::mainnet_state::is_common_config(
+            "rgb",
+            "wallet_config",
+            key
+        ));
+        for configuration in [
+            HashMap::from([(42161, "https://current-endpoint.invalid".into())]),
+            HashMap::new(),
+        ] {
+            sync_ln_evm_rpc_urls(store.as_ref(), BitcoinNetwork::Mainnet, &configuration).unwrap();
+            assert_eq!(store.read_config(key).unwrap(), historical);
+        }
     }
 
     #[test]
