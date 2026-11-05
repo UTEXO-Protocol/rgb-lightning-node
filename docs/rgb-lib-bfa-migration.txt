@@ -309,3 +309,10 @@ RGB PR #4's seven Linux/macOS prerequisite CI jobs passed at source 98bcbf9,
 including the dedicated funded channel-funding/sweep fixture. LDK PR #60's workflow
 dispatch was rejected because repository Actions are disabled; no settings were
 changed. Its local checks do not substitute for remote/platform qualification.
+
+The Python external-signer endpoint fixture follows bfa.5's finalized-state
+eth_call probe rather than the older log-history probe. It admits only the exact
+zero-address/empty-data call at the returned finalized height, rejects changed
+addresses/data/heights and preserves locked-wallet/error/retry assertions for both
+attached and explicit native signer paths. Its two protocol-shape tests pass
+without native services; the complete UniFFI/C ABI cases remain real CI scopes.

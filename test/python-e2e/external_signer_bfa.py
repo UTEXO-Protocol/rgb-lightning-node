@@ -17,7 +17,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class EthereumRPC:
     CHAIN_ID = "0x7a69"
-    FUNDS_IN_TOPIC = "0xf1a18caea297591892fc07ea412a5e617d8e51e1155912d8871793e1d4e70f87"
 
     def __init__(self):
         self.requests = []
@@ -64,13 +63,10 @@ class EthereumRPC:
         if (method == "eth_getBlockByNumber" and isinstance(params, list)
                 and len(params) == 2 and params[0] == "finalized" and params[1] is False):
             return True, {"number": "0x64"}
-        if method == "eth_getLogs" and params == [{
-            "address": "0x" + "00" * 20,
-            "fromBlock": "0x0",
-            "toBlock": "0x0",
-            "topics": [cls.FUNDS_IN_TOPIC, None, "0x" + "00" * 32],
-        }]:
-            return True, []
+        if method == "eth_call" and params == [{
+            "to": "0x" + "00" * 20, "data": "0x",
+        }, "0x64"]:
+            return True, "0x"
         return False, None
 
     def close(self):
@@ -263,12 +259,7 @@ class EthereumRPCProtocolTests(unittest.TestCase):
         calls = [
             ("eth_chainId", [], EthereumRPC.CHAIN_ID),
             ("eth_getBlockByNumber", ["finalized", False], {"number": "0x64"}),
-            ("eth_getLogs", [{
-                "address": "0x" + "00" * 20,
-                "fromBlock": "0x0",
-                "toBlock": "0x0",
-                "topics": [EthereumRPC.FUNDS_IN_TOPIC, None, "0x" + "00" * 32],
-            }], []),
+            ("eth_call", [{"to": "0x" + "00" * 20, "data": "0x"}, "0x64"], "0x"),
         ]
         for method, params, result in calls:
             with self.subTest(method=method):
@@ -285,6 +276,10 @@ class EthereumRPCProtocolTests(unittest.TestCase):
             ("eth_getBlockByNumber", ["finalized", 0]),
             ("eth_getLogs", [{}]),
             ("eth_getLogs", []),
+            ("eth_call", [{"to": "0x" + "00" * 20, "data": "0x"}, "latest"]),
+            ("eth_call", [{"to": "0x" + "00" * 20, "data": "0x"}, "0x63"]),
+            ("eth_call", [{"to": "0x" + "00" * 20, "data": "0x01"}, "0x64"]),
+            ("eth_call", [{"to": "0x" + "01" * 20, "data": "0x"}, "0x64"]),
         ]
         for method, params in calls:
             with self.subTest(method=method, params=params):
@@ -313,7 +308,8 @@ class ExternalSignerBfaTests(unittest.TestCase):
         self.assertEqual(methods[0], "eth_chainId")  # RLN discovers the endpoint's actual chain.
         self.assertGreaterEqual(methods.count("eth_chainId"), 2)  # RGB verifies the configured chain.
         self.assertIn("eth_getBlockByNumber", methods)
-        self.assertIn("eth_getLogs", methods)
+        self.assertIn("eth_call", methods)
+        self.assertNotIn("eth_getLogs", methods)
         for request in self.rpc.requests:
             self.assertTrue(EthereumRPC.answer(request)[0], "unexpected EVM admission request")
 
@@ -378,7 +374,7 @@ class ExternalSignerBfaTests(unittest.TestCase):
     def test_mint_support_failures_leave_wallet_locked_and_allow_valid_retry(self):
         stages = {
             "eth_getBlockByNumber": "cannot get the latest finalized block",
-            "eth_getLogs": "cannot get the logs of the oldest blocks",
+            "eth_call": "cannot read the state as of the latest finalized block",
         }
         for attached in [False, True]:
             for method, expected_stage in stages.items():
@@ -392,7 +388,7 @@ class ExternalSignerBfaTests(unittest.TestCase):
                         methods = [r["method"] for r in self.rpc.requests]
                         self.assertEqual(methods[-1], method)
                         if method == "eth_getBlockByNumber":
-                            self.assertNotIn("eth_getLogs", methods)
+                            self.assertNotIn("eth_call", methods)
                     finally:
                         self.rpc.reject_method = None
                     self.rpc.requests.clear()
