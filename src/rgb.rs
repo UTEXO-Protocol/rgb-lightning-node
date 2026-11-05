@@ -1025,7 +1025,7 @@ impl RgbLibWalletWrapper {
     ) -> Result<AssetIFA, RgbLibError> {
         if !matches!(issuance_type, None | Some(IfaIssuanceType::Legacy)) {
             return Err(RgbLibError::Internal {
-                details: "IFA link rights are unavailable in the BFA RGB library".into(),
+                details: "IFA link issuance is not exposed by this RLN adapter".into(),
             });
         }
         self.get_rgb_wallet().issue_asset_ifa(
@@ -1035,6 +1035,8 @@ impl RgbLibWalletWrapper {
             amounts,
             inflation_amounts,
             reject_list_url,
+            false,
+            None,
         )
     }
 

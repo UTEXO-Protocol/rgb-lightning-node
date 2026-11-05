@@ -47,6 +47,15 @@ default = []
 # `rmn-boiko` branch tip drifts behind and fails to compile the parent
 # source. Using the submodule path guarantees they never skew again.
 [patch.crates-io]
+rgb-consensus = { git = "https://github.com/UTEXO-Protocol/rgb-consensus-s-bfa.git", rev = "af0b751dc9e51547cd57e025fdc3508e120ddf8a" }
+rgb-ops = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa.git", rev = "ed1d60df69f9e4db65640c0ac61a5779ba9c018c" }
+rgb-invoicing = { git = "https://github.com/UTEXO-Protocol/rgb-ops-s-bfa.git", rev = "ed1d60df69f9e4db65640c0ac61a5779ba9c018c" }
+rgb-psbt-utils = { git = "https://github.com/UTEXO-Protocol/rgb-api-s-bfa.git", rev = "8e2f515d0f6445e88d3c794a4b592f7bdd3a12df" }
+rgb-schemas = { git = "https://github.com/UTEXO-Protocol/rgb-schemas-s-bfa.git", rev = "641a06f31cd277c42222504c8040055c8cbafca5" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "e12b9944b30171950de03778d6666b24bc33d994" }
+rgb-strict-encoding-derive = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "e12b9944b30171950de03778d6666b24bc33d994" }
+rgb-strict-types = { git = "https://github.com/rgb-protocol/rgb-strict-types", rev = "8714cdcc8af25333c27214cdf9f42a6388d484ff" }
+
 lightning = { path = "../../rust-lightning/lightning" }
 lightning-background-processor = { path = "../../rust-lightning/lightning-background-processor" }
 lightning-block-sync = { path = "../../rust-lightning/lightning-block-sync" }

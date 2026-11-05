@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [rest-uniffi-with-vls, wasm-without-vls]
+        mode: [rest-uniffi-with-vls, native-vss, wasm-without-vls]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,6 +40,12 @@ jobs:
             cargo test --features "uniffi,vls" --lib 'sdk::tests::attached_external_unlock_with_mismatched_bootstrap_fails' -- --test-threads=1
             cargo test --features "uniffi,vls" --lib 'sdk::tests::attached_external_unlock_without_registered_signer_is_unavailable' -- --test-threads=1
             cargo test --features "uniffi,vls" --lib 'signer::in_process_transport::tests::' -- --test-threads=1
+          elif [ "${{ matrix.mode }}" = "native-vss" ]; then
+            # The default feature graph omits VSS. Exercise its actual wallet/recovery
+            # fixtures on the pinned native graph, including the C binding's own lock.
+            cargo check --locked --features "uniffi,vls,vss,test-utils" --all-targets
+            cargo test --locked --features "uniffi,vls,vss,test-utils" --lib -- --test-threads=1
+            cargo check --locked --manifest-path bindings/c-ffi/Cargo.toml
           elif [ "${{ matrix.mode }}" = "wasm-without-vls" ]; then
             # WASM SDK crate is tracked in a separate workspace/repo path in current layout.
             # It never pulls VLS, so this gate is inherently non-VLS.

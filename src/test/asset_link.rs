@@ -1,5 +1,5 @@
-//! rgb-lib-bfa has no IFA link-right implementation. These regressions deliberately prove
-//! truthful rejection and unchanged wallet state, rather than claiming legacy link parity.
+//! This RLN adapter does not expose the bfa.5 IFA linking workflow. These regressions
+//! prove rejection and unchanged wallet state without claiming end-to-end link parity.
 use super::*;
 
 const TEST_DIR_BASE: &str = "tmp/asset_link/";
@@ -84,7 +84,7 @@ async fn ifa_link_right_issuance_unavailable_does_not_mutate_wallet_or_broadcast
         check_response_is_nok(
             res,
             StatusCode::BAD_REQUEST,
-            "IFA link rights are unavailable",
+            "IFA link issuance is not exposed by this RLN adapter",
             "InvalidRequest",
         )
         .await;

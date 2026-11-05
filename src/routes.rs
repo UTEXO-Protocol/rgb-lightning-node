@@ -434,6 +434,7 @@ pub(crate) enum Assignment {
     NonFungible,
     InflationRight(u64),
     MintRight,
+    LinkRight,
     Any,
 }
 
@@ -445,6 +446,7 @@ impl From<RgbLibAssignment> for Assignment {
             RgbLibAssignment::InflationRight(amt) => Self::InflationRight(amt),
             RgbLibAssignment::Any => Self::Any,
             RgbLibAssignment::MintRight => Self::MintRight,
+            RgbLibAssignment::LinkRight => Self::LinkRight,
         }
     }
 }
@@ -457,7 +459,29 @@ impl From<Assignment> for RgbLibAssignment {
             Assignment::InflationRight(amt) => Self::InflationRight(amt),
             Assignment::Any => Self::Any,
             Assignment::MintRight => Self::MintRight,
+            Assignment::LinkRight => Self::LinkRight,
         }
+    }
+}
+
+#[cfg(test)]
+mod bfa5_assignment_tests {
+    use super::*;
+
+    #[test]
+    fn link_right_remains_distinct_from_mint_and_inflation_rights() {
+        let assignment = Assignment::from(RgbLibAssignment::LinkRight);
+        assert_eq!(
+            serde_json::to_value(&assignment).unwrap(),
+            serde_json::json!({"type": "LinkRight"})
+        );
+        assert_eq!(
+            RgbLibAssignment::from(assignment),
+            RgbLibAssignment::LinkRight
+        );
+        let parsed: Assignment =
+            serde_json::from_value(serde_json::json!({"type": "LinkRight"})).unwrap();
+        assert_eq!(RgbLibAssignment::from(parsed), RgbLibAssignment::LinkRight);
     }
 }
 
@@ -3903,6 +3927,7 @@ pub(crate) async fn list_transfers(
                 rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
                 rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
                 rgb_lib::wallet::TransferKind::Mint => TransferKind::Mint,
+                rgb_lib::wallet::TransferKind::Link => TransferKind::Link,
             },
             txid: transfer.txid,
             recipient_id: transfer.recipient_id,

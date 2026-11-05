@@ -7,6 +7,24 @@ rust-lightning submodule record the exact candidate revisions. It does not
 adopt draft RLN #211's global on-chain-only build, VSS removal, or vendored
 reqwest/native-tls workarounds.
 
+bfa.5 release base
+------------------
+This update uses v0.3.0-beta.7-upstream-dev-bfa.5, frozen upstream commit
+0a9d352f2690902df2b6fae9bca1a6c13c3354d4 on bfa-1ae1c160. RGB PR #4
+carries the reviewed prerequisite APIs onto that tree as
+98bcbf9973b02fa6e336b6db7c16413825500c85. The rolling bfa branch has advanced
+to bfa.6 and is not this candidate's release base. Both LDK RGB users, RLN and
+its C binding must resolve that same exact RGB source and bfa.5's pinned
+consensus/ops/API/schema/strict-encoding graph. Cargo ignores patches in
+transitive dependencies, so each independent workspace mirrors the root pins.
+
+bfa.5's terminal-operation proofs and block-based EVM lock checks are retained.
+Prepared sweeps store MPC entropy outside the stripped signing PSBT and verify
+the complete commitment, exact terminal operations, beneficiaries and witness.
+The old consignment fixture is rejected without mutation; positive contract
+admission uses the recovered bfa.5 BUSDT fixture in RGB PR #4. No old asset ID
+is silently translated into the new schema.
+
 Protocol-1.0 transfers
 ---------------------
 Use sendrgbinvoice (SDK/UniFFI) or POST /sendrgbinvoice for a fungible invoice.
@@ -112,10 +130,13 @@ the presence of the APIs alone is not generic Lightning qualification.
 Explicit compatibility limits
 ------------------------------
 Iris's maintained on-chain profile is selected by its caller. This change does
-not globally disable Lightning. IFA link rights/link operations and linked-contract
-metadata remain unavailable in rgb-lib-bfa. Requests fail explicitly before signing
-or RGB mutation; optional legacy link metadata stays unavailable. Negative IFA
-acceptance is not a claim of linked-contract or linked-Lightning feature parity.
+not globally disable Lightning. bfa.5 implements library link rights, but this RLN
+adapter still does not expose the complete IFA link workflow or linked-contract
+metadata. Its existing nonlegacy issuance/link requests fail explicitly before
+signing or RGB mutation. Legacy IFA issuance passes link_right=false and no parent.
+REST preserves the new LinkRight assignment as a distinct value, and REST/SDK
+history preserve TransferKind::Link. These mappings do not establish linked-asset
+or linked-Lightning workflow parity.
 
 Address generation is fresh-only. Both address and rotateaddress reveal fresh
 native addresses. reuse_addresses=true is rejected by direct SDK creation and
@@ -168,11 +189,11 @@ requires server.info protocol_version 1.0 before wallet tests. Fixture PoW remai
 on with maximum difficulty 4; production proxy policy is not changed. The older
 0.3.0 image speaks protocol 0.2 and is not compatible with these native sources.
 
-Legacy IFA-link success tests cannot establish parity against a library without
-link rights. Explicit funded rejection tests instead require HTTP 400 and verify
+Legacy IFA-link success tests cannot establish parity for the unexposed RLN link
+adapter. Explicit funded rejection tests instead require HTTP 400 and verify
 unchanged assets, outputs and transaction history. Ordinary IFA issuance remains
-supported. This negative acceptance is a documented missing feature, not a claim
-that linked-contract or linked-Lightning payments work. Generic channel-funding
+supported. The bfa.5 library's link implementation does not automatically qualify
+linked-contract or linked-Lightning workflows through RLN. Generic channel-funding
 and sweep regression gates remain required; their tests are not waived.
 
 Authenticated batch sends
@@ -209,7 +230,7 @@ waits do not mine; expected balances, maturity blocks and deadlines are unchange
 The shared read-only detector binds the v1 channel ID to its exact P2WSH funding
 output and bounds ancestry, transaction count and total probe time. Before the
 initial maturity blocks, close fixtures also observe that exact funding spend;
-channel removal alone can precede asynchronous Bitcoin broadcast. Its eight
+channel removal alone can precede asynchronous Bitcoin broadcast. Its sixteen
 pure tests run with:
 
   python3 -m unittest discover -s test -p test_channel_sweep_candidates.py -v
@@ -259,3 +280,32 @@ reachable from rust-lightning dev after its prerequisite PR is merged.
 
 No hosted bridge has been operated. No merge, package publication or all-platform
 native artifact qualification is established by this unpublished source work.
+
+bfa.5 local qualification (2026-11-05)
+-------------------------------------
+The root and C binding locks resolve RGB source 98bcbf9973b02fa6e336b6db7c16413825500c85
+and the gitlink is LDK 44a4d51399036178cd9d4ae2ba539dd47aea691c (PR #60),
+based on the canonical #59 merge. No path overrides were used for these checks.
+
+On macOS arm64 with Rust 1.94.0:
+- All-target native checking with uniffi,vls,vss,test-utils passed.
+- Native library tests with those features: 390 passed, zero failed, three
+  explicitly ignored owned-fixture cases. Ignored tests are not acceptance.
+- C FFI workspace checking and default-feature all-target Clippy with warnings
+  denied passed; root and C binding lockfiles contain the same single RGB graph.
+- Sixteen channel-sweep fixture tests and source formatting passed.
+- LDK Electrum/Esplora workspace checks and four public configuration tests per
+  backend passed. The inherited legacy LDK unit harness remains unresolved.
+
+The VSS mock fixtures now use protocol 1.0, fresh addresses and v2 immutable
+chunk/manifest semantics. They check deterministic address-sequence preservation
+across reopen/cloud restore and fence ownership across canceled backups/locks.
+A dedicated native-vss feature-matrix gate covers these previously omitted tests
+and the C binding lock. bfa.5 BFA integration fixtures now use the same before_block
+in the RGB mint and EVM fundsIn call; their opt-in funded runs require a compatible
+local deployment and are not claimed by the compilation result.
+
+RGB PR #4's seven Linux/macOS prerequisite CI jobs passed at source 98bcbf9,
+including the dedicated funded channel-funding/sweep fixture. LDK PR #60's workflow
+dispatch was rejected because repository Actions are disabled; no settings were
+changed. Its local checks do not substitute for remote/platform qualification.

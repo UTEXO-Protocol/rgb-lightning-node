@@ -520,6 +520,8 @@ fn external_burn_bfa_proof() {
             31337,
             bridge.clone(),
             None,
+            false,
+            None,
         )
         .unwrap();
     let asset_id = ContractId::from_str(&asset.asset_id).unwrap();
@@ -547,11 +549,22 @@ fn external_burn_bfa_proof() {
             witness: false,
         })
         .unwrap();
+    let before_block = u64::from_str_radix(
+        eth_rpc("eth_blockNumber", json!([]))
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+        16,
+    )
+    .unwrap()
+    .checked_add(1000)
+    .unwrap();
     let prepared = issuer
         .mint_begin(
             online,
             asset.asset_id.clone(),
             crate::helpers::native_recipient_from_invoice(&invoice.invoice, 1000),
+            before_block,
             2,
             1,
             proxy(),
@@ -564,9 +577,10 @@ fn external_burn_bfa_proof() {
             "cast",
             "send",
             &bridge,
-            "fundsIn(uint256,uint256)",
+            "fundsIn(uint256,uint256,uint64)",
             "1000",
             &format!("0x{}", prepared.details.opid),
+            &before_block.to_string(),
             "--unlocked",
             "--from",
             "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",

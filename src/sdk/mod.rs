@@ -4802,6 +4802,7 @@ fn to_transfer_data(transfer: rgb_lib::wallet::Transfer) -> TransferData {
             rgb_lib::wallet::TransferKind::Inflation => TransferKind::Inflation,
             rgb_lib::wallet::TransferKind::Burn => TransferKind::Burn,
             rgb_lib::wallet::TransferKind::Mint => TransferKind::Mint,
+            rgb_lib::wallet::TransferKind::Link => TransferKind::Link,
         },
         txid: transfer.txid,
         recipient_id: transfer.recipient_id,
